@@ -129,7 +129,7 @@ pub(crate) fn try_load_session_with_snapshot(
 impl LoadedAccountSession {
     /// The `binding_state` stored with this session when it was signed in
     /// (`native_identity::persist_session`), or `None` for a record that has
-    /// none (an older record, or one an enrolment wrote).
+    /// none (an older record, or one an enrollment wrote).
     pub(crate) fn stored_binding_state(&self) -> Option<String> {
         serde_json::from_slice::<serde_json::Value>(&self.raw)
             .ok()?

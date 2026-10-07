@@ -469,7 +469,7 @@ mod tests {
         // `#[serde(default)]` earning its place: serde requires an `Option`
         // field to be present unless it is defaulted, so without it every
         // contributor who enrolled before this revision would be unable to
-        // load their own config -- a logout-and-re-enrol, not a missing
+        // load their own config -- a logout-and-re-enroll, not a missing
         // handle.
         let s = shared();
         let older = serde_json::json!({

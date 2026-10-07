@@ -113,7 +113,7 @@ pub(crate) enum EnrollOutcome {
 ///
 /// This is the single enrollment implementation shared by the interactive
 /// `login` command and the daemon's `enroll` IPC method, so a socket caller
-/// (a native application) and a terminal caller enrol identically rather
+/// (a native application) and a terminal caller enroll identically rather
 /// than through two hand-maintained copies of the same network calls.
 ///
 /// When `allowed_hosts` is provided it takes precedence over the
@@ -288,7 +288,7 @@ enum ConsentSource<'a> {
 impl ConsentSource<'_> {
     /// Whether the scopes this source yields are the person's choice: an
     /// explicit `--scopes`, or answers to the menu. Default answers are taken
-    /// for them, so they are not, and the enrolment records no choice
+    /// for them, so they are not, and the enrollment records no choice
     /// (`ContributorConfig::consent_scopes_chosen`).
     fn is_a_choice(&self) -> bool {
         matches!(self, ConsentSource::Explicit(_) | ConsentSource::Prompt)

@@ -39,14 +39,14 @@ enum JoinScreenLayout {
     }
 
     /// "Skip: watch only" is offered only while the daemon holds no
-    /// enrolment (`FirstRunState.daemonHoldsEnrolment`). Watching only
+    /// enrollment (`FirstRunState.daemonHoldsEnrolment`). Watching only
     /// beside one would act under it, and could never finish: its marker is
     /// refused while the daemon is logged in.
     static func offersWatchOnly(_ state: FirstRunState) -> Bool {
         !state.daemonHoldsEnrolment
     }
 
-    /// An enrolment the daemon holds for this run and nobody signed out of
+    /// An enrollment the daemon holds for this run and nobody signed out of
     /// -- an invite enrolled before a near.ai sign-in failed, near.ai's own
     /// -- is the account when none is answered, as an earlier run's is
     /// (`OnboardingNavigation.recordEnrolment`).
@@ -63,7 +63,7 @@ enum JoinScreenLayout {
     }
 
     /// Whether the footer can move on: with an account, as watch only, or
-    /// as the enrolment this run holds. An enrolment signed out of waits for
+    /// as the enrollment this run holds. An enrollment signed out of waits for
     /// an account to be chosen.
     static func canForward(_ state: FirstRunState) -> Bool {
         hasAccount(state) || offersWatchOnly(state) || heldEnrolmentIsTheAccount(state)
@@ -71,7 +71,7 @@ enum JoinScreenLayout {
 
     /// The footer's action. Without an account it is "Skip: watch only",
     /// which answers watch only, or -- while the daemon holds this run's
-    /// enrolment -- Continue as that enrolment; either way the person moves
+    /// enrollment -- Continue as that enrollment; either way the person moves
     /// on. With nothing to go on as, it does nothing (`canForward`).
     static func forward(_ state: FirstRunState) -> FirstRunState {
         guard canForward(state) else { return state }
@@ -118,7 +118,7 @@ enum JoinScreenLayout {
         return copy.nearAiText
     }
 
-    /// Why near.ai is no longer chosen: its login or enrolment did not
+    /// Why near.ai is no longer chosen: its login or enrollment did not
     /// succeed and the commit returned here (`returnToJoin(afterNearAIFailure:)`).
     /// The core's line the step would have said it in, shown only while no
     /// account is answered; choosing again takes it down.
@@ -275,9 +275,9 @@ enum JoinScreenLayout {
 
     /// A signed-in near.ai is held, and a passkey is never created over it,
     /// so the passkey card offers no action then (`passkeyOpensNow`); nor
-    /// over an enrolment an earlier first run left; nor beside a held
+    /// over an enrollment an earlier first run left; nor beside a held
     /// invite, since the daemon refuses to create a passkey account over an
-    /// enrolment (`account-already-enrolled`) and `passkeyLine` says so.
+    /// enrollment (`account-already-enrolled`) and `passkeyLine` says so.
     static func showsPasskeyAction(_ state: FirstRunState) -> Bool {
         !state.signedIn && state.account != .enrolled && !holdsInvite(state)
     }
@@ -314,12 +314,12 @@ enum JoinScreenLayout {
     /// claims an account that is not linked. `account_sign_out` has already
     /// ended the daemon's account session, the one near.ai holds too.
     ///
-    /// The daemon has no call that drops an enrolment, so one it holds --
-    /// this run's invite, near.ai's invite-free enrolment, a passkey Verify
+    /// The daemon has no call that drops an enrollment, so one it holds --
+    /// this run's invite, near.ai's invite-free enrollment, a passkey Verify
     /// bound, an earlier first run's --
     /// may outlive the sign-out. It is cleared here and marked
     /// (`signedOutOfEnrolment`), which fails closed: nothing that belongs to
-    /// an enrolment is sent for it, and it is not recorded as the account
+    /// an enrollment is sent for it, and it is not recorded as the account
     /// again. Every other answer (tools, rules, uses) is kept.
     static func signOut(_ state: FirstRunState) -> FirstRunState {
         var cleared = state
@@ -338,7 +338,7 @@ enum JoinScreenLayout {
     /// Record how the passkey sheets ended. A sign-in ends them only once
     /// Verify bound its account, or joined this Mac to the account another
     /// Mac bound (`PasskeySheetOutcome.signedIn`), so every held passkey is
-    /// an enrolment. The shell's login result carries no name
+    /// an enrollment. The shell's login result carries no name
     /// (`NativePasskeyCoordinator.perform(.login)` returns none); the
     /// outcome carries the one the daemon remembers for the signed-in
     /// account's own record, when it has one: a name given here, or the

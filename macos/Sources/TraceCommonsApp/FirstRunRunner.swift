@@ -77,7 +77,7 @@ enum FirstRunFailure: Equatable {
     case lookupUnavailable
     case enrollFailed
     case signInFailed
-    /// The near.ai enrolment without an invite was refused; the daemon's
+    /// The near.ai enrollment without an invite was refused; the daemon's
     /// label, for the core's line (`TCNearAiEnroll`).
     case nearAIEnrollFailed(label: String)
     case scopesFailed
@@ -149,7 +149,7 @@ final class FirstRunRunner: ObservableObject {
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
     /// only when every call succeeded; a dead invite, or a near.ai login or
-    /// enrolment without an invite that did not succeed, goes back to Join;
+    /// enrollment without an invite that did not succeed, goes back to Join;
     /// any other failure leaves the step where it is. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
     /// `completeFailed` when the marker was not written. `refusal` is one
@@ -269,7 +269,7 @@ final class FirstRunRunner: ObservableObject {
     /// asks the daemon which passkeys this Mac remembers and, if the rule
     /// holds, opens the sheets at Welcome back with the remembered name. The
     /// rule is checked again once the daemon answers, since Join (or an
-    /// enrolment the first status reported) can change meanwhile. Offered at
+    /// enrollment the first status reported) can change meanwhile. Offered at
     /// most once; its Sign in is the ordinary sign-in, and "Other sign-in
     /// options" closes it and leaves Join as it was.
     func offerWelcomeBack(from account: any PasskeyAccount) async {

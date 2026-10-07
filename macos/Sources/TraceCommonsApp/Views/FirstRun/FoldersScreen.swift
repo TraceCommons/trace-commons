@@ -65,7 +65,7 @@ enum FoldersScreenLayout {
         case .lookupUnavailable?: return copy.folders.lookupUnavailable
         case .signInFailed?: return copy.folders.signInFailed
         // The core's line for the daemon's label, as the near.ai join view
-        // words it; a label it has no line for reads the enrol refusal.
+        // words it; a label it has no line for reads the enroll refusal.
         case .nearAIEnrollFailed(let label)?: return TCNearAiEnroll.line(label: label) ?? copy.folders.enrollRefused
         default: return nil
         }

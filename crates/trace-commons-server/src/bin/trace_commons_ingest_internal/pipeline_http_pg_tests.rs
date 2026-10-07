@@ -2646,9 +2646,9 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
     );
 }
 
-/// Enrols `near_account_id` as the designated NEAR payout account of the
+/// Enrolls `near_account_id` as the designated NEAR payout account of the
 /// account `principal` is linked to, through an owner connection (a fixture
-/// write, as `main`'s NEAR enrolment makes).
+/// write, as `main`'s NEAR enrollment makes).
 async fn designate_near_account(
     owner: &Arc<PgBackend>,
     tenant: &str,
@@ -2703,7 +2703,7 @@ async fn a_withdrawal_after_settle_keeps_and_pays_the_settled_trace_credit() {
     let principal = static_token_principal_ref(&fixture.token);
     let session = account_session_headers(state, &fixture.token).await;
     // The session links the principal to an account; the account's payout
-    // goes to its NEAR account (item 4), so it enrols one.
+    // goes to its NEAR account (item 4), so it enrolls one.
     designate_near_account(&fixture.owner, tenant, &principal, "contributor.testnet").await;
     let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
 

@@ -32,7 +32,7 @@ public enum FirstRunNavigation {
     /// (`passkey_state` says `none`), and the daemon remembers a passkey used
     /// on this Mac. Anything the daemon cannot say (`unknown`, a null count,
     /// no answer) opens Join as before; so does a finished first run, a held
-    /// enrolment, and any answer already given on Join.
+    /// enrollment, and any answer already given on Join.
     public static func opensWelcomeBack(
         _ state: FirstRunState, passkeys: NativePasskeyState?, completed: Bool
     ) -> Bool {
@@ -61,7 +61,7 @@ public enum FirstRunNavigation {
 
     /// The invite was rejected when it was finally looked up: back to Join,
     /// every answer kept. The daemon is still running, so the next
-    /// `leaveRoots` does not start it again, and an earlier enrolment the
+    /// `leaveRoots` does not start it again, and an earlier enrollment the
     /// daemon holds is kept too.
     public static func returnToJoin(afterDeadInvite state: FirstRunState) -> FirstRunState {
         var returned = state
@@ -69,7 +69,7 @@ public enum FirstRunNavigation {
         return returned
     }
 
-    /// The near.ai login did not finish, or the enrolment through it was
+    /// The near.ai login did not finish, or the enrollment through it was
     /// refused (Kristi's review of #1261). With no Back on Folders or Tools,
     /// staying there would retry the same sign-in at every Continue, so the
     /// person goes back to Join with the near.ai choice cleared, to choose
@@ -94,9 +94,9 @@ public enum FirstRunNavigation {
     ///   screen itself holds Continue until its folders have loaded
     ///   (`RulesScreenLayout.canContinue`), which this state cannot see.
     /// - Uses: the required use ticked, and something Start can do: finish
-    ///   watching only (not while the daemon holds an enrolment, which
+    ///   watching only (not while the daemon holds an enrollment, which
     ///   watching only cannot finish under), reopen a chosen passkey's
-    ///   sheets, or finish an enrolment the daemon holds. With no required use known, Start stays
+    ///   sheets, or finish an enrollment the daemon holds. With no required use known, Start stays
     ///   disabled.
     public static func canContinue(
         _ state: FirstRunState,
@@ -122,7 +122,7 @@ public enum FirstRunNavigation {
     }
 
     /// Whether this first run can share automatically: only with an
-    /// enrolment the daemon holds (`FirstRunState.holdsEnrolment`). Watching
+    /// enrollment the daemon holds (`FirstRunState.holdsEnrolment`). Watching
     /// only, no answer, a passkey chosen but not created, and near.ai whose
     /// invite has not enrolled cannot.
     public static func canChooseAutomatic(_ state: FirstRunState) -> Bool {

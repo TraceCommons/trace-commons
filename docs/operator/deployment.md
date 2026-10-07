@@ -322,7 +322,7 @@ that stage. Nothing else is written: the passkey account stays `unbound`, and
 no fresh device key is minted. The label names no tenant or account.
 
 For an account that is already `bound` (a second Mac signed in with the same
-passkey), the same two routes enrol that Mac's device key into the account
+passkey), the same two routes enroll that Mac's device key into the account
 instead of refusing. Finish attaches the device only when the NEAR AI login's
 anchor is the session's own account's, checked inside the one tenant-scoped
 transaction that writes the device (the share lock on the binding row uses
@@ -332,7 +332,7 @@ account's -- whether it owns another account or none -- is answered
 row (stage `near_ai_account_mismatch`) and nothing else written. A success
 writes `account_device_enrolled` (`{"identity":"near_ai_login"}`); start writes
 `account_device_enrol_started`. There is no cap on how many devices one
-account can enrol this way.
+account can enroll this way.
 
 ### Browser passkey step-up page (Z2 S7)
 

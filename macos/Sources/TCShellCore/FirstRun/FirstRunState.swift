@@ -33,7 +33,7 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     /// Mac had bound it), which enrolled this Mac (`account_bind`), with the
     /// name the person gave it (empty when an existing passkey signed in, or
     /// the bind answered `existing_account`).
-    /// A sign-in alone never records it: it holds no enrolment.
+    /// A sign-in alone never records it: it holds no enrollment.
     case passkey(name: String)
     /// The daemon was already enrolled when this first run began: an earlier
     /// first run joined and was quit before Start. An account it holds, so
@@ -136,12 +136,12 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// `sessionRoots` for how it is declared.
     public var notFound: Set<SourceKind>
     /// The person signed out on Join (#1030 rule 6) while the daemon held an
-    /// enrolment: this run's invite, a passkey Verify bound, or an earlier
-    /// first run's. The daemon has no call that drops an enrolment, so it
+    /// enrollment: this run's invite, a passkey Verify bound, or an earlier
+    /// first run's. The daemon has no call that drops an enrollment, so it
     /// may still hold one; this first run no longer treats it as an account
     /// (`holdsEnrolment` is false) and sends nothing that belongs to one --
-    /// no scopes, no grant, no enrolment marker -- and an enrolment the
-    /// daemon reports is not recorded again. A later enrolment (a new
+    /// no scopes, no grant, no enrollment marker -- and an enrollment the
+    /// daemon reports is not recorded again. A later enrollment (a new
     /// invite enrolled, a passkey bound) clears it.
     public var signedOutOfEnrolment: Bool
 
@@ -198,12 +198,12 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         notFound = Set(candidates.filter { !$0.exists }.map(\.source))
     }
 
-    /// Whether the daemon holds an enrolment for this first run, which is
-    /// what consent scopes, the Automatic grant and the enrolment's marker
-    /// need. An earlier first run's enrolment; a passkey Verify bound; or
+    /// Whether the daemon holds an enrollment for this first run, which is
+    /// what consent scopes, the Automatic grant and the enrollment's marker
+    /// need. An earlier first run's enrollment; a passkey Verify bound; or
     /// near.ai once its invite enrolled, or once it enrolled this Mac with no
     /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
-    /// is not one, and nor is an enrolment the person signed out of
+    /// is not one, and nor is an enrollment the person signed out of
     /// (`signedOutOfEnrolment`).
     public var holdsEnrolment: Bool {
         if signedOutOfEnrolment { return false }
@@ -214,12 +214,12 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         }
     }
 
-    /// Whether the daemon may hold an enrolment, whatever this first run now
+    /// Whether the daemon may hold an enrollment, whatever this first run now
     /// treats as the account: one this run enrolled (an invite, near.ai's),
     /// one an earlier run left or a passkey Verify bound, and one the person
     /// signed out of on Join, which the daemon has no call to drop. Watching
     /// only is not offered while it does: its Start would act under that
-    /// enrolment, whose scopes nobody chose here, and its marker cannot
+    /// enrollment, whose scopes nobody chose here, and its marker cannot
     /// finish while the daemon is logged in.
     public var daemonHoldsEnrolment: Bool {
         if signedOutOfEnrolment || enrolledInvite != nil || nearAIEnrolled { return true }

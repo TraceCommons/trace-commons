@@ -1201,7 +1201,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
     }
 
-    /// Enrol a further device into the `bound` account `(tenant_id,
+    /// Enroll a further device into the `bound` account `(tenant_id,
     /// account_id)` from a verified NEAR AI login: a second Mac signed in with
     /// the account's passkey. Attaches the device only if the login's anchor
     /// is that account's own, decided in the same transaction that would

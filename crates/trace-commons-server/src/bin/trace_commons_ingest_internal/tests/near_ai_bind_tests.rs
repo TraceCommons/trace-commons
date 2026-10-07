@@ -746,7 +746,7 @@ async fn pg_a_bound_accounts_gate_lifts_and_it_cannot_bind_again_to_another_iden
         assert_eq!(after.status, StatusCode::OK, "{:?}", after.json());
     }
 
-    // A bound account's next ceremony is an enrolment of a further device,
+    // A bound account's next ceremony is an enrollment of a further device,
     // never a re-bind: under a different near.ai identity it is refused and
     // the account keeps its one anchor.
     h.sign_in_to_near_ai_as(&fresh_subject());
@@ -2285,12 +2285,12 @@ async fn pg_a_refuse_branch_that_lost_the_race_provisions_nothing_for_x() {
 // --- A second Mac joins a bound account ---------------------------------------
 //
 // "Use existing passkey" on a second Mac signs in to an account another Mac
-// already bound. The bind routes then run an enrolment: the near.ai identity
+// already bound. The bind routes then run an enrollment: the near.ai identity
 // this Mac proves must be the one already bound to the session's own account,
 // compared inside the one transaction that would attach the device. The
 // account being compared against comes from the session, never the body.
 
-/// The wire label an enrolment answers with when this Mac's near.ai identity
+/// The wire label an enrollment answers with when this Mac's near.ai identity
 /// is not the one the session's account is bound to. One fixed value, whatever
 /// the identity resolves to elsewhere.
 const NEAR_AI_ACCOUNT_MISMATCH: &str = "near_ai_account_mismatch";
@@ -2327,7 +2327,7 @@ async fn bound_on_another_mac(h: &Harness) -> (Unbound, Unbound) {
     (account, second)
 }
 
-/// The near.ai identity the account is bound to enrols the second Mac's
+/// The near.ai identity the account is bound to enrolls the second Mac's
 /// device into that same account, in its own tenant: a second device key,
 /// principal and provisioned-device row; still one anchor; the binding row
 /// untouched; a hash-only audit row; and a working native session.
@@ -2472,7 +2472,7 @@ async fn pg_a_second_mac_signed_in_to_another_identity_is_refused_and_writes_not
 
 /// A ceremony started while the account was unbound is a bind; if another
 /// Mac binds the account before it finishes, it is refused rather than
-/// finished as an enrolment, and writes nothing.
+/// finished as an enrollment, and writes nothing.
 #[tokio::test]
 async fn pg_a_bind_ceremony_cannot_finish_as_an_enrolment() {
     let Some(h) = harness().await else {
@@ -2510,7 +2510,7 @@ async fn pg_a_bind_ceremony_cannot_finish_as_an_enrolment() {
     drop_tenants(&admin, &[&account.tenant]).await;
 }
 
-/// The enrolment runs as an ordinary runtime login provisioned exactly as
+/// The enrollment runs as an ordinary runtime login provisioned exactly as
 /// `pg_bind_works_as_the_runtime_role_and_not_without_v100` provisions one
 /// (the operator's base-table grants plus `trace_ingest_runtime`), with
 /// nothing added for it: no migration is needed. The share lock on the

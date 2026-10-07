@@ -672,7 +672,7 @@ internal static class NativeMethods
     /// reading. Passing the negation would swap both readings and compile.
     /// </remarks>
     /// <summary>
-    /// The sentence for one NEAR AI login-enrolment control name.
+    /// The sentence for one NEAR AI login-enrollment control name.
     /// </summary>
     /// <remarks>
     /// Ten labels, ten sentences, and anything else reaching the generic one.

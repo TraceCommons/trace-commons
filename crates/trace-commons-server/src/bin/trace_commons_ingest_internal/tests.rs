@@ -87856,7 +87856,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
 // mode -- arguments and results with prose withheld, which is the shape a
 // consumer rebuilding runnable tasks asks for (#298) -- went straight into
 // the corpus with no backstop pass at all. The driver always covered
-// structured payloads; only enrolment did not.
+// structured payloads; only enrollment did not.
 #[test]
 fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
     assert_eq!(
@@ -97547,7 +97547,7 @@ mod admission_pg_tests;
 #[path = "migrated_pg_fixture.rs"]
 mod migrated_pg_fixture;
 
-/// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
+/// The NEAR AI enrollment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this
 /// suite with `cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests

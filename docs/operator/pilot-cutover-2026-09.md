@@ -308,7 +308,7 @@ first, with rollback.
 - **No hand grants.** V90 is the grant step. Run the V90 post-check above
   after V91.
 - **The old build keeps serving.** An earlier rehearsal ran `5f239be4` on the
-  V89 schema: enrolment, submissions, status and re-POST all passed. In the
+  V89 schema: enrollment, submissions, status and re-POST all passed. In the
   `5888b8bcd` rehearsal, `5f239be4` served submits, a re-POST and status on
   the V91 schema. There is no outage window.
 - **Locks.** Each migration took 0.02–0.04 s on the rehearsal database. V89
@@ -516,7 +516,7 @@ the cutover itself.
      without an invite device.
    - Only then set the policy variables and `ENABLED=true`. With the grants
      above, legacy `tenant-…` devices were verified to keep uploading. That
-     covered individual and pooled devices, and a new pooled enrolment.
+     covered individual and pooled devices, and a new pooled enrollment.
 5. **Witness certificate v2, last.** Follow "verifiers first" in
    `attested-inference.md`. Only after clients that verify v2 are adopted:
    0.12.x has no v2 support.
@@ -709,7 +709,7 @@ match the pilot as below, with pre-check 0's other branch: it started at V73.
 | Status of pre-cutover submissions | pass |
 | Server-side idempotent re-POST of a pre-cutover submission | pass, same `submission_id` |
 | New submits on an individual and a pooled tenant | pass, `accepted` |
-| New enrolment on the individual invite's second use, then a submit | pass |
+| New enrollment on the individual invite's second use, then a submit | pass |
 | 0.12.6 `account login`: URL as printed | 404, as expected |
 | The same URL with `/v1/traces` removed, then `daemon withdraw` of a pre-cutover submission | pass: `withdrawn: true`, server `revoked` |
 | DB audit rows written after the cutover | hashed, and each matches the file log's `event_id`, `previous_event_hash` and `event_hash`. The DB head equals the file head. |
@@ -748,12 +748,12 @@ replaced.
 
 | Run | Result |
 |---|---|
-| Old build `5f239be4` at V74: enrol (individual and pooled), 3 submits, status | pass |
+| Old build `5f239be4` at V74: enroll (individual and pooled), 3 submits, status | pass |
 | Old build: withdraw | **fail**, `permission denied for table trace_token_bundles` (pre-existing) |
 | Old build: withdraw with the token-bundle grant | pass |
-| Old build on the migrated V89 schema: submits, re-POST, new enrolments | pass |
-| Candidate, migrations only, no new grants | status and enrolment pass. **Every new submit fails**: `permission denied for table trace_submission_sessions` in `lock_source_session_for_submission`. Withdraw fails the same way. |
-| Candidate with the required grants | new submits for 3 tenants, a server-side idempotent re-POST, 2 new enrolments on the second invite use and the pooled code, status, and withdraw (`withdrawn: true`, server `revoked`): all pass. DB audit rows written after the cutover are hashed, and match the file log's `event_id`, `previous_event_hash` and `event_hash`. |
+| Old build on the migrated V89 schema: submits, re-POST, new enrollments | pass |
+| Candidate, migrations only, no new grants | status and enrollment pass. **Every new submit fails**: `permission denied for table trace_submission_sessions` in `lock_source_session_for_submission`. Withdraw fails the same way. |
+| Candidate with the required grants | new submits for 3 tenants, a server-side idempotent re-POST, 2 new enrollments on the second invite use and the pooled code, status, and withdraw (`withdrawn: true`, server `revoked`): all pass. DB audit rows written after the cutover are hashed, and match the file log's `event_id`, `previous_event_hash` and `event_hash`. |
 | Candidate plus account admission, runtime role granted, pilot `trace_accounts` UPDATE | boot refused, `account_admission_permissions_or_linkage_not_ready` |
 | The same, with `trace_accounts` UPDATE narrowed | boot ok. Legacy individual, pooled, and newly enrolled pooled devices all submit `accepted`. |
 | Rollback to `5f239be4` after candidate traffic | submits and status pass |

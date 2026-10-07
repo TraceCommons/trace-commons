@@ -3805,7 +3805,7 @@ pub unsafe extern "C" fn tc_queue_outcome_line(label: *const c_char) -> *mut c_c
     })
 }
 
-/// The sentence for one NEAR AI login-enrolment control name.
+/// The sentence for one NEAR AI login-enrollment control name.
 ///
 /// Ten labels, each with its own sentence, and anything else -- including a
 /// label from a newer daemon -- reaching the generic one. **Never the empty

@@ -156,7 +156,7 @@ final class UsesScreenTests: XCTestCase {
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
         // Watching only reads Ask me's line, so Automatic's absence does
         // not hold it. (Watching only with nothing enrolled: beside an
-        // enrolment the daemon holds, Start is not offered at all.)
+        // enrollment the daemon holds, Start is not offered at all.)
         state.account = .watchOnly
         state.enrolledInvite = nil
         XCTAssertTrue(UsesScreenLayout.canStart(

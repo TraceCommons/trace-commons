@@ -497,8 +497,8 @@ final class PasskeySheetsTests: XCTestCase {
     }
 
     /// Kristi's #1235 B1, decision (a): "Use existing passkey" signs in, and
-    /// a sign-in alone holds no enrolment. An account no Mac has bound goes
-    /// through Verify, whose bind enrols this Mac; only then is the outcome
+    /// a sign-in alone holds no enrollment. An account no Mac has bound goes
+    /// through Verify, whose bind enrolls this Mac; only then is the outcome
     /// `.signedIn`, which Join records as a held passkey. Cancelling that
     /// Verify signs out, as it does after Create.
     func test_anUnboundExistingPasskeyIsBoundThroughVerify() async throws {
@@ -612,7 +612,7 @@ final class PasskeySheetsTests: XCTestCase {
     /// account another Mac bound. Verify runs the daemon's bind, which the
     /// commons answers `enrolled` only when this Mac's near.ai sign-in is the
     /// account's own; only then is the outcome `.signedIn`, which Join records
-    /// as a held passkey and an enrolment.
+    /// as a held passkey and an enrollment.
     func test_aSecondMacJoinsItsPasskeysBoundAccountThroughVerify() async throws {
         let copy = try coreCopy()
         let account = RecordingAccount()
@@ -628,7 +628,7 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(model.outcome, .signedIn(name: nil))
         XCTAssertEqual(account.calls, ["signIn", "bind", "passkeyState"])
 
-        // A bound account's Verify accepts nothing but an enrolment: a bind or
+        // A bound account's Verify accepts nothing but an enrollment: a bind or
         // a switch would not be this account, so it fails closed.
         for answer in [PasskeyBindResult.bound, .existingAccount] {
             let odd = PasskeySheetModel(copy: copy.passkey, account: account)

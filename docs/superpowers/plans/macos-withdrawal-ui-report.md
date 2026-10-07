@@ -188,7 +188,7 @@ wrong, reverting that one line costs the screenshots and nothing else.
 `TextField`, `Menu`, segmented `Picker`), which come out as yellow
 placeholders in a capture while being fine in the running app. The captures
 below have no placeholders. It renders fabricated records because the demo
-state directory has no enrolment and therefore no history at all, so a capture
+state directory has no enrollment and therefore no history at all, so a capture
 of the real screen would show an empty list and prove nothing about the copy.
 
 ## Verification

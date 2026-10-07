@@ -263,7 +263,7 @@ pub struct RulesCopy {
     pub sessions_unavailable: &'static str,
     /// Watching only: the past-session card's note. Start queues the picked
     /// sessions on this Mac as pending offers and sends none of them, since
-    /// there is no enrolment to send them under. Approved 2026-10-06.
+    /// there is no enrollment to send them under. Approved 2026-10-06.
     pub past_sessions_watch_only: &'static str,
     /// `{count}`: a folder's older sessions beyond the newest 500 the
     /// picker lists (`list_past_sessions`' `not_listed`; owner decision
@@ -350,7 +350,7 @@ pub struct PasskeyCopy {
     /// never shown.
     pub refused: &'static str,
     /// "Use existing passkey" signed in to a legacy account (created by a
-    /// path other than passkey creation, so it has no binding an enrolment
+    /// path other than passkey creation, so it has no binding an enrollment
     /// could check).
     /// Adding a Mac to one with a passkey is not built, so the sheet signed
     /// out and stays on Choose. (An account bound on another Mac goes through
@@ -838,7 +838,7 @@ mod tests {
     }
 
     /// An existing passkey whose account this Mac cannot join (a legacy
-    /// account, which has no binding an enrolment could check) signs out and says so,
+    /// account, which has no binding an enrollment could check) signs out and says so,
     /// in words of its own rather than the generic refusal. An account bound
     /// on another Mac is joinable now, so the line no longer claims a Mac
     /// can't be added to one.

@@ -112,7 +112,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Invite links, delivered above the view layer.
     ///
-    /// This deliberately does not enrol. It fills the field and brings the
+    /// This deliberately does not enroll. It fills the field and brings the
     /// screen up; pressing the button stays a person's decision, because
     /// which commons to join is the question that screen exists to ask. The
     /// other two clients say the same thing at their own registration sites.

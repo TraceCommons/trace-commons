@@ -47,13 +47,13 @@ flags.
 
 Read together with the decision below that corrections are NOT scrubbed, the
 gap is worse than the one #419 closed rather than merely equal to it. There,
-the deterministic pass still scrubbed the payload and only backstop enrolment
+the deterministic pass still scrubbed the payload and only backstop enrollment
 was missed. Here, the semantic passes are deliberately skipped, so an
 unenrolled correction reaches the corpus with nothing but secret detection
 having looked at it. The consent flag is what closes it.
 
 This is the same asymmetry as the object-key gap: the component that would
-catch it never runs, because enrolment is decided elsewhere.
+catch it never runs, because enrollment is decided elsewhere.
 
 ### A third consent flag
 
@@ -231,7 +231,7 @@ from the source session identifier.
 **No code. Do not open a pull request for this.**
 
 #418 and #419 already made enabling it safe: a marker is no longer counted as
-a payload, and a payload-bearing trace with no prose now enrols for the PII
+a payload, and a payload-bearing trace with no prose now enrolls for the PII
 backstop. `include_tool_payloads: true` appears only in tests.
 
 Enabling it is one configuration change with an operational consequence:
