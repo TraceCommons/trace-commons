@@ -115,9 +115,6 @@ public struct GlassListRow: View {
         GlassTokens.Color.textTertiary
     }
 
-    /// The switch's column, reserved on a row with no switch.
-    static let watchColumn = GlassTokens.Size.watchSwitchWidth
-
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             Group {
