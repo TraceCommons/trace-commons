@@ -219,17 +219,24 @@ public struct GlassModal<Content: View>: View {
 }
 
 /// A confirmation (#1146's viewport modal, `responsive-overlay.tsx`): the
-/// regular modal raised over the whole window, its message the header's
-/// subtitle and its actions the footer. The replacement for a stock
-/// `.alert` or `.confirmationDialog`.
+/// regular modal raised over the whole window, an optional short
+/// `subtitle` under its title, its `message` (a disclosure, a consequence)
+/// in the scrolling body at body size in secondary ink, as #1146 keeps it
+/// in the overlay's children, and its actions the footer. The replacement
+/// for a stock `.alert` or `.confirmationDialog`.
 public struct GlassConfirmation: View {
     private let title: String
+    private let subtitle: String?
     private let message: String?
     private let actions: [GlassModalAction]
     private let onCancel: () -> Void
 
-    public init(title: String, message: String? = nil, actions: [GlassModalAction], onCancel: @escaping () -> Void) {
+    public init(
+        title: String, subtitle: String? = nil, message: String? = nil, actions: [GlassModalAction],
+        onCancel: @escaping () -> Void
+    ) {
         self.title = title
+        self.subtitle = subtitle
         self.message = message
         self.actions = actions
         self.onCancel = onCancel
@@ -238,14 +245,34 @@ public struct GlassConfirmation: View {
     /// #1146's width: the regular modal, never the narrow one.
     public static let width: GlassModalWidth = .regular
 
+    /// The paragraphs the body draws: the message split at its blank
+    /// lines, empty ones dropped.
+    static func paragraphs(_ message: String?) -> [String] {
+        (message ?? "").components(separatedBy: "\n\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
     public var body: some View {
-        GlassModal(title: title, subtitle: message, width: Self.width, actions: actions, onCancel: onCancel) {
-            // #1146's body (`px-[18px] py-3`), empty: the message is the
-            // subtitle.
-            Color.clear
-                .frame(height: 0)
-                .padding(.vertical, GlassTokens.Space.s6)
-                .accessibilityHidden(true)
+        GlassModal(title: title, subtitle: subtitle, width: Self.width, actions: actions, onCancel: onCancel) {
+            let paragraphs = Self.paragraphs(message)
+            if paragraphs.isEmpty {
+                // #1146's body (`px-[18px] py-3`), empty.
+                Color.clear
+                    .frame(height: 0)
+                    .padding(.vertical, GlassTokens.Space.s6)
+                    .accessibilityHidden(true)
+            } else {
+                GlassModalBody {
+                    ForEach(Array(paragraphs.enumerated()), id: \.offset) { _, paragraph in
+                        Text(paragraph)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
         }
     }
 }
@@ -401,6 +428,11 @@ private struct GlassModalHost: ViewModifier {
             .environment(\.glassModalIsTopmost, parentIsTopmost && !covered)
             .disabled(covered)
             .accessibilityHidden(covered)
+            // #1146's `.tc-scrim` backdrop: the window behind blurred by
+            // `size.modalScrimBlur` (8) under the 40% dim, so what the
+            // modal is raised over (Join, under a passkey sheet) stays
+            // faintly legible. Never a system material, which hides it.
+            .blur(radius: covered ? GlassTokens.Size.modalScrimBlur : 0)
             .onPreferenceChange(GlassModalPresence.self) { ids in
                 presented = ids
             }
@@ -466,15 +498,14 @@ struct GlassModalScrimAction: PreferenceKey {
     }
 }
 
-/// The scrim: the window behind, blurred within the window and dimmed by
-/// `modalScrim`. It takes every click, so nothing behind can be used; a
-/// click on it calls `onTap`, the topmost modal's cancel (#1146).
+/// The scrim: `modalScrim` over the window behind, which the host blurs
+/// by `size.modalScrimBlur`. It takes every click, so nothing behind can
+/// be used; a click on it calls `onTap`, the topmost modal's cancel (#1146).
 private struct GlassModalScrim: View {
     let onTap: (() -> Void)?
 
     var body: some View {
         ZStack {
-            GlassFloatingBlur(cornerRadius: 0)
             Rectangle().fill(GlassTokens.Color.modalScrim.color)
         }
         .ignoresSafeArea()

@@ -189,7 +189,8 @@ struct WitnessSection: View {
         .glassModal(isPresented: $showingInferenceDisclosure) {
             GlassConfirmation(
                 title: copy.privacyConfirmTitle ?? copy.inferenceHeading,
-                message: [copy.privacyConfirmDescription, copy.inferenceDisclosure, copy.inferenceCaptureNote,
+                subtitle: copy.privacyConfirmDescription,
+                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote,
                           copy.inferenceScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.inferenceCancel) { showingInferenceDisclosure = false },
@@ -240,7 +241,8 @@ struct WitnessSection: View {
         .glassModal(isPresented: $showingTokenDisclosure) {
             GlassConfirmation(
                 title: copy.privacyConfirmTitle ?? copy.tokenHeading ?? "",
-                message: [copy.privacyConfirmDescription, copy.tokenDisclosure, copy.tokenCaptureNote,
+                subtitle: copy.privacyConfirmDescription,
+                message: [copy.tokenDisclosure, copy.tokenCaptureNote,
                           copy.tokenScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.tokenCancel ?? "") { showingTokenDisclosure = false },

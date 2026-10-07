@@ -189,16 +189,16 @@ final class TracesParityTests: XCTestCase {
             "segments: Tab.allCases.map { item in GlassSegment(item.title(words), value: item) })",
             "Button(words.prepareAdmission) { preparingAdmission = true }\n"
                 + "                            .buttonStyle(GlassButtonStyle(.glass))\n",
-            "SheetNotice(title: copy.heading, detail: copy.working)",
-            // The witness consent is a narrow glass modal whose title is the
-            // core's heading: cancel (Escape) left, confirm prominent but
-            // never on Return, and armed only by Ron's tick.
-            "GlassModal(\n            title: copy.heading, width: .narrow,",
+            "SheetNotice(fills: !inModal, title: copy.heading, detail: copy.working)",
+            // The witness consent is #1146's regular glass modal (P30) whose
+            // title is the core's heading: cancel (Escape) left, confirm
+            // prominent but never on Return, and armed only by Ron's tick.
+            "GlassModal(\n            title: copy.heading,\n",
             ".cancel(copy.cancel, action: onCancel),",
             "GlassModalAction(copy.confirm, isEnabled: confirmLine != nil && confirmed, isProminent: true) {",
             "GlassCheckRow(confirmLine, isOn: $confirmed)",
-            // Prepare admission, in a narrow glass modal over the preview.
-            "title: words.prepareAdmission, width: .narrow,",
+            // Prepare admission, in a regular glass modal over the preview.
+            "title: words.prepareAdmission,\n",
             // The preview itself, in a regular glass modal over the window.
             "struct PreviewModal: View {",
             "PreviewSheet(entry: entry, onClose: onClose)",

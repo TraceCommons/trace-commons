@@ -192,7 +192,6 @@ struct SettingsModal: View {
                 ComputeView(model: compute)
                     .padding(.horizontal, Self.bodyInset)
                     .padding(.vertical, GlassTokens.Space.s6)
-                    .frame(maxWidth: 560, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
             default:
                 GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)

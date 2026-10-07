@@ -181,6 +181,18 @@ struct PreviewSheet: View {
     /// so the sheet draws neither, nor the rules between them.
     private var inModal: Bool { onClose != nil }
 
+    /// Whether the tabs and the document are drawn: anything else (loading,
+    /// a refusal, the witness working) is one notice.
+    private var showsDocument: Bool {
+        !witnessWorking && !loading && failure == nil && summary != nil && words != nil && document != nil
+    }
+
+    /// In a modal, a notice is as tall as it is (#1146's overlay fits its
+    /// content); only the document takes the window's height.
+    static func fillsHeight(inModal: Bool, showsDocument: Bool) -> Bool {
+        !inModal || showsDocument
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -200,9 +212,11 @@ struct PreviewSheet: View {
         // In a modal the window sets the floor instead.
         .frame(
             minWidth: onClose == nil ? SheetMetric.width : nil, idealWidth: SheetMetric.width, maxWidth: .infinity,
-            minHeight: onClose == nil ? SheetMetric.height : nil, idealHeight: SheetMetric.height,
-            maxHeight: .infinity
+            minHeight: onClose == nil ? SheetMetric.height : nil,
+            idealHeight: Self.fillsHeight(inModal: inModal, showsDocument: showsDocument) ? SheetMetric.height : nil,
+            maxHeight: Self.fillsHeight(inModal: inModal, showsDocument: showsDocument) ? .infinity : nil
         )
+        .fixedSize(horizontal: false, vertical: !Self.fillsHeight(inModal: inModal, showsDocument: showsDocument))
         .background {
             // A shortcut needs a control to hang from. This one is never
             // seen and never focused; it exists so Command-F does what it
@@ -370,7 +384,7 @@ struct PreviewSheet: View {
             // Over the whole window, stacked over the preview's own modal.
             .glassModal(isPresented: $preparingAdmission) {
                 GlassModal(
-                    title: words.prepareAdmission, width: .narrow,
+                    title: words.prepareAdmission,
                     actions: [.cancel(words.close) { preparingAdmission = false }],
                     onCancel: { preparingAdmission = false }
                 ) {
@@ -383,14 +397,14 @@ struct PreviewSheet: View {
     @ViewBuilder
     private var content: some View {
         if witnessWorking, let copy = model.witnessCopy?.review {
-            SheetNotice(title: copy.heading, detail: copy.working)
+            SheetNotice(fills: !inModal, title: copy.heading, detail: copy.working)
         } else if loading {
             // Without the core's Look-inside table there is no loading line,
             // and the tabs will not draw: said now, not an empty notice.
             if let words {
-                SheetNotice(title: nil, detail: words.loadingTranscript)
+                SheetNotice(fills: !inModal, title: nil, detail: words.loadingTranscript)
             } else {
-                SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
+                SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)
             }
         } else if failure != nil {
             // A refusal the daemon classified wins; otherwise the one fixed
@@ -401,12 +415,14 @@ struct PreviewSheet: View {
                 // A busy witness judged nothing: not a refusal. The
                 // daemon's busy sentence, and when to try again.
                 SheetNotice(
+                    fills: !inModal,
                     title: model.witnessCopy?.review?.heading,
                     detail: [witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail, retry]
                         .joined(separator: "\n")
                 )
             } else {
                 SheetNotice(
+                    fills: !inModal,
                     title: Self.cannotShow,
                     detail: witnessRequested
                         ? (witnessRefusal ?? model.witnessCopy?.review?.failed ?? cannotShowDetail)
@@ -454,7 +470,7 @@ struct PreviewSheet: View {
             // A summary with no body to show, or the core's Look-inside
             // table would not decode: said, never a blank pane or a row of
             // unnamed tabs.
-            SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)
+            SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)
         }
     }
 
@@ -769,6 +785,9 @@ private struct CaptureSafeScroll<Content: View>: View {
 /// words; the detail sits under it. Centred in the space the tabs would use.
 /// With no title words there is no title, and so no dot without words.
 private struct SheetNotice: View {
+    /// Outside a modal the notice centres in the sheet's floor; in one it
+    /// is as tall as its words, under the header.
+    var fills = true
     let title: String?
     let detail: String
 
@@ -778,7 +797,7 @@ private struct SheetNotice: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: 480)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: fills ? .infinity : nil, alignment: fills ? .center : .leading)
         .padding(GlassTokens.Space.s9)
     }
 }
@@ -1378,7 +1397,7 @@ struct WitnessReviewConsent: View {
     /// Confirm is never the default: Return does not start a review.
     var body: some View {
         GlassModal(
-            title: copy.heading, width: .narrow,
+            title: copy.heading,
             actions: [
                 .cancel(copy.cancel, action: onCancel),
                 GlassModalAction(copy.confirm, isEnabled: confirmLine != nil && confirmed, isProminent: true) {

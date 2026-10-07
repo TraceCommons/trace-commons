@@ -201,7 +201,7 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertTrue(content.contains("} else if summary != nil, let words, let document {"),
                       "the tabs are drawn only with the core's words and a body: \(content)")
         XCTAssertTrue(content.contains("} else if summary != nil {"), "a summary with no body is said: \(content)")
-        XCTAssertTrue(content.contains("SheetNotice(title: Self.cannotShow,"))
+        XCTAssertTrue(content.contains("SheetNotice(fills: !inModal, title: Self.cannotShow,"))
         XCTAssertFalse(content.contains("words?.title ?? tab.title(words)"))
     }
 
@@ -228,7 +228,7 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertFalse(content.contains("detail: \"\""), "an empty notice: \(content)")
         let loading = try Self.declaration("} else if loading {", in: content)
         XCTAssertTrue(loading.contains("if let words {"), "the loading line needs the table: \(loading)")
-        XCTAssertTrue(loading.contains("SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)"),
+        XCTAssertTrue(loading.contains("SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)"),
                       "and without it the cannot-show notice: \(loading)")
     }
 

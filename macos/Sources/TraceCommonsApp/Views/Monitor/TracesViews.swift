@@ -533,12 +533,13 @@ struct TracesTreeView: View {
     private func dismissModal(_ entry: DaemonData.QueueEntry) -> some View {
         if let words = store.words {
             let busy = store.acting.contains(entry.entryId)
-            let keep = { dismissing = nil }
+            // #1146 ignores a close while dismissing: Keep, Escape and a
+            // scrim click wait for the answer, so a refusal is never lost.
+            let keep = { if !store.acting.contains(entry.entryId) { dismissing = nil } }
             GlassModal(
                 title: words.tree.dismissSessionTitle, subtitle: Self.dismissBody(entry, words: words),
-                width: .narrow,
                 actions: [
-                    .cancel(words.tree.dismissSessionKeep, action: keep),
+                    GlassModalAction(words.tree.dismissSessionKeep, role: .cancel, isEnabled: !busy, action: keep),
                     .destructive(busy ? words.tree.dismissing : words.dismissAction, isEnabled: !busy) {
                         Task {
                             await store.perform(.dismiss, on: entry.entryId)

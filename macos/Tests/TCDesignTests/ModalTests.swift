@@ -84,9 +84,10 @@ final class ModalTests: XCTestCase {
     }
 
     /// A confirmation is #1146's regular modal (`responsive-overlay.tsx`),
-    /// 780 wide, never the narrow one; its message is the header's
-    /// subtitle, not a body of its own.
-    func test_aConfirmationIsTheRegularModalWithItsMessageAsSubtitle() throws {
+    /// 780 wide, never the narrow one. Its short subtitle is the header's;
+    /// its message (a disclosure) is the scrolling body at body size in
+    /// secondary ink, as #1146 keeps it in the overlay's children (P31).
+    func test_aConfirmationIsTheRegularModalWithItsMessageInTheBody() throws {
         XCTAssertEqual(GlassConfirmation.width, .regular)
         XCTAssertEqual(GlassConfirmation.width.points, 780)
         let long = String(repeating: "a long confirmation message ", count: 40)
@@ -96,7 +97,14 @@ final class ModalTests: XCTestCase {
         XCTAssertLessThanOrEqual(size.width, GlassTokens.Size.modalWidth + 0.5)
         let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
         let source = try XCTUnwrap(sources["Modal.swift"])
-        XCTAssertTrue(source.contains("GlassModal(title: title, subtitle: message, width: Self.width"))
+        XCTAssertTrue(source.contains("GlassModal(title: title, subtitle: subtitle, width: Self.width"))
+        XCTAssertFalse(source.contains("subtitle: message"), "the disclosure is demoted to the caption subtitle")
+        XCTAssertEqual(GlassConfirmation.paragraphs("a\n\n b \n\n\n\nc"), ["a", "b", "c"])
+        XCTAssertEqual(GlassConfirmation.paragraphs(nil), [])
+        // A tall disclosure grows the modal, up to the body's scroll.
+        let short = NSHostingView(rootView: GlassConfirmation(title: "t", actions: [.cancel("c") {}], onCancel: {})
+            .frame(maxWidth: 1400)).fittingSize
+        XCTAssertGreaterThan(size.height, short.height + 10, "the message is not drawn in the body")
     }
 
     /// #1146 draws a close button on every modal: a modal that names none

@@ -87,10 +87,15 @@ struct ConsentSection: View {
     @ViewBuilder
     private func group(_ title: String, _ scopes: [ConsentScope], granted: Set<String>) -> some View {
         if !scopes.isEmpty {
+            // #1146 spaces the groups apart and rules each option off.
             Text(title)
                 .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textSecondary)
-            ForEach(scopes) { scope in
+                .padding(.top, GlassTokens.Space.s4)
+            ForEach(Array(scopes.enumerated()), id: \.element.id) { index, scope in
+                if index > 0 {
+                    Rectangle().fill(GlassColor.hairline).frame(height: 0.5).accessibilityHidden(true)
+                }
                 row(scope, granted: granted)
             }
         }
