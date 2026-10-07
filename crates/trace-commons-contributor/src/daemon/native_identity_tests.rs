@@ -793,7 +793,7 @@ async fn signed_out_passkey_state_reports_nothing_remembered_as_zero() {
     let (_dir, shared) = shared();
     assert_eq!(
         passkey_state(&shared).await,
-        json!({"state":"none","passkey_count":0,"remembered_name":null,"near_ai_connected":null})
+        json!({"state":"none","passkey_count":0,"remembered_name":null,"signed_in_name":null,"near_ai_connected":null})
     );
 }
 
@@ -831,7 +831,7 @@ async fn a_created_passkey_is_remembered_across_sign_out() {
     let state = passkey_state(&shared).await;
     assert_eq!(
         state,
-        json!({"state":"none","passkey_count":1,"remembered_name":"Work laptop","near_ai_connected":null})
+        json!({"state":"none","passkey_count":1,"remembered_name":"Work laptop","signed_in_name":null,"near_ai_connected":null})
     );
     assert!(!state.to_string().contains(&account_id));
 }
@@ -875,6 +875,87 @@ async fn a_sign_in_refreshes_the_remembered_passkey_and_keeps_its_name() {
     let state = passkey_state(&shared).await;
     assert_eq!(state["passkey_count"], 2);
     assert_eq!(state["remembered_name"], "Home");
+}
+
+/// After a sign-in, `signed_in_name` is the name this Mac remembers for the
+/// signed-in account's own record: never the most recent record's when that
+/// belongs to another account, and null when the account's record has none.
+/// It is a local fact, so it is answered even when the binding read fails.
+#[tokio::test]
+async fn the_signed_in_name_is_the_signed_in_accounts_own_record() {
+    let (_dir, shared) = shared();
+    let account_id = uuid::Uuid::new_v4().to_string();
+    super::super::remembered_passkeys::remember_at(
+        &shared.store,
+        &account_id,
+        Some("Home"),
+        Utc::now() - chrono::Duration::days(3),
+    )
+    .unwrap();
+    let (origin, worker) = server_once("200 OK", session_reply(&account_id), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"unbound"}));
+    worker.await.unwrap();
+    // The server is gone, so the binding read fails: `unknown`, but the
+    // local facts are still answered.
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["state"], "unknown");
+    assert_eq!(state["signed_in_name"], "Home");
+    // A more recent record for another account changes the latest name,
+    // never the signed-in account's.
+    let other = uuid::Uuid::new_v4().to_string();
+    super::super::remembered_passkeys::remember_at(
+        &shared.store,
+        &other,
+        Some("Someone else"),
+        Utc::now() + chrono::Duration::hours(1),
+    )
+    .unwrap();
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["remembered_name"], "Someone else");
+    assert_eq!(state["signed_in_name"], "Home");
+    assert!(!state.to_string().contains(&account_id));
+    // Signed out, there is no signed-in account to name.
+    commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["state"], "none");
+    assert_eq!(state["signed_in_name"], Value::Null);
+}
+
+/// A passkey first used here by signing in has no remembered name, so the
+/// signed-in account has none either, even when another account's record
+/// is named and more recent.
+#[tokio::test]
+async fn a_nameless_signed_in_account_never_borrows_another_records_name() {
+    let (_dir, shared) = shared();
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let (origin, worker) = server_once("200 OK", session_reply(&account_id), None).await;
+    put_pending(
+        &shared,
+        &origin,
+        Action::Login,
+        Instant::now() + Duration::from_secs(30),
+    );
+    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
+    assert!(response.error.is_none());
+    worker.await.unwrap();
+    super::super::remembered_passkeys::remember_at(
+        &shared.store,
+        &uuid::Uuid::new_v4().to_string(),
+        Some("Someone else"),
+        Utc::now() + chrono::Duration::hours(1),
+    )
+    .unwrap();
+    let state = passkey_state(&shared).await;
+    assert_eq!(state["passkey_count"], 2);
+    assert_eq!(state["remembered_name"], "Someone else");
+    assert_eq!(state["signed_in_name"], Value::Null);
 }
 
 /// A refused finish signed nobody in, so nothing is remembered.

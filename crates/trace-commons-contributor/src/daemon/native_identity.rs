@@ -604,15 +604,29 @@ async fn complete(shared: &DaemonShared, action: Action, params: &Value) -> Resu
 }
 
 /// `passkey_state` with the passkeys this Mac remembers
-/// (`remembered_passkeys`): how many, and the most recent one's name. Local
-/// facts, so they are answered whatever the session's state; an unreadable
-/// list is null, never zero.
+/// (`remembered_passkeys`): how many, the most recent one's name, and the
+/// name remembered for the signed-in account's own record
+/// (`signed_in_name`). Local facts, so they are answered whatever the
+/// session's state; an unreadable list is null, never zero.
+///
+/// `signed_in_name` is matched to the session's account, never taken from
+/// the most recent record, which may be another account's. Null when no
+/// session is held or it cannot be read, when this Mac has no record for the
+/// account, or when the record has no name.
 fn passkey_state(store: &ConfigStore, state: &str, near_ai_connected: Option<bool>) -> Value {
     let (count, name) = match super::remembered_passkeys::summary(store) {
         Ok(remembered) => (json!(remembered.count), json!(remembered.latest_name)),
         Err(_) => (Value::Null, Value::Null),
     };
-    json!({"state":state,"passkey_count":count,"remembered_name":name,"near_ai_connected":near_ai_connected})
+    let signed_in_name = account_auth::try_load_session_with_snapshot(store)
+        .ok()
+        .flatten()
+        .and_then(|loaded| {
+            super::remembered_passkeys::name_for(store, &loaded.session.account_id)
+                .ok()
+                .flatten()
+        });
+    json!({"state":state,"passkey_count":count,"remembered_name":name,"signed_in_name":signed_in_name,"near_ai_connected":near_ai_connected})
 }
 
 fn status(store: &ConfigStore) -> Value {

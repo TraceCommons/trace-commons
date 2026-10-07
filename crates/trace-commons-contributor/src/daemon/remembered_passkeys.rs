@@ -109,6 +109,17 @@ pub fn summary(store: &ConfigStore) -> Result<Remembered> {
     })
 }
 
+/// The name this Mac remembers for `account_id`'s own record, when it has
+/// one. Matched by the account's hash, never by recency: the most recent
+/// record may belong to another account, and its name is not this one's.
+pub fn name_for(store: &ConfigStore, account_id: &str) -> Result<Option<String>> {
+    let account = account_hash(account_id);
+    Ok(load(store)?
+        .into_iter()
+        .find(|p| p.account == account)
+        .and_then(|p| p.name))
+}
+
 /// Remember that the passkey for `account_id` was created, added or used
 /// here, at `now`. A `name` replaces the remembered one; `None` (a sign-in)
 /// keeps whatever name this Mac already knew for that account. The record
@@ -222,6 +233,31 @@ mod tests {
                 latest_name: Some("Home".into())
             }
         );
+    }
+
+    #[test]
+    fn the_name_for_an_account_is_its_own_record_never_the_most_recent() {
+        let (_dir, store) = temp_store();
+        let mine = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let nameless = uuid::Uuid::new_v4().to_string();
+        remember_at(&store, &mine, Some("Home"), at(0)).unwrap();
+        remember_at(&store, &nameless, None, at(1)).unwrap();
+        remember_at(&store, &other, Some("Someone else"), at(2)).unwrap();
+        assert_eq!(
+            summary(&store).unwrap().latest_name.as_deref(),
+            Some("Someone else")
+        );
+        assert_eq!(name_for(&store, &mine).unwrap().as_deref(), Some("Home"));
+        assert_eq!(name_for(&store, &nameless).unwrap(), None);
+        assert_eq!(
+            name_for(&store, &uuid::Uuid::new_v4().to_string()).unwrap(),
+            None
+        );
+        store
+            .write_daemon_file(REMEMBERED_PASSKEYS_FILE, b"not json")
+            .unwrap();
+        assert!(name_for(&store, &mine).is_err());
     }
 
     #[test]
