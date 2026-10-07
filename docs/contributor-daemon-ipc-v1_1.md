@@ -585,7 +585,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
 | `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
-| `consent_options` | — | `scopes[]` of `{name, description, always_on, grants_data_use}` | |
+| `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
@@ -664,7 +664,7 @@ consequence, and an action label where there is a real recovery step -- are
 `health_copy::health_copy_for_label`, across the C ABI as `tc_health_copy_json`
 (R6/R7, #1173). Pass `reachable: 0` instead of a label when the daemon
 cannot be reached at all; that returns the separate core-down sentence
-(`health_copy::core_down_copy`, **DRAFT, NEEDS APPROVAL** -- no shell has
+(`health_copy::core_down_copy`, approved 2026-10-06 -- no shell had
 shown a contributor-facing sentence for a fully unreachable daemon before).
 `reachable` is never derived from this call: it is the caller's own
 liveness fact, from whatever probe or IPC failure told it the daemon is
@@ -1194,17 +1194,17 @@ in additive fields on every queue entry (`list_pending`, `snapshot`, the
 | `content_marks` | **only when `scrubbed`** | `marks` without the path family (`local_path`). |
 | `unsure_spans` | **only when `scrubbed`** | how many spans `preview_unsure_spans` would report for that build's body. |
 | `second_look` | always, possibly empty | fixed reasons, in this order: `nothing-matched`, `looks-unsure`, `trimmed-to-fit` |
-| `second_look_lines` | always, possibly empty (R6/R7, #1173; **DRAFT, NEEDS APPROVAL**) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
+| `second_look_lines` | always, possibly empty (R6/R7, #1173; approved 2026-10-06) | `second_look`'s reasons, in the same order, each already turned into the sentence a person reads for it (`preview_copy::second_look_line`) |
 
 `second_look_lines` exists so a card or the review sheet can render the
 explanation without separately asking `tc_second_look_line_text` for each
 reason; it is the same table, inlined. It is exactly as long as
 `second_look` and lines up with it index for index -- never reordered,
 never deduplicated, and never shorter: a reason this build has no sentence
-for gets a generic fallback line rather than being dropped. **DRAFT, NEEDS APPROVAL** because the sentences it
-quotes (`preview_copy::second_look_line`) are themselves unapproved spec
-wording; a client that renders it should expect the words, not the
-presence or absence of the field, to still change.
+for gets a generic fallback line rather than being dropped. The sentences it
+quotes (`preview_copy::second_look_line`) were approved 2026-10-06; a
+client that renders it should expect the words, not the presence or
+absence of the field, to still change.
 
 The reasons:
 
@@ -1940,8 +1940,8 @@ screens' disclosure table for the configuration in `config_dir`. For
 `clear_contribution_override` when any folder's own setting is Automatic, or
 when the folder list or a folder's own setting is unknown: its `mode` is
 `"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
-and it carries no `arming`. Every new
-sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
+and it carries no `arming`. Every sentence was approved 2026-10-06
+(`project_copy.rs`).
 
 ### `preview_body`
 
@@ -2149,8 +2149,8 @@ never dropped -- and a test fails the build on any such key. Labels, never
 values.
 
 `would_send_bytes` is the envelope's size, `preview`'s figure; `turn_count`
-equals the method's own. `line` is the finished sentence (**DRAFT, NEEDS
-APPROVAL**), absent only if the envelope could not be measured.
+equals the method's own. `line` is the finished sentence (approved
+2026-10-06), absent only if the envelope could not be measured.
 
 **What the line promises about the folder is only what is true.** Only
 absolute paths are scrubbed out of the conversation, so a relative path
@@ -2527,7 +2527,7 @@ is contributed through one of the existing paths.
 **The disclosure (M4).** `tc_missions_disclosure_copy_json` returns the
 words shown the first time Missions is opened and in Settings
 (`consent_copy::missions_disclosure_copy`): `{title, matching, nothing_sent,
-credit}`. DRAFT, NEEDS APPROVAL.
+credit}`. Approved 2026-10-06.
 
 ### View menu: Group by and Sort by (K15)
 
@@ -4695,7 +4695,7 @@ the sessions where nothing matched, something looks unsure, or it was trimmed
 to fit. An explicit `"manual"` is kept across restarts and upgrades; only an
 unset value becomes `automatic`. `null` cannot be set: it is not a mode, and
 a caller that means the default sends `"automatic"`. A shell renders the choice with
-`consent_copy::SCRUB_CHECK_*` (DRAFT, NEEDS APPROVAL), whose Automatic
+`consent_copy::SCRUB_CHECK_*` (approved 2026-10-06), whose Automatic
 sentence says the check only counts what was removed and does not check that
 the scrubbing was right: it is not a model or quality check (the
 connect-and-forget design's R1).
@@ -4996,8 +4996,8 @@ guessed one.
 ```json
 {
   "scopes": [
-    { "name": "debugging_evaluation", "description": "…", "always_on": true, "grants_data_use": true },
-    { "name": "public_attribution", "description": "…", "always_on": false, "grants_data_use": false }
+    { "name": "debugging_evaluation", "title": "…", "description": "…", "always_on": true, "grants_data_use": true },
+    { "name": "public_attribution", "title": "…", "description": "…", "always_on": false, "grants_data_use": false }
   ]
 }
 ```
@@ -5006,6 +5006,12 @@ guessed one.
 contributor implicitly grants. `grants_data_use` is `false` for scopes (such
 as `public_attribution`) that carry no data-use grant of their own -- do not
 present those beside real data-use scopes with equal visual weight.
+
+`title` is the scope's short bold label (owner ruling, 2026-10-06). Every
+shell draws it as given and keeps no table of its own; it is never the wire
+name with its underscores replaced. A shell that receives a scope without a
+`title` fails closed: macOS, GTK and Windows refuse the list (or the row),
+so nothing is offered under words the core did not supply.
 
 ### `set_consent_scopes`
 

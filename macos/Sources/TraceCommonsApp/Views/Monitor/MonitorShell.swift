@@ -16,6 +16,19 @@ enum MonitorShellWords {
     static var focus: String { MonitorWords.table?.focus ?? "" }
     static var previous: String { MonitorWords.table?.previous ?? "" }
     static var next: String { MonitorWords.table?.next ?? "" }
+    /// Ron's #1146 toolbar toggles, each naming what pressing it does.
+    static func graphToggle(shown: Bool) -> String { toggle(shown, \.hideGraph, \.showGraph) }
+    static func mapToggle(shown: Bool) -> String { toggle(shown, \.hideMap, \.showMap) }
+    static func inspectorToggle(shown: Bool) -> String { toggle(shown, \.hideInspector, \.showInspector) }
+    /// The focus button's tip (#1146 `GraphFooter`).
+    static func focusTip(tool: String?, focused: Bool) -> String {
+        MonitorWords.table?.shell.focusTip(tool: tool, focused: focused) ?? focus
+    }
+
+    private static func toggle(_ shown: Bool, _ hide: KeyPath<MonitorShellCopy, String>,
+                               _ show: KeyPath<MonitorShellCopy, String>) -> String {
+        MonitorWords.table.map { $0.shell[keyPath: shown ? hide : show] } ?? ""
+    }
 }
 
 // MARK: Inspector demand
@@ -134,7 +147,7 @@ struct TracesGraphFooter: View {
                     .disabled(tool == nil)
                     .accessibilityLabel(MonitorShellWords.focus)
                     .accessibilityAddTraits(focus && tool != nil ? .isSelected : [])
-                    .help(tool.map { "\(MonitorShellWords.focus): \($0.displayName)" } ?? MonitorShellWords.focus)
+                    .help(MonitorShellWords.focusTip(tool: tool?.displayName, focused: focus && tool != nil))
                 Text(Self.range(buckets))
                     .glassType(GlassTokens.TypeScale.label)
                     .foregroundStyle(GlassColor.textSecondary)

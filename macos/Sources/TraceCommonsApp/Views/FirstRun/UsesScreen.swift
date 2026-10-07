@@ -313,7 +313,7 @@ struct UsesScreen: View {
                 if let required {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         HStack(spacing: GlassTokens.Space.s4) {
-                            Toggle(ScopeCopy.title(for: required.name, options: options), isOn: scope(required.name))
+                            Toggle(required.title, isOn: scope(required.name))
                                 .toggleStyle(GlassCheckboxStyle())
                             // Ron's inline "required" in the on colour.
                             Text(copy.uses.required)
@@ -352,7 +352,7 @@ struct UsesScreen: View {
 
     private func scopeRow(_ option: ConsentScope, options: [ConsentScope]) -> some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-            Toggle(ScopeCopy.title(for: option.name, options: options), isOn: scope(option.name))
+            Toggle(option.title, isOn: scope(option.name))
                 .toggleStyle(GlassCheckboxStyle())
             caption(option.description)
         }

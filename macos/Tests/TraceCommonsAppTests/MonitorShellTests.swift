@@ -42,7 +42,9 @@ final class MonitorShellTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         for needle in ["GlassToolbarButton(MonitorShellWords.view, systemImage: \"line.3.horizontal\", expanded: viewMenu)",
                        "GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored)",
-                       "GlassToolbarButton(MonitorShellWords.graph,",
+                       "GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph),",
+                       "GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap),",
+                       "GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector),",
                        "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = false",
                        ".onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }"] {
             XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")

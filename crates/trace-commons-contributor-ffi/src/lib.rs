@@ -5407,7 +5407,7 @@ pub unsafe extern "C" fn tc_redaction_summary_json(
 
 /// The ignore-project control and its confirmation for one project
 /// (`project_copy::ignore_project_copy`): a JSON object
-/// `{title, body, button, tooltip}`.
+/// `{title, body, button, tooltip, keep}`.
 ///
 /// `project_label` is the label the queue shows for the project; `pending`
 /// is how many of its sessions the confirmation will say it removes, as this
@@ -5607,8 +5607,8 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
 /// a JSON object `{title, matching, nothing_sent, credit}` -- matching
 /// happens on this Mac, nothing is sent because of a mission, and a
 /// mission's credit is projected until the commons records it, then
-/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
-/// NEEDS APPROVAL, every sentence.
+/// pending. Shown the first time Missions is opened and in Settings.
+/// Approved 2026-10-06, every sentence.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.

@@ -29,11 +29,11 @@ final class UsesScreenTests: XCTestCase {
     /// `consent_options` as the daemon answers it: the floor first, three
     /// data uses, then the handle, which grants no data use.
     private let options = [
-        ConsentScope(name: "debugging_evaluation", description: "d", alwaysOn: true, grantsDataUse: true),
-        ConsentScope(name: "benchmark_only", description: "b", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "ranking_training", description: "r", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "model_training", description: "m", alwaysOn: false, grantsDataUse: true),
-        ConsentScope(name: "public_attribution", description: "p", alwaysOn: false, grantsDataUse: false),
+        ConsentScope(name: "debugging_evaluation", title: "debugging_evaluation", description: "d", alwaysOn: true, grantsDataUse: true),
+        ConsentScope(name: "benchmark_only", title: "benchmark_only", description: "b", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "ranking_training", title: "ranking_training", description: "r", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "model_training", title: "model_training", description: "m", alwaysOn: false, grantsDataUse: true),
+        ConsentScope(name: "public_attribution", title: "public_attribution", description: "p", alwaysOn: false, grantsDataUse: false),
     ]
 
     private static func source() throws -> String {

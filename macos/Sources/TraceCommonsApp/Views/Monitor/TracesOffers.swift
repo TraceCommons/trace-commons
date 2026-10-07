@@ -185,6 +185,13 @@ struct ArmingOfferGlassCard: View {
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
+                    // #1146 `arming-offer.tsx`: what arming does, on the
+                    // card itself, before either button (and again in the
+                    // confirmation).
+                    Text(copy.body)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack(spacing: GlassTokens.Space.s3) {
                         Button(copy.decline, action: onDecline)
                             .buttonStyle(GlassButtonStyle(.glass))

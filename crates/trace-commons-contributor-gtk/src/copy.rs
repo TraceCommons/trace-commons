@@ -1743,26 +1743,6 @@ pub fn roots_ago(seconds: i64) -> String {
     }
 }
 
-/// The short bold label for a consent scope.
-///
-/// `consent_options` carries the wire name and the description but no
-/// human title, so every shell maps them. The fallback matters as much as
-/// the table: an operator who adds a scope this build has never heard of
-/// still gets a readable row rather than a blank one, and the description
-/// beside it comes from the daemon regardless.
-pub fn scope_title(wire_name: &str) -> String {
-    match wire_name {
-        "debugging_evaluation" => "Finding bugs and measuring agents".to_string(),
-        "benchmark_only" | "benchmark_creation" => "Turn my traces into test cases".to_string(),
-        "ranking_training" | "reward_model_training" => {
-            "Train models that judge agent output".to_string()
-        }
-        "model_training" => "Train coding models directly".to_string(),
-        "public_attribution" => "List my handle publicly as a contributor".to_string(),
-        other => other.replace('_', " "),
-    }
-}
-
 // --- The submit toast --------------------------------------------------
 //
 // One-click submit sends without a preview, so this sentence is the only

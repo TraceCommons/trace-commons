@@ -584,6 +584,9 @@ private struct InstalledSkillPanel: View {
     let copy: SkillLearningCopy
 
     @EnvironmentObject private var model: AppModel
+    /// A rollback asks first, in the core's words (owner ruling,
+    /// 2026-10-06): it removes what Codex reads.
+    @State private var confirmingRollback = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
@@ -617,11 +620,23 @@ private struct InstalledSkillPanel: View {
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button(working ? copy.rollingBack : copy.rollback) {
-                model.rollbackSkill(from: record)
+                confirmingRollback = true
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .frame(minHeight: 44)
             .disabled(working)
+        }
+        .glassModal(isPresented: $confirmingRollback) {
+            GlassConfirmation(
+                title: copy.rollbackConfirmTitle, message: copy.rollbackConfirmBody,
+                actions: [
+                    .cancel(copy.rollbackKeep) { confirmingRollback = false },
+                    .destructive(copy.rollback) {
+                        confirmingRollback = false
+                        model.rollbackSkill(from: record)
+                    },
+                ],
+                onCancel: { confirmingRollback = false })
         }
     }
 }

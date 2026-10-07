@@ -29,13 +29,28 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertFalse(copy.close.isEmpty)
     }
 
-    /// History's refresh and sign-in words (native words for Ron's #1146
-    /// controls).
+    /// History's refresh and sign-in words: Ron's #1146 controls, in his
+    /// words (owner ruling, 2026-10-06).
     func testTheHistoryActionsDecode() throws {
         let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
-        XCTAssertEqual(copy.historyActions.requestRefresh, "Check for updates")
-        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in to your account")
+        XCTAssertEqual(copy.historyActions.requestRefresh, "Request server refresh")
+        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in to withdraw")
         XCTAssertTrue(copy.historyActions.refreshFailed.hasPrefix("Could not ask for updates"))
+    }
+
+    /// Ron's #1146 toolbar, Home and History words.
+    func testTheShellWordsDecode() throws {
+        let shell = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).shell
+        XCTAssertEqual(shell.watching(tools: 1), "Watching 1 tool")
+        XCTAssertEqual(shell.watching(tools: 3), "Watching 3 tools")
+        XCTAssertEqual(shell.waiting(0, secondLook: 2), "Nothing waiting for you")
+        XCTAssertEqual(shell.waiting(1, secondLook: 0), "1 session waiting for you")
+        XCTAssertEqual(shell.waiting(4, secondLook: 2), "4 sessions waiting for you \u{00B7} 2 worth a second look")
+        XCTAssertEqual(shell.focusTip(tool: nil, focused: false), "Select a tool, project or session first")
+        XCTAssertEqual(shell.focusTip(tool: "Codex", focused: false), "Show Codex in the map")
+        XCTAssertEqual(shell.focusTip(tool: "Codex", focused: true), "Back to the whole map")
+        XCTAssertEqual(shell.showMap, "Show the flow map")
+        XCTAssertEqual(shell.hideInspector, "Hide the inspector")
     }
 
     /// Ron's safeguards panel labels (#1241).

@@ -1,15 +1,15 @@
 import Foundation
 import TCShellCore
 
-/// The pause words, held once so the glass panel (R13) offers the choices the
-/// shipping menu did, in its words, until the core exports them (D-12). The
-/// menu bar itself is the glass strip and panel (`MenuBarGlassPanel.swift`).
+/// The pause words, from the core's shell table (#1146's `tray.rs` words;
+/// owner ruling, 2026-10-06). The menu bar itself is the glass strip and
+/// panel (`MenuBarGlassPanel.swift`).
 enum MenuBarWords {
-    static let resume = "Resume watching"
-    static let pause = "Pause"
-    static let pauseHour = "For 1 hour"
-    static let pauseMorning = "Until tomorrow morning"
-    static let pauseIndefinite = "Until I turn it back on"
+    static var resume: String { MonitorWords.table?.shell.resumeWatcher ?? "" }
+    static var pause: String { MonitorWords.table?.shell.pauseWatcher ?? "" }
+    static var pauseHour: String { MonitorWords.table?.shell.pauseHour ?? "" }
+    static var pauseMorning: String { MonitorWords.table?.shell.pauseMorning ?? "" }
+    static var pauseIndefinite: String { MonitorWords.table?.shell.pauseUntilResumed ?? "" }
 
     /// The three pause lengths, in the panel's order: nil is until resumed.
     static func pauseUntil(_ choice: Int) -> Date? {
