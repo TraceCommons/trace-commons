@@ -166,25 +166,11 @@ pub(crate) async fn handle_invite_lookup(shared: &DaemonShared, req: &Request) -
     else {
         return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
     };
-    let Ok(parsed) = crate::commands::parse_invite(invite) else {
+    // The same check `invite_issuer_host` makes, so a host a shell showed
+    // is one this lookup asks about.
+    let Some((parsed, url)) = crate::commands::acceptable_invite(invite) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
     };
-    let Ok(url) = reqwest::Url::parse(&parsed.issuer_url) else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
-    };
-    let literal_loopback = match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        _ => false,
-    };
-    if !(url.scheme() == "https" || (url.scheme() == "http" && literal_loopback))
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || parsed.code.len() > 256
-        || parsed.code.chars().any(char::is_control)
-    {
-        return Response::err(req.id, ERR_BAD_PARAMS, "invite-invalid");
-    }
     let configured = match shared.store.load_config() {
         Ok(cfg) => cfg.and_then(|cfg| cfg.allowed_hosts),
         Err(_) => return Response::err(req.id, ERR_UNAVAILABLE, "invite-lookup-unavailable"),

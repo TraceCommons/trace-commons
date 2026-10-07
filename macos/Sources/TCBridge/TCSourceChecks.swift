@@ -66,9 +66,15 @@ public struct SourceSettingsCopy: Decodable, Sendable {
     public let heading, explanation, saveFailed, consentSaveFailed, unavailable: String
     public let selectedFolder, noCandidate, watchCandidate, chooseFolder, retry: String
     public let tools: [String: Tool]
+    /// The row for a declared folder of exported traces; nil from a core
+    /// that does not carry one, and then no row is drawn.
+    public let trajectory: Trajectory?
     public struct Tool: Decodable, Sendable {
         public let key, decline: String
         public let explanation, chooseFolder: String?
         public let unsetScansConventional: Bool
+    }
+    public struct Trajectory: Decodable, Sendable {
+        public let title, explanation, watching, off, decline: String
     }
 }

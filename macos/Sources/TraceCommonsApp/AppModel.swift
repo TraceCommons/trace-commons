@@ -1566,7 +1566,15 @@ final class AppModel: ObservableObject {
     /// answer, which `set_settings` returns in full, and an undecided
     /// choice is never sent. A failed confirmation requests fresh settings.
     func setSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async -> Bool {
-        guard let params = choice.settingsParams(for: kind), let client else { return false }
+        guard let params = choice.settingsParams(for: kind) else { return false }
+        return await setSettingsDeclaration(params)
+    }
+
+    /// Write `params` through `set_settings` and keep what the daemon
+    /// answers. A lost response does not prove the write failed, so the
+    /// modes are read back; a requested path is never retained.
+    func setSettingsDeclaration(_ params: [String: Any]) async -> Bool {
+        guard let client else { return false }
         let result = await Task.detached(priority: .userInitiated) {
             Result { try client.setSettings(params) }
         }.value
@@ -1949,10 +1957,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var sourceRootSaveFailed = false
 
     func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard let params = choice.settingsParams(for: kind) else {
+            // Nothing to write is a refusal, as it always was.
+            if !sourceRootBusy { sourceRootSaveFailed = true }
+            return
+        }
+        await saveSettings(params)
+    }
+
+    /// One Watched folders declaration, written through `set_settings` with
+    /// the section's in-flight flag and refusal: a source row's, or the
+    /// exported-traces row's off switch.
+    func saveSettings(_ params: [String: Any]) async {
         guard !sourceRootBusy else { return }
         sourceRootBusy = true
         sourceRootSaveFailed = false
-        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootSaveFailed = !(await setSettingsDeclaration(params))
         sourceRootBusy = false
     }
 
