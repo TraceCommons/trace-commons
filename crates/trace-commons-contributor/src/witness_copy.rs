@@ -31,12 +31,14 @@ use crate::witness::status::{InferenceReceiptCount, WitnessLastResult, WitnessTr
 /// The card's heading.
 pub const WITNESS_HEADING: &str = "Redaction witness";
 
-/// What the card is for, in one sentence a contributor can act on.
+/// What the card is for, in Ron's #1146 words (`witness-panel.tsx`).
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "A witness is a
+/// sealed machine that removes private material from a session for you,
+/// instead of this app doing it here. ..."
 pub const WITNESS_INTRO: &str = concat!(
-    "A witness is a sealed machine that removes private material from a session for you, ",
-    "instead of this app doing it here. Turning it on means sending the session to that ",
-    "machine before anything is redacted, which is why it is checked against a measurement ",
-    "you pin before a single byte leaves."
+    "A witness receives raw sessions only after local consent and measurement ",
+    "verification. A configured witness without a valid pin refuses submissions; no ",
+    "witness keeps local redaction."
 );
 
 /// What the certificate proves, stated where a contributor reads it, so no
@@ -46,21 +48,28 @@ pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
     "It is not a statement that a session is clean."
 );
 
-/// Why the pin is a list and not a value.
-pub const WITNESS_MEASUREMENTS_NOTE: &str = concat!(
-    "More than one measurement can be pinned. An upgrade to the witness changes its ",
-    "measurement, so the new one is added here before the change happens; a client that ",
-    "holds only the old one will refuse the upgraded witness."
-);
+/// How the pin list is written, in Ron's #1146 words.
+pub const WITNESS_MEASUREMENTS_NOTE: &str =
+    "One measurement set per line. At least one valid pin required.";
 
-/// Field titles.
-pub const WITNESS_URL_TITLE: &str = "Address";
-pub const WITNESS_SIGNING_ADDRESS_TITLE: &str = "Signing key";
-pub const WITNESS_MEASUREMENTS_TITLE: &str = "Pinned measurements";
+/// Field titles (#1146).
+pub const WITNESS_URL_TITLE: &str = "Witness URL";
+pub const WITNESS_SIGNING_ADDRESS_TITLE: &str = "Signing address";
+pub const WITNESS_MEASUREMENTS_TITLE: &str = "Expected measurements";
 
-/// Actions.
-pub const WITNESS_CONFIGURE: &str = "Use this witness";
-pub const WITNESS_CLEAR: &str = "Stop using a witness";
+/// What each empty field shows (#1146). Examples of a shape, never values.
+pub const WITNESS_URL_PLACEHOLDER: &str = "https://witness.example";
+pub const WITNESS_SIGNING_ADDRESS_PLACEHOLDER: &str = "0x\u{2026}";
+pub const WITNESS_MEASUREMENTS_PLACEHOLDER: &str =
+    "mrtd=\u{2026}\nmrtd=\u{2026},mrconfigid=\u{2026}";
+
+/// The refusing state's fixed operator label, introduced (#1146).
+/// `{label}` is the label, verbatim.
+pub const WITNESS_OPERATOR_LABEL: &str = "Operator label: {label}";
+
+/// Actions (#1146).
+pub const WITNESS_CONFIGURE: &str = "Save witness";
+pub const WITNESS_CLEAR: &str = "Return to local redaction";
 
 /// What clearing actually does. Not "off": the redaction still happens, on
 /// this machine, and saying "off" would read as no redaction at all.
@@ -86,20 +95,26 @@ pub fn token_review_summary(
     )
 }
 
-pub const WITNESS_TOKEN_HEADING: &str = "Token probabilities";
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Token
+/// probabilities".
+pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
 pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
-pub const WITNESS_TOKEN_ENABLE: &str = "Include token probabilities";
-pub const WITNESS_TOKEN_DISABLE: &str = "Stop including token probabilities";
-pub const WITNESS_TOKEN_CONFIRM: &str = "Allow token review";
-pub const WITNESS_TOKEN_CANCEL: &str = "Not now";
+pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
+pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Allow token
+/// review".
+pub const WITNESS_TOKEN_CONFIRM: &str = "I understand \u{2014} enable";
+pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
 pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
 pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
 pub const WITNESS_TOKEN_SAVE_FAILED: &str =
     "The change could not be confirmed. Check the saved setting before trying again.";
 
-pub const WITNESS_INFERENCE_HEADING: &str = "Include captured inference evidence";
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Include
+/// captured inference evidence".
+pub const WITNESS_INFERENCE_HEADING: &str = "Model-call evidence";
 pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
     "When a contribution uses a witness, this allows the final model call's exact request ",
     "and response to be sent to that remote witness before redaction. These may include ",
@@ -118,10 +133,24 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "receipt was verified. A supported desktop app asks separately before sending a ",
     "session for witness review. This permission alone does not make it ready to send."
 );
-pub const WITNESS_INFERENCE_ENABLE: &str = "Review permission";
-pub const WITNESS_INFERENCE_DISABLE: &str = "Stop including inference bodies";
-pub const WITNESS_INFERENCE_CONFIRM: &str = "Allow sending captured bodies";
-pub const WITNESS_INFERENCE_CANCEL: &str = "Not now";
+pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
+pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07): it was "Allow sending
+/// captured bodies".
+pub const WITNESS_INFERENCE_CONFIRM: &str = "I understand \u{2014} enable";
+pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
+
+/// The confirmation over either privacy option's disclosure (#1146
+/// `privacy-controls-panel.tsx`); the disclosure itself is unchanged.
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+pub const WITNESS_PRIVACY_CONFIRM_TITLE: &str = "Review privacy change";
+/// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07).
+pub const WITNESS_PRIVACY_CONFIRM_DESCRIPTION: &str =
+    "Changing local privacy behavior requires explicit confirmation.";
+/// The local capture row's and the token-review storage block's names
+/// (#1146).
+pub const WITNESS_LOCAL_CAPTURE: &str = "Local token capture";
+pub const WITNESS_LOCAL_STORAGE: &str = "Local token-review storage";
 pub const WITNESS_INFERENCE_ENABLED: &str =
     "Permission saved. Captured bodies may be included when a contribution uses a witness.";
 pub const WITNESS_INFERENCE_DISABLED: &str = "Captured inference bodies are not included.";
@@ -529,6 +558,15 @@ pub struct WitnessCopy {
     pub inference_enabled: &'static str,
     pub inference_disabled: &'static str,
     pub inference_save_failed: &'static str,
+    pub url_placeholder: &'static str,
+    pub signing_address_placeholder: &'static str,
+    pub measurements_placeholder: &'static str,
+    /// `{label}`: the refusing state's fixed operator label.
+    pub operator_label: &'static str,
+    pub privacy_confirm_title: &'static str,
+    pub privacy_confirm_description: &'static str,
+    pub local_capture: &'static str,
+    pub local_storage: &'static str,
     pub review: WitnessReviewCopy,
     pub onboarding: FirstContributionCopy,
     pub wallet: WalletCopy,
@@ -693,6 +731,14 @@ pub fn witness_copy() -> WitnessCopy {
         inference_enabled: WITNESS_INFERENCE_ENABLED,
         inference_disabled: WITNESS_INFERENCE_DISABLED,
         inference_save_failed: WITNESS_INFERENCE_SAVE_FAILED,
+        url_placeholder: WITNESS_URL_PLACEHOLDER,
+        signing_address_placeholder: WITNESS_SIGNING_ADDRESS_PLACEHOLDER,
+        measurements_placeholder: WITNESS_MEASUREMENTS_PLACEHOLDER,
+        operator_label: WITNESS_OPERATOR_LABEL,
+        privacy_confirm_title: WITNESS_PRIVACY_CONFIRM_TITLE,
+        privacy_confirm_description: WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
+        local_capture: WITNESS_LOCAL_CAPTURE,
+        local_storage: WITNESS_LOCAL_STORAGE,
         review: WitnessReviewCopy {
             heading: "Review with your configured witness",
             disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
@@ -1183,7 +1229,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            37,
+            45,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );
