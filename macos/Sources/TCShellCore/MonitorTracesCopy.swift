@@ -517,6 +517,14 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let historyEmpty: String
     public let historyFilterEmpty: String
     public let open: String
+    public let pauseWatcher: String
+    public let resumeWatcher: String
+    public let pauseHour: String
+    public let pauseMorning: String
+    public let pauseUntilResumed: String
+    public let startAtLogin: String
+    public let projectsEmpty: String
+    public let changesHeading: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -544,6 +552,14 @@ public struct MonitorShellCopy: MonitorWordTable {
         case historyEmpty = "history_empty"
         case historyFilterEmpty = "history_filter_empty"
         case open
+        case pauseWatcher = "pause_watcher"
+        case resumeWatcher = "resume_watcher"
+        case pauseHour = "pause_hour"
+        case pauseMorning = "pause_morning"
+        case pauseUntilResumed = "pause_until_resumed"
+        case startAtLogin = "start_at_login"
+        case projectsEmpty = "projects_empty"
+        case changesHeading = "changes_heading"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

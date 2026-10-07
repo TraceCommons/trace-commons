@@ -866,6 +866,20 @@ pub struct MonitorShellCopy {
     pub history_filter_empty: &'static str,
     /// A History row's way into its details.
     pub open: &'static str,
+    /// The menu's pause and resume (#1146 `tray.rs`), and the pause
+    /// lengths. "Until tomorrow morning" is native's own: #1146 has no
+    /// counterpart.
+    pub pause_watcher: &'static str,
+    pub resume_watcher: &'static str,
+    pub pause_hour: &'static str,
+    pub pause_morning: &'static str,
+    pub pause_until_resumed: &'static str,
+    /// Settings: the login switch, the projects list before discovery, and
+    /// the change log's heading (#1146 `platform-panel.tsx`,
+    /// `projects-panel.tsx`, `sections.ts`).
+    pub start_at_login: &'static str,
+    pub projects_empty: &'static str,
+    pub changes_heading: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -933,7 +947,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         next: "Next period",
         credit_pending: "Credit pending",
         open_traces: "Open Traces",
-        quit: "Quit…",
+        quit: "Quit Trace Commons",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
         held_for_review: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
@@ -1002,6 +1016,14 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             history_empty: "No submissions recorded on this device yet.",
             history_filter_empty: "No submissions match this filter.",
             open: "Open",
+            pause_watcher: "Pause watcher",
+            resume_watcher: "Resume watcher",
+            pause_hour: "For 1 hour",
+            pause_morning: "Until tomorrow morning",
+            pause_until_resumed: "Until I turn it back on",
+            start_at_login: "Start Trace Commons at login",
+            projects_empty: "No projects seen yet. Sessions appear here after discovery.",
+            changes_heading: "Changes on this machine",
         },
     }
 }
