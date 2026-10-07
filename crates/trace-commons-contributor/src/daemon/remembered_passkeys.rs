@@ -95,7 +95,7 @@ pub fn load(store: &ConfigStore) -> Result<Vec<RememberedPasskey>> {
         serde_json::from_slice(&body).context("remembered-passkeys-malformed")?;
     let mut passkeys: Vec<RememberedPasskey> =
         file.passkeys.into_iter().filter(valid_record).collect();
-    passkeys.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+    passkeys.sort_by_key(|p| std::cmp::Reverse(p.last_used));
     passkeys.truncate(MAX_REMEMBERED);
     Ok(passkeys)
 }
