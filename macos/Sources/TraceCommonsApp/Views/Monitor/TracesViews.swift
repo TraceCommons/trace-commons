@@ -20,7 +20,16 @@ struct TracesTreeView: View {
     /// lives in, so Review is never a press that does nothing visible.
     var onReview: (String) -> Void = { _ in }
 
-    @State private var collapsed: Set<String> = []
+    /// The folders opened. Every folder starts closed, as #1146's tree does
+    /// (`traces-workspace.tsx`, `expanded = []`); a session selected from
+    /// elsewhere opens its folder.
+    @State private var expanded: Set<String> = []
+    private var collapsed: Set<String> { Self.collapsed(in: store.tree, expanded: expanded) }
+
+    /// Every folder not opened.
+    static func collapsed(in tree: TracesTree, expanded: Set<String>) -> Set<String> {
+        Set(tree.folders.map(\.id)).subtracting(expanded)
+    }
     /// A mode change waiting on the core's confirmation: arming always,
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
@@ -86,7 +95,7 @@ struct TracesTreeView: View {
             // last good tree with the inspector hidden. The safeguards and
             // the prompts are the inspector's (`TracesInspectorHost`).
             if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
-                GlassNotice(tone: .outside, title: line) { EmptyView() }
+                GlassAlert(line)
             }
             if store.phase == .loading && isEmpty {
                 GlassSpinner(standalone: true).frame(maxWidth: .infinity)
@@ -117,6 +126,10 @@ struct TracesTreeView: View {
                     // The keyboard moves the selection; keep it on screen.
                     .onChange(of: selection) { _, selected in
                         guard let id = selected.map(Self.rowID) else { return }
+                        // A session's row is drawn only in an open folder.
+                        if case .session(let entryID) = selected, let folder = Self.folder(of: entryID, in: store.tree) {
+                            expanded.insert(folder)
+                        }
                         withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
                             proxy.scrollTo(id)
                         }
@@ -269,9 +282,9 @@ struct TracesTreeView: View {
     private func disclose(_ selected: MonitorSelection, open: Bool) {
         guard let folder = TracesTreeView.folder(of: selected, in: store.tree) else { return }
         if open {
-            collapsed.remove(folder)
+            expanded.insert(folder)
         } else {
-            collapsed.insert(folder)
+            expanded.remove(folder)
         }
     }
 
@@ -296,10 +309,10 @@ struct TracesTreeView: View {
 
     private var isEmpty: Bool { store.tree.folders.isEmpty }
 
-    private func isOpen(_ id: String) -> Bool { !collapsed.contains(id) }
+    private func isOpen(_ id: String) -> Bool { expanded.contains(id) }
 
     private func toggle(_ id: String) {
-        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
+        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
     }
 
     /// The core's line for a write it refused on this row, if one is held.

@@ -862,23 +862,9 @@ private struct HomeStatTile: View {
     let label: String
     let value: String
 
+    /// #1146's `StatCard`: a full card, the value bold and tabular.
     var body: some View {
-        GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(label)
-                    .glassType(GlassTokens.TypeScale.eyebrow)
-                    .foregroundStyle(GlassColor.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-                Text(value)
-                    .glassType(GlassTokens.TypeScale.title)
-                    .monospacedDigit()
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .accessibilityElement(children: .combine)
+        GlassStatCard(label, value: value)
     }
 }
 

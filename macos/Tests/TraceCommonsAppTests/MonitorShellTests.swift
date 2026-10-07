@@ -38,14 +38,58 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertEqual(store.tree, before)
     }
 
+    /// Every folder starts closed, as #1146's tree does: only the folder
+    /// rows are drawn until one is opened.
+    func test_foldersStartClosed() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let tree = store.tree
+        XCTAssertFalse(tree.folders.isEmpty)
+        let closed = TracesTreeView.collapsed(in: tree, expanded: [])
+        XCTAssertEqual(closed, Set(tree.folders.map(\.id)))
+        XCTAssertEqual(TracesTreeView.visibleRows(in: tree, collapsed: closed),
+                       tree.folders.map { .folder(projectID: $0.id) })
+        let first = try XCTUnwrap(tree.folders.first)
+        XCTAssertFalse(TracesTreeView.collapsed(in: tree, expanded: [first.id]).contains(first.id))
+        let view = try Self.text("Views/Monitor/TracesViews.swift")
+        XCTAssertTrue(view.contains("@State private var expanded: Set<String> = []"))
+    }
+
+    /// The main pane takes #1146's insets: the toolbar row and the tabs 12
+    /// in, the Traces tree 8 in and to the bottom, the graph full bleed
+    /// under a 0.5pt rule; the inspector 16 by 18; the map's field, edge
+    /// and 14pt overlay inset; the View menu 250 wide.
+    func test_theShellTakesTheReferenceLayout() throws {
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        for needle in [
+            "GlassPane(padding: 0) {",
+            ".padding([.horizontal, .top], GlassTokens.Space.panePadding)",
+            ".padding(Self.contentInsets(shown))",
+            "EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)",
+            "Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5)",
+            ".transition(.move(edge: .bottom).combined(with: .opacity))",
+            "GlassPane(insets: GlassPaneInsets.inspector) {",
+            "GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {",
+            "GlassMapField()",
+            ".padding(GlassTokens.Space.mapOverlayInset)",
+            ".frame(width: Self.viewMenuWidth)",
+            "static var viewMenuWidth: CGFloat { 250 }",
+        ] {
+            XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(window.contains("RadialGradient("), "the map field is #1146's ellipse")
+        let footer = try Self.text("Views/Monitor/MonitorShell.swift")
+        XCTAssertFalse(footer.contains("GlassColor.hairline"), "the graph's rule is the shell's, at #1146's 0.12")
+    }
+
     func test_theViewMenuIsInTheToolbar() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
-        for needle in ["GlassToolbarButton(MonitorShellWords.view, systemImage: \"line.3.horizontal\", expanded: viewMenu)",
+        for needle in ["GlassToolbarButton(MonitorShellWords.view, icon: .glyph(.viewMenu), expanded: viewMenu)",
                        "GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored)",
                        "GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph),",
                        "GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap),",
                        "GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector),",
-                       "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = false",
+                       "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = true",
                        ".onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }"] {
             XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")
         }
