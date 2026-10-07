@@ -337,6 +337,26 @@ pub const CONTRIBUTION_OVERRIDE_AUTO_CONFIRM: &str = ARMING_OFFER_CONFIRM;
 /// Every confirmation's cancel.
 pub const CONTRIBUTION_OVERRIDE_CANCEL: &str = "Cancel";
 
+/// The `mode` a clear confirmation carries: not a `ProjectMode`, and never
+/// sent to `set_contribution_override`. A shell that confirms it sends
+/// `clear_contribution_override`.
+pub const CONTRIBUTION_OVERRIDE_CLEAR_MODE: &str = "clear";
+
+/// The confirmation for clearing an override while a folder's own setting
+/// is Automatic: clearing hands that folder back to unattended sending, so
+/// it is confirmed like an override is (#1254 review), never done from a
+/// single menu press. Approved 2026-10-06.
+pub const CONTRIBUTION_OVERRIDE_CLEAR_TITLE: &str = "Use each folder's setting?";
+/// Held to `clear_contribution_override`: every folder returns to its own
+/// mode, and a folder set to Automatic sends its finished sessions without
+/// asking again.
+pub const CONTRIBUTION_OVERRIDE_CLEAR_BODY: &str = concat!(
+    "Each folder goes back to its own setting. Folders set to ",
+    folder_mode_auto_label!(),
+    " send their finished sessions without asking again."
+);
+pub const CONTRIBUTION_OVERRIDE_CLEAR_CONFIRM: &str = "Use each folder's setting";
+
 /// One choice in the pill's sub-list.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ContributionModeChoice {
@@ -440,6 +460,22 @@ pub fn contribution_override_confirm_copy(
             cancel: CONTRIBUTION_OVERRIDE_CANCEL,
             arming: Some(crate::consent_copy::automatic_contribution_copy(config)),
         },
+    }
+}
+
+/// The confirmation for clearing the override (mode
+/// [`CONTRIBUTION_OVERRIDE_CLEAR_MODE`]), shown when a folder's own setting
+/// is Automatic. No arming disclosure: the folder was armed under its own
+/// grant, which clearing does not change.
+#[must_use]
+pub fn contribution_override_clear_confirm_copy() -> ContributionOverrideConfirmCopy {
+    ContributionOverrideConfirmCopy {
+        mode: CONTRIBUTION_OVERRIDE_CLEAR_MODE,
+        title: CONTRIBUTION_OVERRIDE_CLEAR_TITLE,
+        body: CONTRIBUTION_OVERRIDE_CLEAR_BODY,
+        confirm: CONTRIBUTION_OVERRIDE_CLEAR_CONFIRM,
+        cancel: CONTRIBUTION_OVERRIDE_CANCEL,
+        arming: None,
     }
 }
 
@@ -655,6 +691,20 @@ mod contribution_override_copy_tests {
             assert!(confirm[key].is_string(), "{key}");
         }
         assert!(confirm["arming"].is_null());
+    }
+
+    /// Clearing is confirmed in the core's words, says that Automatic
+    /// folders send without asking again, and carries no arming disclosure
+    /// and no `ProjectMode`.
+    #[test]
+    fn clearing_the_override_has_its_own_confirmation() {
+        let copy = contribution_override_clear_confirm_copy();
+        assert_eq!(copy.mode, CONTRIBUTION_OVERRIDE_CLEAR_MODE);
+        assert!(serde_json::from_value::<ProjectMode>(serde_json::json!(copy.mode)).is_err());
+        assert!(copy.body.contains(folder_mode_auto_label!()));
+        assert!(copy.body.contains("without asking"));
+        assert_eq!(copy.cancel, CONTRIBUTION_OVERRIDE_CANCEL);
+        assert!(copy.arming.is_none());
     }
 }
 

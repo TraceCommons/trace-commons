@@ -1935,7 +1935,12 @@ checks what the pill shows: the override's own mode while one is in force,
 otherwise the roll-up (the Mixed row only for `mixed`), and nothing while the
 status is unread or the daemon is down. `tc_contribution_override_confirm_json(mode, config_dir)` is each
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
-screens' disclosure table for the configuration in `config_dir`. Every new
+screens' disclosure table for the configuration in `config_dir`. For
+`mode` `"clear"` it returns the confirmation a shell shows before
+`clear_contribution_override` when any folder's own setting is Automatic, or
+when the folder list or a folder's own setting is unknown: its `mode` is
+`"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
+and it carries no `arming`. Every new
 sentence is DRAFT, NEEDS APPROVAL (`project_copy.rs`).
 
 ### `preview_body`

@@ -5523,7 +5523,9 @@ pub extern "C" fn tc_contribution_mode_copy_json() -> *mut c_char {
 /// `project_copy::contribution_override_confirm_copy`): a JSON object
 /// `{mode, title, body, confirm, cancel, arming}`. `mode` is
 /// `"notify_only"`, `"auto_upload"` or `"ignore"`, as
-/// `set_contribution_override` takes it.
+/// `set_contribution_override` takes it, or `"clear"` for the confirmation
+/// before `clear_contribution_override`
+/// (`project_copy::contribution_override_clear_confirm_copy`).
 ///
 /// `arming` is the arming disclosure -- the Flow 1 grant screens' table,
 /// with the disclosure the core chose for the configuration in
@@ -5548,6 +5550,11 @@ pub unsafe extern "C" fn tc_contribution_override_confirm_json(
         let Some(mode) = (unsafe { borrow_optional_str(mode) }) else {
             return Ok(std::ptr::null_mut());
         };
+        if mode == trace_commons_contributor::project_copy::CONTRIBUTION_OVERRIDE_CLEAR_MODE {
+            let copy =
+                trace_commons_contributor::project_copy::contribution_override_clear_confirm_copy();
+            return Ok(to_owned_cstring(&serde_json::to_string(&copy)?));
+        }
         let Ok(mode) = serde_json::from_value::<ProjectMode>(serde_json::json!(mode)) else {
             return Ok(std::ptr::null_mut());
         };
