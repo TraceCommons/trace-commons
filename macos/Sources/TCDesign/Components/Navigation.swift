@@ -245,7 +245,8 @@ public struct GlassStepProgress: View {
                             }
                         }
                     Text(label)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        // #1146's step label tracks 0.06em, tighter than an eyebrow.
+                        .glassType(GlassTokens.TypeScale.eyebrow.tracking(GlassTokens.TypeScale.eyebrow.size * 0.06))
                         .foregroundStyle(index == current ? GlassColor.textPrimary : GlassColor.textTertiary)
                 }
                 .fixedSize()

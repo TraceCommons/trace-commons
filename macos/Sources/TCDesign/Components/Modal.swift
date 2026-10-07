@@ -265,7 +265,7 @@ public struct GlassModalBody<Content: View>: View {
 /// The hairline between a modal's header, body and footer.
 private struct GlassModalRule: View {
     var body: some View {
-        Rectangle().fill(GlassColor.hairline).frame(height: 0.5).accessibilityHidden(true)
+        Rectangle().fill(GlassTokens.Color.rule.color).frame(height: 0.5).accessibilityHidden(true)
     }
 }
 

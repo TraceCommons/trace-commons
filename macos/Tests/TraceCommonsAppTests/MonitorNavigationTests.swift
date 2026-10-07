@@ -725,7 +725,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
         XCTAssertTrue(firstRun.contains("""
                         .frame(width: FirstRunProgress.paneWidth)
-                        .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                        .padding(.vertical, GlassTokens.Space.paneGap * 3)
         """), "the pane is bounded by the window, less the scene's margin")
     }
 

@@ -29,16 +29,14 @@ final class FloatingLayerTests: XCTestCase {
         }
     }
 
-    /// A floating surface is native glass (Liquid Glass on 26, the HUD blur
-    /// before it) whatever Reduce Transparency says, and a surface in a pane
-    /// is the painted tier. Under Reduce Transparency the system makes both
-    /// native backings opaque by itself (Liquid Glass frosts,
-    /// `NSVisualEffectView` draws solid), so floating text never shows the
-    /// map through; Apple's guidance is to let it (R14).
-    func test_floatingSurfacesStayNativeAndTheSystemHandlesReduceTransparency() {
-        let native: GlassSurfaceBacking
-        if #available(macOS 26.0, *) { native = .liquidGlass } else { native = .blur }
-        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true), native)
+    /// A floating surface is the painted tier over the HUD blur on every
+    /// macOS, as #1146 draws its floating controls (owner ruling,
+    /// 2026-10-07), whatever Reduce Transparency says, and a surface in a
+    /// pane is the painted tier. Under Reduce Transparency the system makes
+    /// the blur opaque by itself, so floating text never shows the map
+    /// through (R14).
+    func test_floatingSurfacesArePaintedOverTheBlur() {
+        XCTAssertEqual(GlassSurfaceBacking.choose(floating: true), .blur)
         XCTAssertEqual(GlassSurfaceBacking.choose(floating: false), .painted)
     }
 

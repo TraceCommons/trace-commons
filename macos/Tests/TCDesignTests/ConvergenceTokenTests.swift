@@ -11,10 +11,10 @@ final class ConvergenceTokenTests: XCTestCase {
         XCTAssertEqual(GlassTokens.Color.watchOn.light, GlassTokens.Color.statusOn.light)
     }
 
-    /// One scrim value: the modal's is the general one, merged at #1146's
-    /// modal .40 (and lighter in light).
-    func test_theModalScrimIsTheMergedScrim() {
-        XCTAssertEqual(GlassTokens.Color.modalScrim, GlassTokens.Color.scrim)
+    /// #1146's two scrims: the general one at .35, the modal's at .40
+    /// (both lighter in light).
+    func test_theScrimsAreTheReferenceScrims() {
+        XCTAssertEqual(GlassTokens.Color.scrim.alpha, 0.35, accuracy: 0.0001)
         XCTAssertEqual(GlassTokens.Color.modalScrim.alpha, 0.4, accuracy: 0.0001)
     }
 
@@ -43,7 +43,8 @@ final class ConvergenceTokenTests: XCTestCase {
     func test_newFillsHaveLightValues() {
         for token in [
             GlassTokens.Color.cardHover, GlassTokens.Color.rowHover, GlassTokens.Color.toolbarExpanded,
-            GlassTokens.Color.switchKnobEdge, GlassTokens.Color.modalScrim,
+            GlassTokens.Color.placeholder, GlassTokens.Color.rule, GlassTokens.Color.toolbarGlyph,
+            GlassTokens.Color.toolbarGlyphHidden, GlassTokens.Color.modalScrim,
         ] {
             XCTAssertNotNil(token.lightRGB ?? token.lightAlpha.map { _ in 0 })
         }

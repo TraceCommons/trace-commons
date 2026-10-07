@@ -237,7 +237,7 @@ public struct GlassTextArea: View {
                         // padding; the prompt sits where the text will.
                         Text(prompt)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textTertiary)
+                            .foregroundStyle(GlassTextField.promptInk.color)
                             .padding(.leading, 5)
                             .allowsHitTesting(false)
                             .accessibilityHidden(true)

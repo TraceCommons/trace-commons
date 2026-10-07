@@ -252,11 +252,11 @@ public struct GlassToolbarButton: View {
         .help(label)
     }
 
-    /// The glyph's ink. Dimmed (its panel hidden) is `statusOff`, a glyph
-    /// colour that clears 3:1 on the control fill; the literal grey it
-    /// replaced was about 2.8:1.
+    /// The glyph's ink, as #1146 draws it: `toolbarGlyph`, dimmed to
+    /// `toolbarGlyphHidden` while its pane is hidden (owner ruling,
+    /// 2026-10-07: #1146 wins for theming).
     static func glyph(pressed: Bool?) -> GlassRGBA {
-        pressed == false ? GlassTokens.Color.statusOff : GlassTokens.Color.textPrimary
+        pressed == false ? GlassTokens.Color.toolbarGlyphHidden : GlassTokens.Color.toolbarGlyph
     }
 
     /// The fill behind the glyph: `toolbarExpanded` while its menu is open
@@ -505,17 +505,16 @@ public struct GlassToggleStyle: ToggleStyle {
         }
     }
 
-    /// The knob: white on every track, as #1146 draws it.
+    /// The knob: plain white on every track, the watch switch's too, as
+    /// #1146 draws it (owner ruling, 2026-10-07: white watch knob).
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
         GlassTokens.Color.textOnAccent
     }
 
-    /// A hairline ring around the knob. On the bright watch green white is
-    /// about 1.8:1, so the knob is told apart from its track by this ring
-    /// instead, which clears the 3:1 glyph floor against the track
-    /// (SwitchContrastTests). Every other knob clears it by itself.
-    static func knobEdge(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA? {
-        kind == .watch && isOn ? GlassTokens.Color.switchKnobEdge : nil
+    /// How long the knob takes to slide: #1146's `--tc-dur` (220ms) for a
+    /// toggle, 150ms for the watch switch (`glass.css` .tc-watch).
+    static func duration(_ kind: GlassSwitchKind) -> Double {
+        kind == .watch ? GlassTokens.Motion.fast : GlassTokens.Motion.standard
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -531,7 +530,9 @@ public struct GlassToggleStyle: ToggleStyle {
                 configuration.label
             }
             Button {
-                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { configuration.isOn.toggle() }
+                withAnimation(GlassMotion.systemReducesMotion ? nil : .easeOut(duration: Self.duration(kind))) {
+                    configuration.isOn.toggle()
+                }
             } label: {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     Capsule()
@@ -539,11 +540,6 @@ public struct GlassToggleStyle: ToggleStyle {
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)
-                        .overlay {
-                            if let edge = Self.knobEdge(kind, isOn: configuration.isOn) {
-                                Circle().strokeBorder(edge.color, lineWidth: 1)
-                            }
-                        }
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
@@ -673,9 +669,8 @@ public struct GlassTextField: View {
         invalid ? GlassTokens.Color.statusOutside : nil
     }
 
-    /// The prompt's ink: tertiary text, which clears 4.5:1 where #1146's
-    /// 30% white did not.
-    static let promptInk = GlassTokens.Color.textTertiary
+    /// The prompt's ink: #1146's 30% white (owner ruling, 2026-10-07).
+    static let promptInk = GlassTokens.Color.placeholder
 
     public var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -705,7 +700,7 @@ public struct GlassTextField: View {
 
     @ViewBuilder
     private var field: some View {
-        let shownPrompt = prompt.map { Text($0).foregroundStyle(GlassColor.textTertiary) }
+        let shownPrompt = prompt.map { Text($0).foregroundStyle(Self.promptInk.color) }
         if secure {
             SecureField(label, text: $text, prompt: shownPrompt)
         } else {

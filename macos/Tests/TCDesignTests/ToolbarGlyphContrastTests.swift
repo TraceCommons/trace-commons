@@ -2,18 +2,22 @@ import XCTest
 
 @testable import TCDesign
 
-/// A toolbar glyph is a UI component, so even dimmed (its panel hidden) it
-/// clears 3:1 on the control fill it sits on: white at 14% over the pane
-/// base. The literal `Color(white: 0.49)` it replaced was about 2.8:1.
+/// A toolbar glyph takes #1146's inks (owner ruling, 2026-10-07: #1146
+/// wins for theming): #E6E6EC, and #7C7C86 while its pane is hidden.
 final class ToolbarGlyphContrastTests: XCTestCase {
-    func test_aDimmedToolbarGlyphClearsTheGlyphFloor() {
-        let base = GlassTokens.Color.paneBase
-        let fill = GlassTokens.Gradient.controlFill.stops[0].color
-        let ground = Self.over(fill, base)
-        for pressed: Bool? in [false, true, nil] {
-            let ratio = SwitchContrastTests.contrast(GlassToolbarButton.glyph(pressed: pressed), ground)
-            XCTAssertGreaterThanOrEqual(ratio, 3, "pressed \(String(describing: pressed)): \(ratio)")
-        }
+    func test_toolbarGlyphsTakeTheReferenceInks() {
+        XCTAssertEqual(GlassToolbarButton.glyph(pressed: true), GlassTokens.Color.toolbarGlyph)
+        XCTAssertEqual(GlassToolbarButton.glyph(pressed: nil), GlassTokens.Color.toolbarGlyph)
+        XCTAssertEqual(GlassToolbarButton.glyph(pressed: false), GlassTokens.Color.toolbarGlyphHidden)
+        XCTAssertEqual(GlassTokens.Color.toolbarGlyph.rgb, 0xE6E6EC)
+        XCTAssertEqual(GlassTokens.Color.toolbarGlyphHidden.rgb, 0x7C7C86)
+    }
+
+    /// Lit, the glyph clears text contrast on the control fill.
+    func test_aLitToolbarGlyphClearsTextContrast() {
+        let ground = Self.over(GlassTokens.Gradient.controlFill.stops[0].color, GlassTokens.Color.paneBase)
+        let ratio = SwitchContrastTests.contrast(GlassToolbarButton.glyph(pressed: true), ground)
+        XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(ratio)")
     }
 
     /// `top` at its alpha over an opaque `bottom`.

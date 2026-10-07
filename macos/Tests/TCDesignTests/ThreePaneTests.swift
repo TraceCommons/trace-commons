@@ -28,7 +28,7 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(GlassTokens.Size.mapMinWidth, 360)
         XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                        padding * 2 + main + gap + mapWidth + gap + inspector)
-        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1300)
+        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1280)
     }
 
     /// At its default width every composition is its panes, gaps and
@@ -109,11 +109,11 @@ final class ThreePaneTests: XCTestCase {
     func test_theWindowGrowsRightAndStaysOnScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let frame = CGRect(x: 100, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1300, visible: screen),
-                       CGRect(x: 100, y: 200, width: 1300, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1280, visible: screen),
+                       CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1300, visible: screen),
-                       CGRect(x: 620, y: 200, width: 1300, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
+                       CGRect(x: 620, y: 200, width: 1280, height: 760))
         XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.

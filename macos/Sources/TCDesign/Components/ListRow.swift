@@ -93,8 +93,10 @@ public struct GlassListRow: View {
     /// `GlassTokens.Color.selection`. Solid, so the sub-line keeps text
     /// contrast too (`SelectionContrastTests`).
     static let selectedInk = GlassTokens.Color.textOnAccent
-    /// The sub-line's ink when selected: the same solid ink, not a faded one.
-    static let selectedSubInk = selectedInk
+    /// The sub-line's ink when selected: the white ink at 80%, as #1146's
+    /// `.tc-list-row[aria-selected] .tc-list-row__sub` (owner ruling,
+    /// 2026-10-07: #1146 wins for theming).
+    static let selectedSubInk = GlassRGBA(selectedInk.rgb, alpha: 0.8)
 
     /// The row's fill: the selection, or the faint hover fill under the
     /// pointer (#1146 `.tc-list-row:hover`), never over a selected row.
@@ -103,10 +105,11 @@ public struct GlassListRow: View {
         return hovering ? GlassTokens.Color.rowHover : nil
     }
 
-    /// An unflagged sub-line's ink. An off row fades by `rowOff`, under which
-    /// tertiary text falls below 4.5:1, so it takes the secondary ink.
+    /// An unflagged sub-line's ink: tertiary, on an off row too, which then
+    /// fades by `rowOff` with the rest of the row (#1146 `glass.css`
+    /// `.tc-list-row[data-off]`).
     static func plainSubInk(off: Bool) -> GlassRGBA {
-        off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textTertiary
+        GlassTokens.Color.textTertiary
     }
 
     public var body: some View {
@@ -227,7 +230,7 @@ public struct GlassListRow: View {
         return switch flag {
         case .ask: GlassTokens.Color.statusAsk.color
         case .on: GlassTokens.Color.statusOn.color
-        case nil: off ? GlassColor.textSecondary : GlassColor.textTertiary
+        case nil: Self.plainSubInk(off: off).color
         }
     }
 }
