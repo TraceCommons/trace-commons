@@ -140,6 +140,12 @@ enum RulesScreenLayout {
     /// The past-session card's note. Watching only has no enrolment, so the
     /// sessions picked here are queued on this Mac and none is sent; the
     /// core's line says they wait there. Nil for every other account.
+    /// A folder's older sessions beyond the newest the picker lists, in the
+    /// core's words; nil when there are none.
+    static func notListedNote(_ count: Int, copy: FirstRunCopy.Rules) -> String? {
+        count > 0 ? FirstRunCopy.fill(copy.notListed, ["count": String(count)]) : nil
+    }
+
     static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
         state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
     }
@@ -303,6 +309,8 @@ struct RulesScreen: View {
     /// A read is in flight, so a second press of Retry does not start another.
     @State private var loading = false
     @State private var sessions: [String: [PastSession]] = [:]
+    /// Each folder's older sessions beyond the ones listed (`not_listed`).
+    @State private var notListed: [String: Int] = [:]
     /// Folders whose past sessions were refused: drawn as unavailable, not
     /// as an empty list beside card 1's count.
     @State private var refused: Set<String> = []
@@ -539,6 +547,12 @@ struct RulesScreen: View {
                 if open.contains(id) {
                     sessionList(project, rows: rows)
                         .padding(.leading, GlassTokens.Space.s8)
+                    if let note = RulesScreenLayout.notListedNote(notListed[id] ?? 0, copy: copy.rules) {
+                        Text(note)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .padding(.leading, GlassTokens.Space.s8)
+                    }
                 }
             }
         }
@@ -636,6 +650,7 @@ struct RulesScreen: View {
                 continue
             }
             sessions[project.projectId] = RulesScreenLayout.offered(list.sessions, state: runner.state)
+            notListed[project.projectId] = list.notListed
         }
     }
 }

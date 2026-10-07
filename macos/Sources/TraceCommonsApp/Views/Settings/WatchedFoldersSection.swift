@@ -44,6 +44,14 @@ struct WatchedFoldersSection: View {
                                     onChoose: { save(kind, .watch(path: $0)) },
                                     onDecline: { save(kind, .off) })
                             }
+                            if let trajectory = copy.trajectory,
+                                let answer = TrajectoryRowState.answer(
+                                    copy: trajectory, mode: model.daemonSettings?.trajectorySourceMode)
+                            {
+                                GlassTrajectoryRow(copy: trajectory, answer: answer) {
+                                    Task { await model.saveSettings(TrajectoryRowState.offParams) }
+                                }
+                            }
                         }
                         if model.sourceRootSaveFailed || model.daemonSettings == nil {
                             Button(copy.retry) { model.refreshSettings() }

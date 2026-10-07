@@ -300,6 +300,99 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertFalse(runner.passkeyDue)
     }
 
+    /// A passkey first used on this Mac by signing in is now remembered by
+    /// the label the server returned for it at sign-in, so the next first
+    /// run's P-7 greets it by that name. The daemon answers as it does after
+    /// such a sign-in and a sign-out: the record's name, and no signed-in
+    /// account to name.
+    func test_welcomeBackGreetsAPasskeyLearnedFromSignInByItsLabel() async throws {
+        let reply = #"{"state":"none","passkey_count":1,"remembered_name":"Studio","signed_in_name":null,"near_ai_connected":null}"#
+        let passkeys = try JSONDecoder().decode(NativePasskeyState.self, from: Data(reply.utf8))
+        let runner = FirstRunRunner(
+            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+        let account = PasskeySheetsTests.RecordingAccount()
+        account.passkeys = passkeys
+        await runner.offerWelcomeBack(from: account)
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertEqual(runner.passkeyStart, .welcomeBack)
+        XCTAssertEqual(runner.returningName, "Studio")
+    }
+
+    /// Late enrolment (#1264 follow-up): P-7 is already open when the
+    /// daemon's first status reports an enrolment, so the account becomes
+    /// `.enrolled` under it; then P-7's Sign in.
+    ///
+    /// A passkey for another tenant's account: the daemon refuses the
+    /// sign-in (`account-enrollment-mismatch`, nothing kept, nothing sent
+    /// beyond the login itself; the daemon tests pin that). P-7 stays up with
+    /// the refusal, no bind is asked for, and closing it leaves Join on the
+    /// enrolment it held.
+    func test_aLateEnrolmentUnderWelcomeBackRefusesAnotherTenantsSignIn() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let runner = FirstRunRunner(
+            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+        let account = PasskeySheetsTests.RecordingAccount()
+        account.passkeys = NativePasskeyState(
+            state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
+        await runner.offerWelcomeBack(from: account)
+        XCTAssertEqual(runner.passkeyStart, .welcomeBack)
+
+        runner.state = OnboardingNavigation.recordEnrolment(runner.state)
+        XCTAssertEqual(runner.state.account, .enrolled)
+        let enrolled = runner.state
+
+        account.signInAnswer = .failed(.refused(label: "account-enrollment-mismatch"))
+        let sheet = PasskeySheetModel(start: runner.passkeyStart, copy: copy.passkey, account: account)
+        await sheet.useExisting()
+        XCTAssertEqual(sheet.step, .welcomeBack)
+        XCTAssertEqual(sheet.refusal, "account-enrollment-mismatch")
+        XCTAssertNil(sheet.outcome)
+        XCTAssertEqual(account.calls, ["passkeyState", "signIn"], "no bind, no sign-out")
+
+        sheet.close()
+        runner.finishPasskey(try XCTUnwrap(sheet.outcome), copy: copy)
+        XCTAssertEqual(runner.state, enrolled, "Join keeps the enrolment")
+        XCTAssertTrue(runner.state.holdsEnrolment)
+    }
+
+    /// Late enrolment, the enrolled account's own passkey: the daemon keeps
+    /// the sign-in (it checked the session's tenant against the enrolment),
+    /// and Verify's bind answers `already_enrolled` from local state, with
+    /// no request: the enrolment this Mac holds is this account's. Verify
+    /// takes it as the join it would otherwise have made, ends `.signedIn`
+    /// named by `signed_in_name`, and Join keeps holding the enrolment.
+    func test_aLateEnrolmentUnderWelcomeBackFinishesWithTheEnrolledAccountsPasskey() async throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
+        let runner = FirstRunRunner(
+            state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
+        let account = PasskeySheetsTests.RecordingAccount()
+        account.passkeys = NativePasskeyState(
+            state: "none", passkeyCount: 1, rememberedName: "Home", nearAiConnected: nil)
+        await runner.offerWelcomeBack(from: account)
+        runner.state = OnboardingNavigation.recordEnrolment(runner.state)
+
+        account.signInAnswer = .bound
+        let daemonAnswer = try JSONDecoder().decode(
+            NativeAccountBindResult.self,
+            from: Data(#"{"outcome":"already_enrolled","binding_state":"bound"}"#.utf8))
+        account.bindAnswer = PasskeyBindResult(daemonAnswer)
+        let sheet = PasskeySheetModel(start: runner.passkeyStart, copy: copy.passkey, account: account)
+        await sheet.useExisting()
+        XCTAssertEqual(sheet.step, .verify)
+        account.passkeys = NativePasskeyState(
+            state: "bound", passkeyCount: 1, rememberedName: "Home", signedInName: "Home", nearAiConnected: true)
+        await sheet.verify()
+        XCTAssertNil(sheet.refusal)
+        XCTAssertEqual(sheet.outcome, .signedIn(name: "Home"))
+        XCTAssertEqual(account.calls, ["passkeyState", "signIn", "bind", "passkeyState"], "no sign-out")
+
+        runner.finishPasskey(try XCTUnwrap(sheet.outcome), copy: copy)
+        XCTAssertEqual(runner.state.account, .passkey(name: "Home"))
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+        XCTAssertTrue(runner.state.holdsEnrolment)
+        XCTAssertEqual(runner.state.step, .join)
+    }
+
     /// The sheets are not awaited, so Start can run while they are open. A
     /// sign-out that ends them after Start leaves the finished first run
     /// where it is rather than reopening Join.

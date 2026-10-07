@@ -159,6 +159,14 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(
             PasskeyBindResult(try bindResult(#"{"outcome":"existing_account","binding_state":"bound"}"#)),
             .existingAccount)
+        // An enrolled Mac's bind for the enrolled account's own session
+        // (`already_enrolled`) is the join Verify would have made.
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"already_enrolled","binding_state":"bound"}"#)),
+            .enrolled)
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"already_enrolled","binding_state":"unbound"}"#)),
+            .failed(.refused(label: "account-bind-invalid")))
         // Anything else fails closed: no outcome claims a binding.
         XCTAssertEqual(
             PasskeyBindResult(try bindResult(#"{"outcome":"bound","binding_state":"legacy"}"#)),

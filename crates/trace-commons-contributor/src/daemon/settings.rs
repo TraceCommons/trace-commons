@@ -1525,7 +1525,13 @@ pub fn apply_settings_object(
                 settings.opencode_source = parse_source_declaration(value)?;
             }
             "trajectory_source" => {
-                settings.trajectory_source = parse_source_declaration(value)?;
+                let declaration = parse_source_declaration(value)?;
+                if let Some(path) = declaration.as_ref().and_then(SourceDeclaration::path)
+                    && !names_a_trajectory_folder(path)
+                {
+                    return Err(ERR_SETTINGS_INVALID_VALUE);
+                }
+                settings.trajectory_source = declaration;
             }
             // Unlike the source roots above, `null` here means **off**, not
             // "never asked" -- see `IronWireDeclaration`'s doc comment for
@@ -1735,6 +1741,17 @@ fn parse_source_declaration(
             .map_err(|_| ERR_SETTINGS_INVALID_VALUE),
         _ => Err(ERR_SETTINGS_INVALID_VALUE),
     }
+}
+
+/// Whether `path` names one particular folder a trajectory declaration may
+/// read. Only the trajectory arm is checked: the five tool declarations are
+/// read by adapters with their own layout, whereas a declared trajectory
+/// folder's every `.json`/`.jsonl` child is offered. So a relative path
+/// (resolved against `/` under launchd), the root, and the home directory
+/// itself are refused -- the trajectory adapter deliberately has no scope
+/// that means `$HOME`. An empty path is not absolute.
+fn names_a_trajectory_folder(path: &std::path::Path) -> bool {
+    path.is_absolute() && path.parent().is_some() && path != crate::source::home_dir()
 }
 
 /// `{"mode":"interval"}` or `{"mode":"evening","hour":0..=23}`. An `hour`
@@ -3032,6 +3049,43 @@ mod tests {
             Ok(true)
         );
         assert!(!reads_the_folder(&settings));
+    }
+
+    /// A declared trajectory folder is read whole on every poll, so a path
+    /// that names no particular folder is refused: a relative one (resolved
+    /// against `/` under launchd), an empty one, the root, and the home
+    /// directory itself -- the trajectory adapter has deliberately no scope
+    /// that means `$HOME`. An absolute folder below them is accepted.
+    #[test]
+    fn a_trajectory_folder_that_names_no_particular_folder_is_refused() {
+        let mut settings = DaemonSettings::default();
+        let home = crate::source::home_dir();
+        for path in [
+            serde_json::json!(""),
+            serde_json::json!("exports"),
+            serde_json::json!("./exports"),
+            serde_json::json!("/"),
+            serde_json::json!(home),
+            serde_json::json!(format!("{}/", home.display())),
+        ] {
+            assert_eq!(
+                apply_settings_object(
+                    &mut settings,
+                    &serde_json::json!({"trajectory_source": {"mode": "watch", "path": path}})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE),
+                "{path}"
+            );
+            assert_eq!(settings.trajectory_source, None, "{path}");
+        }
+        let exports = tempfile::tempdir().unwrap();
+        assert_eq!(
+            apply_settings_object(
+                &mut settings,
+                &serde_json::json!({"trajectory_source": {"mode": "watch", "path": exports.path()}})
+            ),
+            Ok(true)
+        );
     }
 
     /// The trajectory folder is offered, never required: an absent one reads

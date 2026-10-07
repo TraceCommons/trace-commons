@@ -24,7 +24,8 @@
 - Swift authors no sentence. New files hold no literal of two or more words with a function word (`ShellWordingTests`); every string comes from `FirstRunCopy`, `TCSourceChecks.settingsCopy()`, `ContributionModeCopy`, `PrivateInferenceSurface`, `AutomaticGrantCopy`, `ScopeCopy` (existing) or the route disclosure.
 - macOS 14 floor, Liquid Glass fallback below 26; screens never branch on the OS.
 - Keep for #1242: `OnboardingNavigation`, `OnboardingCoordinatorView(startAt:onStep:onComplete:)`, `FirstRunWindowView`, `FirstRunProgress.paneWidth`, `AppModel.requiresOnboarding`, `markOnboardingComplete()`.
-- Ron owns #1030: tell him about this port; never push to `ftux`.
+- Ron owns #1030: tell him about this port.
+- Past sessions and folder recognition walk the declared sources, so every call runs off the main thread (`AppModel.firstRunCall`, `ToolsScreen.describe`). Each `list_past_sessions` call walks every source once; Rules calls it once per folder, which is accepted for now (Kristi's review of #1252, a#7) and is the place to batch if a folder count makes it slow.
 - Commit style and verification as the backend plan; plus `python3 scripts/design-tokens/generate.py --check` and `cargo test -p trace-commons-contributor-ffi --test swift_copy_surface_is_central`.
 
 ## Review Focus
@@ -168,5 +169,5 @@ P-1 Choose, P-2 Name (`GlassTextField`, the two name errors, the `GlassNotice(.a
   - **Whole-branch review:** the owner sign-off above closes the one open item. Repeated commit subjects are listed in the PR body (or squashed on merge).
   - **Layout names (whole-branch review):** `JoinLayout` is now `JoinScreenLayout` and `FirstRunRulesLayout` is `RulesScreenLayout`; `RulesScreen(copy:runner:source:)` and `UsesScreen(copy:runner:)` take the runner like the other screens. Restack conflicts in #1241/#1242 should use the new names.
   - **Known, not a regression:** Private AI's Folders host starts at `.folders` in Quick with Join withdrawn, so the stepper shows Join as passed, and a failed start there shows `DaemonStartupNotice` (no `entered` rule in that host), dropping the Folders answers, as the legacy roots screen did.
-- [ ] **Step 3:** Update the #1235 section of the review artifact (https://claude.ai/artifact/YNjwXSsrnsCugV5793uCd9) with code-derived wireframes of the new screens beside Ron's #1030 screens.
+- [ ] **Step 3:** Update the #1235 section of the review artifact with code-derived wireframes of the new screens beside Ron's #1030 screens.
 - [ ] **Step 4:** Tell Ron on #1030 that the native port exists, linking the PR.

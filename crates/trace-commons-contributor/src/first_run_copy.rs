@@ -16,6 +16,9 @@
 //!   tools it used to name are not read (owner decision, 2026-10-04), and a
 //!   folder that matches nothing is refused with `tools.add_tool_refused`.
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
+//! - The passkey name warning is reworded: an account can hold more than one
+//!   passkey, so Ron's "Losing it means losing access" claimed more than is
+//!   true (Kristi's review of #1252).
 //! - Frame adds `undo`, which takes back a passkey or near.ai chosen on Join
 //!   and not yet acted on.
 //! - Join adds `invite_dead` for a real invite the daemon refused,
@@ -37,7 +40,9 @@
 //! - Rules adds `unavailable` and `retry` for folders the daemon could not
 //!   read, `sessions_unavailable` for one folder's past sessions, and
 //!   `past_sessions_watch_only`: watching only queues the picked past
-//!   sessions on this Mac, and the card says they wait there.
+//!   sessions on this Mac, and the card says they wait there; and
+//!   `not_listed`, how many older sessions a folder has beyond the newest
+//!   500 the picker lists.
 //! - Join adds `passkey_unavailable` for a Create passkey whose daemon start
 //!   failed, so the sheets could not open over Join.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
@@ -266,6 +271,11 @@ pub struct RulesCopy {
     /// sessions on this Mac as pending offers and sends none of them, since
     /// there is no enrolment to send them under. Approved 2026-10-06.
     pub past_sessions_watch_only: &'static str,
+    /// `{count}`: a folder's older sessions beyond the newest 500 the
+    /// picker lists (`list_past_sessions`' `not_listed`; owner decision
+    /// 2026-10-05). Shown only when `{count}` is above zero.
+    /// DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+    pub not_listed: &'static str,
     /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
     pub weekdays: [&'static str; 7],
     /// A session's month names, January first, as Ron's `MONTHS`.
@@ -327,6 +337,9 @@ pub struct PasskeyCopy {
     pub name_field: &'static str,
     pub clear_name: &'static str,
     pub default_name: &'static str,
+    /// Ron's warning, reworded (Kristi b#11): an account can hold more than
+    /// one passkey (`passkey_add_*`), so losing one is not losing the
+    /// account. DRAFT, NEEDS APPROVAL (reworded, 2026-10-06).
     pub name_warning: &'static str,
     pub name_empty: &'static str,
     /// `{max}`: the longest name allowed, in characters.
@@ -484,6 +497,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             retry: "Try again",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
+            not_listed: "Older sessions not listed here: {count}",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
             months: [
                 "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -524,7 +538,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             name_field: "Passkey name",
             clear_name: "Clear name",
             default_name: "My trace passkey",
-            name_warning: "Store your passkey securely. Losing it means losing access to your account and any credit in it.",
+            name_warning: "Store your passkey securely. If you lose every passkey on your account, you may lose access to it and any credit in it.",
             name_empty: "Give the passkey a name you will recognise.",
             name_too_long: "Keep the name under {max} characters.",
             verify_title: "Verify your passkey",
@@ -685,6 +699,16 @@ mod tests {
         assert!(rules.past_sessions_watch_only.contains("this Mac"));
         assert!(rules.past_sessions_watch_only.contains("join"));
         assert_ne!(rules.past_sessions_watch_only, rules.past_sessions);
+    }
+
+    /// A folder with more past sessions than the picker lists says how many
+    /// more, by count alone: it never claims they were included.
+    #[test]
+    fn a_folder_with_more_sessions_than_listed_says_how_many() {
+        let rules = first_run_copy().rules;
+        assert!(rules.not_listed.contains("{count}"));
+        assert!(!rules.not_listed.contains("include"));
+        assert_ne!(rules.not_listed, rules.show_all);
     }
 
     /// An unknown invite host or pay range reads as a word, never a dash
@@ -858,6 +882,16 @@ mod tests {
         assert!(passkey.near_ai_mismatch.contains("near.ai"));
         assert!(passkey.near_ai_mismatch.contains("signed out"));
         assert!(!passkey.near_ai_mismatch.contains('{'));
+    }
+
+    /// Kristi b#11: an account can hold more than one passkey
+    /// (`passkey_add_*`), so losing one passkey is not losing the account.
+    /// The warning says what is at stake without claiming more.
+    #[test]
+    fn the_passkey_warning_claims_no_more_than_is_true() {
+        let warning = first_run_copy().passkey.name_warning;
+        assert!(warning.contains("every passkey"), "{warning}");
+        assert!(!warning.contains("Losing it means"), "{warning}");
     }
 
     /// A refused passkey ceremony is worded here: the daemon's label never
