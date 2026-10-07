@@ -111,6 +111,7 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::invite_lookup::lookup_client_key;
 use trace_commons_server::near_account_identity::{
     NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
 };
@@ -298,6 +299,15 @@ const DEFAULT_BIND: &str = "127.0.0.1:3907";
 /// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
 const MAX_INGEST_BODY_BYTES: usize =
     trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Bundle `begin` (a manifest) and `put` (one attachment, envelope included)
+/// refuse anything over the attachment cap in their handlers, so a larger body
+/// is never useful there and must not be buffered first. `finalize` carries a
+/// whole envelope and keeps `MAX_INGEST_BODY_BYTES`.
+const MAX_TOKEN_BUNDLE_BODY_BYTES: usize =
+    trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+/// Ordinary API requests do not need envelope-sized buffering. Large bodies
+/// are enabled only on the authenticated upload method routers below.
+const DEFAULT_API_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Ingest must accept every envelope the contributor is willing to build.
 /// These were independent constants once and they drifted -- the client
 /// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
@@ -8383,6 +8393,8 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
+    let large_body_auth =
+        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8402,15 +8414,27 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/token-bundles",
-            post(token_bundles::begin).get(token_bundles::capabilities),
+            get(token_bundles::capabilities).merge(
+                post(token_bundles::begin)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}",
-            get(token_bundles::status).post(token_bundles::finalize),
+            get(token_bundles::status).merge(
+                post(token_bundles::finalize)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}/{artifact}",
-            axum::routing::put(token_bundles::put).get(token_bundles::read),
+            get(token_bundles::read).merge(
+                axum::routing::put(token_bundles::put)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route("/health", get(health_handler))
         .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
@@ -8421,8 +8445,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/traces",
             get(list_traces_handler)
-                .post(submit_trace_handler)
-                .delete(revoke_trace_body_handler),
+                .delete(revoke_trace_body_handler)
+                .merge(
+                    post(submit_trace_handler)
+                        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        .layer(large_body_auth),
+                ),
         )
         .route(
             "/v1/admission/challenge",
@@ -9160,7 +9188,74 @@ fn app(state: Arc<AppState>) -> Router {
         // trust anything, so it cannot sit behind enrollment.
         .merge(attestation_collateral_routes())
         .with_state(state)
-        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_API_BODY_BYTES))
+}
+
+/// Reject a missing or invalid bearer before a large upload extractor is
+/// allowed to poll the body, then bound how many upload bodies that principal,
+/// and the deployment, may be buffering at once. Both slots are held until the
+/// handler returns, which is after the body has been read and dropped.
+/// Handlers authenticate again on purpose: their existing rate-limit,
+/// tenant-access-grant, and admission ordering remains the authoritative
+/// authorization path, while this middleware is only the cheap pre-body gate.
+///
+/// Concurrency only, no per-minute rate: a token bundle may carry up to
+/// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
+/// legitimate bundle fits under bounds nothing. Memory is what an in-flight
+/// cap bounds.
+async fn authenticate_large_body_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let tenant = match authenticate_ctx(state.as_ref(), request.headers()) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let principal_key = large_body_principal_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    };
+    next.run(request).await
+}
+
+/// Most upload bodies one principal may have in flight at once, across every
+/// large-body route. Above the submit handler's own concurrency of 2, so a
+/// contributor submitting while a bundle uploads is never refused here first.
+const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
+/// Most upload bodies in flight across the deployment. Bounds what uploads can
+/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
+/// (~650 MB), whatever the number of valid tokens.
+const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
+
+fn large_body_principal_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    format!(
+        "large-body:{}",
+        submit_principal_rate_limit_key(tenant_id, auth_method, principal_ref)
+    )
+}
+
+/// Take the principal's slot first, so a principal at its own cap never
+/// spends a deployment-wide slot.
+fn large_body_slots_for<'a>(
+    limiter: &'a AccountRateLimiter,
+    principal_key: &str,
+) -> Option<[ConcurrencyGuard<'a>; 2]> {
+    let principal = limiter.acquire(
+        principal_key,
+        large_body_principal_concurrency(principal_key),
+    )?;
+    let global = limiter.acquire(LARGE_BODY_GLOBAL_KEY, LARGE_BODY_GLOBAL_CONCURRENCY)?;
+    Some([principal, global])
 }
 
 fn default_data_dir() -> PathBuf {
@@ -14996,7 +15091,7 @@ async fn submit_trace_handler(
         authenticated_tenant.principal_ref(),
     );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
-    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
@@ -18867,7 +18962,7 @@ async fn account_credit_summary_handler(
     // often this new route can trigger it is not. Collapses to a generic 429,
     // like every other account surface: no enumeration, no size signal.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("credit-summary-account:{account_key}"),
         CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
     ) {
@@ -19165,7 +19260,7 @@ async fn account_trace_content_handler(
     // `_content_slot` drops at function return, on every path including the
     // fail-closed error returns below.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
@@ -20299,7 +20394,8 @@ async fn native_authorize_start_handler(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT)
+    {
         return native_generic_deny();
     }
 
@@ -20442,7 +20538,7 @@ async fn native_token_inner(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
         return native_generic_deny();
     }
 
@@ -20672,6 +20768,20 @@ const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
+/// Header-independent blast-radius ceiling on interstitial renders. A botnet
+/// can rotate real source addresses, so the per-client bucket alone is not a
+/// deployment-wide bound. The render is stateless and in memory (no database,
+/// no code consumption), so the ceiling only has to bound CPU; set low, it is
+/// a cheap switch that turns every emailed login link into a 429. 12,000 takes
+/// 100 addresses at the per-IP cap to exhaust. Confirm's 600 global
+/// (`CONFIRM_GLOBAL_LIMIT`) is the budget-bearing gate for login itself.
+const INTERSTITIAL_GLOBAL_LIMIT: u32 = 12_000;
+// Compile-time, so a later edit cannot quietly turn the interstitial back into
+// a cheap kill switch, or size it past what the anonymous table holds without
+// folding the per-IP keys that exhaust it.
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT / INTERSTITIAL_PER_IP_LIMIT >= 100);
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT >= 10 * CONFIRM_GLOBAL_LIMIT);
+const _: () = assert!((INTERSTITIAL_GLOBAL_LIMIT as usize) < MAX_ACCOUNT_RATE_WINDOWS);
 /// Per-IP cap on `POST /account/login/confirm` attempts per window.
 const CONFIRM_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on confirm attempts per window across ALL callers — a
@@ -20755,15 +20865,26 @@ static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
 > = std::sync::OnceLock::new();
 
-fn submit_rate_limits(key: &str) -> (u32, u32) {
-    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+fn configured_rate_limits(key: &str) -> Option<(u32, u32)> {
+    SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
         limits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .copied()
-    });
-    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+    })
+}
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    configured_rate_limits(key)
+        .unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+/// The principal's in-flight upload cap. Shared fixture principals get the
+/// same explicit test override as their submit key; see
+/// `SUBMIT_RATE_LIMIT_TEST_LIMITS`.
+fn large_body_principal_concurrency(key: &str) -> u32 {
+    configured_rate_limits(key).map_or(LARGE_BODY_PER_PRINCIPAL_CONCURRENCY, |(_, c)| c)
 }
 
 #[cfg(test)]
@@ -20788,36 +20909,166 @@ struct RateWindow {
     window_start: std::time::Instant,
 }
 
+/// Most independent fixed-window keys retained at once. Excess keys share one
+/// stricter overflow bucket, so rotating addresses or public identifiers
+/// cannot turn the limiter itself into an unbounded memory sink.
+const MAX_ACCOUNT_RATE_WINDOWS: usize = 16_384;
+const ACCOUNT_RATE_OVERFLOW_KEY: &str = "rate-limit-overflow";
+/// The shared overflow bucket deliberately uses the smallest normal
+/// credential-guessing allowance. Under a key-cardinality flood, unfamiliar
+/// callers fail closed rather than inheriting a high-volume public-read cap.
+const ACCOUNT_RATE_OVERFLOW_LIMIT: u32 = 5;
+/// A full-table stale-entry scan is O(N), so it may run at most once per second
+/// even while every request presents a fresh key.
+const ACCOUNT_RATE_PRUNE_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
+struct AccountRateWindows {
+    entries: std::collections::HashMap<String, RateWindow>,
+    last_prune: Option<std::time::Instant>,
+    #[cfg(test)]
+    prune_runs: u64,
+}
+
+impl AccountRateWindows {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            last_prune: None,
+            #[cfg(test)]
+            prune_runs: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last_prune = None;
+        self.prune_runs = 0;
+    }
+}
+
 /// In-process fixed-window rate limiter keyed by an opaque string (IP / account
 /// id / code_hash / a fixed global key). Single-instance only (see the module
 /// note above). The map keys hold NO cleartext secrets: IPs, account ids, and
 /// `code_hash` (already a sha256) are all non-secret or pre-hashed.
+///
+/// Two independently bounded tables: `windows` holds keys an anonymous caller
+/// can mint (per-IP, per-code-hash, per-credential) plus the fixed global
+/// ceilings; `principal_windows` holds keys derived from an authenticated
+/// principal or account. A key-cardinality flood on the public surfaces fills
+/// only the first, so it cannot fold a contributor into the anonymous overflow
+/// bucket.
 struct AccountRateLimiter {
-    windows: std::sync::Mutex<std::collections::HashMap<String, RateWindow>>,
+    windows: std::sync::Mutex<AccountRateWindows>,
+    principal_windows: std::sync::Mutex<AccountRateWindows>,
     concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    max_windows: usize,
 }
 
 impl AccountRateLimiter {
     fn new() -> Self {
+        Self::with_max_windows(MAX_ACCOUNT_RATE_WINDOWS)
+    }
+
+    fn with_max_windows(max_windows: usize) -> Self {
         Self {
-            windows: std::sync::Mutex::new(std::collections::HashMap::new()),
+            windows: std::sync::Mutex::new(AccountRateWindows::new()),
+            principal_windows: std::sync::Mutex::new(AccountRateWindows::new()),
             concurrency: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_windows,
         }
+    }
+
+    #[cfg(test)]
+    fn with_max_windows_for_test(max_windows: usize) -> Self {
+        Self::with_max_windows(max_windows)
     }
 
     /// Record one hit against `key` and report whether it is WITHIN `limit` for
     /// the current `ACCOUNT_RATE_WINDOW`. Returns `true` when allowed, `false`
     /// when the limit is exceeded. A poisoned lock fails CLOSED (denies).
     fn check(&self, key: &str, limit: u32) -> bool {
-        let now = std::time::Instant::now();
-        let mut windows = match self.windows.lock() {
+        self.check_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a fixed, code-built deployment-wide key
+    /// (`"confirm-global"`, `"reward-{resource}-global"`). Such a key never
+    /// falls into the shared overflow bucket when the table is full: a
+    /// global ceiling must keep its own limit during an address-rotation
+    /// flood, which is when it matters. The set of these keys is fixed by
+    /// the code, so they can push the table past `max_windows` only by that
+    /// small constant. Never pass a key that carries caller input.
+    fn check_global(&self, key: &str, limit: u32) -> bool {
+        self.check_global_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a key derived from an AUTHENTICATED principal
+    /// or account (`submit-principal:…`, `content-account:{uuid}`). Such keys
+    /// live in their own bounded table, so an anonymous key flood cannot push
+    /// a contributor into the anonymous overflow bucket. Never pass a key an
+    /// unauthenticated caller can choose.
+    fn check_principal(&self, key: &str, limit: u32) -> bool {
+        self.check_principal_at(key, limit, std::time::Instant::now())
+    }
+
+    fn check_principal_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(
+            &self.principal_windows,
+            self.max_windows,
+            key,
+            limit,
+            now,
+            false,
+        )
+    }
+
+    fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, false)
+    }
+
+    fn check_global_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, true)
+    }
+
+    fn record_at(
+        windows: &std::sync::Mutex<AccountRateWindows>,
+        max_windows: usize,
+        key: &str,
+        limit: u32,
+        now: std::time::Instant,
+        global: bool,
+    ) -> bool {
+        let mut table = match windows.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        // Opportunistic GC: drop entries whose window has fully elapsed so the
-        // map cannot grow unbounded across many distinct keys.
-        windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
-        let entry = windows
+        let new_key_at_capacity =
+            !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows;
+        if new_key_at_capacity
+            && table.last_prune.is_none_or(|last| {
+                now.saturating_duration_since(last) >= ACCOUNT_RATE_PRUNE_INTERVAL
+            })
+        {
+            table.last_prune = Some(now);
+            #[cfg(test)]
+            {
+                table.prune_runs = table.prune_runs.saturating_add(1);
+            }
+            table.entries.retain(|_, window| {
+                now.saturating_duration_since(window.window_start) < ACCOUNT_RATE_WINDOW
+            });
+        }
+        let (key, limit) =
+            if !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows {
+                (
+                    ACCOUNT_RATE_OVERFLOW_KEY,
+                    limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
+                )
+            } else {
+                (key, limit)
+            };
+        let entry = table
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| RateWindow {
                 count: 0,
@@ -20868,9 +21119,11 @@ impl AccountRateLimiter {
     /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
     #[cfg(test)]
     pub fn reset_for_test(&self) {
-        match self.windows.lock() {
-            Ok(mut windows) => windows.clear(),
-            Err(poisoned) => poisoned.into_inner().clear(),
+        for table in [&self.windows, &self.principal_windows] {
+            table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         match self.concurrency.lock() {
             Ok(mut concurrency) => concurrency.clear(),
@@ -20887,13 +21140,44 @@ impl AccountRateLimiter {
 
     #[cfg(test)]
     fn count_for_test(&self, key: &str) -> u32 {
-        match self.windows.lock() {
-            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .get(key)
-                .map_or(0, |window| window.count),
-        }
+        [&self.windows, &self.principal_windows]
+            .into_iter()
+            .map(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entries
+                    .get(key)
+                    .map_or(0, |window| window.count)
+            })
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn in_flight_for_test(&self, key: &str) -> u32 {
+        self.concurrency
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn tracked_windows_for_test(&self) -> usize {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
+    #[cfg(test)]
+    fn prune_runs_for_test(&self) -> u64 {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prune_runs
     }
 }
 
@@ -20971,26 +21255,30 @@ impl Drop for ConcurrencyGuard<'_> {
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
-/// Extract the client IP for rate-limit keying from the first `X-Forwarded-For`
-/// hop.
+/// Extract the canonical client IP rate-limit key from `X-Forwarded-For`.
 ///
 /// TRUST ASSUMPTION: the single-host pilot sits behind a trusted reverse proxy /
-/// load balancer (GCP) that sets `X-Forwarded-For`. The leftmost hop is the
-/// client; we do NOT trust it for any authorization decision — it keys a
-/// best-effort rate-limit bucket ONLY. When the header is absent (no proxy, or a
-/// direct caller) every such request shares the single `"xff-absent"` bucket,
-/// which is conservative (stricter), not permissive. `axum::serve` is not wired
-/// with `ConnectInfo`, so the connection peer addr is intentionally not used
-/// here; wiring it would require a broad make-service change out of Task 11
-/// scope.
+/// load balancer whose Caddy edge OVERWRITES `X-Forwarded-For` with the peer it
+/// observed. The rightmost hop of the last header line is therefore the trusted
+/// value; caller-supplied hops to its left never allocate a bucket. IPv6 keys
+/// are coarsened to /64 so cheap interface-id rotation does not evade the cap.
+/// Missing or malformed values share the conservative `"unattributed"` bucket.
+///
+/// This is not safe for a directly public application listener. Ingest binds
+/// loopback in the pilot, and the Caddy overwrite is load-bearing. The key is
+/// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|hop| hop.trim().to_string())
-        .filter(|hop| !hop.is_empty())
-        .unwrap_or_else(|| "xff-absent".to_string())
+    lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+fn interstitial_rate_limit_allows(limiter: &AccountRateLimiter, client_ip: &str) -> bool {
+    limiter.check(
+        &format!("interstitial-ip:{client_ip}"),
+        INTERSTITIAL_PER_IP_LIMIT,
+    ) && limiter.check_global("interstitial-global", INTERSTITIAL_GLOBAL_LIMIT)
 }
 
 /// Sleep until at least `REDEEM_MIN_LATENCY` has elapsed since `start`. A no-op
@@ -21146,10 +21434,7 @@ async fn login_interstitial_handler(
     // per-cause detail, no enumeration). This GET does NOT consume the code, so a
     // 429 here only throttles interstitial renders; the deny is generic.
     let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("interstitial-ip:{client_ip}"),
-        INTERSTITIAL_PER_IP_LIMIT,
-    ) {
+    if !interstitial_rate_limit_allows(&ACCOUNT_RATE_LIMITER, &client_ip) {
         let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
         response.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -21293,7 +21578,7 @@ async fn confirm_login_inner(
     if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-ip:{client_ip}"), CONFIRM_PER_IP_LIMIT) {
         return redeem_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("confirm-global", CONFIRM_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("confirm-global", CONFIRM_GLOBAL_LIMIT) {
         return redeem_generic_deny();
     }
 
@@ -22932,7 +23217,7 @@ async fn account_passkey_login_start_handler(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23115,7 +23400,7 @@ async fn account_passkey_login_finish_inner(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23357,7 +23642,7 @@ async fn account_near_login_start_handler(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -23449,7 +23734,7 @@ async fn account_near_login_finish_inner(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -55276,10 +55561,10 @@ async fn revocation_propagation_worker_handler(
 
 /// Per-IP cap on `GET /v1/public/register-stats` per window.
 ///
-/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
-/// hop, which any caller can set, so this bucket is trivially escaped by
-/// anyone who wants to. It keeps one ordinary misbehaving client from being
-/// the whole load; the global cap below is what actually bounds the endpoint.
+/// The pilot's loopback-only Caddy edge overwrites `X-Forwarded-For`, and
+/// `client_ip_for_rate_limit` validates and canonicalizes that observation.
+/// It keeps one ordinary misbehaving client from being the whole load; the
+/// global cap below remains the bound against distributed callers.
 const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
 /// The real bound: a cap no per-request header can escape, so a distributed
 /// flood is limited too.
@@ -55426,7 +55711,7 @@ async fn register_stats_handler(
     ) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
 

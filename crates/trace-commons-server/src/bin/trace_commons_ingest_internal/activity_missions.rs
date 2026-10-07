@@ -65,7 +65,7 @@ async fn status_inner(
     query: Option<String>,
 ) -> ApiResult<Json<trace_commons_protocol::activity_missions::ActivityProgress>> {
     no_query(query)?;
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("activity-missions-account:{}", ctx.account_id.as_uuid()),
         30,
     ) {
