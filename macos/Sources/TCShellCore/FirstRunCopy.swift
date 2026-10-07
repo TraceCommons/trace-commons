@@ -52,6 +52,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let passkeyDone: String
         /// Create passkey chosen, created once the daemon starts.
         public let passkeyChosen: String
+        /// Create passkey could not start the daemon, so no sheet opened.
+        public let passkeyUnavailable: String
         public let nearAiEyebrow: String
         public let nearAiText: String
         public let nearAiSignIn: String
