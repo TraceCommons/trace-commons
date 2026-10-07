@@ -3323,8 +3323,15 @@ extension AppModel: FirstRunDaemon {
         guard let client else { return false }
         let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
         if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        // A Cancel before the browser opens: no attempt is begun, and none
+        // that began meanwhile opens the browser.
+        if Task.isCancelled { return false }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
         guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        if Task.isCancelled {
+            _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
+            return false
+        }
         firstRunLoginAttemptID = attempt.attemptID
         defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
         NSWorkspace.shared.open(url)
