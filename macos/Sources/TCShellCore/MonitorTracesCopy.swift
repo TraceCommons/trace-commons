@@ -609,3 +609,99 @@ public struct MonitorShellCopy: MonitorWordTable {
         return focused ? focusWholeMap : focusTool.replacingOccurrences(of: "{tool}", with: tool)
     }
 }
+
+/// Ron's #1146 Home and History structure words
+/// (`preview_copy::MonitorHomeHistoryCopy`): Home's Missions card,
+/// History's headings, project groups, rows, community panel and credit
+/// record. A singular is its own line; numbers are `{name}` holes.
+public struct MonitorHomeHistoryCopy: MonitorWordTable {
+    public let draftsTag: String
+    public let noMissionDrafts: String
+    public let sourcesOne: String
+    public let sources: String
+    public let missionCatalogue: String
+    public let historyDescription: String
+    public let submissions: String
+    public let contributionHistory: String
+    public let readingHistory: String
+    public let filterLabel: String
+    public let project: String
+    public let recordsOne: String
+    public let records: String
+    public let statusLine: String
+    public let rowCredit: String
+    public let heldCountOne: String
+    public let heldCount: String
+    public let publicStanding: String
+    public let noveltyCredit: String
+    public let acceptedInWindow: String
+    public let acceptRate: String
+    public let analyticsWithheld: String
+    public let creditRecord: String
+    public let aboutCredit: String
+    public let aboutCreditBody: String
+    public let stillBeingScored: String
+    public let notSynced: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case draftsTag = "drafts_tag"
+        case noMissionDrafts = "no_mission_drafts"
+        case sourcesOne = "sources_one"
+        case sources
+        case missionCatalogue = "mission_catalogue"
+        case historyDescription = "history_description"
+        case submissions
+        case contributionHistory = "contribution_history"
+        case readingHistory = "reading_history"
+        case filterLabel = "filter_label"
+        case project
+        case recordsOne = "records_one"
+        case records
+        case statusLine = "status_line"
+        case rowCredit = "row_credit"
+        case heldCountOne = "held_count_one"
+        case heldCount = "held_count"
+        case publicStanding = "public_standing"
+        case noveltyCredit = "novelty_credit"
+        case acceptedInWindow = "accepted_in_window"
+        case acceptRate = "accept_rate"
+        case analyticsWithheld = "analytics_withheld"
+        case creditRecord = "credit_record"
+        case aboutCredit = "about_credit"
+        case aboutCreditBody = "about_credit_body"
+        case stillBeingScored = "still_being_scored"
+        case notSynced = "not_synced"
+    }
+
+    public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// A draft's declared sources: the singular is its own line.
+    public func sources(_ count: Int) -> String {
+        count == 1 ? sourcesOne : sources.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// A project group's record count.
+    public func records(_ count: Int) -> String {
+        count == 1 ? recordsOne : records.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// The privacy review card's heading.
+    public func held(_ count: Int) -> String {
+        count == 1 ? heldCountOne : heldCount.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// A row's status line, around History's status word.
+    public func status(_ label: String) -> String {
+        statusLine.replacingOccurrences(of: "{label}", with: label)
+    }
+
+    /// A row's settled credit, around its figure.
+    public func credit(_ amount: String) -> String {
+        rowCredit.replacingOccurrences(of: "{amount}", with: amount)
+    }
+
+    /// The community panel's accepted cell, around the commons' window.
+    public func accepted(window: String) -> String {
+        acceptedInWindow.replacingOccurrences(of: "{label}", with: window)
+    }
+}

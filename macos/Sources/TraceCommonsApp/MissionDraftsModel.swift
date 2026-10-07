@@ -29,6 +29,11 @@ final class MissionDraftsModel {
 
     private(set) var copy: [String: String] = [:]
     private(set) var drafts: [MissionDraftSummary] = []
+    /// Home's Missions card: the drafts as last read, by the screen or by
+    /// `preview()`; nil until one read has answered, so an unread inbox is
+    /// never drawn as an empty one.
+    private(set) var summary: [MissionDraftSummary]?
+    private var previewTask: Task<Void, Never>?
     private(set) var selectedID: String?
     private(set) var detail: StoredMissionDraft?
     private(set) var loading = false
@@ -90,6 +95,26 @@ final class MissionDraftsModel {
 
     func refresh() { refresh(showNotice: true) }
 
+    /// Home's Missions card (Ron's #1146 `home-view.tsx`): the copy and the
+    /// list, read without opening the screen. While the screen is open its
+    /// own list is the one shown; a failed read leaves the last answer, or
+    /// none.
+    func preview() {
+        let service = service
+        previewTask?.cancel()
+        previewTask = Task { [weak self] in
+            if self?.copy.isEmpty == true,
+               case .copy(let copy)? = try? await service(.init(operation: .init("copy"))) {
+                guard let self, !Task.isCancelled, self.copy.isEmpty else { return }
+                self.copy = copy
+            }
+            guard self?.active == false,
+                  case .list(let drafts)? = try? await service(.init(operation: .init("list"))),
+                  let self, !self.active, !Task.isCancelled else { return }
+            self.summary = drafts
+        }
+    }
+
     private func refresh(showNotice: Bool, preservingError: Bool = false) {
         guard active else { return }
         listPresentation = UUID()
@@ -106,6 +131,7 @@ final class MissionDraftsModel {
                       self.listPresentation == presentation, !Task.isCancelled,
                       case .list(let drafts) = response else { return }
                 self.drafts = drafts
+                self.summary = drafts
                 self.loading = false
                 if showNotice { self.notice = self.text("refreshed") }
                 if let id = self.selectedID, !drafts.contains(where: { $0.id == id }) {

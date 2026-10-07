@@ -14,10 +14,17 @@ struct MissionDraftsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(model.text("intro"))
                 controls
+                // The core's sentence ends in its own full stop, so the
+                // file's name goes on a line of its own after it, never
+                // joined with a colon ("selected.: x.json").
                 if let selectedFile {
-                    Text("\(model.text("file_selected")) \(selectedFile.lastPathComponent)")
-                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(model.text("file_selected"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        Text(selectedFile.lastPathComponent)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .textSelection(.enabled)
+                    }
                 }
                 if model.loading || model.mutationBusy {
                     HStack(spacing: GlassTokens.Space.s4) {

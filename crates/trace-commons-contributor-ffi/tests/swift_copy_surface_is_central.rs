@@ -475,6 +475,14 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
                 .map(holed)
                 .collect(),
         );
+        // Ron's #1146 Home and History structure words (glass parity).
+        add(
+            "preview_copy::monitor_screens_copy home_history",
+            table(screens["home_history"].clone())
+                .into_iter()
+                .map(holed)
+                .collect(),
+        );
     }
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).

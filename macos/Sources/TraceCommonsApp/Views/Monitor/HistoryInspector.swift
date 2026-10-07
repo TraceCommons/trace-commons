@@ -2,13 +2,15 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// The opened History row's details (D-7), drawn in History's left pane
-/// below the list (Ron's #1146 `HistoryPage`): its status in the core's
-/// words, then the session detail the legacy History opens (`SessionDetailView`:
-/// reading and read-failure with Retry, the contribution overview, Skills
-/// behind `SkillLearningGate`, and the public-run editor), composed rather
-/// than drawn a second time. Withdraw is not drawn here: it is on the row
-/// above (Ron's `HistoryRow`), so History's page has one.
+/// The opened History row's details (D-7), drawn in the inspector when a
+/// History row is opened (Ron's inspector auto-open; #1146's History
+/// detail): its status in the core's words, the row's tool, day, size and
+/// how it was approved, then the session detail the legacy History opens
+/// (`SessionDetailView`: reading and read-failure with Retry, the
+/// contribution overview, Skills behind `SkillLearningGate`, and the
+/// public-run editor), composed rather than drawn a second time. Withdraw
+/// is not drawn here: it is on the row (Ron's `HistoryRow`), so History has
+/// one.
 ///
 /// Everything below the status runs on the app's own record of the
 /// contribution (`AppModel.history`). A row the record does not hold yet
@@ -28,9 +30,8 @@ struct HistoryDetailInspector: View {
     // and when the app comes back to the front; the installed skill only for
     // a terminal or unaccepted row. The stack adds no read of its own, so a
     // status move does not reload the detail and an ineligible row costs no
-    // install-status read. It scrolls with History's page (Ron's #1146 draws
-    // the opened row below the list, in the left pane), so it has no scroll
-    // of its own.
+    // install-status read. It scrolls inside the inspector's pane
+    // (`HistoryInspectorPane`), so it has no scroll of its own.
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             summary
@@ -62,12 +63,19 @@ struct HistoryDetailInspector: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             if record == nil {
                 Text(row.projectLabel ?? "—")
-                    .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+                    .glassType(GlassTokens.TypeScale.heading)
                     .foregroundStyle(GlassColor.textPrimary)
-                Text(HomeFormat.meta(row, compact: false))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
             }
+            // The row's full line and how it was approved: the list row
+            // says only its tool and day (Ron's `HistoryRow`).
+            Text(HomeFormat.meta(row, compact: false))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(HomeFormat.provenance(row.provenance))
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
             if HistorySelection.tagsStatus(record: record, detail: record.flatMap { model.sessionDetails[$0.submissionID] }),
                let tag = HomeFormat.statusWord(status, label: { HomeFormat.historyStatusLabel(copy: model.publicRunCopy, $0) }) {
                 GlassTag(tag, tone: HomeFormat.tone(status))
@@ -112,8 +120,32 @@ struct HistoryDetailInspector: View {
     }
 }
 
+/// The inspector while a History row is open: the row's details, in a
+/// scroll of the inspector's own (Ron's inspector shows the selection
+/// alone).
+struct HistoryInspectorPane: View {
+    let row: DaemonData.HistoryRow
+
+    var body: some View {
+        ScrollView {
+            HistoryDetailInspector(row: row)
+        }
+        .scrollIndicators(.never)
+    }
+}
+
 /// The legacy record behind a History row, by its submission id.
 enum HistorySelection {
+    /// The History row the inspector shows: only on History's page, and
+    /// only while the opened row is still in the list. Nil otherwise, and
+    /// then the inspector is the Traces selection's.
+    static func opened(
+        _ submissionId: String, onHistory: Bool, in rows: [DaemonData.HistoryRow]?
+    ) -> DaemonData.HistoryRow? {
+        guard onHistory, !submissionId.isEmpty else { return nil }
+        return rows?.first { $0.submissionId == submissionId }
+    }
+
     static func record(for submissionId: String, in history: [HistoryRecord]) -> HistoryRecord? {
         history.first { $0.submissionID == submissionId }
     }

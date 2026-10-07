@@ -20,9 +20,11 @@ final class HomeViewTests: XCTestCase {
         for needle in [
             "Button(action: openTraces) { HStack(spacing: GlassTokens.Space.s1) { Text(HomeFormat.openTracesWord)",
             "static var openTracesWord: String { MonitorWords.table?.openTraces ?? \"\" }",
-            // The hosted Insights and Mission drafts cards (R15) sit between.
             "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
-            "openHistory: { page = .history }, openMissions: { page = .missions }, ",
+            // Ron's Missions is the drafts; the catalogue and Insights sit
+            // after his cards.
+            "openHistory: { page = .history }, openMissionDrafts: { page = .missionDrafts }, ",
+            "openInsights: { page = .insights }, openMissions: { page = .missions })",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")
         }
