@@ -4075,10 +4075,24 @@ tool's layout matches. `trajectory_source` declares it:
   written before this key existed load as absent, so an upgrade reads no new
   folder.
 - Any other value -- a bare path string, an unknown mode -- is `bad_params`
-  / `settings-invalid-value`, as for the other `*_source` keys.
+  / `settings-invalid-value`, as for the other `*_source` keys. So is a
+  `watch` path that names no particular folder: a relative or empty path,
+  the root, or the home directory itself.
+
+A file in the folder is read whole only up to the native adapters' 64 MB
+budget; a larger one is refused from its size alone and raises the
+`session-too-large` health label. Discovery follows no symlinked entry.
 
 `get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
-and never the path; no response, log line or audit row carries it.
+and never the path; no response, log line or audit row carries it. A shell
+shows the folder as a Watched folders row of its own while the mode is
+`watch` or `off`, in the words of `tc_source_settings_copy`'s `trajectory`
+object -- its exports always wait for a person -- with an off switch that
+writes `{"mode":"off"}`.
+
+A session found there that is waiting in a folder on Automatic counts as a
+decision owed (`status.decisions_owed`), and it never arms a folder under
+the automatic grant.
 
 The declaration is not part of the claude/codex start gate: a daemon with
 only a trajectory folder declared has not declared its roots.
