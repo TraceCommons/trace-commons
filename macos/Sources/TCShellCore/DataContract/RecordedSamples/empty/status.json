@@ -4,6 +4,7 @@
   "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": null,
   "consent_scopes": [],
+  "consent_hold": null,
   "paused": false,
   "queue_depth": 0,
   "decisions_owed": 0,

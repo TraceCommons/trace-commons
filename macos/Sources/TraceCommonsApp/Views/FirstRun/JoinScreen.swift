@@ -38,19 +38,47 @@ enum JoinScreenLayout {
         }
     }
 
+    /// "Skip: watch only" is offered only while the daemon holds no
+    /// enrolment (`FirstRunState.daemonHoldsEnrolment`). Watching only
+    /// beside one would act under it, and could never finish: its marker is
+    /// refused while the daemon is logged in.
+    static func offersWatchOnly(_ state: FirstRunState) -> Bool {
+        !state.daemonHoldsEnrolment
+    }
+
+    /// An enrolment the daemon holds for this run and nobody signed out of
+    /// -- an invite enrolled before a near.ai sign-in failed, near.ai's own
+    /// -- is the account when none is answered, as an earlier run's is
+    /// (`OnboardingNavigation.recordEnrolment`).
+    static func heldEnrolmentIsTheAccount(_ state: FirstRunState) -> Bool {
+        !state.signedOutOfEnrolment && (state.enrolledInvite != nil || state.nearAIEnrolled)
+    }
+
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        hasAccount(state) ? copy.frame.continueButton : copy.join.skip
+        hasAccount(state) || !offersWatchOnly(state) ? copy.frame.continueButton : copy.join.skip
     }
 
     static func footerNote(_ state: FirstRunState, copy: FirstRunCopy) -> String? {
-        hasAccount(state) ? nil : copy.join.skipNote
+        hasAccount(state) || !offersWatchOnly(state) ? nil : copy.join.skipNote
+    }
+
+    /// Whether the footer can move on: with an account, as watch only, or
+    /// as the enrolment this run holds. An enrolment signed out of waits for
+    /// an account to be chosen.
+    static func canForward(_ state: FirstRunState) -> Bool {
+        hasAccount(state) || offersWatchOnly(state) || heldEnrolmentIsTheAccount(state)
     }
 
     /// The footer's action. Without an account it is "Skip: watch only",
-    /// which answers watch only; either way the person moves on.
+    /// which answers watch only, or -- while the daemon holds this run's
+    /// enrolment -- Continue as that enrolment; either way the person moves
+    /// on. With nothing to go on as, it does nothing (`canForward`).
     static func forward(_ state: FirstRunState) -> FirstRunState {
+        guard canForward(state) else { return state }
         var forwarded = state
-        if !hasAccount(forwarded) { forwarded.account = .watchOnly }
+        if !hasAccount(forwarded) {
+            forwarded.account = offersWatchOnly(forwarded) ? .watchOnly : .enrolled
+        }
         return FirstRunNavigation.next(forwarded)
     }
 
@@ -370,7 +398,7 @@ struct JoinScreen: View {
             state: $runner.state,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
-                isEnabled: true,
+                isEnabled: JoinScreenLayout.canForward(runner.state),
                 note: JoinScreenLayout.footerNote(runner.state, copy: copy),
                 action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {

@@ -1107,6 +1107,12 @@ struct PassContext {
     /// waiting for a requirement to be met, everything is waiting for a
     /// person, as the contributor asked.
     scrub_check_manual: bool,
+    /// Whether anything may be approved on the contributor's behalf under
+    /// the enrolment this pass reads: false while its scopes were saved by
+    /// enrolment and never chosen (`config::consent_hold`). Such a session
+    /// waits for a person, whose `approve` is refused for the same reason
+    /// until the scopes are chosen. Not a gate hold, and not counted as one.
+    consent_chosen: bool,
     /// R1's disclosure for this contributor, from the same config: what the
     /// Flow 1 grant screen claimed, recorded when the grant arms a project.
     /// The K5 sweep reads each folder's own disclosure instead; see
@@ -1182,10 +1188,12 @@ impl PassContext {
             shared.account_admission.current(cfg.as_ref()),
         );
         let disclosure = super::automatic_gate::disclosure(cfg.as_ref());
+        let consent_chosen = crate::config::consent_hold(cfg.as_ref()).is_none();
         Self {
             now,
             max_queue_entries,
             consent_scopes,
+            consent_chosen,
             approval_inputs,
             admission_evidence,
             gate,
@@ -1412,6 +1420,7 @@ fn visit_session(
         // person (K4 of #1118). Nor for a trajectory session, which always
         // waits for a person (see `from_trajectory`).
         let would_approve = mode == ProjectMode::AutoUpload
+            && ctx.consent_chosen
             && !ctx.scrub_check_manual
             && !from_trajectory
             && state == QueueState::Pending
@@ -1587,6 +1596,7 @@ fn visit_session(
     // The Manual Scrub check arms nothing either (K4 of #1118): the session
     // is queued `Pending` for a person, like any in an Ask me folder.
     let would_arm = mode == ProjectMode::AutoUpload
+        && ctx.consent_chosen
         && !ctx.scrub_check_manual
         && !from_trajectory
         && !returned_from_keep
@@ -3285,7 +3295,7 @@ mod tests {
     fn grant_test_cfg(scopes: &[&str]) -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: true,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -4883,6 +4893,68 @@ mod tests {
         assert_eq!(row.project_label.as_deref(), Some("proj"));
     }
 
+    /// Set the saved config's scope-choice record, as an enrolment, a choice,
+    /// or a config that predates the record would leave it.
+    fn set_chosen(f: &WatcherFixture, chosen: Option<bool>) {
+        let mut cfg = f.shared.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = chosen;
+        f.shared.store.save_config(&cfg).unwrap();
+    }
+
+    /// An armed folder approves nothing on anyone's behalf while the
+    /// enrolment's scopes were never chosen -- an arming left from before a
+    /// new enrolment, say. The session waits for a person (whose `approve`
+    /// is refused too), and once the scopes are chosen the next pass
+    /// approves it as in any armed folder.
+    #[tokio::test]
+    async fn an_unchosen_enrolment_approves_nothing_unattended() {
+        let f = WatcherFixture::new();
+        // The folder is known to the daemon before it is armed.
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        // A pass records what was on disk at the arming (K5).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        set_chosen(&f, Some(false));
+        let fresh = f.write_session_started(
+            "proj",
+            "33333333-3333-3333-3333-333333333333",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let first = f.settle(at("2030-01-04T00:00:00Z")).await;
+        let later = f.settle(at("2030-01-05T00:00:00Z")).await;
+        assert_eq!((first.auto_ready, later.auto_ready), (0, 0), "{later:?}");
+        assert_eq!(state_at(&f, &fresh), (QueueState::Pending, false));
+
+        set_chosen(&f, Some(true));
+        f.settle(at("2030-01-06T00:00:00Z")).await;
+        assert_eq!(state_at(&f, &fresh), (QueueState::Approved, true));
+    }
+
+    /// The same armed folder under a config that predates the record sends
+    /// as it always did: the migration rule reaches the watcher too.
+    #[tokio::test]
+    async fn a_legacy_config_still_approves_unattended() {
+        let f = WatcherFixture::new();
+        // The folder is known to the daemon before it is armed.
+        f.write_session("proj", "11111111-1111-1111-1111-111111111111", 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        arm_via_ipc(&f, "proj", false);
+        // A pass records what was on disk at the arming (K5).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        set_chosen(&f, None);
+        let fresh = f.write_session_started(
+            "proj",
+            "33333333-3333-3333-3333-333333333333",
+            0,
+            &Utc::now().to_rfc3339(),
+        );
+        let pass = f.settle(at("2030-01-04T00:00:00Z")).await;
+        assert_eq!(pass.auto_ready, 1, "{pass:?}");
+        assert_eq!(state_at(&f, &fresh), (QueueState::Approved, true));
+    }
+
     /// K6: a full pass can move `status.decisions_owed` with no queue change.
     /// Until a pass records what was on disk for an arming from now, the
     /// hold covers every session in the folder, so a waiting entry there
@@ -5781,6 +5853,77 @@ mod tests {
         assert!(entry_at(&f, &b).is_none(), "nothing queued");
     }
 
+    /// Including past sessions approves them, so it is refused whole under
+    /// an enrolment whose scopes nobody chose: nothing is revived, queued,
+    /// approved or recorded.
+    #[tokio::test]
+    async fn include_is_refused_while_consent_scopes_are_not_chosen() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        set_chosen(&f, Some(false));
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let b = past(&f, S2);
+        let r = include(&f, &[sid(&a), sid(&b)]).await;
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        assert_eq!(entry_at(&f, &a).unwrap().state, QueueState::Pending);
+        assert!(entry_at(&f, &b).is_none(), "nothing queued");
+        assert!(included_rows(&f).is_empty(), "nothing recorded");
+    }
+
+    /// The first-run bug, at the daemon: an enrolment is held and its scopes
+    /// were never chosen, and a watch-only Start sends what Custom collected
+    /// -- an Automatic rule left on a folder and past-session picks -- then
+    /// approves everything. Every call is refused, and no pass approves or
+    /// sends anything.
+    #[tokio::test]
+    async fn a_watch_only_start_under_an_unchosen_enrolment_sends_nothing() {
+        let f = WatcherFixture::new();
+        enrol(&f);
+        set_chosen(&f, Some(false));
+        let a = past(&f, S1);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let b = past(&f, S2);
+        let project_id = super::super::policy::project_id_for(&alpha_key());
+
+        let rule = ipc_call(
+            &f,
+            "set_project_mode",
+            serde_json::json!({"project_id": project_id, "mode": "auto_upload"}),
+        );
+        let picks = include(&f, &[sid(&a), sid(&b)]).await;
+        let all = super::super::ipc::handle_request_async(
+            &f.shared,
+            &super::super::ipc::Request {
+                id: 1,
+                method: "approve".to_string(),
+                params: serde_json::json!({"all": true}),
+            },
+        )
+        .await;
+        for r in [rule, picks, all] {
+            assert_eq!(
+                r.error.map(|e| e.message),
+                Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+            );
+        }
+        // Nothing approved means nothing for the uploader to send; an entry
+        // approved before the hold is held there (see `daemon::tests`).
+        f.settle(at("2030-01-02T00:00:00Z")).await;
+        let queue = f.shared.queue.lock().unwrap();
+        assert!(
+            queue
+                .all()
+                .iter()
+                .all(|e| e.state == QueueState::Pending && e.approved_scopes.is_none()),
+            "nothing approved: {:?}",
+            queue.all().iter().map(|e| e.state).collect::<Vec<_>>()
+        );
+    }
+
     /// `include_past_sessions` called directly over a walk taken now, as
     /// the IPC handler takes one.
     async fn include_direct(
@@ -6322,7 +6465,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(&f.shared.store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

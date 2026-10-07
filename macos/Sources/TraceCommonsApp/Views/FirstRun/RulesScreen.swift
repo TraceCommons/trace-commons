@@ -137,17 +137,19 @@ enum RulesScreenLayout {
         }
     }
 
-    /// The past-session card's note. Watching only has no enrolment, so the
-    /// sessions picked here are queued on this Mac and none is sent; the
-    /// core's line says they wait there. Nil for every other account.
     /// A folder's older sessions beyond the newest the picker lists, in the
     /// core's words; nil when there are none.
     static func notListedNote(_ count: Int, copy: FirstRunCopy.Rules) -> String? {
         count > 0 ? FirstRunCopy.fill(copy.notListed, ["count": String(count)]) : nil
     }
 
+    /// The past-session card's note. Watching only has no enrolment, so the
+    /// sessions picked here are queued on this Mac and none is sent; the
+    /// core's line says they wait there. Nil for every other account, and
+    /// for watching only while the daemon still holds an enrolment, when
+    /// Start sends nothing (`FirstRunPlan`) and nothing waits.
     static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
-        state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
+        state.account == .watchOnly && !state.daemonHoldsEnrolment ? copy.pastSessionsWatchOnly : nil
     }
 
     static func groupState(_ state: FirstRunState, projectID: String, sessions: [PastSession]) -> GroupState {

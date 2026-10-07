@@ -78,7 +78,7 @@ pub(crate) fn unenrolled_preview_config() -> ContributorConfig {
         // receipt fetch would disclose an exchange to the provider for a
         // submission that is not going to happen.
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(false),
         witness_origin: None,
         inference_receipt_check_attestation: false,
     }
@@ -125,6 +125,10 @@ pub(crate) async fn enroll_core(
     invite: Option<&str>,
     allowed_hosts: Option<&str>,
     consent_scopes: Vec<String>,
+    // Whether the person chose `consent_scopes` (the CLI's own consent
+    // question, answered) rather than having them saved for them. Recorded
+    // as `consent_scopes_chosen`; see `ContributorConfig`.
+    consent_chosen: bool,
 ) -> Result<EnrollOutcome> {
     if grant_b64.is_some() && invite.is_some() {
         anyhow::bail!("--grant and --invite are alternative enrollment paths; pass only one");
@@ -135,8 +139,15 @@ pub(crate) async fn enroll_core(
         .context("loading device identity")?;
 
     if let Some(invite) = invite {
-        let cfg =
-            enroll_with_invite_core(store, invite, allowed_hosts, &device, consent_scopes).await?;
+        let cfg = enroll_with_invite_core(
+            store,
+            invite,
+            allowed_hosts,
+            &device,
+            consent_scopes,
+            consent_chosen,
+        )
+        .await?;
         return Ok(EnrollOutcome::Enrolled(Box::new(cfg)));
     }
 
@@ -195,7 +206,7 @@ pub(crate) async fn enroll_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
@@ -221,9 +232,18 @@ pub async fn login(
     scopes: Option<&str>,
     default_consent: bool,
 ) -> Result<()> {
-    let consent_scopes = resolve_consent_scopes(scopes, default_consent)?;
+    let (consent_scopes, consent_chosen) = resolve_consent_scopes(scopes, default_consent)?;
     let used_invite = invite.is_some();
-    match enroll_core(store, grant_b64, invite, allowed_hosts, consent_scopes).await? {
+    match enroll_core(
+        store,
+        grant_b64,
+        invite,
+        allowed_hosts,
+        consent_scopes,
+        consent_chosen,
+    )
+    .await?
+    {
         EnrollOutcome::AwaitingGrant { device_key_id } => {
             println!("device_key_id: {device_key_id}");
             println!(
@@ -265,6 +285,16 @@ enum ConsentSource<'a> {
     Prompt,
 }
 
+impl ConsentSource<'_> {
+    /// Whether the scopes this source yields are the person's choice: an
+    /// explicit `--scopes`, or answers to the menu. Default answers are taken
+    /// for them, so they are not, and the enrolment records no choice
+    /// (`ContributorConfig::consent_scopes_chosen`).
+    fn is_a_choice(&self) -> bool {
+        matches!(self, ConsentSource::Explicit(_) | ConsentSource::Prompt)
+    }
+}
+
 /// Decide where consent answers come from, given the flags and whether
 /// stdin is a terminal. Split out from [`resolve_consent_scopes`] so the
 /// precedence is testable without a real terminal.
@@ -293,22 +323,30 @@ fn consent_source(
 ///
 /// The default answers are deliberately the most restrictive ones: nothing
 /// beyond the always-on floor is granted unless someone said so.
-fn resolve_consent_scopes(scopes: Option<&str>, default_consent: bool) -> Result<Vec<String>> {
+///
+/// Also answers whether the scopes are the person's choice
+/// ([`ConsentSource::is_a_choice`]).
+fn resolve_consent_scopes(
+    scopes: Option<&str>,
+    default_consent: bool,
+) -> Result<(Vec<String>, bool)> {
     use std::io::IsTerminal;
-    match consent_source(scopes, default_consent, std::io::stdin().is_terminal()) {
+    let source = consent_source(scopes, default_consent, std::io::stdin().is_terminal());
+    let resolved = match source {
         ConsentSource::Explicit(csv) => {
             let names: Vec<String> = csv.split(',').map(|s| s.trim().to_string()).collect();
-            validate_scopes(&names).context("invalid --scopes value")
+            validate_scopes(&names).context("invalid --scopes value")?
         }
-        ConsentSource::DefaultAnswers => Ok(scopes_from_answers(ConsentAnswers::default())),
+        ConsentSource::DefaultAnswers => scopes_from_answers(ConsentAnswers::default()),
         ConsentSource::Prompt => {
             let mut stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout();
             let answers = prompt_consent_answers(&mut stdin, &mut stdout)
                 .context("reading interactive consent answers")?;
-            Ok(scopes_from_answers(answers))
+            scopes_from_answers(answers)
         }
-    }
+    };
+    Ok((resolved, source.is_a_choice()))
 }
 
 /// Print local identity: never the raw `user_subject`, only its hash.
@@ -2211,10 +2249,25 @@ mod tests {
         );
     }
 
+    /// Only an answer the person gave is a choice: an explicit `--scopes`,
+    /// or the interactive menu. Default answers are taken for them.
+    #[test]
+    fn only_an_answered_consent_question_is_a_choice() {
+        assert!(ConsentSource::Explicit("debugging_evaluation").is_a_choice());
+        assert!(ConsentSource::Prompt.is_a_choice());
+        assert!(!ConsentSource::DefaultAnswers.is_a_choice());
+        assert!(!resolve_consent_scopes(None, true).unwrap().1);
+        assert!(
+            resolve_consent_scopes(Some("debugging_evaluation"), false)
+                .unwrap()
+                .1
+        );
+    }
+
     #[test]
     fn default_consent_grants_only_the_floor_scope() {
         assert_eq!(
-            resolve_consent_scopes(None, true).unwrap(),
+            resolve_consent_scopes(None, true).unwrap().0,
             vec!["debugging_evaluation".to_string()]
         );
     }
@@ -2224,7 +2277,7 @@ mod tests {
         // `cargo test` runs with stdin that is not a terminal, so this
         // exercises the non-interactive silent-default branch rather than
         // the interactive prompt path.
-        let scopes = resolve_consent_scopes(None, false).unwrap();
+        let (scopes, _) = resolve_consent_scopes(None, false).unwrap();
         assert_eq!(scopes, vec!["debugging_evaluation".to_string()]);
     }
 
@@ -2276,7 +2329,7 @@ mod tests {
         let device = DeviceIdentity::load_or_generate(&store).unwrap();
         let existing = ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -2423,7 +2476,7 @@ mod tests {
     fn enrolled_with_a_claimed_handle(device_key_id: &str) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -2494,6 +2547,7 @@ mod tests {
             None,
             &device,
             vec!["debugging_evaluation".to_string()],
+            false,
         )
         .await
         .unwrap_err();
@@ -2888,6 +2942,7 @@ async fn enroll_with_invite_core(
     allowed_hosts: Option<&str>,
     device: &DeviceIdentity,
     consent_scopes: Vec<String>,
+    consent_chosen: bool,
 ) -> Result<ContributorConfig> {
     let parsed = parse_invite(invite)?;
 
@@ -2947,7 +3002,7 @@ async fn enroll_with_invite_core(
         // environment or the config file, and never something enrollment
         // hands a contributor.
         inference_receipt_endpoint: crate::config::inference_receipt_endpoint_from_env(),
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(consent_chosen),
         witness_origin: crate::config::environment_witness_origin(env_witness.as_ref()),
         inference_receipt_check_attestation:
             crate::config::inference_receipt_check_attestation_from_env(),
@@ -4248,8 +4303,11 @@ mod daemon_command_tests {
     #[test]
     fn setting_a_project_to_auto_from_the_cli_is_persisted() {
         let (_d, store) = crate::config::tests_support::temp_store();
-        // Arming records the terms in force, so it needs a config.
-        store.save_config(&unenrolled_preview_config()).unwrap();
+        // Arming records the terms in force, so it needs a config, and
+        // scopes the contributor chose.
+        let mut cfg = unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(true);
+        store.save_config(&cfg).unwrap();
         let project = tempfile::tempdir().unwrap();
         daemon_set_project(&store, project.path(), "auto", false, false).unwrap();
         let key = std::fs::canonicalize(project.path())
