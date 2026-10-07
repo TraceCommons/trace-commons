@@ -201,6 +201,32 @@ pub struct SourceSettingsCopy {
     pub opencode_version_title: &'static str,
     pub opencode_version_detail: &'static str,
     pub tools: std::collections::BTreeMap<&'static str, SourceSettingsToolCopy>,
+    /// The row for a declared folder of exported traces
+    /// (`trajectory_source`), shown while `get_settings` reports
+    /// `trajectory_source_mode` as `watch` or `off`.
+    pub trajectory: TrajectorySettingsCopy,
+}
+
+/// The Watched folders row for a declared folder of exported traces. It is
+/// no tool's store, so it is not one of `tools`: discovery never offers it,
+/// and its exports are never sent unattended -- the watcher holds every one
+/// for a person, whatever the folder's rule (`watcher::visit_session`'s
+/// `from_trajectory`), and counts it as a decision owed. Owner decision
+/// 2026-10-05: the declaration does not ship without this row.
+///
+/// Every string here is DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+#[derive(serde::Serialize)]
+pub struct TrajectorySettingsCopy {
+    /// The row's name.
+    pub title: &'static str,
+    /// What the folder's exports are subject to.
+    pub explanation: &'static str,
+    /// `trajectory_source_mode` is `watch`.
+    pub watching: &'static str,
+    /// `trajectory_source_mode` is `off`.
+    pub off: &'static str,
+    /// The off switch: writes `trajectory_source` `{"mode":"off"}`.
+    pub decline: &'static str,
 }
 
 #[derive(serde::Serialize)]
@@ -253,12 +279,42 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         choose_folder: "Choose a different folder…",
         retry: "Retry",
         tools,
+        trajectory: TrajectorySettingsCopy {
+            title: "Exported traces",
+            explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
+            watching: "A folder of exported traces is read.",
+            off: "No folder of exported traces is read.",
+            decline: "Stop reading exported traces",
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kristi b#10 and the owner decision of 2026-10-05: a declared folder
+    /// of exported traces has a Watched folders row of its own, saying that
+    /// its exports always wait for a person, with a control to stop reading
+    /// it. It names no path.
+    #[test]
+    fn a_trajectory_folder_has_a_row_that_says_exports_wait_for_you() {
+        let payload = serde_json::to_value(source_settings_copy()).unwrap();
+        let row = &payload["trajectory"];
+        for key in ["title", "explanation", "watching", "off", "decline"] {
+            assert!(
+                row[key].as_str().is_some_and(|s| !s.trim().is_empty()),
+                "{key}: {row}"
+            );
+        }
+        assert!(
+            row["explanation"]
+                .as_str()
+                .unwrap()
+                .contains("wait for you")
+        );
+        assert_ne!(row["watching"], row["off"]);
+    }
 
     #[test]
     fn export_refusal_payload_preserves_supported_version_and_scope() {

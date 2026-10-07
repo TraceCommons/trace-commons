@@ -1688,6 +1688,9 @@ fn tc_invite_issuer_host_is_null_for_anything_unusable() {
         "VQWWPGYSG8Y4LTP6",
         "https://issuer.tracecommons.ai/onboard",
         "not a url",
+        // What `invite_lookup` refuses, the host refuses too.
+        "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+        "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
     ] {
         let arg = cstr_str(bad);
         let out = unsafe { tc_invite_issuer_host(arg.as_ptr()) };

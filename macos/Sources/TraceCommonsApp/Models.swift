@@ -697,6 +697,9 @@ struct DaemonSettingsView: Decodable, Equatable {
     let geminiSourceMode: String?
     let clineSourceMode: String?
     var opencodeSourceMode: String? = nil
+    /// The declared folder of exported traces: `watch`, `off`, or `unset`,
+    /// never its path. Watched folders draws its own row from it.
+    var trajectorySourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -756,6 +759,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case opencodeSourceMode = "opencode_source_mode"
+        case trajectorySourceMode = "trajectory_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
         case tokenDistributionsContribution = "token_distributions_contribution"

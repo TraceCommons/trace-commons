@@ -74,6 +74,16 @@ final class RulesScreenTests: XCTestCase {
             [.includePastSessions(projectID: "p1", ["a", "b"])])
     }
 
+    /// A folder with more past sessions than the picker lists says how many
+    /// more with the core's line; one with none says nothing.
+    func test_aFolderWithOlderSessionsNotListedSaysHowMany() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON()))).rules
+        XCTAssertEqual(
+            RulesScreenLayout.notListedNote(7, copy: copy),
+            FirstRunCopy.fill(copy.notListed, ["count": "7"]))
+        XCTAssertNil(RulesScreenLayout.notListedNote(0, copy: copy))
+    }
+
     /// Setting a folder to Never clears its selection (Ron's `applyRule`),
     /// and the folder's other rules leave it alone.
     func test_neverClearsTheFolderSelection() {

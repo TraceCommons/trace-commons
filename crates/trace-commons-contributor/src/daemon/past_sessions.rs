@@ -5,8 +5,9 @@
 //! watcher's cwd cache, so it is complete before the first discovery pass
 //! has run and it includes sessions no pass has ever visited. It never calls
 //! `TraceSource::load`: a session the queue has not offered is described by
-//! its date and size only, because nothing is read before the person
-//! chooses.
+//! its date and size only. No session is loaded before the person chooses;
+//! the walk reads only what each adapter's `discover` already reads (a
+//! file's head for its cwd, a staged trajectory's declaration).
 //!
 //! Session identity on the wire is an opaque id (`session_id_for`), never a
 //! path. A row carries no path, cwd or project path.
@@ -58,6 +59,15 @@ pub enum PastSessionState {
     Never,
     /// Still being written: not quiescent yet.
     StillActive,
+    /// Queued, but held for a person's review of that one session (or held
+    /// once before it aged out): an include always skips it
+    /// `held-for-review`, so it cannot be ticked.
+    HeldForReview,
+    /// Queued and recorded as one a group approval leaves out, for an
+    /// evidence-admitted contributor
+    /// (`contribution_eligibility::contributable_in_a_group`): an include
+    /// skips it `session-ineligible`, so it cannot be ticked.
+    Ineligible,
 }
 
 impl PastSessionState {
@@ -65,6 +75,24 @@ impl PastSessionState {
     pub fn selectable(self) -> bool {
         matches!(self, Self::Pending | Self::Expired | Self::NotQueued)
     }
+}
+
+/// Whether `e` is held for a person's review: held now, or held once
+/// before it aged out -- the expiry overwrote the hold's label, and the
+/// review clock is what still says so. The one test the listing and the
+/// include both apply, so a row the picker offers is one the include takes.
+fn held_for_a_person(e: &QueueEntry) -> bool {
+    e.held_for_review() || (e.state == QueueState::Expired && e.review_started_at.is_some())
+}
+
+/// Whether `e` is one a group approval leaves out for this contributor:
+/// only when the signup flag applies (`admission_evidence`), as
+/// `ipc::group_selection` decides it. An include is a group control -- the
+/// picker's "Include every past session" names a whole folder -- so it
+/// leaves out what a group approve leaves out.
+fn ineligible_for_a_group(e: &QueueEntry, admission_evidence: bool) -> bool {
+    admission_evidence
+        && !super::contribution_eligibility::contributable_in_a_group(e.eligibility.as_deref())
 }
 
 /// One row of the picker. Display fields only.
@@ -227,6 +255,7 @@ pub fn rows_for(
         .lock()
         .expect("settings lock")
         .quiescence_secs;
+    let admission_evidence = shared.admission_evidence() == Some(true);
     let queue = shared.queue.lock().expect("queue lock");
     let latest_at = latest_offers(&queue);
 
@@ -239,6 +268,16 @@ pub fn rows_for(
         let latest = latest_at.get(path.as_path()).copied();
         let queued_state = match latest.map(|e| e.state) {
             None => None,
+            Some(QueueState::Pending | QueueState::Expired)
+                if latest.is_some_and(held_for_a_person) =>
+            {
+                Some(PastSessionState::HeldForReview)
+            }
+            Some(QueueState::Pending | QueueState::Expired)
+                if latest.is_some_and(|e| ineligible_for_a_group(e, admission_evidence)) =>
+            {
+                Some(PastSessionState::Ineligible)
+            }
             Some(QueueState::Pending) => Some(PastSessionState::Pending),
             Some(QueueState::Approved) => Some(PastSessionState::Approved),
             Some(QueueState::Expired) => Some(PastSessionState::Expired),
@@ -287,12 +326,35 @@ pub fn rows_for(
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
+/// The picker's page of `rows` (newest first): the newest
+/// [`MAX_SESSIONS_PER_INCLUDE`], so "Include every past session" of what is
+/// listed is one include that fits, and how many older ones are not listed
+/// (owner decision, 2026-10-05). The shell says how many with the core's
+/// `rules.not_listed` line.
+pub fn listed_page(mut rows: Vec<PastSessionRow>) -> (Vec<PastSessionRow>, usize) {
+    let not_listed = rows.len().saturating_sub(MAX_SESSIONS_PER_INCLUDE);
+    rows.truncate(MAX_SESSIONS_PER_INCLUDE);
+    (rows, not_listed)
+}
+
 // -- `include_past_sessions`: the picker's Continue ------------------------
 
-/// The most session ids one include may name. The queue's own default cap,
-/// so "Include every past session" of a folder the size of a full queue is
-/// one call, and a runaway caller is refused before anything is read.
+/// The most distinct session ids one include may name, and the most rows a
+/// listing returns ([`listed_page`]): "Include every past session" selects
+/// every listed id, so it is always one call. A runaway caller is refused
+/// before anything is read. (The IPC handler refuses more than this many
+/// raw ids, duplicates counted, before it copies one.)
 pub const MAX_SESSIONS_PER_INCLUDE: usize = 500;
+
+/// The most live (`Approved`, not yet sent) sessions that people included
+/// from the picker the queue may hold at once. Included sessions do not
+/// count against the watcher's queue cap
+/// ([`super::queue::counts_against_the_cap`]), so this is their own bound:
+/// each holds a pinned envelope on disk until it is sent. The queue's
+/// default cap, tunable by the owner. An include that could go past it is
+/// refused whole, `included-sessions-limit`, counting every id asked for
+/// as though it would be approved.
+pub const MAX_LIVE_INCLUDED_SESSIONS: usize = 500;
 
 /// Refusals of the whole call, and per-session skip labels. Fixed strings,
 /// never a path, a session id or anything the caller sent.
@@ -309,6 +371,9 @@ pub const LABEL_SESSION_PROJECT_CHANGED: &str = "session-project-changed";
 pub const LABEL_SESSION_FILE_VANISHED: &str = "session-file-vanished";
 pub const LABEL_PROJECT_ID_INVALID: &str = "project_id-invalid";
 pub const LABEL_SESSION_UNREADABLE: &str = "session-unreadable";
+pub const LABEL_SESSION_INELIGIBLE: &str = "session-ineligible";
+pub const LABEL_SESSION_DUPLICATE: &str = "session-duplicate";
+pub const LABEL_INCLUDED_SESSIONS_LIMIT: &str = "included-sessions-limit";
 
 /// The audit row an include writes before it changes anything.
 pub const AUDIT_PAST_SESSIONS_INCLUDED: &str = "past-sessions-included";
@@ -322,10 +387,17 @@ pub struct SkippedSession {
 
 /// What an include came to. Every distinct id asked for is counted in
 /// `approved` or listed in `skipped`, exactly once.
+///
+/// `approved_entry_ids` and `hold_until` are `approve`'s: the queue entries
+/// approved, and when their undo window ends (`null` when nothing was
+/// approved or the hold is off), so a shell can offer Undo through
+/// `cancel`.
 #[derive(Debug, Clone, Serialize)]
 pub struct IncludeOutcome {
     pub approved: usize,
     pub skipped: Vec<SkippedSession>,
+    pub approved_entry_ids: Vec<Uuid>,
+    pub hold_until: Option<DateTime<Utc>>,
 }
 
 /// A refusal of the whole call: an IPC error code and a fixed label.
@@ -333,23 +405,36 @@ pub type IncludeRefusal = (&'static str, &'static str);
 
 /// Approve the chosen past sessions of `project_key` as a person's
 /// approval: pinned to a preview, held for the undo window, and recorded as
-/// the person's own, so a later change of the folder's rule does not take
-/// it back. Never `include_backlog`: each session is named.
+/// the person's own, so a later change of the folder's rule -- to Ask me or
+/// to Never -- does not take it back. Never `include_backlog`: each session
+/// is named.
 ///
 /// The whole call is validated before anything changes. The Never
-/// contribution override, a Never folder, and any id that is not one of
-/// this folder's sessions in `discovered` refuse every session; then a
-/// `past-sessions-included` audit row (label and count only) is written,
-/// and an unwritable log refuses the call too. Only then is anything
-/// revived, queued or approved.
+/// contribution override, a Never folder, any id that is not one of this
+/// folder's sessions in `discovered`, and an include that could take the
+/// live included sessions past [`MAX_LIVE_INCLUDED_SESSIONS`]
+/// (`included-sessions-limit`) refuse every session; then a
+/// `past-sessions-included` audit row (label and the count asked for) is
+/// written -- it records the person's request, so it is written even when
+/// every session is then skipped -- and an unwritable log refuses the call
+/// too. Only then is anything revived, queued or approved.
 ///
 /// Per session: kept and dismissed sessions are never revived; a session
 /// still being written is skipped `session-still-active` and never queued
 /// half-written; an offer held for a person's review is skipped
-/// `held-for-review`, as a group approve leaves it; an expired offer is
-/// revived; a session never offered is read and queued now, past the queue
-/// cap (`watcher::offer_for_a_person`); anything already decided is
-/// `not-pending`.
+/// `held-for-review`, as a group approve leaves it; for an evidence-admitted
+/// contributor, a session a group approve leaves out is skipped
+/// `session-ineligible`; an expired offer is revived, or, if its session
+/// changed since, read again and offered fresh; a session never offered is
+/// read and queued now, outside the watcher's queue cap
+/// (`watcher::offer_for_a_person`); a second session whose bytes are the
+/// same as one already chosen is `session-duplicate`; anything already
+/// decided is `not-pending`. A folder that turned Never during the call
+/// skips what is left `project-mode-never`, at each step.
+///
+/// A revive is the person's choice and stands even when the approval then
+/// does not land (watching only answers `not-enrolled`): the session waits
+/// again as an ordinary offer, and counts as a decision owed.
 pub async fn include_past_sessions(
     shared: &DaemonShared,
     discovered: &[DiscoveredSession],
@@ -391,6 +476,25 @@ pub async fn include_past_sessions(
         };
         chosen.push(d);
     }
+    // Conservative: every id asked for is counted as though it would be
+    // approved, so the bound holds whatever the per-session answers are.
+    {
+        let queue = shared.queue.lock().expect("queue lock");
+        let live_included = queue
+            .all()
+            .iter()
+            .filter(|e| {
+                e.person_included
+                    && matches!(
+                        e.state,
+                        QueueState::Pending | QueueState::Approved | QueueState::Uploading
+                    )
+            })
+            .count();
+        if live_included + chosen.len() > MAX_LIVE_INCLUDED_SESSIONS {
+            return Err((ERR_BAD_PARAMS, LABEL_INCLUDED_SESSIONS_LIMIT));
+        }
+    }
 
     // The record first, as `approve`'s `bulk-approved` row: a rollback that
     // has to write to the disk that just refused a write is not a rollback.
@@ -421,6 +525,7 @@ pub async fn include_past_sessions(
         .lock()
         .expect("settings lock")
         .quiescence_secs;
+    let admission_evidence = shared.admission_evidence() == Some(true);
     let mut skipped: Vec<SkippedSession> = Vec::new();
     let skip = |d: &DiscoveredSession, label: &'static str| SkippedSession {
         session_id: d.session_id.clone(),
@@ -430,23 +535,33 @@ pub async fn include_past_sessions(
     let mut to_approve: Vec<(Uuid, &DiscoveredSession)> = Vec::new();
     let mut to_offer: Vec<&DiscoveredSession> = Vec::new();
     {
+        /// What the queue's latest offer at a chosen session's path says.
+        struct Latest {
+            entry_id: Uuid,
+            state: QueueState,
+            held: bool,
+            ineligible: bool,
+            /// The session on disk is not the one this offer was built from.
+            changed: bool,
+        }
+        // Policy before queue, as everywhere else. The folder's rule is read
+        // again here, under the lock a revive takes: Never set since the
+        // check above must not be met by a session made to wait again.
+        let policy = shared.policy.lock().expect("policy lock");
+        let never = policy.holds_every_send() || policy.resolve(project_key) == ProjectMode::Ignore;
         let mut queue = shared.queue.lock().expect("queue lock");
-        let latest: Vec<Option<(Uuid, QueueState, bool)>> = {
+        let latest: Vec<Option<Latest>> = {
             let latest_at = latest_offers(&queue);
             chosen
                 .iter()
                 .map(|d| {
-                    latest_at.get(d.session_ref.path.as_path()).map(|e| {
-                        (
-                            e.entry_id,
-                            e.state,
-                            // Held now, or held once before it aged out: the
-                            // expiry overwrote the hold's label, and the
-                            // review clock is what still says so.
-                            e.held_for_review()
-                                || (e.state == QueueState::Expired
-                                    && e.review_started_at.is_some()),
-                        )
+                    latest_at.get(d.session_ref.path.as_path()).map(|e| Latest {
+                        entry_id: e.entry_id,
+                        state: e.state,
+                        held: held_for_a_person(e),
+                        ineligible: ineligible_for_a_group(e, admission_evidence),
+                        changed: e.size_bytes != d.session_ref.size_bytes
+                            || e.observed_modified_at.is_some_and(|at| at != d.modified_at),
                     })
                 })
                 .collect()
@@ -459,14 +574,36 @@ pub async fn include_past_sessions(
                 skipped.push(skip(d, LABEL_SESSION_KEPT));
             } else if !d.quiescent(now, quiescence_secs) {
                 skipped.push(skip(d, LABEL_SESSION_STILL_ACTIVE));
+            } else if never {
+                skipped.push(skip(d, LABEL_PROJECT_MODE_NEVER));
             } else {
                 match latest {
                     None => to_offer.push(d),
-                    Some((_, _, true)) => skipped.push(skip(d, LABEL_HELD_FOR_REVIEW)),
-                    Some((id, QueueState::Pending, false)) => to_approve.push((id, d)),
-                    Some((id, QueueState::Expired, false)) => {
-                        if queue.revive_expired(id, now) {
-                            to_approve.push((id, d));
+                    Some(Latest { held: true, .. }) => skipped.push(skip(d, LABEL_HELD_FOR_REVIEW)),
+                    Some(Latest {
+                        state: QueueState::Pending | QueueState::Expired,
+                        ineligible: true,
+                        ..
+                    }) => skipped.push(skip(d, LABEL_SESSION_INELIGIBLE)),
+                    Some(Latest {
+                        entry_id,
+                        state: QueueState::Pending,
+                        ..
+                    }) => to_approve.push((entry_id, d)),
+                    // Changed since it aged out: reviving it would approve
+                    // a description of bytes that are gone. Read it again.
+                    Some(Latest {
+                        state: QueueState::Expired,
+                        changed: true,
+                        ..
+                    }) => to_offer.push(d),
+                    Some(Latest {
+                        entry_id,
+                        state: QueueState::Expired,
+                        ..
+                    }) => {
+                        if queue.revive_expired(entry_id, now) {
+                            to_approve.push((entry_id, d));
                         } else {
                             skipped.push(skip(d, LABEL_NOT_PENDING));
                         }
@@ -490,10 +627,36 @@ pub async fn include_past_sessions(
         }
     }
 
+    // One entry per session: identical bytes at two paths are one queue
+    // entry (`queue::entry_id_for` hashes the content), so the second
+    // session to resolve to it is answered `session-duplicate` rather than
+    // approved twice or answered twice. A newly read session found to be
+    // one a group approve leaves out is skipped here.
+    let to_approve: Vec<(Uuid, &DiscoveredSession)> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        let mut taken = std::collections::HashSet::new();
+        let mut kept = Vec::with_capacity(to_approve.len());
+        for (id, d) in to_approve {
+            if !taken.insert(id) {
+                skipped.push(skip(d, LABEL_SESSION_DUPLICATE));
+            } else if queue
+                .get(id)
+                .is_some_and(|e| ineligible_for_a_group(e, admission_evidence))
+            {
+                skipped.push(skip(d, LABEL_SESSION_INELIGIBLE));
+            } else {
+                kept.push((id, d));
+            }
+        }
+        kept
+    };
+
     if to_approve.is_empty() {
         return Ok(IncludeOutcome {
             approved: 0,
             skipped,
+            approved_entry_ids: Vec::new(),
+            hold_until: None,
         });
     }
     // The terms in force now, read as `approve` reads them; see there.
@@ -519,9 +682,8 @@ pub async fn include_past_sessions(
         inputs: inputs.as_deref(),
         verdict: None,
         correction: None,
-        // The call's one instant, as `approve` takes one.
-        approved_at: now,
         approval_hold_secs,
+        person_included: true,
     };
     let entry_ids: Vec<Uuid> = to_approve.iter().map(|(id, _)| *id).collect();
     let batch = super::ipc::approve_as_a_person(shared, &entry_ids, &terms)
@@ -536,5 +698,7 @@ pub async fn include_past_sessions(
     Ok(IncludeOutcome {
         approved: batch.approved_ids.len(),
         skipped,
+        approved_entry_ids: batch.approved_ids,
+        hold_until: batch.hold_until,
     })
 }
