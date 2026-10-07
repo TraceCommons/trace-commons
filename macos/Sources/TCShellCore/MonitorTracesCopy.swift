@@ -525,6 +525,11 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let startAtLogin: String
     public let projectsEmpty: String
     public let changesHeading: String
+    public let tabHome: String
+    public let tabInference: String
+    public let tabTraces: String
+    public let tabsLabel: String
+    public let mapViewsLabel: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -560,6 +565,11 @@ public struct MonitorShellCopy: MonitorWordTable {
         case startAtLogin = "start_at_login"
         case projectsEmpty = "projects_empty"
         case changesHeading = "changes_heading"
+        case tabHome = "tab_home"
+        case tabInference = "tab_inference"
+        case tabTraces = "tab_traces"
+        case tabsLabel = "tabs_label"
+        case mapViewsLabel = "map_views_label"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

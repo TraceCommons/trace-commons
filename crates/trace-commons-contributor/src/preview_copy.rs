@@ -880,6 +880,14 @@ pub struct MonitorShellCopy {
     pub start_at_login: &'static str,
     pub projects_empty: &'static str,
     pub changes_heading: &'static str,
+    /// The monitor's tabs, the tab strip's accessible name, and the map's
+    /// view selector's accessible name: words macOS held in Swift until
+    /// 2026-10-06.
+    pub tab_home: &'static str,
+    pub tab_inference: &'static str,
+    pub tab_traces: &'static str,
+    pub tabs_label: &'static str,
+    pub map_views_label: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -1024,6 +1032,11 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             start_at_login: "Start Trace Commons at login",
             projects_empty: "No projects seen yet. Sessions appear here after discovery.",
             changes_heading: "Changes on this machine",
+            tab_home: "Home",
+            tab_inference: "Inference",
+            tab_traces: "Traces",
+            tabs_label: "Monitor",
+            map_views_label: "Map",
         },
     }
 }
