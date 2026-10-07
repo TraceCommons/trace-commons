@@ -210,7 +210,9 @@ pub struct MonitorTracesCopy {
 //   (`history_copy`, `routing_copy`). Since the owner's 2026-10-06 ruling
 //   (#1146's wording wins), Home's and History's #1146 lines -- his
 //   "credit pending" accessory, the filters, the empty states -- are
-//   [`MonitorShellCopy`].
+//   [`MonitorShellCopy`], and the words that carry his Home and History
+//   structure (headings, project groups, community and credit record) are
+//   [`MonitorHomeHistoryCopy`].
 // - No "Share automatically": the folder rule is Ask me / Automatic /
 //   Never, from `project_copy::FOLDER_MODE_LABELS`.
 
@@ -819,6 +821,10 @@ pub struct MonitorScreensCopy {
     /// 2026-10-06): the toolbar toggles, the graph's focus tips, Home's
     /// status lines and History's filters and empty states.
     pub shell: MonitorShellCopy,
+    /// Ron's #1146 Home and History structure (the glass parity pass,
+    /// 2026-10-07): Home's Missions card, History's headings, project
+    /// groups, rows, community panel and credit record.
+    pub home_history: MonitorHomeHistoryCopy,
 }
 
 /// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
@@ -888,6 +894,61 @@ pub struct MonitorShellCopy {
     pub tab_traces: &'static str,
     pub tabs_label: &'static str,
     pub map_views_label: &'static str,
+}
+
+/// Ron's #1146 Home and History words that carry their structure
+/// (`home-view.tsx`, `history-page.tsx`, `history-row.tsx`,
+/// `community-panel.tsx`, `credit-record-panel.tsx`), verbatim. Numbers are
+/// `{name}` holes and a singular is its own line. Pending credit is never
+/// said bare: a shell shows it only beside the commons' statement of what it
+/// waits on (D6), so there is no per-row pending line here.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorHomeHistoryCopy {
+    /// Home's Missions card: the accessory tag, the empty line, and each
+    /// draft's source count.
+    pub drafts_tag: &'static str,
+    pub no_mission_drafts: &'static str,
+    pub sources_one: &'static str,
+    pub sources: &'static str,
+    /// Home's way into the commons mission catalogue, which #1146 has no
+    /// place for (its Missions card is the drafts).
+    pub mission_catalogue: &'static str,
+    /// History's page description, under the breadcrumb.
+    pub history_description: &'static str,
+    /// The contribution list card's eyebrow and heading.
+    pub submissions: &'static str,
+    pub contribution_history: &'static str,
+    /// While History is first read.
+    pub reading_history: &'static str,
+    /// The filter's accessible name.
+    pub filter_label: &'static str,
+    /// A project group's eyebrow and its record count.
+    pub project: &'static str,
+    pub records_one: &'static str,
+    pub records: &'static str,
+    /// A row's status line; `{label}` is History's status word.
+    pub status_line: &'static str,
+    /// A row's settled credit; `{amount}` is the figure.
+    pub row_credit: &'static str,
+    /// The privacy review card's heading, by count.
+    pub held_count_one: &'static str,
+    pub held_count: &'static str,
+    /// The community panel: its heading and its cells. `{label}` is the
+    /// commons' window label.
+    pub public_standing: &'static str,
+    pub novelty_credit: &'static str,
+    pub accepted_in_window: &'static str,
+    pub accept_rate: &'static str,
+    pub analytics_withheld: &'static str,
+    /// The credit record card: eyebrow, heading, the pending figure's
+    /// label, and the chip before the first sync.
+    pub credit_record: &'static str,
+    pub about_credit: &'static str,
+    /// DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07). What credit is,
+    /// as #1146's credit record says it.
+    pub about_credit_body: &'static str,
+    pub still_being_scored: &'static str,
+    pub not_synced: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -1038,6 +1099,37 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tabs_label: "Monitor",
             map_views_label: "Map",
         },
+        home_history: MonitorHomeHistoryCopy {
+            drafts_tag: "Drafts",
+            no_mission_drafts: "No mission drafts on this machine.",
+            sources_one: "1 source",
+            sources: "{count} sources",
+            mission_catalogue: "Mission catalogue",
+            history_description: "What you have contributed, and what is still being reviewed.",
+            submissions: "Submissions",
+            contribution_history: "Contribution history",
+            reading_history: "Reading local history\u{2026}",
+            filter_label: "Filter history",
+            project: "Project",
+            records_one: "1 record",
+            records: "{count} records",
+            status_line: "Status: {label}",
+            row_credit: "credit {amount}",
+            held_count_one: "1 held for privacy review",
+            held_count: "{count} held for privacy review",
+            public_standing: "Public standing",
+            novelty_credit: "Novelty credit",
+            accepted_in_window: "Accepted \u{00b7} {label}",
+            accept_rate: "Accept rate",
+            analytics_withheld: "Aggregate analytics withheld by policy.",
+            credit_record: "Credit record",
+            about_credit: "About credit.",
+            about_credit_body: "Contributions earn credit points, scored on novelty and information \
+                richness. Today credit is a record, not currency: no payout, token, exchange rate, \
+                or date.",
+            still_being_scored: "Still being scored",
+            not_synced: "Not synced yet",
+        },
     }
 }
 
@@ -1147,6 +1239,7 @@ mod tests {
             "/safeguards/",
             "/history_actions/",
             "/shell/",
+            "/home_history/",
         ] {
             assert!(
                 words.iter().any(|(key, _)| key.starts_with(table)),
@@ -1256,6 +1349,30 @@ mod tests {
         // Withdrawn is a filter word, never "by you": it also gathers
         // withdrawals this machine did not make.
         assert!(!shell.filter_withdrawn.contains("by you"));
+    }
+
+    /// Ron's #1146 Home and History structure words, verbatim, with a
+    /// singular of its own wherever he pluralised, and no bare pending
+    /// credit (D6).
+    #[test]
+    fn the_home_and_history_words_are_rons() {
+        let copy = monitor_screens_copy().home_history;
+        for (key, word) in words_of(&copy) {
+            assert!(!word.is_empty(), "{key} is empty");
+            assert!(
+                !word.to_lowercase().contains("pending"),
+                "{key} says pending credit bare: {word}"
+            );
+        }
+        assert_eq!(copy.drafts_tag, "Drafts");
+        assert_eq!(copy.contribution_history, "Contribution history");
+        assert_eq!(copy.status_line, "Status: {label}");
+        assert_eq!(copy.row_credit, "credit {amount}");
+        assert!(copy.sources.contains("{count}") && !copy.sources_one.contains('{'));
+        assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
+        assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));
+        assert!(copy.accepted_in_window.contains("{label}"));
+        assert!(copy.about_credit_body.contains("not currency"));
     }
 
     /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]
