@@ -149,7 +149,7 @@ final class ToolFolderInspectorTests: XCTestCase {
         let tree = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
         XCTAssertTrue(tree.contains("modeLabels: store.disclosure?.folderModeLabels"))
         let home = try TracesParityTests.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(home.contains("HistoryList.labels(disclosure: TracesStore.disclosureCopy"))
+        XCTAssertTrue(home.contains("HistoryList.labels(shell: MonitorWords.table?.shell)"))
     }
 }
 

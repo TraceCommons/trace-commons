@@ -122,9 +122,19 @@ private struct HomeOverview: View {
                     hostedCard(missionDraftsHeading, action: openMissionDrafts)
                 }
                 GlassEyebrowCard(MonitorWords.history, action: openHistory) {
-                    Image(systemName: "chevron.right")
-                        .glassGlyph(10, weight: .semibold)
-                        .foregroundStyle(GlassColor.textTertiary)
+                    HStack(spacing: GlassTokens.Space.s2) {
+                        // Ron's "X credit pending", under D6: only beside
+                        // the commons' statement of what it waits on.
+                        if let pending = HomeFormat.creditPendingAccessory(
+                            freshRollup?.creditPending, condition: HomeFormat.pendingCondition(freshCredit)) {
+                            Text(pending)
+                                .glassType(GlassTokens.TypeScale.caption)
+                                .foregroundStyle(GlassColor.textSecondary)
+                        }
+                        Image(systemName: "chevron.right")
+                            .glassGlyph(10, weight: .semibold)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
                 } content: {
                     recent
                 }
@@ -185,8 +195,18 @@ private struct HomeOverview: View {
         let state = state
         return GlassCard {
             HStack(spacing: GlassTokens.Space.s4) {
-                status(state)
-                    .accessibilityElement(children: .combine)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    status(state)
+                    // Ron's #1146 second line: sessions waiting and how many
+                    // are worth a second look. Only from the core's count:
+                    // an unknown count draws no line, never "nothing".
+                    if let line = HomeFormat.waitingLine(traces.decisionsOwed, sessions: traces.tree.allSessions) {
+                        Text(line)
+                            .glassType(GlassTokens.TypeScale.label)
+                            .foregroundStyle(GlassColor.textSecondary)
+                    }
+                }
+                .accessibilityElement(children: .combine)
                 Spacer(minLength: 0)
                 // The way into the tree, as #1146's status card has it.
                 Button(action: openTraces) {
@@ -216,7 +236,7 @@ private struct HomeOverview: View {
                         Text(HealthCopy.core(label: label, maxQueueEntries: nil).title)
                     case .watching(let tools):
                         GlassStatusDot(.on, ring: true)
-                        Text(FlowMapScene.pair(MonitorWords.watching, tools))
+                        Text(MonitorWords.table?.shell.watching(tools: tools) ?? FlowMapScene.pair(MonitorWords.watching, tools))
                     }
                 case .paused:
                     GlassStatusDot(.ask, ring: true)
@@ -237,7 +257,9 @@ private struct HomeOverview: View {
         if store.history == nil {
             Text("—").glassType(GlassTokens.TypeScale.label).foregroundStyle(GlassColor.textTertiary)
         } else if rows.isEmpty {
-            Text("0").glassType(GlassTokens.TypeScale.label).foregroundStyle(GlassColor.textTertiary)
+            Text(MonitorWords.table?.shell.nothingContributed ?? "0")
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textSecondary)
         } else {
             VStack(spacing: 0) {
                 ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -354,7 +376,7 @@ private struct HistoryPage: View {
     /// The core's filter labels, or none at all: a filter with an empty
     /// segment is never drawn, and then every row is shown.
     private var labels: [HistoryList.Filter: String]? {
-        HistoryList.labels(disclosure: TracesStore.disclosureCopy, publicRun: model.publicRunCopy)
+        HistoryList.labels(shell: MonitorWords.table?.shell)
     }
 
     private var shownFilter: HistoryList.Filter {
@@ -373,18 +395,18 @@ private struct HistoryPage: View {
                     .foregroundStyle(GlassColor.textTertiary)
             }
             if rows.isEmpty {
-                Text("0")
-                    .glassType(GlassTokens.TypeScale.number)
-                    .foregroundStyle(GlassColor.textTertiary)
+                Text(MonitorWords.table?.shell.historyEmpty ?? "0")
+                    .glassType(GlassTokens.TypeScale.label)
+                    .foregroundStyle(GlassColor.textSecondary)
             } else {
                 filterBar(rows)
                 let groups = HistoryFolders.folders(
                     HistoryList.rows(rows, filter: shownFilter),
                     projectID: { $0.projectId ?? "" }, projectLabel: { $0.projectLabel ?? "—" })
                 if groups.isEmpty {
-                    Text("0")
-                        .glassType(GlassTokens.TypeScale.number)
-                        .foregroundStyle(GlassColor.textTertiary)
+                    Text(MonitorWords.table?.shell.historyFilterEmpty ?? "0")
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
                 ForEach(groups) { group in
                     VStack(alignment: .leading, spacing: 0) {
@@ -516,7 +538,7 @@ private struct HistoryListRow: View {
         let result = record.flatMap { model.withdrawals[$0.submissionID] }
         let control = HistoryList.rowWithdraw(record: record, detail: detail, result: result, account: model.accountSession)
         HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-            Button(copy.viewSession, action: open)
+            Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)
                 .buttonStyle(GlassButtonStyle(.glass, small: true))
                 .frame(minHeight: 44)
             if result == nil, !confirming || control != .withdraw {
@@ -674,17 +696,24 @@ enum HistoryList {
         filter == .all ? rows : rows.filter { $0.status == filter.rawValue }
     }
 
-    /// A filter's label from the core, or nil when the core has not said.
-    static func label(_ filter: Filter, disclosure: ContributorDisclosureCopy?, publicRun: PublicRunCopy?) -> String? {
-        let label = filter == .all ? publicRun?.allContributions : disclosure?.historyUi.statusLabels[filter.rawValue]
+    /// A filter's label from the core (Ron's #1146 `history-filter.tsx`
+    /// words, `MonitorShellCopy`), or nil when the core has not said.
+    static func label(_ filter: Filter, shell: MonitorShellCopy?) -> String? {
+        let label: String? = switch filter {
+        case .all: shell?.filterAll
+        case .accepted: shell?.filterAccepted
+        case .submitted: shell?.filterSubmitted
+        case .quarantined: shell?.filterQuarantined
+        case .withdrawn: shell?.filterWithdrawn
+        }
         return label.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     /// Every filter's label, or nil if any is missing.
-    static func labels(disclosure: ContributorDisclosureCopy?, publicRun: PublicRunCopy?) -> [Filter: String]? {
+    static func labels(shell: MonitorShellCopy?) -> [Filter: String]? {
         var labels: [Filter: String] = [:]
         for filter in Filter.allCases {
-            guard let label = label(filter, disclosure: disclosure, publicRun: publicRun) else { return nil }
+            guard let label = label(filter, shell: shell) else { return nil }
             labels[filter] = label
         }
         return labels
@@ -883,6 +912,24 @@ enum HomeFormat {
     /// a bare number that reads as owed.
     static func pendingFigure(_ pending: Double?, credit: DaemonData.CommonsCreditSummary?) -> String {
         pendingFigure(pending, condition: pendingCondition(credit))
+    }
+
+    /// Ron's #1146 second status line, from the core's decisions owed and
+    /// the waiting sessions' second-look reasons. Nil when the core did not
+    /// say how many are owed: an unknown count is never "nothing waiting".
+    static func waitingLine(_ owed: Int?, sessions: [DaemonData.QueueEntry]) -> String? {
+        guard let owed, let shell = MonitorWords.table?.shell else { return nil }
+        let secondLook = sessions.filter { !($0.secondLook ?? []).isEmpty }.count
+        return shell.waiting(owed, secondLook: secondLook)
+    }
+
+    /// History card's "X credit pending", under the same rule as the tile:
+    /// only with the commons' statement of what it waits on (D6), and never
+    /// for nothing pending.
+    static func creditPendingAccessory(_ pending: Double?, condition: String?) -> String? {
+        guard let pending, pending > 0, condition != nil,
+              let template = MonitorWords.table?.shell.creditPendingAmount else { return nil }
+        return template.replacingOccurrences(of: "{amount}", with: points(pending))
     }
 
     /// Home's pending-credit tile and status-card link, in the core's words.

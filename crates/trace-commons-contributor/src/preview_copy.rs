@@ -205,10 +205,12 @@ pub struct MonitorTracesCopy {
 // - A word a table already holds keeps its key: Contribute, Undo, Size,
 //   Tool, Folder, Residual risk here; Watching, On, Off, Folders, Waiting,
 //   Summary on [`MonitorScreensCopy`].
-// - No credit, history, community or withdrawal words, and none of Ron's
-//   routing state labels: those stay on the core tables native already
-//   reads (`history_copy`, `routing_copy`). Ron's "credit pending" beside
-//   the contributed count is left out for that reason.
+// - No credit, community or withdrawal words, and none of Ron's routing
+//   state labels: those stay on the core tables native already reads
+//   (`history_copy`, `routing_copy`). Since the owner's 2026-10-06 ruling
+//   (#1146's wording wins), Home's and History's #1146 lines -- his
+//   "credit pending" accessory, the filters, the empty states -- are
+//   [`MonitorShellCopy`].
 // - No "Share automatically": the folder rule is Ask me / Automatic /
 //   Never, from `project_copy::FOLDER_MODE_LABELS`.
 
@@ -230,6 +232,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "hours",
     "uploads",
     "megabytes",
+    "amount",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -428,8 +431,10 @@ pub struct MonitorSafeguardsCopy {
 
 /// History's refresh and account sign-in controls: the controls Ron's
 /// #1146 `history-refresh-control.tsx` and `account-sign-in-control.tsx`
-/// draw, in native words rather than his (History and withdrawal copy keep
-/// native's voice). They name no machinery and promise no timing.
+/// draw, in his words (owner ruling, 2026-10-06: #1146's wording wins).
+/// The two outcome lines and the three sign-in results #1146 has no
+/// sentence for (it shows the raw error) stay native, and name no
+/// machinery.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorHistoryActionsCopy {
     /// Asks the daemon to check the server sooner (`refresh_history`).
@@ -623,10 +628,10 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
 #[must_use]
 pub fn decisions_owed_text(decisions_owed: Option<u64>) -> String {
     match decisions_owed {
-        None => "Decision count unavailable".to_string(),
+        None => "Decisions owed unavailable".to_string(),
         Some(0) => String::new(),
-        Some(1) => "1 decision waiting".to_string(),
-        Some(n) => format!("{n} decisions waiting"),
+        Some(1) => "1 decision owed".to_string(),
+        Some(n) => format!("{n} decisions owed"),
     }
 }
 
@@ -810,22 +815,73 @@ pub struct MonitorScreensCopy {
     pub safeguards: MonitorSafeguardsCopy,
     /// History's refresh and account sign-in controls (#1146).
     pub history_actions: MonitorHistoryActionsCopy,
+    /// Ron's #1146 shell, Home and History words (owner ruling,
+    /// 2026-10-06): the toolbar toggles, the graph's focus tips, Home's
+    /// status lines and History's filters and empty states.
+    pub shell: MonitorShellCopy,
+}
+
+/// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
+/// button, Home and History (`monitor-toolbar.tsx`, `monitor-shell.tsx`,
+/// `home-view.tsx`, `history-filter.tsx`, `history-page.tsx`,
+/// `history-row.tsx`). Where Ron pluralised with a helper, the singular is
+/// its own line.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorShellCopy {
+    /// The toolbar's graph, flow map and inspector toggles, by state: each
+    /// names what pressing it does.
+    pub show_graph: &'static str,
+    pub hide_graph: &'static str,
+    pub show_map: &'static str,
+    pub hide_map: &'static str,
+    pub show_inspector: &'static str,
+    pub hide_inspector: &'static str,
+    /// The graph's focus button: nothing selected, focused, and `{tool}`
+    /// the selected session's tool.
+    pub focus_needs_selection: &'static str,
+    pub focus_whole_map: &'static str,
+    pub focus_tool: &'static str,
+    /// Home's status card: watching N tools.
+    pub watching_tools_one: &'static str,
+    pub watching_tools: &'static str,
+    /// Home's status card's second line.
+    pub waiting_for_you_one: &'static str,
+    pub waiting_for_you: &'static str,
+    /// Joined to the line above with a middle dot.
+    pub worth_a_second_look: &'static str,
+    pub nothing_waiting: &'static str,
+    /// Home's History card, before anything was contributed.
+    pub nothing_contributed: &'static str,
+    /// Home's History card accessory: `{amount}` is the pending credit.
+    pub credit_pending_amount: &'static str,
+    /// History's filters, in Ron's order. `submitted` is History's status
+    /// word for it (`history_copy::WAITING_TO_BE_SCORED`).
+    pub filter_all: &'static str,
+    pub filter_accepted: &'static str,
+    pub filter_submitted: &'static str,
+    pub filter_quarantined: &'static str,
+    pub filter_withdrawn: &'static str,
+    /// History's list, empty, and empty under a filter.
+    pub history_empty: &'static str,
+    pub history_filter_empty: &'static str,
+    /// A History row's way into its details.
+    pub open: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
 #[must_use]
 pub fn monitor_screens_copy() -> MonitorScreensCopy {
     MonitorScreensCopy {
-        computer: "Computer",
-        commons: "Commons",
+        computer: "This computer",
+        commons: "Library \u{00b7} commons",
         waiting: "Waiting",
         folders: "Folders",
         watched: "Watched",
         off: "Off",
         on: "On",
         connected: "Connected",
-        reduce: "Reduce",
-        enlarge: "Enlarge",
+        reduce: "Zoom map out",
+        enlarge: "Zoom map in",
         calls: "Calls",
         models: "Models",
         priced: "Priced",
@@ -869,12 +925,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
         settings_sections: "Settings sections",
         close: "Close",
-        view: "View",
+        view: "View options",
         graph: "Graph",
         show_ignored_folders: "Show ignored folders",
         focus: "Focus",
-        previous: "Previous",
-        next: "Next",
+        previous: "Previous period",
+        next: "Next period",
         credit_pending: "Credit pending",
         open_traces: "Open Traces",
         quit: "Quit…",
@@ -906,19 +962,46 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
                 but this build could not read how many or why.",
         },
         history_actions: MonitorHistoryActionsCopy {
-            request_refresh: "Check for updates",
-            requesting: "Checking for updates\u{2026}",
+            request_refresh: "Request server refresh",
+            requesting: "Requesting\u{2026}",
             refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
             refresh_failed: "Could not ask for updates. Nothing changed; try again.",
-            checking_account: "Reading your account\u{2026}",
-            sign_in_to_withdraw: "Sign in to your account",
-            waiting_for_sign_in: "Signing in\u{2026}",
-            complete_sign_in: "Finish signing in in your browser, then come back here.",
+            checking_account: "Checking account session\u{2026}",
+            sign_in_to_withdraw: "Sign in to withdraw",
+            waiting_for_sign_in: "Waiting for sign-in\u{2026}",
+            complete_sign_in: "Complete sign-in in your browser. This may take up to five minutes.",
             sign_in_inactive: "Sign-in finished, but this device is still signed out of your \
                 Trace Commons account. Sign in again to withdraw.",
             sign_in_unverified: "Sign-in finished, but your account could not be checked. \
                 Sign in again before withdrawing.",
             sign_in_failed: "Sign-in did not finish. Nothing was withdrawn; sign in again to withdraw.",
+        },
+        shell: MonitorShellCopy {
+            show_graph: "Show the graph",
+            hide_graph: "Hide the graph",
+            show_map: "Show the flow map",
+            hide_map: "Hide the flow map",
+            show_inspector: "Show the inspector",
+            hide_inspector: "Hide the inspector",
+            focus_needs_selection: "Select a tool, project or session first",
+            focus_whole_map: "Back to the whole map",
+            focus_tool: "Show {tool} in the map",
+            watching_tools_one: "Watching 1 tool",
+            watching_tools: "Watching {count} tools",
+            waiting_for_you_one: "1 session waiting for you",
+            waiting_for_you: "{count} sessions waiting for you",
+            worth_a_second_look: "{count} worth a second look",
+            nothing_waiting: "Nothing waiting for you",
+            nothing_contributed: "Nothing contributed from this machine yet.",
+            credit_pending_amount: "{amount} credit pending",
+            filter_all: "All",
+            filter_accepted: "In commons",
+            filter_submitted: crate::history_copy::WAITING_TO_BE_SCORED,
+            filter_quarantined: "Privacy review",
+            filter_withdrawn: "Withdrawn",
+            history_empty: "No submissions recorded on this device yet.",
+            history_filter_empty: "No submissions match this filter.",
+            open: "Open",
         },
     }
 }
@@ -1028,6 +1111,7 @@ mod tests {
             "/undo/",
             "/safeguards/",
             "/history_actions/",
+            "/shell/",
         ] {
             assert!(
                 words.iter().any(|(key, _)| key.starts_with(table)),
@@ -1078,33 +1162,65 @@ mod tests {
         assert!(!traces.counts.project_count_one.contains('{'));
     }
 
-    /// History's refresh and sign-in controls are native words, not Ron's
-    /// #1146 literals: History and withdrawal copy keep native's voice. They
-    /// name no machinery (daemon, core, server) and promise no timing.
+    /// History's refresh and sign-in controls are Ron's #1146 words (owner
+    /// ruling, 2026-10-06). The lines #1146 has no sentence for -- the
+    /// refresh outcome and the sign-in results, where it shows raw error
+    /// text -- stay native and name no machinery.
     #[test]
-    fn history_actions_speak_in_native_voice() {
-        let words = words_of(&monitor_screens_copy().history_actions);
-        assert_eq!(words.len(), 11, "every history action is read");
-        let ron = [
-            "Request server refresh",
-            "Sign in to withdraw",
-            "Refresh requested. The daemon checks server results asynchronously.",
-            "Refresh request failed. Try again when the core is available.",
-            "Checking account session\u{2026}",
-            "Waiting for sign-in\u{2026}",
-            "Complete sign-in in your browser. This may take up to five minutes.",
-        ];
-        for (key, word) in &words {
+    fn history_actions_speak_in_rons_words() {
+        let copy = monitor_screens_copy().history_actions;
+        assert_eq!(words_of(&copy).len(), 11, "every history action is read");
+        assert_eq!(copy.request_refresh, "Request server refresh");
+        assert_eq!(copy.requesting, "Requesting\u{2026}");
+        assert_eq!(copy.checking_account, "Checking account session\u{2026}");
+        assert_eq!(copy.sign_in_to_withdraw, "Sign in to withdraw");
+        assert_eq!(copy.waiting_for_sign_in, "Waiting for sign-in\u{2026}");
+        assert_eq!(
+            copy.complete_sign_in,
+            "Complete sign-in in your browser. This may take up to five minutes."
+        );
+        for (key, word) in [
+            ("refresh_requested", copy.refresh_requested),
+            ("refresh_failed", copy.refresh_failed),
+            ("sign_in_inactive", copy.sign_in_inactive),
+            ("sign_in_unverified", copy.sign_in_unverified),
+            ("sign_in_failed", copy.sign_in_failed),
+        ] {
             assert!(!word.is_empty(), "{key} is empty");
-            assert!(
-                !ron.contains(&word.as_str()),
-                "{key} is Ron's literal: {word}"
-            );
             let lower = word.to_lowercase();
-            for machinery in ["daemon", "core", "server", "asynchronous", "minute"] {
+            for machinery in ["daemon", "core", "server", "asynchronous"] {
                 assert!(!lower.contains(machinery), "{key} says {machinery}: {word}");
             }
         }
+    }
+
+    /// Ron's #1146 shell words, verbatim, with his numbers as holes and a
+    /// singular of its own wherever he pluralised.
+    #[test]
+    fn the_shell_words_are_rons() {
+        let screens = monitor_screens_copy();
+        let shell = &screens.shell;
+        for (key, word) in words_of(shell) {
+            assert!(!word.is_empty(), "{key} is empty");
+        }
+        assert_eq!(screens.view, "View options");
+        assert_eq!(screens.previous, "Previous period");
+        assert_eq!(screens.next, "Next period");
+        assert_eq!(screens.computer, "This computer");
+        assert_eq!(shell.show_map, "Show the flow map");
+        assert!(shell.focus_tool.contains("{tool}"));
+        assert!(shell.watching_tools.contains("{count}"));
+        assert!(!shell.watching_tools_one.contains('{'));
+        assert!(!shell.waiting_for_you_one.contains('{'));
+        assert!(shell.credit_pending_amount.contains("{amount}"));
+        // The submitted filter is History's own status word.
+        assert_eq!(
+            shell.filter_submitted,
+            crate::history_copy::WAITING_TO_BE_SCORED
+        );
+        // Withdrawn is a filter word, never "by you": it also gathers
+        // withdrawals this machine did not make.
+        assert!(!shell.filter_withdrawn.contains("by you"));
     }
 
     /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]
@@ -1139,10 +1255,10 @@ mod tests {
 
     #[test]
     fn an_unknown_decision_count_is_never_zero() {
-        assert_eq!(decisions_owed_text(None), "Decision count unavailable");
+        assert_eq!(decisions_owed_text(None), "Decisions owed unavailable");
         assert_eq!(decisions_owed_text(Some(0)), "");
-        assert_eq!(decisions_owed_text(Some(1)), "1 decision waiting");
-        assert_eq!(decisions_owed_text(Some(120)), "120 decisions waiting");
+        assert_eq!(decisions_owed_text(Some(1)), "1 decision owed");
+        assert_eq!(decisions_owed_text(Some(120)), "120 decisions owed");
         assert_ne!(decisions_owed_text(None), decisions_owed_text(Some(0)));
     }
 

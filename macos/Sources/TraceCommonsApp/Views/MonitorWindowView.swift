@@ -499,13 +499,13 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                         GlassToolbarButton(MonitorShellWords.view, systemImage: "line.3.horizontal", expanded: viewMenu) {
                             viewMenu.toggle()
                         }
-                        GlassToolbarButton(MonitorShellWords.graph, systemImage: "chart.bar.xaxis", pressed: showsGraph) {
+                        GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph), systemImage: "chart.bar.xaxis", pressed: showsGraph) {
                             showsGraph.toggle()
                         }
-                        GlassToolbarButton(String(localized: "Map", comment: "Map pane toggle"), systemImage: "map", pressed: showsMap) {
+                        GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), systemImage: "map", pressed: showsMap) {
                             showsMap.toggle()
                         }
-                        GlassToolbarButton(String(localized: "Inspector", comment: "Inspector pane toggle"), systemImage: "sidebar.right", pressed: showsInspector) {
+                        GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector), systemImage: "sidebar.right", pressed: showsInspector) {
                             showsInspector.toggle()
                         }
                     }
