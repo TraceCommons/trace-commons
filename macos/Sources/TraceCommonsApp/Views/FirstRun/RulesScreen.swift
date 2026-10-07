@@ -268,10 +268,11 @@ enum RulesScreenLayout {
         }
     }
 
-    /// The retry beside `rules.unavailable`: the first run's own retry word,
-    /// the one Folders and Tools offer when discovery fails.
+    /// The retry beside `rules.unavailable`: Rules' own word, `rules.retry`
+    /// (owner ruling, 2026-10-06), not the one Folders and Tools offer when
+    /// discovery fails.
     static func retryTitle(_ copy: FirstRunCopy) -> String {
-        copy.folders.retry
+        copy.rules.retry
     }
 
     /// Continue waits for the folders: never while they are loading or

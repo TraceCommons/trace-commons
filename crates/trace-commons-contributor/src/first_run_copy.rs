@@ -32,7 +32,7 @@
 //!   `sign_in_failed` (the core's existing sign-in line), so leaving Folders
 //!   or Tools never stops in silence, and `settings_failed` for a changed
 //!   folder declaration the running daemon refused.
-//! - Rules adds `unavailable` for folders the daemon could not
+//! - Rules adds `unavailable` and `retry` for folders the daemon could not
 //!   read, `sessions_unavailable` for one folder's past sessions, and
 //!   `past_sessions_watch_only`: watching only queues the picked past
 //!   sessions on this Mac, and the card says they wait there.
@@ -247,9 +247,12 @@ pub struct RulesCopy {
     pub never_count: &'static str,
     pub never_label: &'static str,
     /// The folders could not be read; Continue stays disabled, and the
-    /// card offers `folders.retry`. No screen has a Back (Ron's review of
-    /// #1235, item 9), so it does not say to go back. Approved 2026-10-06.
+    /// card offers `retry`. No screen has a Back (Ron's review of #1235,
+    /// item 9), so it does not say to go back. Approved 2026-10-06.
     pub unavailable: &'static str,
+    /// Reads the folders again after `unavailable`: Rules' own word, not
+    /// Folders' `retry`. Approved 2026-10-06.
+    pub retry: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
     /// Watching only: the past-session card's note. Start queues the picked
@@ -470,6 +473,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
             unavailable: "Couldn't read repos from your sessions.",
+            retry: "Try again",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
             weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
@@ -693,7 +697,9 @@ mod tests {
         assert!(!copy.rules.unavailable.contains("Go back"));
         assert!(!copy.rules.unavailable.contains("Back"));
         assert_ne!(copy.rules.unavailable, copy.folders.discovery_failed);
-        assert!(!copy.folders.retry.trim().is_empty());
+        // Rules has its own retry word, not Folders' "Look again".
+        assert_eq!(copy.rules.retry, "Try again");
+        assert_ne!(copy.rules.retry, copy.folders.retry);
     }
 
     /// Enroll runs only after the invite was looked up and accepted, so its

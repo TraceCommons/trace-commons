@@ -159,6 +159,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let neverLabel: String
         /// The folders could not be read.
         public let unavailable: String
+        /// Reads the folders again after `unavailable`.
+        public let retry: String
         /// One folder's past sessions could not be read.
         public let sessionsUnavailable: String
         /// Watching only: picked past sessions wait on this Mac.

@@ -334,7 +334,9 @@ final class RulesScreenTests: XCTestCase {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         XCTAssertFalse(RulesScreenLayout.canContinue(projects: nil))
         XCTAssertTrue(RulesScreenLayout.canContinue(projects: []))
-        XCTAssertEqual(RulesScreenLayout.retryTitle(copy), copy.folders.retry)
+        XCTAssertEqual(RulesScreenLayout.retryTitle(copy), copy.rules.retry)
+        XCTAssertEqual(copy.rules.retry, "Try again")
+        XCTAssertNotEqual(copy.rules.retry, copy.folders.retry)
         XCTAssertFalse(copy.rules.unavailable.contains("Go back"))
 
         let url = URL(fileURLWithPath: #filePath)
