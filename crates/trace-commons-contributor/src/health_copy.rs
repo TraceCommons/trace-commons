@@ -218,6 +218,49 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
     }
 }
 
+/// What a screen says when it asked for something to show and the answer
+/// did not arrive or could not be read. It may be shown while the
+/// background service is running (one screen's read failed, not the
+/// service), so it claims neither that the service is down nor that what is
+/// on screen is a last-known answer. A failed read changes nothing, which is
+/// the data consequence it states. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+pub const READ_UNAVAILABLE: &str =
+    "This couldn't be read just now. Nothing has changed. Try again in a moment.";
+
+/// The button beside [`core_down_copy`] in a shell that can ask its
+/// background service to start again, and the same button while it is
+/// asking. Not part of [`core_down_copy`] itself: nothing in the core
+/// restarts a stopped service, so only a shell that hosts one offers this.
+/// DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+pub const RETRY_STARTUP: &str = "Try again";
+/// See [`RETRY_STARTUP`]. DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+pub const RETRYING_STARTUP: &str = "Trying again…";
+
+/// Every status line a shell shows around a failed read or request, in one
+/// bundle so a shell asks once: the core-down banner, the read-unavailable
+/// line, the request-failed line (the monitor's, so the two cannot drift),
+/// and the start-again button's two states.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ShellStatusCopy {
+    pub core_down: HealthLineCopy,
+    pub read_unavailable: &'static str,
+    pub request_failed: &'static str,
+    pub retry_startup: &'static str,
+    pub retrying_startup: &'static str,
+}
+
+/// The status lines, built from the lines above and the monitor's.
+#[must_use]
+pub fn shell_status_copy() -> ShellStatusCopy {
+    ShellStatusCopy {
+        core_down: core_down_copy(),
+        read_unavailable: READ_UNAVAILABLE,
+        request_failed: crate::preview_copy::MONITOR_REQUEST_FAILED,
+        retry_startup: RETRY_STARTUP,
+        retrying_startup: RETRYING_STARTUP,
+    }
+}
+
 /// A count with thousands separators, `1,000` rather than `1000`.
 fn format_count(n: u64) -> String {
     let digits = n.to_string();

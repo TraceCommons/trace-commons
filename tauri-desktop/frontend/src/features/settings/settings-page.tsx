@@ -2,6 +2,7 @@ import { Button } from "@/components/ui/button";
 import { PageHeader } from "../../components/page-header";
 import { RouteDisclosurePanel } from "../../components/route-disclosure";
 import { useCoreStatus } from "../../lib/tauri/use-core-status";
+import { useShellStatusLines } from "../../lib/tauri/use-contributor-copy";
 import { AuditPanel } from "./components/audit-panel";
 import { AutomaticGrantPanel } from "./components/automatic-grant-panel";
 import { BehaviorSettingsPanel } from "./components/behavior-settings-panel";
@@ -42,6 +43,7 @@ export function SettingsPage({
   /** Opens the Flow 1 grant screens again (K10). */
   onTurnOnAutomaticContributing?: () => void;
 } = {}) {
+  const lines = useShellStatusLines();
   const settings = useSettings();
   const core = useCoreStatus();
   const daemon = useDaemonControl();
@@ -75,7 +77,7 @@ export function SettingsPage({
       )}
       {settings.state === "error" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Settings unavailable. Refresh after Rust core starts.
+          {lines.readUnavailable}
         </p>
       )}
       {core.data && (

@@ -21,6 +21,15 @@ function title(value: Record<string, unknown>) {
     throw new Error("Invalid onboarding field: title");
   return raw;
 }
+// A scope's tag is the core's (`consent_copy::scope_tag`). A daemon from
+// before the tag sends none, and the row is then drawn without one rather
+// than refused: the tag adds to the title, and the shell types no stand-in.
+function tag(value: Record<string, unknown>): string | null {
+  const raw = value.tag;
+  if (raw === undefined || raw === null || raw === "") return null;
+  if (typeof raw !== "string") throw new Error("Invalid onboarding field: tag");
+  return raw;
+}
 function boolean(value: Record<string, unknown>, key: string) {
   if (typeof value[key] !== "boolean")
     throw new Error(`Invalid onboarding field: ${key}`);
@@ -40,6 +49,7 @@ export function parseConsentOptions(value: unknown): ConsentOption[] {
       description: string(scope, "description"),
       always_on: boolean(scope, "always_on"),
       grants_data_use: boolean(scope, "grants_data_use"),
+      tag: tag(scope),
     };
   });
 }

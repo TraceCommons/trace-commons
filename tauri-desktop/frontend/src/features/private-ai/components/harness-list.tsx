@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
 import type { HarnessList, HarnessPlan } from "../api/harness-api";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 
 export function HarnessListPanel({
   data,
@@ -22,6 +23,7 @@ export function HarnessListPanel({
   onCommit: () => Promise<void>;
   onCancel: () => void;
 }) {
+  const lines = useShellStatusLines();
   const rows = data?.harnesses ?? [];
   const view = data?.view;
   return (
@@ -68,7 +70,7 @@ export function HarnessListPanel({
       )}
       {state === "error" && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Configured tools unavailable. Refresh after Rust core starts.
+          {lines.readUnavailable}
         </p>
       )}
       {state === "ready" && rows.length === 0 && (
