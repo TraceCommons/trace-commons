@@ -19,6 +19,28 @@ final class GlassSourceRowTests: XCTestCase {
         XCTAssertNil(answer.evidence)
     }
 
+    /// Kristi b#10: a declared folder of exported traces has a row of its
+    /// own while the daemon reports one watched or turned off: the core's
+    /// line for that mode, and an off switch only while it is watched. With
+    /// none declared there is no row. The off switch writes exactly the
+    /// `trajectory_source` off declaration.
+    func test_aTrajectoryFolderHasARowWithAnOffSwitch() throws {
+        let copy = try XCTUnwrap(TCSourceChecks.settingsCopy()?.trajectory)
+        let watched = try XCTUnwrap(TrajectoryRowState.answer(copy: copy, mode: "watch"))
+        XCTAssertEqual(watched.line, copy.watching)
+        XCTAssertTrue(watched.canTurnOff)
+        let off = try XCTUnwrap(TrajectoryRowState.answer(copy: copy, mode: "off"))
+        XCTAssertEqual(off.line, copy.off)
+        XCTAssertFalse(off.canTurnOff)
+        XCTAssertNil(TrajectoryRowState.answer(copy: copy, mode: "unset"))
+        XCTAssertNil(TrajectoryRowState.answer(copy: copy, mode: nil))
+        XCTAssertTrue(copy.explanation.contains("wait for you"))
+        let params = TrajectoryRowState.offParams
+        XCTAssertEqual(params.count, 1)
+        XCTAssertEqual(
+            (params[SessionRoots.trajectorySettingsKey] as? [String: String]), ["mode": "off"])
+    }
+
     /// Undecided with no mode shows the candidate, and with no candidate the
     /// core's no-candidate sentence, never a path this shell invented.
     func test_undecidedShowsTheCandidateOrTheCoresNoCandidateLine() throws {

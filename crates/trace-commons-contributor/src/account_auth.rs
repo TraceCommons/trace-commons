@@ -126,6 +126,19 @@ pub(crate) fn try_load_session_with_snapshot(
     }))
 }
 
+impl LoadedAccountSession {
+    /// The `binding_state` stored with this session when it was signed in
+    /// (`native_identity::persist_session`), or `None` for a record that has
+    /// none (an older record, or one an enrolment wrote).
+    pub(crate) fn stored_binding_state(&self) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(&self.raw)
+            .ok()?
+            .get("binding_state")?
+            .as_str()
+            .map(str::to_owned)
+    }
+}
+
 /// Whether a session is still worth presenting: not expired, and not about
 /// to be. The same test [`try_load_session_with_snapshot`] applies on load,
 /// for a caller that holds a loaded session across time.

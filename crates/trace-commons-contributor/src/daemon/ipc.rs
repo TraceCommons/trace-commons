@@ -1825,6 +1825,11 @@ impl DaemonShared {
             "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
+            // Additive. `consent-scopes-not-chosen` while nothing may be sent
+            // under the enrolment because its scopes were saved by enrolment
+            // and never chosen; `null` otherwise. Label only. See
+            // `config::consent_hold`.
+            "consent_hold": crate::config::consent_hold(cfg.as_ref()),
             "paused": self.is_paused(now),
             "queue_depth": queue.pending().len(),
             // Additive (K6). The badge's exact count: `Pending` entries that
@@ -2649,6 +2654,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
         "preview-unsure-spans-requires-async",
     ),
     ("quiesce", "quiesce-requires-async"),
+    ("include_past_sessions", "past-sessions-requires-async"),
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
     ("enroll", "enroll-requires-async"),
@@ -3196,6 +3202,10 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
 /// every project a declared source lists now, so a folder is answerable
 /// before the first discovery pass. An id that resolves to nothing is
 /// refused, never answered with an empty list.
+///
+/// `sessions` holds the newest `MAX_SESSIONS_PER_INCLUDE` rows and `total`
+/// counts them; `not_listed` is how many older sessions the folder has
+/// beyond those (`past_sessions::listed_page`).
 fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
         return Response::err(
@@ -3212,6 +3222,7 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_PROJECT_ID_UNRECOGNIZED);
     };
     let rows = super::past_sessions::rows_for(shared, &discovered, &project_key, Utc::now());
+    let (rows, not_listed) = super::past_sessions::listed_page(rows);
     let mode = shared
         .policy
         .lock()
@@ -3222,6 +3233,7 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
         serde_json::json!({
             "total": rows.len(),
             "sessions": rows,
+            "not_listed": not_listed,
             "project_mode": mode,
         }),
     )
@@ -3231,9 +3243,11 @@ fn handle_list_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
 /// folder's past sessions, each named by the opaque id `list_past_sessions`
 /// gave it. See `past_sessions::include_past_sessions` for the rules.
 ///
-/// `project_id` resolves as it does for the listing. `session_ids` is a
-/// non-empty array of strings, at most `MAX_SESSIONS_PER_INCLUDE` distinct
-/// ones; anything else is refused before the walk.
+/// `project_id` resolves as it does for the listing. `session_ids` is an
+/// array of strings with at least one id: more than
+/// `MAX_SESSIONS_PER_INCLUDE` entries, duplicates counted, is refused before
+/// any string is copied or the walk is taken; so is anything else that is
+/// not such an array.
 async fn handle_include_past_sessions(shared: &DaemonShared, req: &Request) -> Response {
     use super::past_sessions::{LABEL_SESSION_IDS_INVALID, LABEL_TOO_MANY_SESSIONS};
     let Some(project_id) = req.params.get("project_id").and_then(|v| v.as_str()) else {
@@ -3728,7 +3742,7 @@ fn grant_automatic_refusal(
     }
     // R7: a scope nobody chose never carries a standing grant, and an empty
     // list names nothing to grant under.
-    if !cfg.consent_scopes_chosen || cfg.consent_scopes.is_empty() {
+    if cfg.consent_scopes_chosen != Some(true) || cfg.consent_scopes.is_empty() {
         return Some(ERR_GRANT_SCOPES_NOT_CHOSEN);
     }
     // The witness shown on the disclosure screen, or `null` for none. It
@@ -4038,6 +4052,14 @@ fn handle_set_project_mode(shared: &DaemonShared, req: &Request) -> Response {
     // never be armed, terms or not.
     if let Err(e) = ProjectPolicy::check_mode(&key, mode) {
         return Response::err(req.id, ERR_BAD_PARAMS, &one_line_label(&e.to_string()));
+    }
+    // Arming sends on the contributor's behalf, so it needs scopes they
+    // chose. Ask me and Never only ever stop sends, and stay allowed.
+    if mode == ProjectMode::AutoUpload {
+        let cfg = shared.store.load_config().ok().flatten();
+        if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
+            return Response::err(req.id, ERR_BAD_PARAMS, label);
+        }
     }
     // Fail closed: a grant needs terms to be a grant of. Arming with none --
     // no config yet, or one that could not be read -- would leave the next
@@ -4349,6 +4371,13 @@ fn handle_set_contribution_override(shared: &DaemonShared, req: &Request) -> Res
     // that could not be read -- it is refused, fail closed, rather than
     // leaving the next sweep to adopt whatever config then exists.
     let grant = if mode == ProjectMode::AutoUpload {
+        // Arming everything, so held to arming one folder's rule: never
+        // under scopes nobody chose.
+        if let Some(label) =
+            crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
+        {
+            return Response::err(req.id, ERR_BAD_PARAMS, label);
+        }
         let Some(terms) = super::grant_terms::GrantTerms::in_force(shared) else {
             return Response::err(req.id, ERR_UNAVAILABLE, "arming-terms-unavailable");
         };
@@ -5038,16 +5067,19 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // config records neither, which the uploader treats as
     // "unknown, re-ask" -- fail-closed.
     let cfg = shared.store.load_config().ok().flatten();
+    // An approval is a decision to send under the enrolment, and an
+    // enrolment whose scopes nobody chose sends nothing: refused, before
+    // anything is approved or recorded, in every form (one entry, a
+    // project, all).
+    if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
+        return Response::err(req.id, ERR_BAD_PARAMS, label);
+    }
     let scopes = cfg
         .as_ref()
         .map(|c| c.consent_scopes.clone())
         .unwrap_or_default();
-    // One instant for the whole call, so `approve: {"all": true}`
-    // holds every entry it approved for the same window and reports
-    // one deadline that is true of all of them -- rather than a
-    // deadline that happens to describe the first entry and expires
-    // early for the rest.
-    let approved_at = Utc::now();
+    // The approval instant is taken by `approve_as_a_person`, under the
+    // lock that approves; see there.
     let approval_hold_secs = shared
         .settings
         .lock()
@@ -5228,8 +5260,8 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         inputs: inputs.as_deref(),
         verdict: verdict.as_deref(),
         correction: correction.as_deref(),
-        approved_at,
         approval_hold_secs,
+        person_included: false,
     };
     let ApprovedBatch {
         approved_ids,
@@ -5285,9 +5317,10 @@ pub(super) struct ApprovalTerms<'a> {
     pub inputs: Option<&'a str>,
     pub verdict: Option<&'a str>,
     pub correction: Option<&'a str>,
-    /// One instant for the whole call; see `handle_approve`.
-    pub approved_at: chrono::DateTime<Utc>,
     pub approval_hold_secs: u64,
+    /// The first-run picker's include: every entry approved is marked
+    /// [`super::queue::QueueEntry::person_included`].
+    pub person_included: bool,
 }
 
 /// What one batch of a person's approvals came to. Every id the batch was
@@ -5320,8 +5353,8 @@ pub(super) async fn approve_as_a_person(
         inputs,
         verdict,
         correction,
-        approved_at,
         approval_hold_secs,
+        person_included,
     } = *terms;
     // Entries nobody previewed have no artifact behind them. Build one now.
     //
@@ -5421,7 +5454,16 @@ pub(super) async fn approve_as_a_person(
         }
     }
     let skipped_ids: std::collections::HashSet<Uuid> = skipped.iter().map(|(id, _)| *id).collect();
+    // Policy before queue, as everywhere else: the folder rules are read
+    // again under the lock that approves (see the Never check below).
+    let policy = shared.policy.lock().expect("policy lock");
     let mut queue = shared.queue.lock().expect("queue lock");
+    // One instant for the whole batch, so every entry it approves is held
+    // for the same window and the one deadline reported is true of all of
+    // them. Taken here, under the lock that approves and after every
+    // preview build, not when the call began: a slow build must not eat the
+    // undo window, which then ends before the approval is even saved.
+    let approved_at = Utc::now();
     // Written under the same lock that approves, and saved by the same
     // `queue.save` below, so the refusal and the approvals in this batch
     // land together or not at all.
@@ -5531,7 +5573,25 @@ pub(super) async fn approve_as_a_person(
                 continue;
             }
         }
+        // Never, set while this call built its previews, is honoured here:
+        // setting it refuses only `Pending` entries, so an approval landing
+        // after it would otherwise go out. A later Never leaves an approval
+        // made before it alone (`Queue::refuse_pending_for_project`).
+        if policy.holds_every_send() {
+            skipped.push((id, ERR_CONTRIBUTION_OVERRIDE_NEVER));
+            continue;
+        }
+        if queue
+            .get(id)
+            .is_some_and(|e| policy.resolve(&e.project_key) == ProjectMode::Ignore)
+        {
+            skipped.push((id, super::past_sessions::LABEL_PROJECT_MODE_NEVER));
+            continue;
+        }
         if queue.approve(id, scopes, inputs, verdict, correction, Some(approved_at)) {
+            if person_included {
+                queue.mark_person_included(id);
+            }
             approved_ids.push(id);
         } else {
             // `Queue::approve` refuses anything not `Pending`, and this
@@ -5573,6 +5633,7 @@ pub(super) async fn approve_as_a_person(
         return Err("queue-write-failed");
     }
     drop(queue);
+    drop(policy);
     shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
     Ok(ApprovedBatch {
         approved_ids,
@@ -7676,9 +7737,21 @@ mod tests {
     /// records the terms in force and is refused without a config.
     fn enrolled_shared() -> DaemonShared {
         let s = shared();
-        s.store
-            .save_config(&crate::commands::unenrolled_preview_config())
-            .unwrap();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        // A contributor who chose their scopes: the one every send path
+        // serves. `unchosen_shared` is the enrolment nobody chose for.
+        cfg.consent_scopes_chosen = Some(true);
+        s.store.save_config(&cfg).unwrap();
+        s
+    }
+
+    /// An enrolment whose consent scopes were saved by enrolment and never
+    /// chosen (`consent_scopes_chosen: Some(false)`).
+    fn unchosen_shared() -> DaemonShared {
+        let s = shared();
+        let mut cfg = crate::commands::unenrolled_preview_config();
+        cfg.consent_scopes_chosen = Some(false);
+        s.store.save_config(&cfg).unwrap();
         s
     }
 
@@ -8017,6 +8090,7 @@ mod tests {
         cfg.tenant_id = "synthetic-tenant".into();
         cfg.user_subject = "synthetic-user".into();
         cfg.consent_scopes = vec!["debugging_evaluation".into()];
+        cfg.consent_scopes_chosen = Some(true);
         let roots = s.source_roots_with_routing();
         let sources = crate::source::all_sources(&roots);
         let entry = s.queue.lock().unwrap().get(id).unwrap().clone();
@@ -8652,14 +8726,17 @@ mod tests {
     /// without a matching removal here would put that path on the wire.
     #[test]
     fn the_settings_blob_reports_source_modes_and_never_a_source_path() {
+        // An absolute path on every platform: a declared folder must be one
+        // (`/private/...` is relative on Windows and is refused there).
+        let sentinel = std::env::temp_dir()
+            .join("source-path-sentinel")
+            .to_string_lossy()
+            .into_owned();
         for source in crate::source::declarable_source_names() {
             let key = crate::daemon::settings::source_settings_key(source)
                 .expect("every registered source has a settings key");
             for (declaration, expected) in [
-                (
-                    serde_json::json!({"mode":"watch","path":"/private/source-path-sentinel"}),
-                    "watch",
-                ),
+                (serde_json::json!({"mode":"watch","path":sentinel}), "watch"),
                 (serde_json::json!({"mode":"off"}), "off"),
                 (serde_json::Value::Null, "unset"),
             ] {
@@ -8683,7 +8760,9 @@ mod tests {
             &mut settings,
             &serde_json::json!({"trajectory_source": {
                 "mode": "watch",
-                "path": "/private/trajectory-folder-sentinel"
+                "path": std::env::temp_dir()
+                    .join("trajectory-folder-sentinel")
+                    .to_string_lossy(),
             }}),
         )
         .unwrap();
@@ -9535,7 +9614,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -14307,7 +14386,7 @@ mod tests {
         s.store
             .save_config(&crate::config::ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -14601,7 +14680,7 @@ mod tests {
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 58);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 59);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -16305,5 +16384,125 @@ mod tests {
         let status = s.status_value();
         assert_eq!(status["contribution_mode"], "auto_upload");
         assert_eq!(status["contribution_mode_partial"], true);
+    }
+
+    // -- Sending needs chosen consent scopes -------------------------------
+
+    /// Under an enrolment whose scopes nobody chose, every way of sending is
+    /// refused with one fixed label, before anything is approved, armed or
+    /// recorded: `approve` in all three forms, arming a folder, and an
+    /// `auto_upload` contribution override. What only stops sends -- Ask me,
+    /// Never -- is still allowed.
+    #[tokio::test]
+    async fn every_send_path_is_refused_while_consent_scopes_are_not_chosen() {
+        let s = unchosen_shared();
+        let key = "/tmp/unchosen-folder";
+        let id = seed_entry(&s, key);
+        let project_id = crate::daemon::policy::project_id_for(key);
+        let audit_before = audit::load(&s.store).unwrap_or_default().len();
+        for params in [
+            serde_json::json!({"entry_id": id}),
+            serde_json::json!({"all": true}),
+            serde_json::json!({"project_id": project_id}),
+        ] {
+            let r = handle_request_async(&s, &req("approve", params.clone())).await;
+            let err = r
+                .error
+                .unwrap_or_else(|| panic!("approve {params} refused"));
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, crate::config::CONSENT_SCOPES_NOT_CHOSEN);
+        }
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "auto_upload"}),
+            ),
+        );
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        let r = set_override(
+            &s,
+            serde_json::json!({"mode": "auto_upload", "confirm": true}),
+        );
+        assert_eq!(
+            r.error.map(|e| e.message),
+            Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string())
+        );
+        assert_eq!(
+            s.queue.lock().unwrap().get(id).unwrap().state,
+            super::super::queue::QueueState::Pending
+        );
+        assert_eq!(
+            s.policy.lock().unwrap().resolve(key),
+            ProjectMode::NotifyOnly
+        );
+        assert!(s.policy.lock().unwrap().contribution_override.is_none());
+        assert_eq!(
+            audit::load(&s.store).unwrap_or_default().len(),
+            audit_before,
+            "a refusal records nothing"
+        );
+
+        // Stopping sends needs no choice.
+        let r = handle_request(
+            &s,
+            &req(
+                "set_project_mode",
+                serde_json::json!({"project_id": project_id, "mode": "ignore"}),
+            ),
+        );
+        assert!(r.error.is_none(), "{:?}", r.error);
+        let r = set_override(&s, serde_json::json!({"mode": "ignore"}));
+        assert!(r.error.is_none(), "{:?}", r.error);
+    }
+
+    /// Once the scopes are chosen the same calls go through, and a config
+    /// that predates the record (no key at all) was never held.
+    #[tokio::test]
+    async fn a_choice_or_a_legacy_config_lets_the_send_paths_through() {
+        for chosen in [Some(true), None] {
+            let s = unchosen_shared();
+            let mut cfg = s.store.load_config().unwrap().unwrap();
+            cfg.consent_scopes_chosen = chosen;
+            s.store.save_config(&cfg).unwrap();
+            let key = "/tmp/chosen-folder";
+            let id = seed_entry(&s, key);
+            let r = handle_request_async(&s, &req("approve", serde_json::json!({"entry_id": id})))
+                .await;
+            assert_ne!(
+                r.error.map(|e| e.message),
+                Some(crate::config::CONSENT_SCOPES_NOT_CHOSEN.to_string()),
+                "{chosen:?}"
+            );
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_project_mode",
+                    serde_json::json!({"project_id": crate::daemon::policy::project_id_for(key), "mode": "auto_upload"}),
+                ),
+            );
+            assert!(r.error.is_none(), "{chosen:?}: {:?}", r.error);
+        }
+    }
+
+    /// `status.consent_hold` names the hold, label only, so a shell can say
+    /// why nothing is sent; `null` with no enrolment, a choice, or a config
+    /// that predates the record.
+    #[test]
+    fn status_names_the_consent_hold() {
+        assert_eq!(
+            unchosen_shared().status_value()["consent_hold"],
+            crate::config::CONSENT_SCOPES_NOT_CHOSEN
+        );
+        assert!(enrolled_shared().status_value()["consent_hold"].is_null());
+        assert!(shared().status_value()["consent_hold"].is_null());
+        let s = unchosen_shared();
+        let mut cfg = s.store.load_config().unwrap().unwrap();
+        cfg.consent_scopes_chosen = None;
+        s.store.save_config(&cfg).unwrap();
+        assert!(s.status_value()["consent_hold"].is_null());
     }
 }

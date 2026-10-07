@@ -216,6 +216,21 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         }
     }
 
+    /// Whether the daemon may hold an enrolment, whatever this first run now
+    /// treats as the account: one this run enrolled (an invite, near.ai's),
+    /// one an earlier run left or a passkey Verify bound, and one the person
+    /// signed out of on Join, which the daemon has no call to drop. Watching
+    /// only is not offered while it does: its Start would act under that
+    /// enrolment, whose scopes nobody chose here, and its marker cannot
+    /// finish while the daemon is logged in.
+    public var daemonHoldsEnrolment: Bool {
+        if signedOutOfEnrolment || enrolledInvite != nil || nearAIEnrolled { return true }
+        switch account {
+        case .enrolled, .passkey: return true
+        case .none, .watchOnly, .nearAI, .passkeyChosen: return false
+        }
+    }
+
     /// Answer a tool's row. A folder added for that tool is a row of its
     /// own and keeps its own answer.
     public mutating func answer(_ kind: SourceKind, _ choice: SourceChoice) {

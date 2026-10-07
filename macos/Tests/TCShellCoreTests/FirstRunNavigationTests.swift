@@ -268,6 +268,51 @@ final class FirstRunNavigationTests: XCTestCase {
         )
     }
 
+    /// Kristi's review of #1261: with Back gone, a near.ai sign-in or
+    /// enrolment that keeps failing must not hold the person on Folders or
+    /// Tools. They go back to Join with the near.ai choice cleared, so they
+    /// choose again (near.ai, a passkey, or watch only); every other answer
+    /// is kept, and the daemon is not started twice.
+    func test_aFailedNearAISignInReturnsToJoinWithTheChoiceCleared() {
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.account = .nearAI
+        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/.claude/projects")
+        state.toolAnswers[.codex] = .off
+        state.rules["repo-1"] = .ask
+        state.scopes = ["traces"]
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+
+        let returned = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
+        XCTAssertEqual(returned.step, .join)
+        XCTAssertEqual(returned.account, .none, "near.ai is not kept as the answer")
+        var expected = state
+        expected.step = .join
+        expected.account = .none
+        XCTAssertEqual(returned, expected, "every other answer is kept")
+
+        // Until near.ai is chosen again, no Continue signs in or enrols, so
+        // a session the daemon still keeps is never reused unasked.
+        XCTAssertEqual(FirstRunPlan.calls(for: returned, at: .leaveRoots), [])
+        var watching = returned
+        watching.account = .watchOnly
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .leaveRoots), [])
+        var passkey = returned
+        passkey.account = .passkeyChosen
+        XCTAssertEqual(FirstRunPlan.calls(for: passkey, at: .leaveRoots), [.openPasskeySheets])
+        var again = returned
+        again.account = .nearAI
+        XCTAssertEqual(FirstRunPlan.calls(for: again, at: .leaveRoots), [.nearAILogin, .enrollNearAI])
+    }
+
+    /// Only a near.ai answer is cleared: the function never drops a held
+    /// account.
+    func test_aNearAIFailureKeepsAnyOtherAccount() {
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.account = .passkey(name: "Mac")
+        XCTAssertEqual(FirstRunNavigation.returnToJoin(afterNearAIFailure: state).account, .passkey(name: "Mac"))
+    }
+
     func test_aDeadInviteKeepsAnEarlierEnrolment() {
         var state = FirstRunState(tier: .quick, step: .folders)
         state.invite = "INVITE-2"

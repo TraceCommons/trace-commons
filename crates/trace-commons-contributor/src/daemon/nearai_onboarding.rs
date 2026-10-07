@@ -552,7 +552,7 @@ fn persist_for(
         )),
         witness: Some(commons.witness),
         inference_receipt_endpoint: commons.receipt_endpoint,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
     };
 
@@ -961,8 +961,8 @@ pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
     use super::native_identity::{authenticated, resolve_origin};
     use reqwest::Method;
     use serde_json::json;
-    if shared.store.load_config()?.is_some() {
-        bail!("account-already-enrolled");
+    if let Some(config) = shared.store.load_config()? {
+        return already_enrolled(shared, &config);
     }
     let mut account = crate::account_auth::try_load_session_with_snapshot(&shared.store)?
         .ok_or_else(|| anyhow!("account-session-required"))?;
@@ -988,6 +988,44 @@ pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
     let prepared = prepare(shared, &origin).await?;
     let api = CloudApi::live().map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
     bind_prepared(shared, &api, &origin, account, account_id, prepared).await
+}
+
+/// `account_bind` on a Mac that is already enrolled: the enrolment it holds
+/// may be the signed-in account's own (Welcome back's sign-in, after the
+/// first status reported an enrolment). Answered from local state alone,
+/// with no request and nothing written:
+///
+/// - the session's tenant (decoded from its `tcn1_` token, as
+///   `persist_session` reads it) is the enrolment's `tenant_id`, and
+/// - the session was signed in to a `bound` account (the `binding_state`
+///   stored with it).
+///
+/// Both hold: `{"outcome":"already_enrolled","binding_state":"bound"}`.
+/// Anything else, including no session or a record without a stored state,
+/// keeps the refusal `account-already-enrolled`.
+///
+/// The config records a tenant and no account, so this is a tenant match.
+/// It names one account because a binding row, and so a `bound` state, is
+/// only ever written for a passkey-origin account, and each of those is
+/// created alone in a freshly minted tenant. It grants nothing
+/// `persist_session` had not already accepted when it kept this session
+/// under this enrolment.
+fn already_enrolled(
+    shared: &DaemonShared,
+    config: &crate::config::ContributorConfig,
+) -> Result<serde_json::Value> {
+    let refused = || anyhow!("account-already-enrolled");
+    let session = crate::account_auth::try_load_session_with_snapshot(&shared.store)
+        .ok()
+        .flatten()
+        .ok_or_else(refused)?;
+    let same_tenant =
+        token_tenant(&session.session.access_token).as_deref() == Some(config.tenant_id.as_str());
+    let bound = session.stored_binding_state().as_deref() == Some("bound");
+    if !(same_tenant && bound) {
+        return Err(refused());
+    }
+    Ok(serde_json::json!({"outcome":"already_enrolled","binding_state":"bound"}))
 }
 
 /// Whether `account_bind` runs a ceremony for the signed-in account's
@@ -1330,7 +1368,7 @@ mod native_bind_tests {
                 assert!(!result.to_string().contains("secret"));
                 let cfg = shared.store.load_config().unwrap().unwrap();
                 assert!(cfg.consent_scopes.is_empty());
-                assert!(!cfg.consent_scopes_chosen);
+                assert_eq!(cfg.consent_scopes_chosen, Some(false));
                 assert_eq!(
                     crate::account_auth::try_load_session_with_snapshot(&shared.store)
                         .unwrap()

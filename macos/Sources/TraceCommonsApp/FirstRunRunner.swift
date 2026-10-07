@@ -39,6 +39,9 @@ protocol FirstRunDaemon: AnyObject {
     /// The near.ai login: true once the daemon keeps a near.ai session,
     /// after the browser sign-in when it kept none.
     func nearAILogin() async -> Bool
+    /// End the browser sign-in `nearAILogin` is waiting on
+    /// (`near_ai_credential_cancel`). True only once the daemon took it.
+    func cancelNearAILogin() async -> Bool
     /// Enroll this Mac through that login, with no invite.
     func enrollNearAI() async -> FirstRunNearAIEnrolment
     func saveConsentScopes(_ scopes: [String]) async -> Bool
@@ -106,6 +109,16 @@ final class FirstRunRunner: ObservableObject {
     /// The last invite the daemon looked up and found valid.
     @Published private(set) var lookup: DaemonData.InviteLookup?
     @Published private(set) var isCommitting = false
+    /// The near.ai login without an invite is running, which can wait on
+    /// the browser for up to `NearAILoginPoll.limit`: Folders and Tools
+    /// offer Cancel beside the spinning Continue only while this holds.
+    @Published private(set) var signInWaiting = false
+    /// The login `signInWaiting` covers, so Cancel can end its wait.
+    private var loginTask: Task<Bool, Never>?
+    /// The daemon's answer to a Cancel, awaited before the commit ends so
+    /// a Continue pressed straight after cannot start a sign-in the cancel
+    /// then ends.
+    private var loginCancel: Task<Bool, Never>?
     /// The passkey sheets are asked for: by Create passkey on Join, after
     /// starting the daemon when it was not running (`openPasskeyOnJoin`),
     /// or by the commit that started the daemon for a passkey an earlier
@@ -152,8 +165,10 @@ final class FirstRunRunner: ObservableObject {
     }
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
-    /// only when every call succeeded; a dead invite goes back to Join; any
-    /// other failure leaves the step where it is. Start always ends in
+    /// only when every call succeeded; a dead invite, a near.ai sign-in that
+    /// did not succeed (with an invite or without), or a near.ai enrolment
+    /// without one that was refused, goes back to Join; any other failure
+    /// leaves the step where it is, and so does a cancelled browser wait. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
     /// `completeFailed` when the marker was not written. `refusal` is one
     /// decided before Start (`UsesStart`); once the marker is written it is
@@ -217,10 +232,37 @@ final class FirstRunRunner: ObservableObject {
             state.enrolledInvite = invite
             state.signedOutOfEnrolment = false
         case .signInNearAI:
-            guard await daemon.signInNearAI() else { return fail(.signInFailed) }
+            // With an invite too (owner, 2026-10-07): back to Join with the
+            // choice cleared and the invite and its enrolment kept.
+            guard await daemon.signInNearAI() else {
+                state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
+                return fail(.signInFailed)
+            }
             state.signedIn = true
         case .nearAILogin:
-            guard await daemon.nearAILogin() else { return fail(.signInFailed) }
+            let daemon = self.daemon
+            let login = Task { await daemon.nearAILogin() }
+            loginTask = login
+            signInWaiting = true
+            let signedIn = await login.value
+            signInWaiting = false
+            loginTask = nil
+            // The person cancelled: the step and the near.ai choice stay,
+            // nothing is enrolled even if the sign-in finished meanwhile,
+            // and the next Continue signs in afresh. A cancel the daemon
+            // did not take still ended the wait here, and reads as the
+            // sign-in that did not finish.
+            if let cancel = loginCancel {
+                loginCancel = nil
+                if !(await cancel.value) { failure = .signInFailed }
+                return false
+            }
+            // No Back to leave a sign-in that keeps failing: back to Join,
+            // the choice cleared, which says why (`nearAINotice`).
+            guard signedIn else {
+                state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
+                return fail(.signInFailed)
+            }
         case .enrollNearAI:
             switch await daemon.enrollNearAI() {
             case .enrolled:
@@ -228,6 +270,7 @@ final class FirstRunRunner: ObservableObject {
                 state.signedIn = true
                 state.signedOutOfEnrolment = false
             case .refused(let label):
+                state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.nearAIEnrollFailed(label: label))
             }
         case .openPasskeySheets:
@@ -259,6 +302,20 @@ final class FirstRunRunner: ObservableObject {
             finish()
         }
         return true
+    }
+
+    /// Cancel on Folders or Tools while the near.ai browser sign-in runs:
+    /// the daemon is asked to end its attempt, and the wait ends here
+    /// whatever it answers (fail closed); the commit stops once the daemon
+    /// has answered. Nothing to cancel, nothing done.
+    func cancelSignIn() async {
+        guard signInWaiting, loginCancel == nil, let login = loginTask else { return }
+        signInWaiting = false
+        let daemon = self.daemon
+        let cancel = Task { await daemon.cancelNearAILogin() }
+        loginCancel = cancel
+        login.cancel()
+        _ = await cancel.value
     }
 
     /// Create passkey on Join: the sheets open over Join, as in #1030, with

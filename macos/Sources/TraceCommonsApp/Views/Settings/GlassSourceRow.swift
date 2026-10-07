@@ -61,6 +61,58 @@ enum SourceRowState {
     }
 }
 
+/// The declared folder of exported traces (`trajectory_source`), pure. It
+/// has a row while the daemon reports one watched or turned off, never a
+/// path; the off switch is offered only while it is watched.
+enum TrajectoryRowState {
+    struct Answer: Equatable {
+        let line: String
+        let canTurnOff: Bool
+    }
+
+    static func answer(copy: SourceSettingsCopy.Trajectory, mode: String?) -> Answer? {
+        switch mode {
+        case "watch": return Answer(line: copy.watching, canTurnOff: true)
+        case "off": return Answer(line: copy.off, canTurnOff: false)
+        default: return nil
+        }
+    }
+
+    /// What the off switch writes.
+    static var offParams: [String: Any] {
+        [SessionRoots.trajectorySettingsKey: ["mode": "off"]]
+    }
+}
+
+/// The row for a declared folder of exported traces: the core's words and
+/// one off switch. Presentational, as `GlassSourceRow` is.
+struct GlassTrajectoryRow: View {
+    let copy: SourceSettingsCopy.Trajectory
+    let answer: TrajectoryRowState.Answer
+    var onTurnOff: () -> Void
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                Text(copy.title).glassType(GlassTokens.TypeScale.bodyStrong)
+                Text(copy.explanation)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(answer.line).glassType(GlassTokens.TypeScale.body)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Button(copy.decline) { onTurnOff() }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                        .disabled(!answer.canTurnOff)
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
 /// One agent's session store: what is known about it, what the contributor
 /// has said, and the three ways to answer. Shared by Settings' watched
 /// folders and the Folders onboarding step. Presentational: it holds no

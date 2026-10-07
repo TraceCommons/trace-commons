@@ -12,13 +12,25 @@ struct FirstRunFooter {
     /// The action is running: the button carries a spinner (Ron's Start
     /// sharing).
     let busy: Bool
+    /// A small secondary button beside the spinning action that ends what it
+    /// waits on, when the screen has one (the near.ai browser sign-in).
+    let cancel: Cancel?
     let action: () -> Void
 
-    init(title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, action: @escaping () -> Void) {
+    struct Cancel {
+        let title: String
+        let action: () -> Void
+    }
+
+    init(
+        title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, cancel: Cancel? = nil,
+        action: @escaping () -> Void
+    ) {
         self.title = title
         self.isEnabled = isEnabled
         self.note = note
         self.busy = busy
+        self.cancel = cancel
         self.action = action
     }
 }
@@ -174,6 +186,10 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                     .foregroundStyle(GlassColor.textTertiary)
             }
             Spacer(minLength: 0)
+            if let cancel = footer.cancel {
+                Button(cancel.title, action: cancel.action)
+                    .buttonStyle(GlassButtonStyle(.secondary))
+            }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {
                     if footer.busy { GlassSpinner() }

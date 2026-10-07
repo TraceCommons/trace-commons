@@ -484,7 +484,7 @@ fn enroll(store: &ConfigStore) {
     let device = DeviceIdentity::load_or_generate(store).unwrap();
     let cfg = ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: true,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

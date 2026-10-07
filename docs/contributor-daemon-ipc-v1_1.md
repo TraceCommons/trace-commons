@@ -546,19 +546,19 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208), and with `consent-scopes-not-chosen` in every form while the enrolment's scopes were never chosen (see "Sending needs chosen consent scopes"); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
-| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows, `total`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; nothing is read before the person chooses; `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
-| `include_past_sessions` | `project_id`, `session_ids[]` (1 to 500 distinct) | `approved`, `skipped[]` of `{session_id, label}` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`) or the Never override; writes `past-sessions-included` first. Async entry point only, as `approve`. See "`include_past_sessions`" below |
+| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows (the newest 500), `total`, `not_listed`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; no session is loaded before the person chooses (only what each adapter's discovery already reads); `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
+| `include_past_sessions` | `project_id`, `session_ids[]` (at most 500 ids, duplicates counted; at least one) | `approved`, `skipped[]` of `{session_id, label}`, `approved_entry_ids[]`, `hold_until` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`), the Never override or the live-included limit (`included-sessions-limit`); writes `past-sessions-included` first. Async entry point only: the synchronous one answers `past-sessions-requires-async`. See "`include_past_sessions`" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208); see "The contribution override" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrolment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
@@ -615,6 +615,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "logged_in": false,
   "tenant_id": null,
   "consent_scopes": [],
+  "consent_hold": null,
   "paused": false,
   "queue_depth": 0,
   "decisions_owed": 0,
@@ -1660,6 +1661,7 @@ visited is not in the queue at all. It uses `list_past_sessions` and
     }
   ],
   "total": 2,
+  "not_listed": 0,
   "project_mode": "notify_only"
 }
 ```
@@ -1669,7 +1671,10 @@ The listing walks every declared source's discovery itself rather than the
 watcher's cwd cache, so it is complete before the first discovery pass has
 run (a Rules step shown seconds after Folders started the daemon) and it
 includes sessions no pass has ever visited. It never loads a session: a row
-the queue has not offered is described by its date and size alone.
+the queue has not offered is described by its date and size alone. No
+session is loaded before the person chooses; the walk reads only what each
+adapter's discovery already reads (a file's head for its cwd, a staged
+trajectory's declaration).
 
 `project_id` is required. A missing or non-string one is `bad_params` /
 `project_id-invalid`; an id that resolves to no project the daemon knows --
@@ -1688,6 +1693,8 @@ Each row's `state`:
 | `not_queued` | true | on disk, never offered |
 | `never` | false | the folder's rule is Never; every row it would list is `never` |
 | `still_active` | false | still being written: modified within `quiescence_secs` |
+| `held_for_review` | false | queued, but held for a person's review of that one session, or held when it aged out; an include always skips it `held-for-review` |
+| `ineligible` | false | queued and recorded as one a group `approve` leaves out, for an evidence-admitted contributor (`contributable_in_a_group`); an include skips it `session-ineligible` |
 
 A queued row (`pending`, `approved`, `expired`) carries its queue entry's
 `entry_id`, `started_at`, `duration_secs`, `title`, `size_bytes` and `source`
@@ -1700,8 +1707,12 @@ on a queued entry that has none, as on `list_pending`.
 Kept and dismissed sessions are not listed. Outside a Never folder, neither
 is a session whose latest offer was decided some other way (uploading,
 uploaded, refused, failed): the picker is for sessions still open to a
-choice. A Never folder lists those too, as `never`. `total` is the number of rows
-returned.
+choice. A Never folder lists those too, as `never`. `sessions` holds the
+folder's newest 500 rows, so "Include every past session" of what is listed
+is one include that fits the per-call limit; `total` is the number of rows
+returned and `not_listed` how many older sessions the folder has beyond
+them (0 when none). A shell says how many with the core's
+`rules.not_listed` line.
 
 **No path crosses the socket.** `session_id` is `sess_` and the first 32 hex
 characters of sha256 over the session path's bytes: one-way, and
@@ -1726,7 +1737,9 @@ path; the folder is named only by `project_id`.
   "approved": 1,
   "skipped": [
     { "session_id": "sess_fedcba9876543210fedcba9876543210", "label": "session-still-active" }
-  ]
+  ],
+  "approved_entry_ids": ["5f0c...-uuid"],
+  "hold_until": "2026-10-06T12:00:10Z"
 }
 ```
 
@@ -1734,12 +1747,23 @@ The picker's Continue: approve exactly the sessions named, as a person's
 approval. Each one is pinned to a preview and held for the undo window
 exactly as a click on a card is (`approve` and this method share one
 implementation), and it is recorded as the person's own, so a later change
-of the folder's rule -- back to Ask me, say -- does not take it back.
+of the folder's rule -- back to Ask me, or to Never -- does not take it back.
 "Include every past session in {folder}" is a selection of every id the
-listing returned, never `include_backlog`.
+listing returned (at most 500, see `not_listed`), never `include_backlog`.
+
+`approved_entry_ids` and `hold_until` are `approve`'s: the queue entries
+approved, and when their undo window ends, `null` when nothing was approved
+or the hold is off. The window runs from when the approval lands, under the
+lock that approves, not from when the call began, so a slow include does
+not use it up; Undo is `cancel` on those ids.
+
+Sessions a person included do not count against the watcher's queue cap
+(`max_queue_entries`), so an include never stops the watcher offering new
+sessions. Their own total is bounded instead: at most 500 included sessions
+may be live (pending, approved or uploading) at once.
 
 Dispatched on the async entry point only, as `approve` is; the synchronous
-entry point answers `unknown_method`.
+entry point refuses it `unavailable` / `past-sessions-requires-async`.
 
 **The whole call is validated before anything changes.** Each of these
 refuses every session and records nothing:
@@ -1748,11 +1772,13 @@ refuses every session and records nothing:
 |---|---|
 | `bad_params` / `project_id-invalid` | `project_id` missing or not a string |
 | `bad_params` / `session_ids-invalid` | `session_ids` missing, not an array, holding a non-string, or empty once duplicates are dropped |
-| `bad_params` / `too-many-sessions` | more than 500 ids, checked before any id is read |
+| `bad_params` / `too-many-sessions` | more than 500 ids, duplicates counted, checked before any id is read |
 | `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
 | `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
+| `bad_params` / `consent-scopes-not-chosen` | the enrolment's scopes were never chosen, as `approve` refuses it; nothing is revived, queued or recorded |
 | `bad_params` / `project-mode-never` | the folder's rule is Never |
 | `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
+| `bad_params` / `included-sessions-limit` | the live included sessions plus every id asked for would pass 500 |
 | `unavailable` / `audit-write-failed` | the `past-sessions-included` audit row could not be written |
 
 Duplicate ids are counted once, in the order first named. A session the
@@ -1764,8 +1790,9 @@ names what the person saw, and a vanished session refuses the selection.
 before anything is revived, queued or approved: `project_label` is the
 folder's derived label (from the key the daemon holds, never the caller's
 string) and `detail` the number of sessions chosen. No session id, path or
-title is in it. A log that refuses the write refuses the call, under the
-same rollback-cannot-record guarantee as `bulk-approved`.
+title is in it. It records the person's request, so it is written even when
+every session is then skipped. A log that refuses the write refuses the
+call, under the same rollback-cannot-record guarantee as `bulk-approved`.
 
 **One refusal comes after the audit row.** If the queue cannot be saved once
 the approvals are made, the call is `unavailable` / `queue-write-failed`:
@@ -1783,11 +1810,13 @@ approves them.
 |---|---|
 | `session-dismissed` | the session was dismissed; it is never revived |
 | `session-kept` | the session is kept on this Mac; `undo_keep` first |
-| `session-still-active` | still being written (judged at the walk, and again at the read); never queued half-written |
+| `session-still-active` | still being written (judged at the walk, and again at the read from a fresh walk); never queued half-written |
 | `held-for-review` | its offer is held for a person's review, or was when it aged out, as a group `approve` leaves it |
+| `session-ineligible` | for an evidence-admitted contributor, one a group `approve` leaves out (`contributable_in_a_group`), whether queued already or found so when read |
+| `session-duplicate` | its bytes are the same as a session already chosen in this call, so it is the same queue entry, answered once |
 | `not-pending` | already decided (approved, uploading, uploaded) by the time the include reached it |
 | `session-project-changed` | read now, the session resolves to another folder than the one named |
-| `project-mode-never` | the folder turned Never between the validation and the read |
+| `project-mode-never` | the folder (or the global override) turned Never after the validation: checked again at the revive, at the insert and under the lock that approves |
 | `session-unreadable` | the session file could not be read or parsed |
 | `session-file-vanished` | the session file was gone by the read |
 | `envelope-too-large` | over the size limit, at the read or at the pin |
@@ -1795,7 +1824,12 @@ approves them.
 | `not-enrolled`, and `approve`'s other per-entry labels | the approval itself was refused, as `approve` reports it |
 
 An `expired` session is revived to `pending` (its `discovered_at` set to
-now, as `undo_keep` dates a return) and approved. A `not_queued` session is
+now, as `undo_keep` dates a return) and approved; one whose session changed
+since it aged out (another size or modification time) is read again and
+offered fresh instead, so what is approved is what is on disk. A revive is
+the person's choice and stands even when the approval then does not land --
+watching only answers `not-enrolled` -- so the session waits again as an
+ordinary offer, and counts as a decision owed. A `not_queued` session is
 read and queued now, then approved; an explicit selection lands past the
 queue's entry cap, because it is a person's choice rather than the watcher's
 offer, but never past the quiescence check. A session queued by a discovery
@@ -2704,7 +2738,10 @@ them.
 
 **One reply, one deadline.** A group `approve` does not fan out. It takes one
 approval instant for the whole call, so every entry it approves shares one
-hold and the single `hold_until` it reports is true of all of them. A client
+hold and the single `hold_until` it reports is true of all of them. The
+instant is taken under the lock that approves, after every preview the call
+builds, never when the call began: a slow build must not use up the undo
+window before the approval is even saved. A client
 must not fan a group submit out into per-entry calls and keep the first
 reply's hold: an undo bar has to outlast every entry it offers to undo, and
 the first reply's deadline retires Undo while something it covers is still
@@ -2762,6 +2799,8 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `correction-credential-detected` | The `correction` sent with this call contains something credential-shaped. Nothing was built, pinned or sent; the entry stays `pending` | Retry succeeds once the credential is out of the text. Surface this distinctly and tell the contributor to rotate it -- never echo the correction or the match |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+  | `project-mode-never` | The entry's folder was set to Never while this call built its previews; checked again under the lock that approves | Will not succeed while the folder is Never |
+  | `contribution-override-never` | The Never contribution override was turned on while this call built its previews; checked again under the lock that approves | Will not succeed while the override is on |
 
   Only `envelope-too-large` changes the entry's state; every other label
   above leaves the entry exactly where it stood. A refusal that no retry
@@ -4043,10 +4082,24 @@ tool's layout matches. `trajectory_source` declares it:
   written before this key existed load as absent, so an upgrade reads no new
   folder.
 - Any other value -- a bare path string, an unknown mode -- is `bad_params`
-  / `settings-invalid-value`, as for the other `*_source` keys.
+  / `settings-invalid-value`, as for the other `*_source` keys. So is a
+  `watch` path that names no particular folder: a relative or empty path,
+  the root, or the home directory itself.
+
+A file in the folder is read whole only up to the native adapters' 64 MB
+budget; a larger one is refused from its size alone and raises the
+`session-too-large` health label. Discovery follows no symlinked entry.
 
 `get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
-and never the path; no response, log line or audit row carries it.
+and never the path; no response, log line or audit row carries it. A shell
+shows the folder as a Watched folders row of its own while the mode is
+`watch` or `off`, in the words of `tc_source_settings_copy`'s `trajectory`
+object -- its exports always wait for a person -- with an off switch that
+writes `{"mode":"off"}`.
+
+A session found there that is waiting in a folder on Automatic counts as a
+decision owed (`status.decisions_owed`), and it never arms a folder under
+the automatic grant.
 
 The declaration is not part of the claude/codex start gate: a daemon with
 only a trajectory folder declared has not declared its roots.
@@ -5025,8 +5078,37 @@ Appends a `consent-scopes-changed` audit entry.
 It also records that the contributor chose the scopes: the config field
 `consent_scopes_chosen` (default `false`) becomes `true` when `scopes` names at
 least one scope, and `false` when it is omitted or empty, since that saves the
-floor scope without naming anything. `grant_automatic` requires it. No
-enrollment path sets it, and a new enrollment writes a config without it.
+floor scope without naming anything. `grant_automatic` requires it, and
+every send path requires it (see "Sending needs chosen consent scopes"). The
+daemon's `enroll` and every app enrolment write it `false`; the CLI's `login`
+writes `true` when its own consent question was answered (an explicit
+`--scopes`, or the interactive menu) and `false` for default answers. A
+config with no such key predates the record and is not held; an omitted or
+empty `scopes` leaves such a config without the key.
+
+### Sending needs chosen consent scopes
+
+An enrolment saves the floor scope with nobody having picked it, so while
+the config's `consent_scopes_chosen` is `false` nothing is sent under it.
+One fixed label, `consent-scopes-not-chosen`, everywhere:
+
+| Path | What happens |
+|---|---|
+| `approve` (`entry_id`, `all`, `project_id`) | `bad_params` / `consent-scopes-not-chosen`, before anything is approved or audited |
+| `include_past_sessions` | the same, refused whole before anything is revived, queued or audited |
+| `set_project_mode` to `auto_upload` | the same, before the arming is audited; `notify_only` and `ignore` are allowed |
+| `set_contribution_override` `auto_upload` | the same; `notify_only` and `ignore` are allowed |
+| the watcher's unattended approvals | none are made; a session in an Automatic folder waits `pending`, and is approved on the first pass after the scopes are chosen |
+| the upload pass | every `approved` entry is held exactly as it is (no state change, no attempt, no label), as a Never override holds them; choosing the scopes releases them to the send path, whose scope and input pins still re-ask an entry whose terms moved |
+
+`status.consent_hold` is `consent-scopes-not-chosen` while this holds and
+`null` otherwise (no enrolment, a choice recorded, or a config that predates
+the record). No health label is raised.
+
+Migration: no released client wrote `consent_scopes_chosen`, so a config
+without the key belongs to a contributor who joined before the record
+existed. It is not held, and the key stays absent across later saves.
+`grant_automatic` still requires an explicit `true`.
 
 ### `enroll`
 
@@ -6186,13 +6268,31 @@ passkeys before authentication without telling anyone who asks whether the
 account exists, so the daemon keeps its own list (`remembered-passkeys.json`
 in the state directory, 0600): a record is written when a passkey is created,
 added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one, the SHA-256 of the account id (for matching a later sign-in;
+Mac learned one (the name it was given when created or added here, or the
+label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
 never sent over IPC), and when it was last used. No credential material, no
 token, no credential id. At most four records are kept, most recent first.
 `passkey_count` is how many; `0` means none remembered here, not that the
 account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in: the login answer
-carries no name). Both are null when the list cannot be read. Signing out
+when it has none (a passkey first used here by signing in whose login answer
+carried no label: it has none on the server, or the server predates
+`passkey_label`).
+
+A sign-in learns the passkey's name from the server. The commons'
+`POST /v1/account/native/passkey/login/finish` answer carries, beside the
+session, an optional `passkey_label`: the label the signed-in account gave the
+passkey that just authenticated, looked up by the tenant, account and
+credential id of the verified assertion (never from anything in the request),
+so it is only ever the authenticating account's own credential's label. It is
+absent, not null, when that passkey has no label or the label could not be
+read; an older server never sends it, and an older daemon ignores it. On a
+login the daemon records that label as the record's name, replacing any name
+it held; with no label (or one that fails the daemon's own name rules: blank,
+over 64 characters, or holding a control character) it keeps the name it
+already had. The label is not logged and is not forwarded over IPC except as
+`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
+`account-enrollment-mismatch`, a session for another tenant or account than
+the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
 keeps the list, since a returning person after sign-out is who the first
 run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
 the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
@@ -6204,7 +6304,7 @@ record is), never the most recent record's: after a sign-in, the most recent
 record may belong to another account, and its name is not this one's. It is
 null when no account session is held or the session cannot be read, when
 this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in), or when the list cannot be read. A
+passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
 local fact like the other two, it is answered in every `state`, including
 `unknown`. The first run reads it once a passkey sign-in has finished, to
 name the passkey on Join's card; it never reads `remembered_name` for that,
@@ -6252,7 +6352,28 @@ session is left as it was, and the shell signs it out. A `bound` or
 `enrolled` result is persisted only if its tenant and account are the passkey
 session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
 state) is refused with `account-bind-refused` before the refresh token is
-spent. Tokens,
+spent.
+
+On a Mac that is **already enrolled**, `account_bind` sends no request and
+writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
+when the enrolment it holds is the signed-in account's own: the session's
+tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
+it) equals the enrolment config's `tenant_id`, **and** the session was signed
+in to a `bound` account (the `binding_state` stored with it at sign-in). This
+is the first run's Welcome back case: the enrolment is reported after P-7
+opened, and the person signs in with that account's passkey. Anything else
+-- no session, another tenant, an `unbound` or `legacy` account, or a stored
+session without a `binding_state` -- is refused as before with
+`account-already-enrolled`. The config records a tenant and no account, so
+the check is a tenant match; it identifies one account because a binding row
+(and so a `bound` state) is only ever written for a passkey-origin account,
+each created alone in a freshly minted tenant, and it accepts nothing the
+sign-in's own tenant check had not already accepted when it kept the
+session. Recording the enrolled account at enrolment would make it
+account-precise; that is not done yet. Added in v1.1 additively: the macOS
+shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
+either); a shell that does not know it reads an unknown outcome and fails
+closed (`account-bind-invalid`). Tokens,
 rotations and atomic device/config persistence stay in Rust/Keychain. Binding
 creates no folder/trace/body consent. Native login remains weak and native add
 keeps the existing first-strong-authenticator gate; adding another requires

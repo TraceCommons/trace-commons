@@ -155,8 +155,10 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
         // Watching only reads Ask me's line, so Automatic's absence does
-        // not hold it.
+        // not hold it. (Watching only with nothing enrolled: beside an
+        // enrolment the daemon holds, Start is not offered at all.)
         state.account = .watchOnly
+        state.enrolledInvite = nil
         XCTAssertTrue(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
     }
@@ -499,6 +501,7 @@ private final class StartDaemon: FirstRunDaemon {
     func enrollInvite(_ invite: String) async -> Bool { log.append(.enroll(invite)); return true }
     func signInNearAI() async -> Bool { log.append(.signInNearAI); return true }
     func nearAILogin() async -> Bool { log.append(.nearAILogin); return true }
+    func cancelNearAILogin() async -> Bool { true }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { log.append(.enrollNearAI); return .enrolled }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { log.append(.setConsentScopes(scopes)); return true }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool {

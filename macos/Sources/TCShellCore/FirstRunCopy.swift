@@ -167,6 +167,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionsUnavailable: String
         /// Watching only: picked past sessions wait on this Mac.
         public let pastSessionsWatchOnly: String
+        /// `{count}`: older sessions beyond the newest the picker lists.
+        public let notListed: String
         /// A session's weekday names, Sunday first, and month names,
         /// January first.
         public let weekdays: [String]

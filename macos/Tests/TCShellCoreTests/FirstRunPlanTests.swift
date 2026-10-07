@@ -366,6 +366,63 @@ final class FirstRunPlanTests: XCTestCase {
         ])
     }
 
+    /// The first-run consent bug, exactly: the daemon holds an enrolment
+    /// (an invite enrolled before a near.ai sign-in failed, or one signed
+    /// out of on Join), the person is on watch only, and Start carries an
+    /// Automatic rule left on a folder and past-session picks. Nothing that
+    /// would use the enrolment is sent -- no rule, no past session, no
+    /// Private AI, no marker -- since every one of them would act under an
+    /// enrolment whose scopes nobody chose, and the watch-only marker cannot
+    /// finish while the daemon is logged in. Start is not offered for it
+    /// either (`canContinue`).
+    func test_watchOnlyUnderAHeldEnrolmentSendsNothing() {
+        var afterFailedSignIn = answered(tier: .custom)
+        afterFailedSignIn.step = .uses
+        afterFailedSignIn.daemonStarted = true
+        afterFailedSignIn.enrolledInvite = "INVITE-1"
+        afterFailedSignIn.account = .watchOnly
+        afterFailedSignIn.scopes = ["debugging_evaluation"]
+        afterFailedSignIn.rules = ["p1": .autoUpload, "p2": .ask]
+        afterFailedSignIn.pastSelections = ["p1": ["s1", "s2"], "p2": ["s3"]]
+        afterFailedSignIn.privateAI = true
+        XCTAssertTrue(afterFailedSignIn.daemonHoldsEnrolment)
+        XCTAssertFalse(afterFailedSignIn.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: afterFailedSignIn, at: .start), [])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(
+                afterFailedSignIn, candidates: [], requiredScope: "debugging_evaluation"))
+
+        var signedOut = afterFailedSignIn
+        signedOut.enrolledInvite = nil
+        signedOut.signedOutOfEnrolment = true
+        XCTAssertTrue(signedOut.daemonHoldsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: signedOut, at: .start), [])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(signedOut, candidates: [], requiredScope: "debugging_evaluation"))
+
+        // With no enrolment held, watch only still finishes as before.
+        var watching = afterFailedSignIn
+        watching.enrolledInvite = nil
+        XCTAssertFalse(watching.daemonHoldsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .start).last, .markWatchOnlyComplete)
+        XCTAssertTrue(FirstRunNavigation.canContinue(watching, candidates: [], requiredScope: "debugging_evaluation"))
+    }
+
+    /// Whether the daemon may hold an enrolment, whatever this first run
+    /// treats as the account: one it enrolled, one an earlier run left, a
+    /// bound passkey, near.ai's, and one signed out of on Join.
+    func test_theDaemonHoldsAnEnrolmentWhateverTheAccountAnswer() {
+        XCTAssertFalse(FirstRunState().daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .watchOnly).daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .nearAI).daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .passkeyChosen).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .enrolled).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .passkey(name: "")).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .watchOnly, enrolledInvite: "I").daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .none, nearAIEnrolled: true).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .watchOnly, signedOutOfEnrolment: true).daemonHoldsEnrolment)
+    }
+
     func test_quickNeverSetsARuleOrIncludesPastSessions() {
         var state = onUses()
         state.scopes = ["research"]

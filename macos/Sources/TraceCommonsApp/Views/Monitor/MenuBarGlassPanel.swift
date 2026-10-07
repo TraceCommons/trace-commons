@@ -211,7 +211,7 @@ struct MenuBarGlassPanel: View {
                     Task { await store.resolveConfirmation(confirmed: confirmed) }
                 }
             } else {
-                if store.status?.contributionOverride != nil {
+                if !store.stale, store.status?.contributionOverride != nil {
                     Text(copy.overrideActive)
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
@@ -225,7 +225,11 @@ struct MenuBarGlassPanel: View {
                             sub: sub,
                             fill: .solid(Self.modeFill(choice.mode)),
                             checked: MenuPanelData.listChecks(choice.mode, status: store.status, stale: store.stale)) {
-                                store.choose(choice.mode)
+                                if MenuPanelData.pressOnlyCloses(choice.mode, status: store.status, stale: store.stale) {
+                                    self.sub = nil
+                                } else {
+                                    store.choose(choice.mode)
+                                }
                             }
                             .accessibilityLabel(choice.label)
                             .accessibilityHint(sub)
@@ -367,8 +371,10 @@ struct MenuBarGlassPanel: View {
     /// The handoff spaces these rows like the popover's own children: 8pt
     /// between each row's selection and the next. The rows stack with no
     /// gap; each carries its own clear 4pt above and below
-    /// (`GlassMenuRowStyle`), so its hit rect is 32pt and a click between
-    /// two selections still lands on a row.
+    /// (`GlassMenuRowStyle`), so its hit rect is about 34pt (a 26pt
+    /// selection plus 8) and a click between two selections still lands on
+    /// a row. The block gives back those 4pt at its top and bottom edges,
+    /// so its gap to the content above and its bottom inset stay 8pt.
     private var menuItems: some View {
         VStack(alignment: .leading, spacing: 0) {
             hairline
@@ -389,6 +395,7 @@ struct MenuBarGlassPanel: View {
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }
         .buttonStyle(GlassMenuRowStyle())
+        .padding(.vertical, -GlassTokens.Space.s2)
     }
 
     private var hairline: some View {

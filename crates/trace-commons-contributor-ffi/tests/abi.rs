@@ -1688,6 +1688,9 @@ fn tc_invite_issuer_host_is_null_for_anything_unusable() {
         "VQWWPGYSG8Y4LTP6",
         "https://issuer.tracecommons.ai/onboard",
         "not a url",
+        // What `invite_lookup` refuses, the host refuses too.
+        "http://issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
+        "https://someone@issuer.tracecommons.ai/onboard#VQWWPGYSG8Y4LTP6",
     ] {
         let arg = cstr_str(bad);
         let out = unsafe { tc_invite_issuer_host(arg.as_ptr()) };
@@ -2521,7 +2524,7 @@ fn write_enrolled_config(
     let store = trace_commons_contributor::config::ConfigStore::open(dir.to_path_buf()).unwrap();
     let cfg = trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION

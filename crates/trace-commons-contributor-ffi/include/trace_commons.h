@@ -1739,7 +1739,8 @@ char*       tc_gate_held_notice(const char* held_json);
 
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
- * the opencode-export-version-unsupported health label. No daemon handle needed. */
+ * the opencode-export-version-unsupported health label, and a trajectory
+ * object for the exported-traces row. No daemon handle needed. */
 char*       tc_source_settings_copy(void);
 
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
