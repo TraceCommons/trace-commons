@@ -332,6 +332,15 @@ impl AccountAdmissionState {
     pub(super) fn forget_session(&self) {
         self.drop_session();
     }
+
+    /// Drop everything held for the enrollment: the session and the last
+    /// answer. For `unenroll`, after which no answer read for the old
+    /// enrollment may count for a later one -- not even one for the same
+    /// account, whose answer is keyed by the config that is now gone.
+    pub(super) fn forget_enrollment(&self) {
+        self.drop_session();
+        self.forget();
+    }
 }
 
 /// Ask ingest again, before a full pass. Never fails the pass: every error

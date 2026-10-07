@@ -88,6 +88,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unenroll;
 pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
