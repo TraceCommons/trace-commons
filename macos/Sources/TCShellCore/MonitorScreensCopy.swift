@@ -99,6 +99,10 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     /// Ron's #1146 toolbar, Home and History words (owner ruling,
     /// 2026-10-06).
     public let shell: MonitorShellCopy
+    /// The Traces graph footer's zoom, range and bar words (Ron's #1146).
+    public let tracesGraph: MonitorTracesGraphCopy
+    /// The flow map's names and node cards (Ron's #1146).
+    public let flowMap: MonitorFlowMapCopy
 
     enum CodingKeys: String, CodingKey {
         case computer
@@ -178,6 +182,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case safeguards
         case historyActions = "history_actions"
         case shell
+        case tracesGraph = "traces_graph"
+        case flowMap = "flow_map"
     }
 
     /// The payload fields this shell decodes, by wire name.
@@ -259,6 +265,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "safeguards",
         "history_actions",
         "shell",
+        "traces_graph",
+        "flow_map",
     ]
 
     /// Each nested table's wire fields, by its wire name.
@@ -266,6 +274,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "safeguards": MonitorSafeguardsCopy.consumedFields,
         "history_actions": MonitorHistoryActionsCopy.consumedFields,
         "shell": MonitorShellCopy.consumedFields,
+        "traces_graph": MonitorTracesGraphCopy.consumedFields,
+        "flow_map": MonitorFlowMapCopy.consumedFields,
     ]
 
     /// Decode the payload, or nil if it will not parse or a field is empty.
@@ -277,7 +287,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         }
         let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote, copy.windowLastHours, copy.historySubmitted]
         return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole || !copy.historyActions.isWhole
-            || !copy.shell.isWhole ? nil : copy
+            || !copy.shell.isWhole || !copy.tracesGraph.isWhole || !copy.flowMap.isWhole ? nil : copy
     }
 
     /// What a screen says for a failed read: the core's line for a core that
