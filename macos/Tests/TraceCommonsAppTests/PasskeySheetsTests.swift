@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -542,6 +543,58 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertTrue(source.contains(".multilineTextAlignment(.center)"))
         XCTAssertTrue(source.contains("GlassTokens.TypeScale.display"))
         XCTAssertTrue(source.contains(".passkeyOutlined()"))
+    }
+
+    /// #1030's popup size (`ftux.css`): about 380 wide, its buttons full
+    /// width and 40 tall, stacked one under the other, and the round icon in
+    /// the purple at 35% on the card edge.
+    func test_thePopupsTakeRonsSizeAndBlockButtons() throws {
+        XCTAssertEqual(PasskeyPopupLayout.width, 380)
+        XCTAssertEqual(PasskeyPopupLayout.blockButtonHeight, 40)
+        XCTAssertEqual(PasskeyPopupLayout.padding, 22)
+        XCTAssertEqual(PasskeyPopupLayout.bottomPadding, 20)
+        XCTAssertEqual(PasskeyPopupLayout.cornerInset, 14)
+        XCTAssertEqual(PasskeyPopupLayout.iconTint.dark, GlassTokens.Color.purple.opacity(0.35).dark)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains(".frame(width: PasskeyPopupLayout.width)"))
+        XCTAssertFalse(source.contains(".frame(width: 360)"))
+        // Every action on P-1, P-2, P-5 and P-7 is a block button but
+        // Verify, which is the outlined one, and P-7's link.
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.useExisting, .primary)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.createNew, .glass)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.nameTitle, .primary)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.cancel, .glass)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.welcomeSignIn, .primary)"))
+        XCTAssertTrue(source.contains(".glassEdge(GlassTokens.Shadow.cardEdge, in: Circle())"))
+    }
+
+    /// V7: P-2's clear button sits inside the field's well at its right, as
+    /// #1030's `.ftux-name-field`, not beside the field. It shows while the
+    /// field holds anything, is named by the core, and clearing counts as an
+    /// edit, so the empty-name line shows.
+    func test_theClearNameButtonSitsInsideTheWell() throws {
+        XCTAssertTrue(PasskeyNameField.showsClear("My trace passkey"))
+        XCTAssertFalse(PasskeyNameField.showsClear(""))
+        XCTAssertEqual(PasskeyPopupLayout.nameFieldHeight, 44)
+        XCTAssertEqual(PasskeyPopupLayout.clearSize, 18)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("PasskeyNameField("))
+        XCTAssertTrue(source.contains("clearLabel: copy.passkey.clearName"))
+        XCTAssertTrue(source.contains("invalid: model.nameError != nil"))
+        XCTAssertFalse(source.contains("xmark.circle.fill"), "no clear glyph outside the well")
+        // The button and the field share the one well.
+        let field = try XCTUnwrap(source.range(of: "struct PasskeyNameField"))
+        let body = source[field.lowerBound...]
+        XCTAssertTrue(body.contains(".glassFieldWell(invalid: invalid)"))
+
+        let copy = try coreCopy()
+        let model = PasskeySheetModel(start: .name, copy: copy.passkey, account: RecordingAccount())
+        XCTAssertNil(model.nameError)
+        model.name = ""
+        model.nameTouched = true
+        XCTAssertEqual(model.nameError, copy.passkey.nameEmpty)
     }
 
     /// Option 1 (2026-10-06): a second Mac signs in with the passkey of an

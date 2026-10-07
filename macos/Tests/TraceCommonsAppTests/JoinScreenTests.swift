@@ -502,6 +502,42 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(source.contains("firstRunPasskeySheets("), "the first-run host mounts the sheets")
     }
 
+    /// The sheets open over Join, as in #1030: before the daemon runs,
+    /// Create passkey starts it (watching nothing) and opens them, rather
+    /// than recording a choice the Folders or Tools commit acts on. A start
+    /// that failed reads the core's own line under the card.
+    func test_createPasskeyBeforeTheDaemonRunsStartsItOnJoin() throws {
+        let copy = try coreCopy()
+        let fresh = FirstRunState()
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(fresh, hasPasskeyAccount: false))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(fresh, hasPasskeyAccount: false))
+
+        let running = FirstRunState(daemonStarted: true)
+        XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: true), "it opens at once")
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: false),
+            "the account follows the start; the request waits for it")
+
+        // Nothing to start where Join offers no passkey, nor for a choice
+        // an earlier build recorded, whose button undoes it.
+        var withInvite = FirstRunState()
+        withInvite.invite = "INVITE-1"
+        let signedIn = FirstRunState(account: .nearAI, signedIn: true)
+        for state in [
+            withInvite, signedIn, FirstRunState(account: .enrolled), FirstRunState(account: .passkey(name: "Mac")),
+            FirstRunState(account: .passkeyChosen),
+        ] {
+            XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(state, hasPasskeyAccount: false), "\(state.account)")
+        }
+
+        XCTAssertEqual(JoinScreenLayout.passkeyFailureLine(.passkeyUnavailable, copy: copy.join), copy.join.passkeyUnavailable)
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(.startFailed, copy: copy.join))
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(nil, copy: copy.join))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("runner.openPasskeyOnJoin()"))
+        XCTAssertTrue(source.contains("JoinScreenLayout.passkeyFailureLine(runner.failure"))
+    }
+
     /// The sheets' outcome lowers the request whatever it was, so a closed
     /// sheet is asked again only by the next commit or the button. The
     /// sheets open after Folders or Tools, so a sign-out can end them on a

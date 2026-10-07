@@ -200,17 +200,33 @@ enum JoinScreenLayout {
     /// The one credit-range unit the daemon accepts (`CREDIT_RANGE_UNIT_POINTS`).
     static let pointsPerAcceptedTrace = "points_per_accepted_trace"
 
-    /// The passkey ceremony completes with the daemon, which runs only once
-    /// Folders or Tools commits. Before then Create passkey records the
-    /// choice (`togglePasskey`) and the commit opens the sheets
-    /// (`FirstRunCall.openPasskeySheets`); once the daemon runs, it opens
-    /// them now. A chosen passkey's button undoes instead. A signed-in
-    /// near.ai already holds the daemon's account session, so a passkey is
-    /// not created over it, as near.ai is not chosen over a passkey
+    /// The passkey ceremony completes with the daemon. Once it runs, Create
+    /// passkey opens the sheets now, over Join (#1030 `ftux-page.tsx`). A
+    /// chosen passkey's button undoes instead (a choice an earlier build
+    /// recorded for the Folders or Tools commit). A signed-in near.ai
+    /// already holds the daemon's account session, so a passkey is not
+    /// created over it, as near.ai is not chosen over a passkey
     /// (`canToggleNearAI`).
     static func passkeyOpensNow(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
-        hasPasskeyAccount && state.daemonStarted && showsPasskeyAction(state) && !passkeyChosen(state)
-            && !passkeyDone(state)
+        hasPasskeyAccount && state.daemonStarted && offersPasskey(state)
+    }
+
+    /// Before the daemon runs, Create passkey starts it, watching nothing,
+    /// and then opens the sheets over Join (`FirstRunRunner.openPasskeyOnJoin`),
+    /// so the person never meets them on a later step.
+    static func passkeyStartsDaemon(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
+        offersPasskey(state) && !passkeyOpensNow(state, hasPasskeyAccount: hasPasskeyAccount)
+    }
+
+    /// Create passkey is the button's action: offered, not chosen, not held.
+    private static func offersPasskey(_ state: FirstRunState) -> Bool {
+        showsPasskeyAction(state) && !passkeyChosen(state) && !passkeyDone(state)
+    }
+
+    /// The line under the passkey card when Create passkey could not start
+    /// the daemon its sheets need.
+    static func passkeyFailureLine(_ failure: FirstRunFailure?, copy: FirstRunCopy.Join) -> String? {
+        failure == .passkeyUnavailable ? copy.passkeyUnavailable : nil
     }
 
     /// Create passkey chosen and not yet created: the choice is undoable.
@@ -323,13 +339,14 @@ enum JoinScreenLayout {
 /// watch only" until an account exists.
 ///
 /// Join holds no daemon client: on a first pass the daemon is not running.
-/// The invite is looked up and enrolled, a chosen near.ai signed in and a
-/// chosen passkey's sheets opened, when Folders or Tools commits
-/// (`FirstRunPlan`). The one daemon path here is `passkeyAccount`, whose
-/// ceremony completes with the daemon: back on Join after the daemon
-/// started, Create passkey opens the sheets at once. They are presented by
-/// `firstRunPasskeySheets`, which the first-run host
-/// (`OnboardingCoordinatorView`) mounts once for every step.
+/// The invite is looked up and enrolled, and a chosen near.ai signed in,
+/// when Folders or Tools commits (`FirstRunPlan`). Create passkey is the
+/// exception (#1030): its sheets open over Join, so when the daemon is not
+/// running it starts it first, declaring both roots `off` so nothing is read
+/// (`CommitPoint.passkeyOnJoin`), and the ceremony completes there through
+/// `passkeyAccount`. The sheets are presented by `firstRunPasskeySheets`,
+/// which the first-run host (`OnboardingCoordinatorView`) mounts once for
+/// every step.
 struct JoinScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -349,7 +366,7 @@ struct JoinScreen: View {
             state: $runner.state,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
-                isEnabled: true,
+                isEnabled: !runner.isCommitting,
                 note: JoinScreenLayout.footerNote(runner.state, copy: copy),
                 action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {
@@ -420,7 +437,7 @@ struct JoinScreen: View {
         }
     }
 
-    private var passkeyCard: some View {
+    @ViewBuilder private var passkeyCard: some View {
         accountCard(
             eyebrow: copy.join.passkeyEyebrow,
             text: JoinScreenLayout.passkeyLine(runner.state, copy: copy.join),
@@ -428,16 +445,24 @@ struct JoinScreen: View {
             showsAction: JoinScreenLayout.showsPasskeyAction(runner.state)
         ) {
             Button(action: passkeyAction) {
-                // Choosing opens nothing until the daemon runs, so only the
-                // undo carries a glyph, as on the near.ai card.
+                // Only the undo of a choice recorded for later carries a
+                // glyph, as on the near.ai card; starting the daemon for the
+                // sheets shows the spinner.
                 if JoinScreenLayout.passkeyChosen(runner.state) {
                     Label(JoinScreenLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if runner.isCommitting { GlassSpinner() }
+                        Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
+                    }
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))
+            .disabled(runner.isCommitting)
+        }
+        if let line = JoinScreenLayout.passkeyFailureLine(runner.failure, copy: copy.join) {
+            GlassNotice(tone: .outside) { Text(line) }
         }
     }
 
@@ -514,11 +539,14 @@ struct JoinScreen: View {
         if looked.outcome != .refused { draft = nil }
     }
 
-    /// Before the daemon runs, record or undo the choice; once it runs,
-    /// open the sheets.
+    /// Open the sheets over Join: at once while the daemon runs, after
+    /// starting it otherwise. A choice recorded for later is undone.
     private func passkeyAction() {
-        if JoinScreenLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: passkeyAccount != nil) {
+        let hasAccount = passkeyAccount != nil
+        if JoinScreenLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: hasAccount) {
             runner.requestPasskey()
+        } else if JoinScreenLayout.passkeyStartsDaemon(runner.state, hasPasskeyAccount: hasAccount) {
+            Task { await runner.openPasskeyOnJoin() }
         } else {
             runner.state = JoinScreenLayout.togglePasskey(runner.state)
         }

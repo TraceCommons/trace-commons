@@ -101,6 +101,62 @@ final class FirstRunPlanTests: XCTestCase {
         }
     }
 
+    /// Create passkey on Join opens the sheets over Join (#1030): with no
+    /// daemon yet it starts one watching nothing -- Claude Code and Codex
+    /// both declared `off`, so the start gate admits it and no folder is
+    /// read -- then opens them. A running daemon only opens them.
+    func test_createPasskeyOnJoinStartsTheDaemonWatchingNothing() throws {
+        let state = FirstRunState()
+        let calls = FirstRunPlan.calls(for: state, at: .passkeyOnJoin)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls.last, .openPasskeySheets)
+        let declared = try settings(calls.first)
+        XCTAssertEqual(declared.count, 2, "only the two roots the start gate reads")
+        XCTAssertEqual(declared["claude_source"] as? [String: String], ["mode": "off"])
+        XCTAssertEqual(declared["codex_source"] as? [String: String], ["mode": "off"])
+
+        var running = state
+        running.daemonStarted = true
+        XCTAssertEqual(FirstRunPlan.calls(for: running, at: .passkeyOnJoin), [.openPasskeySheets])
+    }
+
+    /// Wherever Join offers no passkey, Create passkey plans nothing: an
+    /// invite held or enrolled (the daemon refuses a passkey account over an
+    /// enrolment), a signed-in near.ai, an enrolment, a held passkey.
+    func test_createPasskeyOnJoinPlansNothingBesideAnotherAccount() {
+        var withInvite = FirstRunState()
+        withInvite.invite = "INVITE-1"
+        var enrolledInvite = FirstRunState()
+        enrolledInvite.enrolledInvite = "INVITE-1"
+        var signedIn = FirstRunState(account: .nearAI)
+        signedIn.signedIn = true
+        for state in [
+            withInvite, enrolledInvite, signedIn, FirstRunState(account: .enrolled),
+            FirstRunState(account: .passkey(name: "Mac")), FirstRunState(account: .passkey(name: "")),
+        ] {
+            XCTAssertEqual(FirstRunPlan.calls(for: state, at: .passkeyOnJoin), [], "\(state.account)")
+        }
+    }
+
+    /// The daemon Join started holds `off` for both roots. Folders then sends
+    /// only what differs from that, never a second start, and a row
+    /// answered `off` again is not resent.
+    func test_foldersAfterAPasskeyStartSendsOnlyTheChangedRoots() throws {
+        var state = answered()
+        state.invite = ""
+        state.account = .passkey(name: "Mac")
+        state.daemonStarted = true
+        state.startedSettingsJSON = FirstRunPlan.watchNothingSettingsJSON
+        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        guard case .setSourceSettings(let json)? = calls.first else {
+            return XCTFail("expected setSourceSettings, got \(calls)")
+        }
+        XCTAssertEqual(calls.count, 1)
+        let sent = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: String]])
+        XCTAssertEqual(Set(sent.keys), ["claude_source"])
+        XCTAssertEqual(sent["claude_source"]?["mode"], "watch")
+    }
+
     /// A new passkey creates an account of its own, and the daemon refuses
     /// to create one over an enrolment (`account-already-enrolled`), so an
     /// invite and a chosen passkey never both reach the daemon. Join keeps
