@@ -38,13 +38,14 @@
     "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec).", "light": { "hex": "#f2f3f6" } },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast.", "light": { "hex": "#ffffff", "alpha": 0.3 } },
     "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
-    "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon or toolbar button (#1146 --tc-control-hover), drawn over the control fill.", "light": { "hex": "#000000", "alpha": 0.08 } },
+    "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.", "light": { "hex": "#ebebed", "alpha": 0.84 } },
     "cardHover": { "hex": "#ffffff", "alpha": 0.1, "note": "Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.", "light": { "hex": "#ffffff", "alpha": 0.86 } },
     "rowHover": { "hex": "#ffffff", "alpha": 0.05, "note": "Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.", "light": { "hex": "#000000", "alpha": 0.04 } },
     "toolbarExpanded": { "hex": "#55555a", "note": "A toolbar button whose menu is open (#1146 .tc-btn--icon[aria-expanded=true]). textPrimary on it clears 4.5:1 in both appearances.", "light": { "hex": "#d1d1d6" } },
     "toolbarGlyph": { "hex": "#e6e6ec", "note": "A toolbar button's glyph (#1146 monitor-toolbar.tsx).", "light": { "hex": "#1d1d1f" } },
     "toolbarGlyphHidden": { "hex": "#7c7c86", "note": "A toolbar glyph whose pane is hidden (#1146 .tc-btn--icon[aria-pressed=false]).", "light": { "hex": "#8a8a90" } },
     "controlSelected": { "hex": "#ffffff", "alpha": 0.16, "light": { "hex": "#ffffff" } },
+    "controlSelectedFloating": { "hex": "#ffffff", "alpha": 0.18, "note": "The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].", "light": { "hex": "#ffffff" } },
     "toggleOn": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "toggleOff": { "hex": "#ffffff", "alpha": 0.18, "light": { "hex": "#000000", "alpha": 0.16 } },
     "toggleOnSettings": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
@@ -187,6 +188,9 @@
       { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.24 } },
       { "y": 10, "blur": 30, "hex": "#000000", "alpha": 0.28, "light": { "hex": "#000000", "alpha": 0.126 } }
     ],
+    "barTrackEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.14, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.5 } }
+    ],
     "consentEdge": [
       { "y": 1, "hex": "#ffffff", "alpha": 0.1, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.2 } }
     ]
@@ -199,7 +203,7 @@
     "tile": 6,
     "checkbox": 5,
     "pill": 999,
-    "menuPanel": 18,
+    "menuPanel": 14,
     "menuStatePill": 22
   },
   "space": {
@@ -218,6 +222,10 @@
     "windowControlsInset": 30,
     "windowControlsWidth": 78,
     "panePadding": 12,
+    "inspectorPaddingHorizontal": 16,
+    "inspectorPaddingVertical": 18,
+    "treeInset": 8,
+    "mapOverlayInset": 14,
     "cardPaddingVertical": 12,
     "cardPaddingHorizontal": 14,
     "cardGap": 10,
@@ -272,6 +280,8 @@
   },
   "opacity": {
     "disabled": 0.45,
+    "disabledSubmit": 0.55,
+    "disabledCheck": 0.7,
     "rowOff": 0.6,
     "skeletonDim": 0.5
   },

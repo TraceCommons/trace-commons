@@ -64,8 +64,8 @@ public enum GlassTokens {
         /// Over native glass, the thin dark veil kept for text contrast.
         public static let glassVeil: GlassRGBA = GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3))
         public static let wellFill: GlassRGBA = GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06))
-        /// Hover on a glass, round, pill-icon or toolbar button (#1146 --tc-control-hover), drawn over the control fill.
-        public static let controlHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0x000000, alpha: 0.08))
+        /// Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.
+        public static let controlHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xEBEBED, alpha: 0.84))
         /// Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.
         public static let cardHover: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0xFFFFFF, alpha: 0.86))
         /// Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.
@@ -77,6 +77,8 @@ public enum GlassTokens {
         /// A toolbar glyph whose pane is hidden (#1146 .tc-btn--icon[aria-pressed=false]).
         public static let toolbarGlyphHidden: GlassRGBA = GlassRGBA(0x7C7C86, alpha: 1, light: GlassRGBA(0x8A8A90, alpha: 1))
         public static let controlSelected: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.16, light: GlassRGBA(0xFFFFFF, alpha: 1))
+        /// The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].
+        public static let controlSelectedFloating: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0xFFFFFF, alpha: 1))
         public static let toggleOn: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static let toggleOff: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.18, light: GlassRGBA(0x000000, alpha: 0.16))
         public static let toggleOnSettings: GlassRGBA = GlassRGBA(0x8A3DFF, alpha: 1, light: GlassRGBA(0x7A2CF5, alpha: 1))
@@ -186,6 +188,7 @@ public enum GlassTokens {
             "toolbarGlyph": toolbarGlyph,
             "toolbarGlyphHidden": toolbarGlyphHidden,
             "controlSelected": controlSelected,
+            "controlSelectedFloating": controlSelectedFloating,
             "toggleOn": toggleOn,
             "toggleOff": toggleOff,
             "toggleOnSettings": toggleOnSettings,
@@ -278,6 +281,7 @@ public enum GlassTokens {
         public static let nodeCardEdge: [GlassShadow] = [GlassShadow(x: 0, y: 1, blur: 0, color: GlassRGBA(0xFFFFFF, alpha: 0.22, light: GlassRGBA(0xFFFFFF, alpha: 0.44)), inset: true), GlassShadow(x: 0, y: 16, blur: 40, color: GlassRGBA(0x000000, alpha: 0.45, light: GlassRGBA(0x000000, alpha: 0.203)), inset: false)]
         public static let modal: [GlassShadow] = [GlassShadow(x: 0, y: 24, blur: 60, color: GlassRGBA(0x000000, alpha: 0.5, light: GlassRGBA(0x000000, alpha: 0.225)), inset: false)]
         public static let mapEdge: [GlassShadow] = [GlassShadow(x: 0, y: 1, blur: 0, color: GlassRGBA(0xFFFFFF, alpha: 0.12, light: GlassRGBA(0xFFFFFF, alpha: 0.24)), inset: true), GlassShadow(x: 0, y: 10, blur: 30, color: GlassRGBA(0x000000, alpha: 0.28, light: GlassRGBA(0x000000, alpha: 0.126)), inset: false)]
+        public static let barTrackEdge: [GlassShadow] = [GlassShadow(x: 0, y: 1, blur: 0, color: GlassRGBA(0xFFFFFF, alpha: 0.14, light: GlassRGBA(0xFFFFFF, alpha: 0.5)), inset: true)]
         public static let consentEdge: [GlassShadow] = [GlassShadow(x: 0, y: 1, blur: 0, color: GlassRGBA(0xFFFFFF, alpha: 0.1, light: GlassRGBA(0xFFFFFF, alpha: 0.2)), inset: true)]
 
         /// Every shadow token by its JSON name.
@@ -296,6 +300,7 @@ public enum GlassTokens {
             "nodeCardEdge": nodeCardEdge,
             "modal": modal,
             "mapEdge": mapEdge,
+            "barTrackEdge": barTrackEdge,
             "consentEdge": consentEdge,
         ]
     }
@@ -308,7 +313,7 @@ public enum GlassTokens {
         public static let tile: CGFloat = 6
         public static let checkbox: CGFloat = 5
         public static let pill: CGFloat = 999
-        public static let menuPanel: CGFloat = 18
+        public static let menuPanel: CGFloat = 14
         public static let menuStatePill: CGFloat = 22
 
         /// Every radius token by its JSON name.
@@ -341,6 +346,10 @@ public enum GlassTokens {
         public static let windowControlsInset: CGFloat = 30
         public static let windowControlsWidth: CGFloat = 78
         public static let panePadding: CGFloat = 12
+        public static let inspectorPaddingHorizontal: CGFloat = 16
+        public static let inspectorPaddingVertical: CGFloat = 18
+        public static let treeInset: CGFloat = 8
+        public static let mapOverlayInset: CGFloat = 14
         public static let cardPaddingVertical: CGFloat = 12
         public static let cardPaddingHorizontal: CGFloat = 14
         public static let cardGap: CGFloat = 10
@@ -365,6 +374,10 @@ public enum GlassTokens {
             "windowControlsInset": windowControlsInset,
             "windowControlsWidth": windowControlsWidth,
             "panePadding": panePadding,
+            "inspectorPaddingHorizontal": inspectorPaddingHorizontal,
+            "inspectorPaddingVertical": inspectorPaddingVertical,
+            "treeInset": treeInset,
+            "mapOverlayInset": mapOverlayInset,
             "cardPaddingVertical": cardPaddingVertical,
             "cardPaddingHorizontal": cardPaddingHorizontal,
             "cardGap": cardGap,
@@ -469,12 +482,16 @@ public enum GlassTokens {
 
     public enum Opacity {
         public static let disabled: Double = 0.45
+        public static let disabledSubmit: Double = 0.55
+        public static let disabledCheck: Double = 0.7
         public static let rowOff: Double = 0.6
         public static let skeletonDim: Double = 0.5
 
         /// Every opacity token by its JSON name.
         public static let all: [String: Double] = [
             "disabled": disabled,
+            "disabledSubmit": disabledSubmit,
+            "disabledCheck": disabledCheck,
             "rowOff": rowOff,
             "skeletonDim": skeletonDim,
         ]
