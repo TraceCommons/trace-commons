@@ -2438,7 +2438,7 @@ char*       tc_contribution_override_refusal_text(const char* label);
  * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
  * Matching happens on this Mac; nothing is sent because of a mission; a
  * mission's credit is projected until the commons records it, then pending.
- * DRAFT, NEEDS APPROVAL. NULL only on a caught panic.
+ * Approved 2026-10-06. NULL only on a caught panic.
  */
 char*       tc_missions_disclosure_copy_json(void);
 

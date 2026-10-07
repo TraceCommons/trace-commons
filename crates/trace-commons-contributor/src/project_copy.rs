@@ -51,7 +51,7 @@ pub const ARMING_OFFER_DECLINE: &str = "Not now";
 /// go without asking, and sessions already on this Mac keep waiting for the
 /// contributor to pick them.
 ///
-/// **DRAFT, NEEDS APPROVAL.** The first paragraph changed with the from-now
+/// Approved 2026-10-06. The first paragraph changed with the from-now
 /// default; the second and third are the agreed text unchanged. It still
 /// opens "Sessions from this project will be scrubbed", which
 /// `arming_wording::project_arming_claim` depends on.
@@ -90,7 +90,7 @@ pub const ARMING_BODY_WITH_BACKLOG: &str = "Sessions from this project will be s
 /// Customize's words for the from-now rule, the past-session picker, and
 /// "Keep on this Mac" (K5), in one table so no shell writes its own.
 ///
-/// **DRAFT, NEEDS APPROVAL**, every sentence. Each is held to what the daemon
+/// Approved 2026-10-06, every sentence. Each is held to what the daemon
 /// does: see "Arming from now" and "`keep`: Keep on this Mac" in
 /// `docs/contributor-daemon-ipc-v1_1.md`.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
@@ -167,8 +167,8 @@ pub fn ignore_project_copy(project: &str, pending: usize) -> IgnoreProjectCopy {
 /// project the contributor has contributed from `count` times.
 ///
 /// `body` is the from-now confirmation and `body_with_backlog` the one for
-/// `include_backlog`; `customize` is Customize's table (K5). DRAFT, NEEDS
-/// APPROVAL where [`ARMING_BODY`] and [`customize_copy`] say so.
+/// `include_backlog`; `customize` is Customize's table (K5). Both approved
+/// 2026-10-06.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct ArmingOfferCopy {
     pub evidence: String,
@@ -479,7 +479,7 @@ pub fn contribution_override_clear_confirm_copy() -> ContributionOverrideConfirm
     }
 }
 
-/// **DRAFT, NEEDS APPROVAL.** A refused Automatic override with no
+/// Approved 2026-10-06. A refused Automatic override with no
 /// grant terms in force (`arming-terms-unavailable`: no contributor
 /// configuration on this Mac yet, or one that cannot be read). Nothing was
 /// recorded and no folder changed.
@@ -488,7 +488,7 @@ pub const CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS: &str = concat!(
     " can't be turned on until this Mac is set up to contribute. Nothing changed."
 );
 
-/// **DRAFT, NEEDS APPROVAL.** Every other refused or failed override write:
+/// Approved 2026-10-06. Every other refused or failed override write:
 /// a policy or audit write that failed (nothing changed), a queue write that
 /// failed after the override took effect, or a core that did not answer.
 /// It claims neither outcome, because the shell re-reads `status` after

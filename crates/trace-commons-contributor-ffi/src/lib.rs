@@ -5607,8 +5607,8 @@ pub unsafe extern "C" fn tc_contribution_override_refusal_text(
 /// a JSON object `{title, matching, nothing_sent, credit}` -- matching
 /// happens on this Mac, nothing is sent because of a mission, and a
 /// mission's credit is projected until the commons records it, then
-/// pending. Shown the first time Missions is opened and in Settings. DRAFT,
-/// NEEDS APPROVAL, every sentence.
+/// pending. Shown the first time Missions is opened and in Settings.
+/// Approved 2026-10-06, every sentence.
 ///
 /// Returns an owned JSON string; free it with [`tc_string_free`]. NULL only
 /// on a caught panic.

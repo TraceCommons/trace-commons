@@ -41,17 +41,17 @@ pub fn residual_secret_line(count: u32, sites: &[String]) -> String {
 // Flow 2 states (#1118 K3): the scrub state, "worth a second look", and the
 // per-line unsure hints. Worded from the design's review-sheet mock.
 //
-// Every sentence in this section is DRAFT, NEEDS APPROVAL.
+// Every sentence in this section was approved 2026-10-06.
 
-/// **DRAFT, NEEDS APPROVAL.** The heading over a session with a
+/// Approved 2026-10-06. The heading over a session with a
 /// `second_look` reason.
 pub const SECOND_LOOK_HEADING: &str = "Worth a second look";
 
-/// **DRAFT, NEEDS APPROVAL.** A session no preview has scrubbed yet. Not
+/// Approved 2026-10-06. A session no preview has scrubbed yet. Not
 /// "0 marks": nobody has counted.
 pub const NOT_YET_SCRUBBED: &str = "Not yet scrubbed";
 
-/// **DRAFT, NEEDS APPROVAL.** The row's scrub state: `Scrubbed · 7 marks`,
+/// Approved 2026-10-06. The row's scrub state: `Scrubbed · 7 marks`,
 /// `Scrubbed · 1 mark`, or [`NOT_YET_SCRUBBED`] for `None` (the absent
 /// `marks` key). `None` is never rendered as zero.
 pub fn scrub_state_line(marks: Option<u32>) -> String {
@@ -62,7 +62,7 @@ pub fn scrub_state_line(marks: Option<u32>) -> String {
     }
 }
 
-/// **DRAFT, NEEDS APPROVAL.** Why one `second_look` reason waits, or `None`
+/// Approved 2026-10-06. Why one `second_look` reason waits, or `None`
 /// for a label this build does not know.
 pub fn second_look_line(reason: &str) -> Option<&'static str> {
     match reason {
@@ -93,7 +93,7 @@ pub fn second_look_line_or_fallback(reason: &str) -> &'static str {
     second_look_line(reason).unwrap_or(SECOND_LOOK_FALLBACK_LINE)
 }
 
-/// **DRAFT, NEEDS APPROVAL.** The hint under an unsure span, or `None` for a
+/// Approved 2026-10-06. The hint under an unsure span, or `None` for a
 /// label this build does not know.
 pub fn unsure_hint_line(label: &str) -> Option<&'static str> {
     match label {
@@ -797,7 +797,7 @@ pub struct MonitorScreensCopy {
     /// Beside projected mission credit: what it is,
     /// and that it is not yet earned.
     pub projected_note: &'static str,
-    /// DRAFT, NEEDS APPROVAL. The window the Inference tab's counts
+    /// Approved 2026-10-06. The window the Inference tab's counts
     /// cover, from `window_hours` on `inference_calls` and
     /// `tool_destinations`. `{hours}` is replaced with a number.
     pub window_last_hours: &'static str,

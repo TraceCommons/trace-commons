@@ -86,10 +86,10 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let signedOut: String
     public let projected: String
     public let projectedNote: String
-    /// DRAFT, NEEDS APPROVAL. The window the Inference tab's counts cover;
+    /// Approved 2026-10-06. The window the Inference tab's counts cover;
     /// `{hours}` is replaced with a number. See `windowLine(hours:)`.
     public let windowLastHours: String
-    /// DRAFT, NEEDS APPROVAL. History's word for a `submitted`
+    /// History's word for a `submitted`
     /// contribution: waiting to be scored, not done.
     public let historySubmitted: String
     /// The queue's safeguards panel (Ron's #1146 `QueueStatusPanel`, #1241).
