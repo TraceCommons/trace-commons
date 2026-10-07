@@ -486,7 +486,16 @@ struct PasskeySheets: View {
             refusalNotice
             blockButton(copy.passkey.nameTitle, .primary) { Task { await model.submitName() } }
                 .disabled(model.nameError != nil)
-            GlassNotice(tone: .ask) { Text(copy.passkey.nameWarning) }
+            // #1030's StatusNote: the amber warning glyph before the words.
+            GlassNotice(tone: .ask) {
+                HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(GlassTokens.Color.statusAsk.color)
+                        .accessibilityHidden(true)
+                    Text(copy.passkey.nameWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
         .disabled(model.busy)
     }

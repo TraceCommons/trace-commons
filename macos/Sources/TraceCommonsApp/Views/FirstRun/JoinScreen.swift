@@ -512,9 +512,13 @@ struct JoinScreen: View {
                         Text(text)
                             .glassType(GlassTokens.TypeScale.label)
                             .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 0)
+                // #1030's `ftux-row--between`: the text takes the row and
+                // the action keeps its own width.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
                 if let done {
                     GlassStatusLabel(done, status: .on)
                 } else if showsAction {
