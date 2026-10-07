@@ -97,6 +97,7 @@ const TAURI_COMMANDS: &[&str] = &[
     "settings_ranges",
     "quit_app",
     "quit_confirmation_copy",
+    "shell_status_copy",
     "cancel_private_ai_credential",
     "forget_private_ai_credential",
     "migrate_private_ai_credential",

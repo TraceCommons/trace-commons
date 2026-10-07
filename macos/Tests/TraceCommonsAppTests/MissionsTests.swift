@@ -35,10 +35,29 @@ final class MissionsTests: XCTestCase {
                      {"id":"c","title":"C","summary":null,"credit_range":null}]}
         """#)
         XCTAssertEqual(MissionFormat.condition(catalogue), "Waits on settlement")
-        XCTAssertEqual(MissionFormat.credit(catalogue.missions[0], in: catalogue), "5–20 points")
-        XCTAssertEqual(MissionFormat.credit(catalogue.missions[1], in: catalogue), "3 points")
+        let words = try XCTUnwrap(MonitorWords.table)
+        XCTAssertEqual(
+            MissionFormat.credit(catalogue.missions[0], in: catalogue),
+            words.missionCreditPoints.replacingOccurrences(of: "{min}", with: "5")
+                .replacingOccurrences(of: "{max}", with: "20"))
+        XCTAssertEqual(
+            MissionFormat.credit(catalogue.missions[1], in: catalogue),
+            words.missionCreditPointsOne.replacingOccurrences(of: "{min}", with: "3"))
         XCTAssertEqual(MissionFormat.credit(catalogue.missions[2], in: catalogue), "—")
         XCTAssertTrue(MissionFormat.showsProjected(catalogue))
+    }
+
+    /// A unit this build cannot word reads as a dash, never as the wire
+    /// label, and never as a figure.
+    func test_anUnwordedUnitIsADash() throws {
+        let catalogue = try catalogue(#"""
+        {"fetched_at":null,"posture":{"settlement":"disabled","graded":false,"explanation":"Waits on settlement"},
+         "missions":[{"id":"a","title":"A","summary":null,"credit_range":{"min":5,"max":20,"unit":"points_per_accepted_trace"}},
+                     {"id":"b","title":"B","summary":null,"credit_range":{"min":1,"max":2,"unit":"USD"}}]}
+        """#)
+        XCTAssertEqual(MissionFormat.credit(catalogue.missions[0], in: catalogue), "—")
+        XCTAssertEqual(MissionFormat.credit(catalogue.missions[1], in: catalogue), "—")
+        XCTAssertFalse(MissionFormat.showsProjected(catalogue))
     }
 
     /// Mission credit is labelled projected, never pending: Pending is

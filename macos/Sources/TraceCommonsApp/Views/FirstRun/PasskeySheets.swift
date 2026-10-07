@@ -21,8 +21,11 @@ enum PasskeySheetOutcome: Equatable {
     /// An existing passkey signed in, and Verify enrolled this Mac: either
     /// the account was unbound and Verify bound it (`bound`), or another Mac
     /// had bound it and Verify joined this one to it (`enrolled`). A sign-in
-    /// alone holds no enrolment and never ends the sheets with this.
-    case signedIn
+    /// alone holds no enrolment and never ends the sheets with this. `name`
+    /// is the one the daemon remembers for the signed-in account's own
+    /// record (`signed_in_name`), read once Verify finished; nil when it has
+    /// none.
+    case signedIn(name: String?)
     /// Verify's bind answered `existing_account`: the daemon switched to an
     /// account that already existed and makes no claim that the new passkey
     /// moved, so no passkey name is carried.
@@ -370,15 +373,26 @@ final class PasskeySheetModel: ObservableObject {
         refusal = nil
         defer { busy = false }
         switch (verifying, await account.bind()) {
-        case (.created, .bound): outcome = createdName.map { .created(name: $0) } ?? .signedIn
-        case (.signedInUnbound, .bound): outcome = .signedIn
+        case (.created, .bound):
+            if let createdName { outcome = .created(name: createdName) } else { outcome = await signedIn() }
+        case (.signedInUnbound, .bound): outcome = await signedIn()
         case (.created, .existingAccount), (.signedInUnbound, .existingAccount): outcome = .existingAccount
-        case (.signedInBound, .enrolled): outcome = .signedIn
+        case (.signedInBound, .enrolled): outcome = await signedIn()
         case (_, .nearAiMismatch): await signOut(saying: .nearAiMismatch)
         case (_, .bound), (_, .existingAccount), (_, .enrolled): refusal = "account-bind-invalid"
         case (_, .failed(.refused(let label))): refusal = label
         case (_, .failed): break
         }
+    }
+
+    /// A sign-in that Verify finished, named by what the daemon remembers for
+    /// the signed-in account's own record. Read now, once the session is the
+    /// account Verify bound or enrolled, and never from `rememberedName`: the
+    /// most recent record may be another account's, and the person may have
+    /// picked another passkey in the system sheet than the one P-7 greeted.
+    private func signedIn() async -> PasskeySheetOutcome {
+        let name = await account.passkeyState()?.signedInName.map(PasskeyName.trimmed)
+        return .signedIn(name: name?.isEmpty == false ? name : nil)
     }
 
     /// The sheet left the screen: a system sheet still up is dismissed, so

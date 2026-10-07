@@ -135,6 +135,19 @@ final class NativePasskeyCoordinatorTests: XCTestCase {
         XCTAssertNil(older.passkeyCount)
     }
 
+    /// The name remembered for the signed-in account's own record, which
+    /// Join's card shows after a passkey sign-in; an older daemon sends no
+    /// `signed_in_name`, which is no name, never the latest one.
+    func testSignedInNameDecodesAndAnOlderDaemonHasNone() throws {
+        let signedIn = try JSONDecoder().decode(NativePasskeyState.self,
+            from: Data(#"{"state":"bound","passkey_count":2,"remembered_name":"Someone else","signed_in_name":"Home","near_ai_connected":true}"#.utf8))
+        XCTAssertEqual(signedIn.signedInName, "Home")
+        XCTAssertEqual(signedIn.rememberedName, "Someone else")
+        let older = try JSONDecoder().decode(NativePasskeyState.self,
+            from: Data(#"{"state":"bound","passkey_count":2,"remembered_name":"Someone else","near_ai_connected":true}"#.utf8))
+        XCTAssertNil(older.signedInName)
+    }
+
     func testTaskCancellationAndBusyCeremonyNeverComplete() async throws {
         let daemon = IdentityDaemonFixture()
         let provider = IdentityProviderFixture()

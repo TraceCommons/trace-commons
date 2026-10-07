@@ -138,7 +138,7 @@ final class PasskeySheetsTests: XCTestCase {
         // Join reads the core's signed-out sentence for that outcome only.
         XCTAssertEqual(PasskeySheetOutcome.signedOut.joinNotice(copy), copy.join.signedOut)
         XCTAssertNil(PasskeySheetOutcome.closed.joinNotice(copy))
-        XCTAssertNil(PasskeySheetOutcome.signedIn.joinNotice(copy))
+        XCTAssertNil(PasskeySheetOutcome.signedIn(name: nil).joinNotice(copy))
         XCTAssertNil(PasskeySheetOutcome.created(name: "n").joinNotice(copy))
         XCTAssertNil(PasskeySheetOutcome.existingAccount.joinNotice(copy))
     }
@@ -266,7 +266,7 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(model.step, .verify)
         XCTAssertNil(model.outcome)
         await model.verify()
-        XCTAssertEqual(model.outcome, .signedIn)
+        XCTAssertEqual(model.outcome, .signedIn(name: nil))
 
         // A cancelled save sheet returns to Name.
         let creating = PasskeySheetModel(copy: copy.passkey, account: account)
@@ -298,8 +298,8 @@ final class PasskeySheetsTests: XCTestCase {
         await returning.useExisting()
         XCTAssertEqual(returning.step, .verify)
         await returning.verify()
-        XCTAssertEqual(account.calls, ["signIn", "bind"])
-        XCTAssertEqual(returning.outcome, .signedIn)
+        XCTAssertEqual(account.calls, ["signIn", "bind", "passkeyState"])
+        XCTAssertEqual(returning.outcome, .signedIn(name: nil))
         let elsewhere = PasskeySheetModel(start: .welcomeBack, copy: copy.passkey, account: account)
         elsewhere.close()
         XCTAssertEqual(elsewhere.outcome, .closed)
@@ -419,8 +419,64 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(model.step, .verify)
         account.bindAnswer = .enrolled
         await model.verify()
-        XCTAssertEqual(model.outcome, .signedIn)
-        XCTAssertEqual(account.calls, ["signIn", "bind"])
+        XCTAssertEqual(model.outcome, .signedIn(name: nil))
+        XCTAssertEqual(account.calls, ["signIn", "bind", "passkeyState"])
+    }
+
+    /// After a passkey sign-in, the passkey is named by what the daemon
+    /// remembers for the signed-in account's own record (`signed_in_name`),
+    /// read once Verify finished, never by the most recent record
+    /// (`remembered_name`), which may be another account's. No such name, a
+    /// blank one or no answer is no name.
+    func test_aSignInIsNamedByTheSignedInAccountsOwnRecord() async throws {
+        let copy = try coreCopy()
+        func signIn(
+            start: PasskeySheetStep, signInAnswer: PasskeySignInResult, bindAnswer: PasskeyBindResult,
+            passkeys: NativePasskeyState?
+        ) async -> (PasskeySheetOutcome?, [String]) {
+            let account = RecordingAccount()
+            account.signInAnswer = signInAnswer
+            account.bindAnswer = bindAnswer
+            account.passkeys = passkeys
+            let model = PasskeySheetModel(start: start, copy: copy.passkey, account: account)
+            await model.useExisting()
+            await model.verify()
+            return (model.outcome, account.calls)
+        }
+        func state(_ signedIn: String?, latest: String? = "Someone else") -> NativePasskeyState {
+            NativePasskeyState(
+                state: "bound", passkeyCount: 2, rememberedName: latest, signedInName: signedIn,
+                nearAiConnected: true)
+        }
+        for start in [PasskeySheetStep.choose, .welcomeBack] {
+            for (signInAnswer, bindAnswer) in [
+                (PasskeySignInResult.unbound, PasskeyBindResult.bound), (.bound, .enrolled),
+            ] {
+                let named = await signIn(
+                    start: start, signInAnswer: signInAnswer, bindAnswer: bindAnswer, passkeys: state("Home"))
+                XCTAssertEqual(named.0, .signedIn(name: "Home"))
+                XCTAssertEqual(named.1, ["signIn", "bind", "passkeyState"], "read after Verify finished")
+
+                let unnamed = await signIn(
+                    start: start, signInAnswer: signInAnswer, bindAnswer: bindAnswer, passkeys: state(nil))
+                XCTAssertEqual(unnamed.0, .signedIn(name: nil), "never the latest record's name")
+
+                let blank = await signIn(
+                    start: start, signInAnswer: signInAnswer, bindAnswer: bindAnswer, passkeys: state("  "))
+                XCTAssertEqual(blank.0, .signedIn(name: nil))
+
+                let silent = await signIn(
+                    start: start, signInAnswer: signInAnswer, bindAnswer: bindAnswer, passkeys: nil)
+                XCTAssertEqual(silent.0, .signedIn(name: nil))
+            }
+        }
+
+        // A bind that switched to an existing account carries no name and
+        // asks for none.
+        let switched = await signIn(
+            start: .choose, signInAnswer: .unbound, bindAnswer: .existingAccount, passkeys: state("Home"))
+        XCTAssertEqual(switched.0, .existingAccount)
+        XCTAssertEqual(switched.1, ["signIn", "bind"])
     }
 
     /// "Other sign-in options" closes Welcome back without a call.
@@ -455,8 +511,8 @@ final class PasskeySheetsTests: XCTestCase {
 
         account.bindAnswer = .bound
         await model.verify()
-        XCTAssertEqual(model.outcome, .signedIn)
-        XCTAssertEqual(account.calls, ["signIn", "bind", "bind"])
+        XCTAssertEqual(model.outcome, .signedIn(name: nil))
+        XCTAssertEqual(account.calls, ["signIn", "bind", "bind", "passkeyState"])
 
         // bind switched to an account that already existed.
         let switching = PasskeySheetModel(copy: copy.passkey, account: account)
@@ -614,8 +670,8 @@ final class PasskeySheetsTests: XCTestCase {
 
         account.bindAnswer = .enrolled
         await model.verify()
-        XCTAssertEqual(model.outcome, .signedIn)
-        XCTAssertEqual(account.calls, ["signIn", "bind"])
+        XCTAssertEqual(model.outcome, .signedIn(name: nil))
+        XCTAssertEqual(account.calls, ["signIn", "bind", "passkeyState"])
 
         // A bound account's Verify accepts nothing but an enrolment: a bind or
         // a switch would not be this account, so it fails closed.

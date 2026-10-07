@@ -376,11 +376,59 @@ final class MenuBarGlassPanelTests: XCTestCase {
         let never = ProjectRow(projectId: "n", projectLabel: "n", mode: .ignore, folderMode: .ignore)
         let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
         let unknown = ProjectRow(projectId: "x", projectLabel: "x", mode: .ignore)
-        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([]))
-        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([], override: "ignore"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil, override: "ignore"))
+    }
+
+    /// Under an Automatic override, clearing starts no new unattended
+    /// sending (a folder set to Automatic already sends under its own
+    /// arming, and Ask me folders go back to asking), so Mixed clears at
+    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
+        let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
+        let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "auto_upload"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation(nil, override: "auto_upload"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "notify_only"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: nil))
+
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("auto_upload")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "auto_upload")
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// A stale store sends nothing from Mixed, even with an override in
+    /// force and an Automatic folder.
+    func test_mixedDoesNothingWhileStale() async throws {
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        let sent = client.overrideCalls
+        store.attach(client)
+        XCTAssertFalse(store.canChooseOverride)
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls, sent)
+    }
+
+    /// The Mixed row goes through `chooseMixed`, which confirms; the panel
+    /// never calls the unconfirmed `clearOverride` (#1256 review).
+    func test_theMixedRowGoesThroughChooseMixed() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("Task { await store.chooseMixed() }"))
+        XCTAssertFalse(source.contains("clearOverride()"))
     }
 
     /// Automatic's confirmation carries the arming disclosure, and its

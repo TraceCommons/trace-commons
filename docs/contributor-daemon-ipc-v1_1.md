@@ -1937,8 +1937,10 @@ status is unread or the daemon is down. `tc_contribution_override_confirm_json(m
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. For
 `mode` `"clear"` it returns the confirmation a shell shows before
-`clear_contribution_override` when any folder's own setting is Automatic, or
-when the folder list or a folder's own setting is unknown: its `mode` is
+`clear_contribution_override` when the override in force is Ask me or Never
+and any folder's own setting is Automatic, or the folder list or a folder's
+own setting is unknown (under an Automatic override clearing resumes nothing,
+so it is not confirmed): its `mode` is
 `"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
 and it carries no `arming`. Every sentence was approved 2026-10-06
 (`project_copy.rs`).
@@ -6107,7 +6109,7 @@ key, tenant identity or secret-store reference.
 | `passkey_cancel` | `ceremony` | `{cancelled:true}` |
 | `account_bind` | none | `{outcome,binding_state}` |
 | `account_binding` | none | `{binding_state}` |
-| `passkey_state` | none | `{state,passkey_count,remembered_name,near_ai_connected}` |
+| `passkey_state` | none | `{state,passkey_count,remembered_name,signed_in_name,near_ai_connected}` |
 | `account_sign_in` | `ingest_url?` | `{signed_in:true,expires_at}` |
 | `account_session_status` | none | `{state,signed_in,expires_at}` |
 | `account_sign_out` | none | `{signed_out:true}` |
@@ -6195,6 +6197,20 @@ keeps the list, since a returning person after sign-out is who the first
 run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
 the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
 `remembered_name`.
+
+`signed_in_name` is the name this Mac remembers for the **signed-in
+account's own record**, matched by the session's account id (hashed, as the
+record is), never the most recent record's: after a sign-in, the most recent
+record may belong to another account, and its name is not this one's. It is
+null when no account session is held or the session cannot be read, when
+this Mac has no record for that account, when that record has no name (a
+passkey first used here by signing in), or when the list cannot be read. A
+local fact like the other two, it is answered in every `state`, including
+`unknown`. The first run reads it once a passkey sign-in has finished, to
+name the passkey on Join's card; it never reads `remembered_name` for that,
+since the person may have picked another account's passkey in the system
+sheet. Added in v1.1 additively; older shells ignore it, and a shell
+reading an older daemon finds it absent and shows no name.
 
 Native login is discoverable authentication: `user_handle` must contain the
 nonempty raw Apple user ID encoded as canonical base64url. A missing or empty

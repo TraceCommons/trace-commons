@@ -4,11 +4,13 @@ import {
   requestNotificationPermission,
   setStartAtLogin,
 } from "../../../lib/tauri/platform-api";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 
 const platformKey = ["local", "platform", "capabilities"] as const;
 
 export function usePlatformCapabilities() {
   const queryClient = useQueryClient();
+  const lines = useShellStatusLines();
   const query = useQuery({
     queryKey: platformKey,
     queryFn: getPlatformCapabilities,
@@ -30,13 +32,11 @@ export function usePlatformCapabilities() {
     busy: notification.isPending || login.isPending,
     requestNotifications: notification.mutateAsync,
     setStartAtLogin: login.mutateAsync,
-    error:
-      query.error instanceof Error
-        ? query.error.message
-        : notification.error instanceof Error
-          ? notification.error.message
-          : login.error instanceof Error
-            ? login.error.message
-            : null,
+    // The core's line, never the raw error: it can carry a URL or a path.
+    error: query.isError
+      ? lines.readUnavailable
+      : notification.isError || login.isError
+        ? lines.requestFailed
+        : null,
   };
 }

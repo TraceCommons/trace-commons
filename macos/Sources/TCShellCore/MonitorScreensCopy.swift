@@ -86,6 +86,10 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
     public let signedOut: String
     public let projected: String
     public let projectedNote: String
+    /// `{min}`, `{max}`: a mission's range in `points`.
+    public let missionCreditPoints: String
+    /// `{min}`.
+    public let missionCreditPointsOne: String
     /// Approved 2026-10-06. The window the Inference tab's counts cover;
     /// `{hours}` is replaced with a number. See `windowLine(hours:)`.
     public let windowLastHours: String
@@ -181,6 +185,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         case signedOut = "signed_out"
         case projected
         case projectedNote = "projected_note"
+        case missionCreditPoints = "mission_credit_points"
+        case missionCreditPointsOne = "mission_credit_points_one"
         case windowLastHours = "window_last_hours"
         case historySubmitted = "history_submitted"
         case safeguards
@@ -266,6 +272,8 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         "signed_out",
         "projected",
         "projected_note",
+        "mission_credit_points",
+        "mission_credit_points_one",
         "window_last_hours",
         "history_submitted",
         "safeguards",
@@ -295,7 +303,7 @@ public struct MonitorScreensCopy: Decodable, Equatable, Sendable {
         else {
             return nil
         }
-        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote, copy.windowLastHours, copy.historySubmitted]
+        let words = [copy.computer, copy.commons, copy.waiting, copy.folders, copy.watched, copy.off, copy.on, copy.connected, copy.reduce, copy.enlarge, copy.calls, copy.models, copy.priced, copy.unknown, copy.proofVerified, copy.proofGatewayOnly, copy.proofUnattested, copy.proofPending, copy.proofUnavailable, copy.proofFailed, copy.proofOutside, copy.proofUnrecorded, copy.history, copy.contributed, copy.watching, copy.paused, copy.summary, copy.week, copy.month, copy.total, copy.held, copy.withdrawn, copy.credit, copy.creditFinal, copy.pending, copy.community, copy.rank, copy.window, copy.approved, copy.unrecorded, copy.missions, copy.contributionMode, copy.mixed, copy.shared, copy.kept, copy.recentActivity, copy.flagged, copy.manageRules, copy.settings, copy.settingsTitle, copy.settingsSubtitle, copy.settingsSections, copy.close, copy.view, copy.graph, copy.showIgnoredFolders, copy.focus, copy.previous, copy.next, copy.creditPending, copy.openTraces, copy.quit, copy.coreUnreachable, copy.requestFailed, copy.heldForReview, copy.heldExplanation, copy.creditNotCurrency, copy.historyShownOf, copy.historyShown, copy.signedOut, copy.projected, copy.projectedNote, copy.missionCreditPoints, copy.missionCreditPointsOne, copy.windowLastHours, copy.historySubmitted]
         return words.contains(where: \.isEmpty) || !copy.safeguards.isWhole || !copy.historyActions.isWhole
             || !copy.shell.isWhole || !copy.tracesGraph.isWhole || !copy.flowMap.isWhole
             || !copy.homeHistory.isWhole || !copy.settingsNav.isWhole ? nil : copy
