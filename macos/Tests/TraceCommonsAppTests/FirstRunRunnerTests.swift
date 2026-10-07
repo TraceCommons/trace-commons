@@ -307,20 +307,13 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.holdsEnrolment)
     }
 
-    /// Late enrolment, the enrolled tenant's own passkey: the daemon keeps
+    /// Late enrolment, the enrolled account's own passkey: the daemon keeps
     /// the sign-in (it checked the session's tenant against the enrolment),
-    /// and Verify's bind is refused before any request
-    /// (`account-already-enrolled`), since this Mac is already enrolled.
-    ///
-    /// Recorded as it is, a known dead end: Verify cannot finish, and its
-    /// only exit, Cancel, signs out and clears Join's enrolment
-    /// (`signedOutOfEnrolment`), where "Other sign-in options" on P-7 would
-    /// have kept it. Fail closed -- nothing of another account is sent or
-    /// kept -- but a worse outcome than not using P-7. The bind refusal says
-    /// only that this Mac is enrolled, not that it is enrolled under this
-    /// session's account, so the sheet cannot safely read it as success;
-    /// that needs a daemon answer that says so.
-    func test_aLateEnrolmentUnderWelcomeBackWithTheEnrolledAccountsPasskey() async throws {
+    /// and Verify's bind answers `already_enrolled` from local state, with
+    /// no request: the enrolment this Mac holds is this account's. Verify
+    /// takes it as the join it would otherwise have made, ends `.signedIn`
+    /// named by `signed_in_name`, and Join keeps holding the enrolment.
+    func test_aLateEnrolmentUnderWelcomeBackFinishesWithTheEnrolledAccountsPasskey() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let runner = FirstRunRunner(
             state: FirstRunState(tier: .quick, step: .join, daemonStarted: true), daemon: RecordingFirstRunDaemon())
@@ -331,23 +324,24 @@ final class FirstRunRunnerTests: XCTestCase {
         runner.state = OnboardingNavigation.recordEnrolment(runner.state)
 
         account.signInAnswer = .bound
-        account.bindAnswer = .failed(.refused(label: "account-already-enrolled"))
+        let daemonAnswer = try JSONDecoder().decode(
+            NativeAccountBindResult.self,
+            from: Data(#"{"outcome":"already_enrolled","binding_state":"bound"}"#.utf8))
+        account.bindAnswer = PasskeyBindResult(daemonAnswer)
         let sheet = PasskeySheetModel(start: runner.passkeyStart, copy: copy.passkey, account: account)
         await sheet.useExisting()
         XCTAssertEqual(sheet.step, .verify)
+        account.passkeys = NativePasskeyState(
+            state: "bound", passkeyCount: 1, rememberedName: "Home", signedInName: "Home", nearAiConnected: true)
         await sheet.verify()
-        XCTAssertEqual(sheet.step, .verify)
-        XCTAssertEqual(sheet.refusal, "account-already-enrolled")
-        XCTAssertNil(sheet.outcome)
-        XCTAssertEqual(account.calls, ["passkeyState", "signIn", "bind"])
+        XCTAssertNil(sheet.refusal)
+        XCTAssertEqual(sheet.outcome, .signedIn(name: "Home"))
+        XCTAssertEqual(account.calls, ["passkeyState", "signIn", "bind", "passkeyState"], "no sign-out")
 
-        await sheet.cancelVerify()
-        XCTAssertEqual(sheet.outcome, .signedOut)
-        XCTAssertEqual(account.calls, ["passkeyState", "signIn", "bind", "signOut"])
         runner.finishPasskey(try XCTUnwrap(sheet.outcome), copy: copy)
-        XCTAssertEqual(runner.state.account, AccountAnswer.none)
-        XCTAssertTrue(runner.state.signedOutOfEnrolment)
-        XCTAssertFalse(runner.state.holdsEnrolment)
+        XCTAssertEqual(runner.state.account, .passkey(name: "Home"))
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+        XCTAssertTrue(runner.state.holdsEnrolment)
         XCTAssertEqual(runner.state.step, .join)
     }
 

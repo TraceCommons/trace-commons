@@ -1185,31 +1185,45 @@ async fn a_late_enrolment_refuses_a_sign_in_to_another_tenant_and_keeps_nothing(
     );
 }
 
-/// Late enrolment, part two: the passkey is the enrolled tenant's own. The
-/// sign-in is kept and named, and P-7's next step, Verify's `account_bind`,
-/// is refused (`account-already-enrolled`) before any request: this Mac is
-/// not enrolled a second time, and no bind ceremony reaches the server.
-#[tokio::test]
-async fn a_late_enrolment_keeps_a_same_tenant_sign_in_and_refuses_a_second_enrolment() {
-    let (_dir, shared) = shared();
+/// A P-7 sign-in after a late enrolment: config saved for `tenant-a`, then a
+/// login whose answer is `reply_tenant`'s with `binding_state`. Returns the
+/// requests the server saw and the account id signed in.
+async fn late_enrolment_sign_in(
+    shared: &DaemonShared,
+    reply_tenant: &str,
+    binding_state: &str,
+) -> (Response, Vec<String>, String) {
     let account_id = uuid::Uuid::new_v4().to_string();
     let mut reply = labeled_session_reply(&account_id, json!("Home"));
     reply["access_token"] = json!(format!(
         "tcn1_{}.secret",
-        URL_SAFE_NO_PAD.encode("tenant-a")
+        URL_SAFE_NO_PAD.encode(reply_tenant)
     ));
-    reply["binding_state"] = json!("bound");
+    reply["binding_state"] = json!(binding_state);
     let (origin, worker) = server_sequence(vec![reply]).await;
-    configure_test_origin(&shared, &origin);
+    configure_test_origin(shared, &origin);
     put_pending(
-        &shared,
+        shared,
         &origin,
         Action::Login,
         Instant::now() + Duration::from_secs(30),
     );
-    let response = handle(&shared, &request("passkey_login_complete", login_params())).await;
-    assert_eq!(response.result.unwrap(), json!({"binding_state":"bound"}));
+    let response = handle(shared, &request("passkey_login_complete", login_params())).await;
     let seen = worker.await.unwrap();
+    (response, seen, account_id)
+}
+
+/// Late enrolment, part two: the passkey is the enrolled account's own (its
+/// session is for the enrolment's tenant, and the account is `bound`). The
+/// sign-in is kept and named, and P-7's next step, Verify's `account_bind`,
+/// answers `already_enrolled` from local state alone: the enrolment this
+/// Mac already holds is this account's, so Verify can finish. No request is
+/// sent, and the enrolment is not written again.
+#[tokio::test]
+async fn a_late_enrolment_answers_already_enrolled_for_the_enrolled_accounts_sign_in() {
+    let (_dir, shared) = shared();
+    let (response, seen, account_id) = late_enrolment_sign_in(&shared, "tenant-a", "bound").await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"bound"}));
     assert_eq!(seen.len(), 1);
     assert_eq!(
         account_auth::try_load_session_with_snapshot(&shared.store)
@@ -1219,14 +1233,59 @@ async fn a_late_enrolment_keeps_a_same_tenant_sign_in_and_refuses_a_second_enrol
             .account_id,
         account_id
     );
+    let config_before = serde_json::to_value(shared.store.load_config().unwrap()).unwrap();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(
+        bind.result.unwrap(),
+        json!({"outcome":"already_enrolled","binding_state":"bound"})
+    );
+    assert_eq!(
+        serde_json::to_value(shared.store.load_config().unwrap()).unwrap(),
+        config_before
+    );
+    assert_eq!(passkey_state(&shared).await["signed_in_name"], "Home");
+}
+
+/// Late enrolment, the enrolment's tenant but an account no Mac has bound
+/// (`unbound`): this Mac's enrolment cannot be its, so the bind is refused
+/// as before, with no request.
+#[tokio::test]
+async fn a_late_enrolment_refuses_to_bind_an_unbound_same_tenant_account() {
+    let (_dir, shared) = shared();
+    let (response, seen, _) = late_enrolment_sign_in(&shared, "tenant-a", "unbound").await;
+    assert_eq!(response.result.unwrap(), json!({"binding_state":"unbound"}));
+    assert_eq!(seen.len(), 1);
     let bind = handle(&shared, &request("account_bind", json!({}))).await;
     assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
-    assert_eq!(
-        super::super::remembered_passkeys::name_for(&shared.store, &account_id)
-            .unwrap()
-            .as_deref(),
-        Some("Home")
-    );
+}
+
+/// A session for another tenant than the enrolment's (held from before the
+/// enrolment, so `persist_session` never compared them) is refused as
+/// before, with no request; so is no session at all.
+#[tokio::test]
+async fn an_enrolled_mac_refuses_to_bind_another_tenants_session_or_none() {
+    let (_dir, shared) = shared();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-session-required");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let snapshot = commons_credentials::snapshot(&shared.store, Kind::Account).unwrap();
+    persist_session(
+        &shared.store,
+        &snapshot,
+        &origin,
+        &json!({"access_token":format!("tcn1_{}.secret", URL_SAFE_NO_PAD.encode("tenant-b")),"token_type":"Bearer","expires_in_secs":43200,"account_id":uuid::Uuid::new_v4().to_string(),"binding_state":"bound"}),
+    )
+    .unwrap();
+    configure_test_origin(&shared, &origin);
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
+    commons_credentials::clear(&shared.store, &[Kind::Account]).unwrap();
+    let bind = handle(&shared, &request("account_bind", json!({}))).await;
+    assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
+    let accepted = tokio::time::timeout(Duration::from_millis(200), listener.accept()).await;
+    assert!(accepted.is_err(), "no request reached the server");
 }
 
 /// Late enrolment, part three: the enrolment lands while the system sheet

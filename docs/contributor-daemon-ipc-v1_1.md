@@ -6270,7 +6270,28 @@ session is left as it was, and the shell signs it out. A `bound` or
 `enrolled` result is persisted only if its tenant and account are the passkey
 session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
 state) is refused with `account-bind-refused` before the refresh token is
-spent. Tokens,
+spent.
+
+On a Mac that is **already enrolled**, `account_bind` sends no request and
+writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
+when the enrolment it holds is the signed-in account's own: the session's
+tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
+it) equals the enrolment config's `tenant_id`, **and** the session was signed
+in to a `bound` account (the `binding_state` stored with it at sign-in). This
+is the first run's Welcome back case: the enrolment is reported after P-7
+opened, and the person signs in with that account's passkey. Anything else
+-- no session, another tenant, an `unbound` or `legacy` account, or a stored
+session without a `binding_state` -- is refused as before with
+`account-already-enrolled`. The config records a tenant and no account, so
+the check is a tenant match; it identifies one account because a binding row
+(and so a `bound` state) is only ever written for a passkey-origin account,
+each created alone in a freshly minted tenant, and it accepts nothing the
+sign-in's own tenant check had not already accepted when it kept the
+session. Recording the enrolled account at enrolment would make it
+account-precise; that is not done yet. Added in v1.1 additively: the macOS
+shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
+either); a shell that does not know it reads an unknown outcome and fails
+closed (`account-bind-invalid`). Tokens,
 rotations and atomic device/config persistence stay in Rust/Keychain. Binding
 creates no folder/trace/body consent. Native login remains weak and native add
 keeps the existing first-strong-authenticator gate; adding another requires
