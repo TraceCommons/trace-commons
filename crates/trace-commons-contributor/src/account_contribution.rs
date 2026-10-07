@@ -9,17 +9,17 @@ pub const PENDING_CREDIT_LINE: &str =
 pub const READY_LINE: &str = "Ready to contribute. Accepted contributions may earn pending credit.";
 pub const NOT_READY_LINE: &str =
     "Contributions are currently unavailable. Refresh status or redeem an invite.";
-/// **DRAFT, NEEDS APPROVAL.** What a commons that does not use account
+/// Approved 2026-10-06. What a commons that does not use account
 /// admission (the server answers `legacy_evidence`) tells a contributor.
 pub const LEGACY_EVIDENCE_LINE: &str = "This commons does not use account admission. Your contributions go through the standard review.";
-/// **DRAFT, NEEDS APPROVAL.** The card's heading and controls, so no shell
+/// Approved 2026-10-06. The card's heading and controls, so no shell
 /// types its own.
 pub const HEADING: &str = "Account contributions";
-/// **DRAFT, NEEDS APPROVAL.**
+/// Approved 2026-10-06.
 pub const REFRESH_ACTION: &str = "Refresh status";
-/// **DRAFT, NEEDS APPROVAL.**
+/// Approved 2026-10-06.
 pub const INVITE_CODE_LABEL: &str = "Invite code";
-/// **DRAFT, NEEDS APPROVAL.**
+/// Approved 2026-10-06.
 pub const REDEEM_ACTION: &str = "Redeem invite";
 
 use crate::{
