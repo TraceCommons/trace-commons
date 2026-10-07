@@ -330,6 +330,16 @@ final class RulesScreenTests: XCTestCase {
         state.pastSelections = ["p1": ["s1"]]
         XCTAssertTrue(FirstRunPlan.calls(for: state, at: .start).contains(.includePastSessions(projectID: "p1", ["s1"])))
 
+        // Only while it is true: with an enrolment the daemon still holds
+        // (one signed out of, or an invite enrolled before a sign-in
+        // failed), watching only sends nothing, so nothing waits to say so.
+        for held in [
+            FirstRunState(tier: .custom, step: .rules, account: .watchOnly, signedOutOfEnrolment: true),
+            FirstRunState(tier: .custom, step: .rules, account: .watchOnly, enrolledInvite: "INVITE-1"),
+        ] {
+            XCTAssertNil(RulesScreenLayout.pastSessionsNote(held, copy: copy.rules))
+        }
+
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift")

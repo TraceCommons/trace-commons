@@ -323,6 +323,11 @@ extension DaemonData {
         /// `loggedIn` for that.
         public let accountScope: String?
         public let consentScopes: [String]?
+        /// `consent-scopes-not-chosen` while the daemon sends nothing under
+        /// its enrolment because the scopes were saved by enrolment and never
+        /// chosen; `nil` otherwise, and from a daemon predating it. A label,
+        /// never shown as text.
+        public let consentHold: String?
         public let paused: Bool?
         /// Every `Pending` entry. NOT the badge: never draw a count from it.
         public let queueDepth: Int?
@@ -366,6 +371,7 @@ extension DaemonData {
             case tenantId = "tenant_id"
             case accountScope = "account_scope"
             case consentScopes = "consent_scopes"
+            case consentHold = "consent_hold"
             case paused
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
