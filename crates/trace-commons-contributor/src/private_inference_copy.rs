@@ -592,8 +592,8 @@ pub struct PrivateInferenceCopy {
     pub account_contribution_checking: &'static str,
     pub account_contribution_unavailable: &'static str,
     pub account_contribution_pending_credit: &'static str,
-    /// The account contribution card's heading and controls (DRAFT, NEEDS
-    /// APPROVAL), so no shell types its own.
+    /// The account contribution card's heading and controls (approved
+    /// 2026-10-06), so no shell types its own.
     pub account_contribution_heading: &'static str,
     pub account_contribution_refresh_action: &'static str,
     pub account_contribution_invite_code: &'static str,

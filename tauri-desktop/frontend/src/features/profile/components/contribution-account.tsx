@@ -13,7 +13,7 @@ type ContributionCopy = {
   pendingCredit: string;
 };
 
-// DRAFT, NEEDS APPROVAL. The one sentence this shell owns: the core's own
+// Approved 2026-10-06. The one sentence this shell owns: the core's own
 // words are what failed to arrive, so it cannot supply this one.
 const COPY_UNREADABLE =
   "Account contribution status cannot be shown, because this build could not read its wording.";
