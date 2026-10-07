@@ -6186,13 +6186,31 @@ passkeys before authentication without telling anyone who asks whether the
 account exists, so the daemon keeps its own list (`remembered-passkeys.json`
 in the state directory, 0600): a record is written when a passkey is created,
 added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one, the SHA-256 of the account id (for matching a later sign-in;
+Mac learned one (the name it was given when created or added here, or the
+label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
 never sent over IPC), and when it was last used. No credential material, no
 token, no credential id. At most four records are kept, most recent first.
 `passkey_count` is how many; `0` means none remembered here, not that the
 account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in: the login answer
-carries no name). Both are null when the list cannot be read. Signing out
+when it has none (a passkey first used here by signing in whose login answer
+carried no label: it has none on the server, or the server predates
+`passkey_label`).
+
+A sign-in learns the passkey's name from the server. The commons'
+`POST /v1/account/native/passkey/login/finish` answer carries, beside the
+session, an optional `passkey_label`: the label the signed-in account gave the
+passkey that just authenticated, looked up by the tenant, account and
+credential id of the verified assertion (never from anything in the request),
+so it is only ever the authenticating account's own credential's label. It is
+absent, not null, when that passkey has no label or the label could not be
+read; an older server never sends it, and an older daemon ignores it. On a
+login the daemon records that label as the record's name, replacing any name
+it held; with no label (or one that fails the daemon's own name rules: blank,
+over 64 characters, or holding a control character) it keeps the name it
+already had. The label is not logged and is not forwarded over IPC except as
+`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
+`account-enrollment-mismatch`, a session for another tenant or account than
+the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
 keeps the list, since a returning person after sign-out is who the first
 run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
 the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
@@ -6204,7 +6222,7 @@ record is), never the most recent record's: after a sign-in, the most recent
 record may belong to another account, and its name is not this one's. It is
 null when no account session is held or the session cannot be read, when
 this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in), or when the list cannot be read. A
+passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
 local fact like the other two, it is answered in every `state`, including
 `unknown`. The first run reads it once a passkey sign-in has finished, to
 name the passkey on Join's card; it never reads `remembered_name` for that,

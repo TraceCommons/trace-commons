@@ -987,6 +987,153 @@ async fn pg_native_sign_in_is_a_weak_native_session() {
     drop_tenant(&admin, &created.tenant).await;
 }
 
+/// A native account created end to end with no label at `create/start`.
+async fn create_unlabeled_native_account(state: &Arc<AppState>) -> Created {
+    let start = create_start(state, None).await;
+    assert_eq!(start.status, StatusCode::OK, "create/start");
+    let start = start.json();
+    let ceremony_id = start["ceremony_id"].as_str().expect("ceremony id");
+    let mut authenticator = new_software_authenticator();
+    let credential = softpasskey_register(&mut authenticator, &start["public_key"]);
+    let finish = create_finish(state, ceremony_id, &credential).await;
+    assert_eq!(finish.status, StatusCode::OK, "create/finish");
+    let body = finish.json();
+    let token = body["access_token"].as_str().expect("token").to_string();
+    let (tenant, _) = native_token_parts(&token).expect("a tcn1_ token");
+    Created {
+        token,
+        tenant,
+        account_id: body["account_id"]
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
+            .expect("account id"),
+        credential_id: credential_id_to_string(&webauthn_rs::prelude::CredentialID::from(
+            credential.raw_id.as_ref(),
+        )),
+        authenticator,
+    }
+}
+
+/// Native sign-in answers with the label the account gave the passkey that
+/// just authenticated (`passkey_label`), so a Mac that first uses a passkey
+/// by signing in can still name it. The label is the credential's current
+/// one, is absent (not null) when the passkey has none, and the lookup
+/// behind it matches tenant, account AND credential: another account's
+/// credential, even in the same tenant, or a revoked one, has no label to
+/// give.
+#[tokio::test]
+async fn pg_native_sign_in_returns_its_own_passkeys_label_only() {
+    let Some((backend, state)) = pg_state(Some(5)).await else {
+        return;
+    };
+    let admin = pg_admin(&backend).await;
+    let mut labeled = create_native_account(&state).await;
+    let mut unlabeled = create_unlabeled_native_account(&state).await;
+
+    let login = native_login(&state, &mut labeled).await;
+    assert_eq!(
+        login.status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&login.bytes)
+    );
+    assert_eq!(login.json()["passkey_label"], "My trace passkey");
+
+    // Renamed: the answer is the label as it is now.
+    admin
+        .execute(
+            "UPDATE trace_webauthn_credentials SET label = 'Studio'
+              WHERE tenant_id = $1 AND credential_id = $2",
+            &[&labeled.tenant, &labeled.credential_id],
+        )
+        .await
+        .expect("rename");
+    let login = native_login(&state, &mut labeled).await;
+    assert_eq!(login.status, StatusCode::OK);
+    assert_eq!(login.json()["passkey_label"], "Studio");
+
+    // No label: the key is absent, as from an older server.
+    let login = native_login(&state, &mut unlabeled).await;
+    assert_eq!(login.status, StatusCode::OK);
+    let body = login.json();
+    assert_eq!(body["account_id"], unlabeled.account_id.to_string());
+    assert!(
+        body.as_object()
+            .expect("object")
+            .get("passkey_label")
+            .is_none(),
+        "{body}"
+    );
+
+    // The lookup: its own credential only.
+    let own = backend
+        .credential_label_for_account(&labeled.tenant, labeled.account_id, &labeled.credential_id)
+        .await
+        .expect("own label");
+    assert_eq!(own.as_deref(), Some("Studio"));
+    // Another account in the SAME tenant asking about this credential.
+    let sibling = Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+            &[&labeled.tenant, &sibling],
+        )
+        .await
+        .expect("sibling account");
+    for (what, tenant, account, credential) in [
+        (
+            "same tenant, other account",
+            labeled.tenant.as_str(),
+            sibling,
+            labeled.credential_id.as_str(),
+        ),
+        (
+            "other tenant, right account id",
+            unlabeled.tenant.as_str(),
+            labeled.account_id,
+            labeled.credential_id.as_str(),
+        ),
+        (
+            "own account, another account's credential",
+            labeled.tenant.as_str(),
+            labeled.account_id,
+            unlabeled.credential_id.as_str(),
+        ),
+    ] {
+        assert_eq!(
+            backend
+                .credential_label_for_account(tenant, account, credential)
+                .await
+                .expect(what),
+            None,
+            "{what}"
+        );
+    }
+    // Revoked: no label.
+    admin
+        .execute(
+            "UPDATE trace_webauthn_credentials SET revoked_at = now()
+              WHERE tenant_id = $1 AND credential_id = $2",
+            &[&labeled.tenant, &labeled.credential_id],
+        )
+        .await
+        .expect("revoke");
+    assert_eq!(
+        backend
+            .credential_label_for_account(
+                &labeled.tenant,
+                labeled.account_id,
+                &labeled.credential_id
+            )
+            .await
+            .expect("revoked"),
+        None
+    );
+
+    drop_tenant(&admin, &labeled.tenant).await;
+    drop_tenant(&admin, &unlabeled.tenant).await;
+}
+
 /// Removing a passkey revokes the native sessions it minted, and only those.
 #[tokio::test]
 async fn pg_removing_a_passkey_revokes_its_native_sessions() {

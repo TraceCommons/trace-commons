@@ -4245,6 +4245,33 @@ impl Database for PgBackend {
         }))
     }
 
+    async fn credential_label_for_account(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Read-only and only after a verified assertion, so, like the login
+        // loader, no ensure_trace_tenant. Tenant, account AND credential must
+        // all match: the label of a credential another account holds is never
+        // readable here, even within one tenant.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT label FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND credential_id = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.and_then(|row| row.get::<_, Option<String>>("label")))
+    }
+
     async fn update_webauthn_credential_after_login(
         &self,
         tenant_id: &str,
