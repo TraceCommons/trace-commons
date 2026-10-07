@@ -526,6 +526,28 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
     assert!(witness.contains("!confirmed"));
     assert!(witness.contains("mutation.mutate(true)"));
 
+    // A consent scope's label is the core's `title` (`consent_options`),
+    // never its wire name with the underscores turned into spaces.
+    for surface in [
+        "tauri-desktop/frontend/src/features/settings/components/consent-settings-panel.tsx",
+        "tauri-desktop/frontend/src/features/onboarding/components/onboarding-consent-step.tsx",
+    ] {
+        let source = read(&root, surface);
+        assert!(
+            source.contains("{option.title}"),
+            "{surface} must draw the core's scope title"
+        );
+        assert!(
+            !source.contains("option.name.replaceAll"),
+            "{surface} must not draw a scope's wire name"
+        );
+    }
+    let consent_parse = read(
+        &root,
+        "tauri-desktop/frontend/src/features/onboarding/consent-options.ts",
+    );
+    assert!(consent_parse.contains("title: title(scope)"));
+
     let admission = read(
         &root,
         "tauri-desktop/frontend/src/features/waiting/components/admission-preparation-overlay.tsx",

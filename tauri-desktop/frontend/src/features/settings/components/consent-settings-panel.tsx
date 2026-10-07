@@ -136,7 +136,7 @@ export function ConsentSettingsPanel({
                     />
                     <span>
                       <strong>
-                        {option.name.replaceAll("_", " ")}
+                        {option.title}
                         {option.always_on ? " · required" : ""}
                       </strong>
                       <small>{option.description}</small>
