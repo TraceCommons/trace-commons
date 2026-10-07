@@ -517,6 +517,9 @@ fn copy_commands_reach_the_frontend_through_tauri_and_render_at_safety_surfaces(
         "useWitnessReviewCopy",
         "copy.data?.disclosure",
         "copy.data?.confirm",
+        // The core's line that the reviewed content is fixed; macOS and GTK
+        // draw it under the disclosure.
+        "copy.data.immutable",
     ] {
         assert!(
             witness.contains(rendered_copy),
