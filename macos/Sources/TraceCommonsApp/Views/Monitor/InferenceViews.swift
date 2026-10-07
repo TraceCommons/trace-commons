@@ -26,7 +26,10 @@ struct InferenceTabView: View {
         VStack(alignment: .leading, spacing: 0) {
             switch model.startup {
             case .needsRoots:
-                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, offersJoin: false, onComplete: {})
+                // Ron's 450pt first-run pane, centred, not the window's width.
+                OnboardingCoordinatorView(startAt: .folders, takesInvites: false, onComplete: {})
+                    .frame(width: FirstRunProgress.paneWidth)
+                    .frame(maxWidth: .infinity)
             case .starting:
                 SettingsAwaiting().frame(maxWidth: .infinity)
             case .refused(let sentence):

@@ -9,12 +9,16 @@ struct FirstRunFooter {
     let isEnabled: Bool
     /// The caption on the footer's leading side, when the screen has one.
     let note: String?
+    /// The action is running: the button carries a spinner (Ron's Start
+    /// sharing).
+    let busy: Bool
     let action: () -> Void
 
-    init(title: String, isEnabled: Bool, note: String? = nil, action: @escaping () -> Void) {
+    init(title: String, isEnabled: Bool, note: String? = nil, busy: Bool = false, action: @escaping () -> Void) {
         self.title = title
         self.isEnabled = isEnabled
         self.note = note
+        self.busy = busy
         self.action = action
     }
 }
@@ -84,36 +88,38 @@ enum FirstRunFrameLayout {
 }
 
 /// Ron's first-run frame (#1030 `ftux-frame.tsx`) in glass: one pane with
-/// the tier as eyebrow, the step progress, an optional Back, the runner's
-/// failure as a notice, the screen, and its footer.
+/// the tier on the right of its bar, the step progress, the screen's fixed
+/// header (its title), the cards scrolling beneath it with the runner's
+/// failure after them as a notice, and the footer. No screen has a Back
+/// (Ron's review of #1235, item 9).
 ///
 /// `notice` is the sentence a screen maps the runner's failure to; the
 /// frame shows it and decides nothing about it. `isCommitting` withdraws
 /// the tier switch while the runner's calls are in flight.
-struct FirstRunFrame<Content: View>: View {
+struct FirstRunFrame<Header: View, Content: View>: View {
     private let copy: FirstRunCopy
     @Binding private var state: FirstRunState
-    private let onBack: (() -> Void)?
     private let isCommitting: Bool
     private let notice: String?
     private let footer: FirstRunFooter
+    private let header: Header
     private let content: Content
 
     init(
         copy: FirstRunCopy,
         state: Binding<FirstRunState>,
-        onBack: (() -> Void)?,
         isCommitting: Bool = false,
         notice: String? = nil,
         footer: FirstRunFooter,
+        @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content
     ) {
         self.copy = copy
         self._state = state
-        self.onBack = onBack
         self.isCommitting = isCommitting
         self.notice = notice
         self.footer = footer
+        self.header = header()
         self.content = content()
     }
 
@@ -123,13 +129,21 @@ struct FirstRunFrame<Content: View>: View {
                 bar
                 GlassStepProgress(labels: copy.frame.steps(for: state.tier), current: FirstRunFrameLayout.current(state))
                     .frame(maxWidth: .infinity)
-                if let notice {
-                    GlassNotice(tone: .outside) {
-                        Text(notice)
+                header
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                        content
+                        if let notice {
+                            GlassNotice(tone: .outside) {
+                                Text(notice)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 footerRow
             }
         }
@@ -137,16 +151,13 @@ struct FirstRunFrame<Content: View>: View {
         .accessibilityLabel(copy.frame.eyebrow(for: state.tier))
     }
 
+    /// Ron's `ftux-pane__bar`: the tier's name on the right.
     private var bar: some View {
         HStack(spacing: GlassTokens.Space.s6) {
-            if let onBack {
-                Button(copy.passkey.back, action: onBack)
-                    .buttonStyle(GlassButtonStyle(.link))
-            }
+            Spacer(minLength: 0)
             Text(copy.frame.eyebrow(for: state.tier))
                 .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textTertiary)
-            Spacer(minLength: 0)
         }
     }
 
@@ -163,7 +174,12 @@ struct FirstRunFrame<Content: View>: View {
                     .foregroundStyle(GlassColor.textTertiary)
             }
             Spacer(minLength: 0)
-            Button(footer.title, action: footer.action)
+            Button(action: footer.action) {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    if footer.busy { GlassSpinner() }
+                    Text(footer.title)
+                }
+            }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .disabled(!footer.isEnabled)
                 .help(FirstRunFrameLayout.showsAnswerEveryTool(state, footer: footer) ? copy.frame.answerEveryTool : "")

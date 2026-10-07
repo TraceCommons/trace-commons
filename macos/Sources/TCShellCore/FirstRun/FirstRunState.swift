@@ -64,18 +64,25 @@ public struct AddedFolder: Codable, Equatable, Sendable {
 
     public let kind: Kind
     public let path: String
+    /// The person's answer on the folder's own row: nil until answered,
+    /// true for Watch, false for "I don't use it". A tool's folder starts
+    /// unanswered (Ron's review of #1235, item 3). A folder of exported
+    /// traces reads Watch, and "I don't use it" removes it (`Fine as
+    /// built`), so it starts at true.
+    public var watched: Bool?
 
-    public init(kind: Kind, path: String) {
+    public init(kind: Kind, path: String, watched: Bool? = nil) {
         self.kind = kind
         self.path = path
+        self.watched = watched ?? (kind == .trajectory ? true : nil)
     }
 }
 
 /// Every answer the person gives during the first run, and how far the
 /// daemon calls have got. Pure: nothing here calls anything.
 /// `FirstRunPlan` turns it into calls; the runner records their outcomes
-/// back into `daemonStarted`, `startedSettingsJSON`, `enrolledInvite` and
-/// `signedIn`. Those four are facts the daemon holds, so navigation never
+/// back into `daemonStarted`, `startedSettingsJSON`, `enrolledInvite`,
+/// `signedIn` and `nearAIEnrolled`. Those are facts the daemon holds, so navigation never
 /// clears them.
 public struct FirstRunState: Codable, Equatable, Sendable {
     public var tier: FirstRunTier
@@ -89,7 +96,8 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// One answer per offered tool. A missing key or `.undecided` is not an
     /// answer. Set through `answer(_:_:)`, which keeps one answer per kind.
     public var toolAnswers: [SourceKind: SourceChoice]
-    /// Set through `add(_:)`, which keeps one answer per kind.
+    /// Folders added on Tools, each its own row. Set through `add(_:)` and
+    /// answered through `answerAdded(path:watched:)`.
     public var addedFolders: [AddedFolder]
     /// Rule per `project_id` (Custom only).
     public var rules: [String: ProjectMode]
@@ -120,6 +128,13 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     public var enrolledInvite: String?
     /// The near.ai sign-in completed; going forward again does not reopen it.
     public var signedIn: Bool
+    /// The daemon enrolled this Mac through the near.ai login, with no
+    /// invite (`near_ai_account_enroll`). A fact the daemon holds.
+    public var nearAIEnrolled: Bool
+    /// The tools discovery last reported not on this Mac
+    /// (`recordDiscovery`). Such a tool is not asked (spec rule 1); see
+    /// `sessionRoots` for how it is declared.
+    public var notFound: Set<SourceKind>
 
     public init(
         tier: FirstRunTier = .quick,
@@ -139,7 +154,9 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         daemonStarted: Bool = false,
         startedSettingsJSON: String? = nil,
         enrolledInvite: String? = nil,
-        signedIn: Bool = false
+        signedIn: Bool = false,
+        nearAIEnrolled: Bool = false,
+        notFound: Set<SourceKind> = []
     ) {
         self.tier = tier
         self.step = step
@@ -159,38 +176,78 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         self.startedSettingsJSON = startedSettingsJSON
         self.enrolledInvite = enrolledInvite
         self.signedIn = signedIn
+        self.nearAIEnrolled = nearAIEnrolled
+        self.notFound = notFound
+    }
+
+    /// Record what discovery found. A tool not on this Mac is not asked,
+    /// and Continue counts only the tools found here (spec rule 1, the
+    /// owner's reversal in Ron's review of #1235).
+    public mutating func recordDiscovery(_ candidates: [SourceCandidate]) {
+        notFound = Set(candidates.filter { !$0.exists }.map(\.source))
     }
 
     /// Whether the daemon holds an enrolment for this first run, which is
     /// what consent scopes, the Automatic grant and the enrolment's marker
     /// need. An earlier first run's enrolment; a passkey Verify bound; or
-    /// near.ai once its invite enrolled. An account answer alone -- near.ai
-    /// chosen, a passkey chosen -- is not one.
+    /// near.ai once its invite enrolled, or once it enrolled this Mac with no
+    /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
+    /// is not one.
     public var holdsEnrolment: Bool {
         switch account {
         case .enrolled, .passkey: return true
-        case .nearAI: return enrolledInvite != nil
+        case .nearAI: return enrolledInvite != nil || nearAIEnrolled
         case .none, .watchOnly, .passkeyChosen: return false
         }
     }
 
-    /// Answer a tool's row. A folder added for that tool earlier is dropped,
-    /// so a later "I don't use it" is not turned back into a watch.
+    /// Answer a tool's row. A folder added for that tool is a row of its
+    /// own and keeps its own answer.
     public mutating func answer(_ kind: SourceKind, _ choice: SourceChoice) {
-        addedFolders.removeAll { $0.kind == .source(kind) }
         toolAnswers[kind] = choice
     }
 
-    /// Add a folder. It replaces an earlier folder of the same kind and, for
-    /// a tool, that tool's row answer. One folder is one thing: an earlier
-    /// folder at the same path, of any kind, is dropped too, so a folder
-    /// answered again is never declared under two adapters.
+    /// Add a folder as a row of its own. It answers nothing: no tool row is
+    /// written, and a tool's folder starts unanswered. One folder is one
+    /// thing: an earlier folder at the same path, of any kind, is dropped,
+    /// so a folder answered again is never declared under two adapters. A
+    /// second folder of exported traces replaces the first, which has one
+    /// declaration of its own.
     public mutating func add(_ folder: AddedFolder) {
-        addedFolders.removeAll { $0.kind == folder.kind || $0.path == folder.path }
-        if case .source(let kind) = folder.kind {
-            toolAnswers[kind] = nil
-        }
+        addedFolders.removeAll { $0.path == folder.path || (folder.kind == .trajectory && $0.kind == .trajectory) }
         addedFolders.append(folder)
+    }
+
+    /// What a tool's own row answered, apart from any folder added for it.
+    public func rowAnswer(_ kind: SourceKind) -> SourceChoice {
+        toolAnswers[kind] ?? .undecided
+    }
+
+    /// Answer an added folder's row: true for Watch, false for "I don't use
+    /// it", nil to take the answer back.
+    public mutating func answerAdded(path: String, watched: Bool?) {
+        guard let index = addedFolders.firstIndex(where: { $0.path == path }) else { return }
+        addedFolders[index].watched = watched
+    }
+
+    /// Tools that two rows both watch: the tool's own row and a folder
+    /// added for it, or two added folders. The daemon watches one folder per
+    /// tool, so Continue is held until one of them says "I don't use it".
+    public var watchedTwice: Set<SourceKind> {
+        var counts: [SourceKind: Int] = [:]
+        for (kind, choice) in toolAnswers {
+            if case .watch = choice { counts[kind, default: 0] += 1 }
+        }
+        for folder in addedFolders where folder.watched == true {
+            if case .source(let kind) = folder.kind { counts[kind, default: 0] += 1 }
+        }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    /// Every added tool folder has an answer. A folder of exported traces
+    /// always reads Watch.
+    public var everyAddedFolderAnswered: Bool {
+        addedFolders.allSatisfy { $0.watched != nil }
     }
 
     /// Withdraw the trajectory folder, which has no tool row to answer "I
@@ -201,15 +258,28 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     }
 
     /// The tool answers and added folders as one declaration. An added folder
-    /// for a tool is that tool's answer; a later one replaces an earlier one.
+    /// answered Watch is that tool's folder (while a tool is watched in two
+    /// rows, `watchedTwice`, Continue is held, so this is never sent); one
+    /// unanswered or answered "I don't use it" declares nothing, and the
+    /// tool's own row stands.
     /// Both Continue on Folders/Tools and the daemon start read this, so they
     /// cannot disagree about what is answered.
+    ///
+    /// A tool not on this Mac is not asked, so it has no answer. Claude Code
+    /// and Codex must be declared for the daemon to start, and an absent
+    /// declaration of either reads its conventional folder, which would read
+    /// the tool unasked once it is installed; a missing Claude Code or Codex
+    /// the person did not answer is therefore declared `off`, watch nothing.
+    /// A missing optional tool stays undeclared, which constructs no adapter.
     public var sessionRoots: SessionRoots {
         var roots = SessionRoots()
         for (kind, choice) in toolAnswers {
             roots[kind] = choice
         }
-        for folder in addedFolders {
+        for kind in [SourceKind.claudeCode, .codex] where notFound.contains(kind) && !roots[kind].isAnswered {
+            roots[kind] = .off
+        }
+        for folder in addedFolders where folder.watched == true {
             switch folder.kind {
             case .source(let kind): roots[kind] = .watch(path: folder.path)
             case .trajectory: roots.trajectory = .watch(path: folder.path)

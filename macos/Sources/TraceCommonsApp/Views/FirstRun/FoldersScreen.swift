@@ -38,15 +38,6 @@ enum FoldersScreenLayout {
         return .failed
     }
 
-    /// Back, withdrawn while a commit runs: the runner moves the step on
-    /// from wherever the state is when its calls finish. Never offered by a
-    /// host without Join (`offersJoin` false): Back from Folders or Tools
-    /// lands on Join, and what Join takes would be committed after that
-    /// host's runner is gone.
-    static func backAction(isCommitting: Bool, offersJoin: Bool = true, back: @escaping () -> Void) -> (() -> Void)? {
-        isCommitting || !offersJoin ? nil : back
-    }
-
     /// The rows take no answer while a commit runs: `.start` sends no roots,
     /// so a row changed mid-commit would show a declaration the daemon never
     /// received.
@@ -73,6 +64,9 @@ enum FoldersScreenLayout {
         case .enrollFailed?: return copy.folders.enrollRefused
         case .lookupUnavailable?: return copy.folders.lookupUnavailable
         case .signInFailed?: return copy.folders.signInFailed
+        // The core's line for the daemon's label, as the near.ai join view
+        // words it; a label it has no line for reads the enrol refusal.
+        case .nearAIEnrollFailed(let label)?: return TCNearAiEnroll.line(label: label) ?? copy.folders.enrollRefused
         default: return nil
         }
     }
@@ -88,8 +82,6 @@ struct FoldersScreen: View {
     /// Where each tool's "Get {tool}" leads: the core's install pages
     /// (`FirstRunCopy.Folders.installURL(for:)`), passed by the host.
     var installURL: (SourceKind) -> URL? = { _ in nil }
-    /// Whether Back to Join is offered (`FoldersScreenLayout.backAction`).
-    var offersJoin = true
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
@@ -98,16 +90,12 @@ struct FoldersScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            // Withdrawn while a commit runs: the runner moves the step on
-            // from wherever the state is when its calls finish.
-            onBack: FoldersScreenLayout.backAction(isCommitting: runner.isCommitting, offersJoin: offersJoin) {
-                runner.state = FirstRunNavigation.back(runner.state)
-            },
             isCommitting: runner.isCommitting,
             notice: FoldersScreenLayout.notice(for: runner.failure, copy: copy, onboarding: onboarding),
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: canContinue,
+                busy: runner.isCommitting,
                 action: { Task { await runner.commit(.leaveRoots) } }
             )
         ) {
@@ -117,13 +105,17 @@ struct FoldersScreen: View {
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+        } content: {
+            Group {
                 switch discovery {
                 case .found(let candidates):
-                    ScrollView {
+                    Group {
                         VStack(spacing: GlassTokens.Space.s4) {
                             ForEach(candidates, id: \.source) { candidate in
                                 ToolAnswerRow(
                                     copy: copy.folders,
+                                    choose: copy.frame.choose,
                                     candidate: candidate,
                                     meta: candidate.evidence(now: Date()),
                                     state: $runner.state,
@@ -162,8 +154,12 @@ struct FoldersScreen: View {
         }
     }
 
+    /// Discovery's rows, and what they say is not on this Mac: such a tool
+    /// is not asked (`FirstRunState.recordDiscovery`). Not recorded while a
+    /// commit holds the state it started from.
     private func refreshDiscovery() {
         discovery = FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)
+        if let rows = discovery.rows, !runner.isCommitting { runner.state.recordDiscovery(rows) }
     }
 
     private var canContinue: Bool {

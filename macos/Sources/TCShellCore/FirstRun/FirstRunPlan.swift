@@ -9,7 +9,15 @@ public enum FirstRunCall: Equatable, Sendable {
     case setSourceSettings(settingsJSON: String)
     case lookupInvite(String)
     case enroll(String)
+    /// With an invite: sign in to the account the invite enrolled
+    /// (`account_sign_in`).
     case signInNearAI
+    /// Without an invite: the near.ai login (the browser sign-in, skipped
+    /// when the daemon already keeps one), then the enrolment through it
+    /// (`near_ai_account_enroll`). Signing in with near.ai needs no invite
+    /// (owner, Ron's review of #1235).
+    case nearAILogin
+    case enrollNearAI
     /// Open the passkey sheets for a passkey chosen on Join. Not a daemon
     /// call: the person goes through the sheets, whose ceremony completes
     /// with the daemon this commit started.
@@ -24,6 +32,31 @@ public enum FirstRunCall: Equatable, Sendable {
     /// The completion marker for watching only, which has no tenant to key
     /// a marker by.
     case markWatchOnlyComplete
+}
+
+/// How the first run's near.ai login stands, read from the daemon's
+/// credential status while the browser sign-in runs.
+public enum NearAILoginPoll: Equatable, Sendable {
+    case signedIn
+    case waiting
+    case ended
+
+    /// The ceremony's waiting word (`nearai_credential::ceremony`).
+    public static let waitingForBrowser = "waiting_for_browser"
+    /// How long the first run waits on the browser before it gives up and
+    /// says the sign-in did not finish.
+    public static let limit: TimeInterval = 600
+
+    /// A kept session is signed in. An attempt still waiting on the
+    /// browser, or a poll that could not be read, waits. Any other attempt
+    /// word -- cancelled, failed, finished without a session, or one this
+    /// build does not know -- is over.
+    public static func verdict(_ status: CredentialStatus?) -> NearAILoginPoll {
+        guard let status else { return .waiting }
+        if status.sessionState == CredentialSurface.statePresent { return .signedIn }
+        guard let attempt = status.attemptStatus else { return .waiting }
+        return attempt == waitingForBrowser ? .waiting : .ended
+    }
 }
 
 /// Where the first run commits answers to the daemon.
@@ -62,9 +95,15 @@ public enum FirstRunPlan {
             calls.append(.enroll(invite))
         }
         // One account: the near.ai sign-in or the passkey sheets, whichever
-        // Join chose, in the same place.
-        if state.account == .nearAI, !state.signedIn {
-            calls.append(.signInNearAI)
+        // Join chose, in the same place. near.ai with an invite signs in to
+        // the account the invite enrolled; without one it enrolls this Mac
+        // through the near.ai login, and needs no invite.
+        if state.account == .nearAI {
+            if joinsInvite || state.enrolledInvite != nil {
+                if !state.signedIn { calls.append(.signInNearAI) }
+            } else if !state.nearAIEnrolled {
+                calls.append(contentsOf: [.nearAILogin, .enrollNearAI])
+            }
         }
         // A new passkey creates an account of its own, and the daemon
         // refuses to create one over an enrolment

@@ -16,7 +16,8 @@
 //! - The invite placeholder carries no code: Ron's preview showed a mock one.
 //! - Tools adds three lines for a folder that matches more than one kind:
 //!   `which_kind` asks which, `trajectory_label` names the exported-traces
-//!   option and its row, and `neither` dismisses the question.
+//!   option and its row, and `neither` dismisses the question; and
+//!   `one_folder_per_tool` for a tool watched in two rows.
 //! - Folders adds three lines Ron's preview had no need for, since its data
 //!   was mocked: `discovery_failed` and `retry` for a discovery that returns
 //!   nothing readable, and `enroll_refused` for an enroll refused after the
@@ -26,9 +27,9 @@
 //!   folder declaration the running daemon refused.
 //! - Rules adds `past_sessions_watch_only`: watching only queues the picked
 //!   past sessions on this Mac, and the card says they wait there.
-//! - Join adds `near_ai_needs_invite` and `invite_or_passkey`: near.ai signs
-//!   in to the account an invite enrolls, and a new passkey creates an
-//!   account of its own, so the two are not combined.
+//! - Join adds `invite_or_passkey`: a new passkey creates an account of its
+//!   own, so it is not combined with an invite. near.ai needs no invite
+//!   (owner, Ron's review of #1235), so there is no line asking for one.
 //! - Uses adds Start's failures (`sharing_refused`, `scopes_failed`,
 //!   `rules_failed`, `private_ai_failed`, `complete_failed`), and the passkey
 //!   sheets add `refused`, so no daemon label is ever shown,
@@ -41,8 +42,9 @@
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
 //! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
-//! `{name}`, `{max}`, `{selected}`, `{total}` and `{tools}`; the shell fills
-//! them and adds nothing else.
+//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, and the
+//! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
+//! `{minutes}`; the shell fills them and adds nothing else.
 
 /// Every placeholder name the table uses, each written `{name}` in a string.
 pub const PLACEHOLDERS: &[&str] = &[
@@ -57,6 +59,11 @@ pub const PLACEHOLDERS: &[&str] = &[
     "selected",
     "total",
     "tools",
+    "weekday",
+    "day",
+    "month",
+    "hours",
+    "minutes",
 ];
 
 /// The first-run window: tiers, step labels and the shared footer controls.
@@ -78,6 +85,9 @@ pub struct FrameCopy {
     /// Takes back a choice not yet acted on (a passkey or near.ai on Join).
     /// Not Ron's words.
     pub undo: &'static str,
+    /// What an unanswered picker reads: Ron's design-system `Picker`
+    /// placeholder. The picker's question stays its accessible label.
+    pub choose: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -120,9 +130,6 @@ pub struct JoinCopy {
     /// near.ai chosen but not yet signed in: the sign-in runs once the
     /// daemon starts, after Folders or Tools. Not Ron's words.
     pub near_ai_chosen: &'static str,
-    /// near.ai signs in to the account an invite enrolls, so it waits for
-    /// one. Not Ron's words.
-    pub near_ai_needs_invite: &'static str,
     /// A new passkey creates an account of its own, so it is not combined
     /// with an invite. Not Ron's words.
     pub invite_or_passkey: &'static str,
@@ -201,6 +208,12 @@ pub struct ToolsCopy {
     /// It closes the question and adds the folder as nothing.
     /// **DRAFT, NEEDS APPROVAL**
     pub neither: &'static str,
+    /// `{tool}`: a tool's own row and a folder added for it both read
+    /// Watch. The daemon watches one folder per tool, so Continue waits for
+    /// one of them to say "I don't use it"; this says so beside the added
+    /// folder.
+    /// **DRAFT, NEEDS APPROVAL**
+    pub one_folder_per_tool: &'static str,
 }
 
 /// Rules and the past-session picker (`rules-screen.tsx`).
@@ -221,7 +234,10 @@ pub struct RulesCopy {
     pub show_fewer: &'static str,
     pub never_count: &'static str,
     pub never_label: &'static str,
-    /// The folders could not be read; Continue stays disabled.
+    /// The folders could not be read; Continue stays disabled, and the
+    /// card offers `folders.retry`. No screen has a Back (Ron's review of
+    /// #1235, item 9), so it does not say to go back.
+    /// **DRAFT, NEEDS APPROVAL**
     pub unavailable: &'static str,
     /// One folder's past sessions could not be read.
     pub sessions_unavailable: &'static str,
@@ -230,6 +246,18 @@ pub struct RulesCopy {
     /// there is no enrolment to send them under.
     /// **DRAFT, NEEDS APPROVAL**
     pub past_sessions_watch_only: &'static str,
+    /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
+    pub weekdays: [&'static str; 7],
+    /// A session's month names, January first, as Ron's `MONTHS`.
+    pub months: [&'static str; 12],
+    /// `{weekday}`, `{day}`, `{month}`: a session's start, read in UTC so it
+    /// never moves a day with the time zone (Ron's `formatSessionDate`).
+    pub session_date: &'static str,
+    /// `{minutes}`: a session under an hour long (Ron's `formatDuration`).
+    pub duration_minutes: &'static str,
+    /// `{hours}`, `{minutes}`: an hour or longer. The shell pads the minutes
+    /// to two digits from two hours up, as Ron's `formatDuration` does.
+    pub duration_hours: &'static str,
 }
 
 /// Uses: data use, Sharing and starting (`uses-screen.tsx`).
@@ -347,6 +375,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} sessions",
             undo: "Undo",
+            choose: "Choose…",
         },
         join: JoinCopy {
             title_light: "Get started on ",
@@ -371,7 +400,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
             near_ai_chosen: "You'll sign in once watching starts.",
-            near_ai_needs_invite: "Paste an invite above to sign in with near.ai.",
             invite_or_passkey: "An invite and a new passkey can't be combined. Use one or the other.",
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
@@ -415,6 +443,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
             neither: "Neither",
+            one_folder_per_tool: "{tool} can watch only one folder. Answer “I don’t use it” on one of its rows.",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -431,9 +460,16 @@ pub fn first_run_copy() -> FirstRunCopy {
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
-            unavailable: "Couldn't read repos from your sessions. Go back, then continue to try again.",
+            unavailable: "Couldn't read repos from your sessions.",
             sessions_unavailable: "Past sessions unavailable",
             past_sessions_watch_only: "You're watching only, so the sessions you pick wait on this Mac, unsent, until you join.",
+            weekdays: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+            months: [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ],
+            session_date: "{weekday} {day} {month}",
+            duration_minutes: "{minutes} min",
+            duration_hours: "{hours} h {minutes} min",
         },
         uses: UsesCopy {
             title_light: "How your data is ",
@@ -569,6 +605,56 @@ mod tests {
         }
     }
 
+    /// Ron's #1030 picker placeholder (design-system `Picker`): an
+    /// unanswered picker reads it, and the question stays its accessible
+    /// label.
+    #[test]
+    fn an_unanswered_picker_reads_rons_choose() {
+        let copy = first_run_copy();
+        assert_eq!(copy.frame.choose, "Choose…");
+        assert_ne!(copy.frame.choose, copy.folders.watch_question);
+    }
+
+    /// Ron's `formatSessionDate` and `formatDuration` (`ftux-model.ts`):
+    /// "Sat 12 Sep", "52 min", "1 h 18 min", "2 h 04 min". The shell reads
+    /// the date in UTC and fills these; it writes no unit of its own.
+    #[test]
+    fn session_dates_and_durations_are_rons_formats() {
+        let rules = first_run_copy().rules;
+        assert_eq!(
+            rules.weekdays,
+            ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        );
+        assert_eq!(
+            rules.months,
+            [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+            ]
+        );
+        let date = rules
+            .session_date
+            .replace("{weekday}", "Sat")
+            .replace("{day}", "12")
+            .replace("{month}", "Sep");
+        assert_eq!(date, "Sat 12 Sep");
+        assert_eq!(rules.duration_minutes.replace("{minutes}", "52"), "52 min");
+        assert_eq!(
+            rules
+                .duration_hours
+                .replace("{hours}", "2")
+                .replace("{minutes}", "04"),
+            "2 h 04 min"
+        );
+    }
+
+    /// No first-run screen has a Back, so nothing tells the person to go
+    /// back.
+    #[test]
+    fn no_line_says_to_go_back() {
+        let json = serde_json::to_string(&first_run_copy()).unwrap();
+        assert!(!json.contains("Go back"), "{json}");
+    }
+
     /// Watching only queues picked past sessions on this Mac and sends
     /// nothing, so the card says they wait there, and never that they are
     /// shared.
@@ -614,6 +700,15 @@ mod tests {
         // The question can be dismissed: the folder is neither kind.
         assert!(!tools.neither.trim().is_empty());
         assert_ne!(tools.neither, tools.trajectory_label);
+    }
+
+    /// A tool watched in two rows holds Continue, and the added row says
+    /// why with the tool's name.
+    #[test]
+    fn a_tool_watched_twice_has_its_own_line() {
+        let tools = first_run_copy().tools;
+        assert!(tools.one_folder_per_tool.contains("{tool}"));
+        assert!(tools.one_folder_per_tool.contains("I don’t use it"));
     }
 
     /// Start's failures each have a sentence that is true when it is shown.
@@ -669,14 +764,16 @@ mod tests {
         assert!(copy.folders.settings_failed.contains("Continue"));
     }
 
-    /// near.ai signs in to the account an invite enrolls, and a new passkey
-    /// creates an account of its own, so Join says why each is held back.
+    /// A new passkey creates an account of its own, so Join says why it is
+    /// held back beside an invite. near.ai needs no invite, so nothing asks
+    /// for one.
     #[test]
-    fn join_says_why_an_account_choice_is_held_back() {
+    fn join_says_why_a_passkey_is_held_back_and_never_asks_for_an_invite() {
         let join = first_run_copy().join;
-        assert_ne!(join.near_ai_needs_invite, join.near_ai_text);
         assert_ne!(join.invite_or_passkey, join.passkey_text);
-        assert_ne!(join.near_ai_needs_invite, join.invite_or_passkey);
+        let json = serde_json::to_string(&first_run_copy()).unwrap();
+        assert!(!json.contains("near_ai_needs_invite"));
+        assert!(!json.contains("Paste an invite above"));
     }
 
     /// An existing passkey whose account this Mac cannot join (a legacy

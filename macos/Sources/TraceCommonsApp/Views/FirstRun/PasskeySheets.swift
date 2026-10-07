@@ -449,8 +449,7 @@ struct PasskeySheets: View {
 
     /// P-1.
     private var choose: some View {
-        GlassSheet(title: copy.passkey.chooseTitle) {
-            corner(back: false)
+        popup(.choose, title: copy.passkey.chooseTitle) {
             Button(copy.passkey.useExisting) { Task { await model.useExisting() } }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .frame(maxWidth: .infinity)
@@ -465,8 +464,7 @@ struct PasskeySheets: View {
 
     /// P-2.
     private var nameSheet: some View {
-        GlassSheet(title: copy.passkey.nameTitle) {
-            corner(back: true)
+        popup(.name, title: copy.passkey.nameTitle) {
             HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
                 GlassTextField(
                     copy.passkey.nameField,
@@ -501,9 +499,9 @@ struct PasskeySheets: View {
         .disabled(model.busy)
     }
 
-    /// P-5.
+    /// P-5. Verify is Ron's outlined button.
     private var verify: some View {
-        GlassSheet(title: copy.passkey.verifyTitle, subtitle: copy.passkey.verifyBody) {
+        popup(.verify, title: copy.passkey.verifyTitle, subtitle: copy.passkey.verifyBody) {
             refusalNotice
             Button {
                 Task { await model.verify() }
@@ -512,9 +510,10 @@ struct PasskeySheets: View {
                     if model.busy { GlassSpinner() }
                     Text(copy.passkey.verify)
                 }
+                .frame(maxWidth: .infinity)
             }
             .buttonStyle(GlassButtonStyle(.glass))
-            .frame(maxWidth: .infinity)
+            .passkeyOutlined()
             Button(copy.passkey.cancel) { Task { await model.cancelVerify() } }
                 .buttonStyle(GlassButtonStyle(.glass))
                 .frame(maxWidth: .infinity)
@@ -523,20 +522,21 @@ struct PasskeySheets: View {
         .disabled(model.busy)
     }
 
-    /// P-7.
+    /// P-7: a display-size title, then the card with the tinted circle,
+    /// the passkey's name when known, and Sign in.
     private var welcomeBack: some View {
-        GlassSheet(title: copy.passkey.welcomeTitle, subtitle: copy.passkey.welcomeBody) {
+        popup(.welcomeBack, title: copy.passkey.welcomeTitle, subtitle: copy.passkey.welcomeBody, display: true) {
             GlassCard {
-                VStack(spacing: GlassTokens.Space.s6) {
-                    Image(systemName: "person.badge.key.fill")
-                        .foregroundStyle(GlassColor.accentText)
+                VStack(spacing: GlassTokens.Space.s7) {
+                    PasskeyPopupIcon(.touch)
                     if let returningName {
                         Text(returningName)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .glassType(GlassTokens.TypeScale.heading)
                             .foregroundStyle(GlassColor.textPrimary)
                     }
                     Button(copy.passkey.welcomeSignIn) { Task { await model.useExisting() } }
                         .buttonStyle(GlassButtonStyle(.primary))
+                        .frame(maxWidth: .infinity)
                 }
                 .frame(maxWidth: .infinity)
             }
@@ -548,17 +548,18 @@ struct PasskeySheets: View {
         .disabled(model.busy)
     }
 
-    /// Back on the left (P-2 only) and Close on the right, as Ron's corners.
-    private func corner(back: Bool) -> some View {
-        HStack {
-            if back {
-                Button(copy.passkey.back) { model.back() }
-                    .buttonStyle(GlassButtonStyle(.link))
-            }
-            Spacer(minLength: 0)
-            Button(copy.passkey.close) { model.close() }
-                .buttonStyle(GlassButtonStyle(.link))
-        }
+    /// One popup in Ron's shape for `step`: its icon, centred heading, and
+    /// the round Back and Close in its corners.
+    private func popup<Body: View>(
+        _ step: PasskeySheetStep, title: String, subtitle: String? = nil, display: Bool = false,
+        @ViewBuilder body: () -> Body
+    ) -> some View {
+        let corners = PasskeyPopupLayout.corners(step)
+        return PasskeyPopup(
+            icon: PasskeyPopupLayout.icon(step), title: title, subtitle: subtitle, display: display,
+            backLabel: copy.passkey.back, onBack: corners.back ? { model.back() } : nil,
+            closeLabel: copy.passkey.close, onClose: corners.close ? { model.close() } : nil,
+            content: body)
     }
 
     /// The core's sentence for a refused ceremony. The model keeps the
@@ -671,5 +672,151 @@ extension View {
         copy: FirstRunCopy, runner: FirstRunRunner, account: (any PasskeyAccount)?
     ) -> some View {
         modifier(FirstRunPasskeyPresenter(copy: copy, runner: runner, account: account))
+    }
+}
+
+/// Ron's passkey popups' shape (#1030 `passkey-flow.tsx`, review of #1235
+/// item 14), apart from the view so it can be tested.
+enum PasskeyPopupLayout {
+    /// The round tinted icon at a popup's head.
+    enum Icon: Equatable {
+        /// P-1 and P-2.
+        case passkey
+        /// P-5.
+        case lock
+        /// P-7's circle, inside its card, tinted on.
+        case touch
+    }
+
+    struct Corners: Equatable {
+        let back: Bool
+        let close: Bool
+    }
+
+    /// The icon at the head of a popup; P-7 carries its circle in its card.
+    static func icon(_ step: PasskeySheetStep) -> Icon? {
+        switch step {
+        case .choose, .name: return .passkey
+        case .verify: return .lock
+        case .welcomeBack: return nil
+        }
+    }
+
+    /// Ron's corner buttons: Close on P-1, Back and Close on P-2; P-5 has
+    /// its own Cancel, which signs out, and P-7 its "Other sign-in options".
+    static func corners(_ step: PasskeySheetStep) -> Corners {
+        switch step {
+        case .choose: return Corners(back: false, close: true)
+        case .name: return Corners(back: true, close: true)
+        case .verify, .welcomeBack: return Corners(back: false, close: false)
+        }
+    }
+
+    static func symbol(_ icon: Icon) -> String {
+        switch icon {
+        case .passkey: return "person.badge.key"
+        case .lock: return "lock"
+        case .touch: return "touchid"
+        }
+    }
+}
+
+/// Ron's `ftux-popup-icon`: a 52pt circle, accent-tinted with the purple
+/// glyph, or on-tinted with the on glyph for P-7.
+struct PasskeyPopupIcon: View {
+    private let icon: PasskeyPopupLayout.Icon
+
+    init(_ icon: PasskeyPopupLayout.Icon) {
+        self.icon = icon
+    }
+
+    var body: some View {
+        let on = icon == .touch
+        Image(systemName: PasskeyPopupLayout.symbol(icon))
+            .glassGlyph(24)
+            .foregroundStyle((on ? GlassTokens.Color.statusOn : GlassTokens.Color.purpleText).color)
+            .frame(width: 52, height: 52)
+            .background(Circle().fill((on ? GlassTokens.Color.tintOn : GlassTokens.Color.tintAccent).color))
+            .accessibilityHidden(true)
+    }
+}
+
+/// Ron's popup (`tc-modal tc-modal--narrow ftux-popup`): the icon, a
+/// centred heading, the content, and round Back and Close buttons in its
+/// corners.
+struct PasskeyPopup<Content: View>: View {
+    let icon: PasskeyPopupLayout.Icon?
+    let title: String
+    let subtitle: String?
+    let display: Bool
+    let backLabel: String
+    let onBack: (() -> Void)?
+    let closeLabel: String
+    let onClose: (() -> Void)?
+    let content: Content
+
+    init(
+        icon: PasskeyPopupLayout.Icon?, title: String, subtitle: String?, display: Bool,
+        backLabel: String, onBack: (() -> Void)?, closeLabel: String, onClose: (() -> Void)?,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.icon = icon
+        self.title = title
+        self.subtitle = subtitle
+        self.display = display
+        self.backLabel = backLabel
+        self.onBack = onBack
+        self.closeLabel = closeLabel
+        self.onClose = onClose
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(spacing: GlassTokens.Space.s7) {
+            if let icon { PasskeyPopupIcon(icon) }
+            VStack(spacing: GlassTokens.Space.s3) {
+                Text(title)
+                    .glassType(display ? GlassTokens.TypeScale.display : GlassTokens.TypeScale.heading)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .accessibilityAddTraits(.isHeader)
+                if let subtitle {
+                    Text(subtitle)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            content
+        }
+        .padding(.horizontal, GlassTokens.Space.panePadding)
+        .padding(.top, GlassTokens.Space.panePadding + (onBack != nil || onClose != nil ? GlassTokens.Space.s4 : 0))
+        .padding(.bottom, GlassTokens.Space.panePadding)
+        .frame(maxWidth: .infinity)
+        .overlay(alignment: .topLeading) {
+            if let onBack {
+                GlassRoundButton(backLabel, systemImage: "chevron.left", small: true, action: onBack)
+                    .padding(GlassTokens.Space.s7)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if let onClose {
+                GlassRoundButton(closeLabel, systemImage: "xmark", small: true, action: onClose)
+                    .padding(GlassTokens.Space.s7)
+            }
+        }
+        .glassTier(.pane)
+    }
+}
+
+extension View {
+    /// Ron's outlined block button (`ftux-btn-outline`): full width, a
+    /// 1.5pt inner ring and a soft 3pt halo, both in the overlay ink.
+    func passkeyOutlined() -> some View {
+        frame(maxWidth: .infinity)
+            .overlay(Capsule().strokeBorder(GlassColor.ink(0.7), lineWidth: 1.5))
+            .background(Capsule().inset(by: -3).strokeBorder(GlassColor.ink(0.12), lineWidth: 3))
     }
 }

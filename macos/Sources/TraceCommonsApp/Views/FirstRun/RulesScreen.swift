@@ -30,6 +30,43 @@ enum RulesScreenLayout {
         session.selectable && session.state != .stillActive
     }
 
+    /// The tools the person chose to watch, by the daemon's source name
+    /// (`ProjectTool.source`, `PastSession.source`): each watched session
+    /// store, and the exported-traces folder when one is declared.
+    static func watchedSources(_ state: FirstRunState) -> Set<String> {
+        let roots = state.sessionRoots
+        var watched = Set(
+            SourceKind.allCases.filter {
+                if case .watch = roots[$0] { return true }
+                return false
+            }.map(\.rawValue))
+        if case .watch = roots.trajectory { watched.insert(trajectorySource) }
+        return watched
+    }
+
+    /// The daemon's source name for exported traces (`SOURCE_TRAJECTORY`).
+    static let trajectorySource = "trajectory"
+
+    /// Spec rule 9: only repos found in the sessions of a watched tool. A
+    /// repo whose tools the daemon has not named is not known to be one, so
+    /// it is left out rather than offered on a guess.
+    static func offered(_ projects: [ProjectRow], state: FirstRunState) -> [ProjectRow] {
+        let watched = watchedSources(state)
+        return projects.filter { project in project.tools.contains { watched.contains($0.source) } }
+    }
+
+    /// A repo's session count over its watched tools only.
+    static func watchedSessionCount(_ project: ProjectRow, state: FirstRunState) -> Int {
+        let watched = watchedSources(state)
+        return project.tools.filter { watched.contains($0.source) }.reduce(0) { $0 + $1.sessionCount }
+    }
+
+    /// A repo's past sessions from watched tools only.
+    static func offered(_ sessions: [PastSession], state: FirstRunState) -> [PastSession] {
+        let watched = watchedSources(state)
+        return sessions.filter { watched.contains($0.source) }
+    }
+
     /// The folder's rule as shown: the person's answer, else the daemon's
     /// mode. Only a change is written to the state, so an untouched rule is
     /// not sent again.
@@ -160,17 +197,17 @@ enum RulesScreenLayout {
 
     /// A row's words: date, then title and duration when the session was
     /// opened; a `not_queued` row has neither and shows its size instead.
-    /// Every part is a system formatter's, in the person's locale.
-    static func labelParts(_ session: PastSession) -> [String] {
+    /// The date and duration are Ron's formats in the core's words.
+    static func labelParts(_ session: PastSession, copy: FirstRunCopy.Rules) -> [String] {
         var parts: [String] = []
         if let started = session.startedAt {
-            parts.append(dateText(started))
+            parts.append(dateText(started, copy: copy))
         }
         if let title = session.title, !title.isEmpty {
             parts.append(title)
         }
         if let seconds = session.durationSecs {
-            parts.append(durationText(seconds))
+            parts.append(durationText(seconds, copy: copy))
         }
         if session.title == nil, session.durationSecs == nil {
             parts.append(sizeText(session.sizeBytes))
@@ -178,15 +215,33 @@ enum RulesScreenLayout {
         return parts
     }
 
-    static func dateText(_ date: Date) -> String {
-        date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
+    /// "Sat 12 Sep" (Ron's `formatSessionDate`), read in UTC so a session
+    /// never moves to another day with the time zone. Every word is the
+    /// core's; only the calendar arithmetic is here.
+    static func dateText(_ date: Date, copy: FirstRunCopy.Rules) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC") ?? TimeZone(secondsFromGMT: 0)!
+        let parts = calendar.dateComponents([.weekday, .day, .month], from: date)
+        guard let weekday = parts.weekday, let day = parts.day, let month = parts.month,
+            copy.weekdays.indices.contains(weekday - 1), copy.months.indices.contains(month - 1)
+        else { return "" }
+        return FirstRunCopy.fill(
+            copy.sessionDate,
+            ["weekday": copy.weekdays[weekday - 1], "day": String(day), "month": copy.months[month - 1]])
     }
 
-    static func durationText(_ seconds: Int) -> String {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = seconds >= 3_600 ? [.hour, .minute] : [.minute]
-        formatter.unitsStyle = .abbreviated
-        return formatter.string(from: TimeInterval(max(seconds, 0))) ?? ""
+    /// "52 min", "1 h 18 min", "2 h 04 min" (Ron's `formatDuration`): whole
+    /// minutes, rounded; the minutes are padded to two digits from two hours
+    /// up, as his are.
+    static func durationText(_ seconds: Int, copy: FirstRunCopy.Rules) -> String {
+        let total = max(0, Int((Double(seconds) / 60).rounded()))
+        guard total >= 60 else {
+            return FirstRunCopy.fill(copy.durationMinutes, ["minutes": String(total)])
+        }
+        let hours = total / 60
+        let rest = total % 60
+        let minutes = hours >= 2 && rest < 10 ? "0\(rest)" : String(rest)
+        return FirstRunCopy.fill(copy.durationHours, ["hours": String(hours), "minutes": minutes])
     }
 
     static func sizeText(_ bytes: Int) -> String {
@@ -201,6 +256,16 @@ enum RulesScreenLayout {
             return false
         }
         return ListFormatter.localizedString(byJoining: watched.map(\.displayName))
+    }
+
+    /// Ron's #1030 `RULE_DOTS`: Ask me on the ask colour, Automatic on the
+    /// on colour, Never on the off colour.
+    static func dot(for mode: ProjectMode) -> GlassStatus? {
+        switch mode {
+        case .ask: return .ask
+        case .autoUpload: return .on
+        case .ignore: return .off
+        }
     }
 
     /// The folder as a row names it: its path, or its label without one.
@@ -227,7 +292,6 @@ struct RulesScreen: View {
     /// as an empty list beside card 1's count.
     @State private var refused: Set<String> = []
     @State private var armingCandidate: ProjectRow?
-    @State private var totals: [String: Int] = [:]
     @State private var open: Set<String> = []
     @State private var showingAll: Set<String> = []
 
@@ -237,19 +301,17 @@ struct RulesScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
-            onBack: { runner.state = FirstRunNavigation.back(runner.state) },
             footer: FirstRunFooter(
                 title: copy.frame.continueButton,
                 isEnabled: projects != nil,
                 action: { runner.state = FirstRunNavigation.next(runner.state) })
         ) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                    FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
-                    content
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+            FirstRunTitle(light: copy.rules.titleLight, bold: copy.rules.titleBold)
+        } content: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                content
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .task { await load() }
         // One dialog for the list, named by whichever folder is being armed.
@@ -297,10 +359,16 @@ struct RulesScreen: View {
                 pastSessionsCard(projects)
             }
         } else if loadFailed {
-            GlassNotice(tone: .outside) {
-                Text(copy.rules.unavailable)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            // No Back to retry through (Ron's review of #1235, item 9): the
+            // core's retry reads the folders again.
+            HStack(spacing: GlassTokens.Space.s4) {
+                GlassNotice(tone: .outside) {
+                    Text(copy.rules.unavailable)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                Button(copy.folders.retry) { Task { await load() } }
+                    .buttonStyle(GlassButtonStyle(.secondary))
             }
         } else {
             HStack(spacing: GlassTokens.Space.s4) {
@@ -356,18 +424,18 @@ struct RulesScreen: View {
                         }),
                     options: ProjectModeChoices.options(
                         for: RulesScreenLayout.offeredModes(project, state: runner.state),
-                        copy: modeCopy),
-                    placeholder: modeCopy.title)
+                        copy: modeCopy, dot: RulesScreenLayout.dot(for:)),
+                    placeholder: copy.frame.choose)
             }
         }
     }
 
     /// A folder's session count as card 1 and a Never folder show it: the
-    /// daemon's total for the folder, which can exceed the rows it lists.
-    /// The selection counts ("{selected} of {total}") are over listed rows,
-    /// what a person could tick.
+    /// sessions of its watched tools (`watchedSessionCount`), since Rules
+    /// offers no other. The selection counts ("{selected} of {total}") are
+    /// over listed rows, what a person could tick.
     private func sessionCount(_ project: ProjectRow) -> Int? {
-        totals[project.projectId] ?? project.sessionCount
+        RulesScreenLayout.watchedSessionCount(project, state: runner.state)
     }
 
     // MARK: Card 2: past sessions, by folder
@@ -407,18 +475,21 @@ struct RulesScreen: View {
         let folder = RulesScreenLayout.folder(project)
         let rows = sessions[id] ?? []
         if RulesScreenLayout.rule(runner.state, for: project) == .ignore {
+            // Ron's dimmed Never row (`ftux-muted-row`): the list row's off
+            // opacity, over the secondary ink that still reads once faded.
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassCheckMark(checked: false)
                 Text(folder)
                     .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textTertiary)
+                    .foregroundStyle(GlassColor.textSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
                 Text(FirstRunCopy.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
                     .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
+                    .foregroundStyle(GlassColor.textSecondary)
             }
+            .opacity(GlassTokens.Opacity.rowOff)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(FirstRunCopy.fill(copy.rules.neverLabel, ["folder": folder]))
         } else if refused.contains(id) {
@@ -486,7 +557,7 @@ struct RulesScreen: View {
         return VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             ForEach(visible) { session in
                 Toggle(isOn: tickBinding(id, session)) {
-                    Text(RulesScreenLayout.labelParts(session).joined(separator: " · "))
+                    Text(RulesScreenLayout.labelParts(session, copy: copy.rules).joined(separator: " · "))
                 }
                 .toggleStyle(GlassCheckboxStyle())
                 .disabled(!RulesScreenLayout.isTickable(session))
@@ -532,10 +603,11 @@ struct RulesScreen: View {
     /// and lists nothing to tick.
     private func load() async {
         guard projects == nil else { return }
-        guard let loaded = await source.rulesProjects() else {
+        guard let all = await source.rulesProjects() else {
             loadFailed = true
             return
         }
+        let loaded = RulesScreenLayout.offered(all, state: runner.state)
         loadFailed = false
         if let first = loaded.first { open.insert(first.projectId) }
         projects = loaded
@@ -544,8 +616,7 @@ struct RulesScreen: View {
                 refused.insert(project.projectId)
                 continue
             }
-            sessions[project.projectId] = list.sessions
-            totals[project.projectId] = list.total
+            sessions[project.projectId] = RulesScreenLayout.offered(list.sessions, state: runner.state)
         }
     }
 }

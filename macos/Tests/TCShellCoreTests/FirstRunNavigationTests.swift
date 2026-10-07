@@ -33,26 +33,56 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(state.step, .folders)
     }
 
-    func test_aMissingToolMustBeAnswered() {
-        let candidates = [candidate(.claudeCode), candidate(.codex, exists: false)]
+    /// Spec rule 1, the owner's reversal in Ron's design review of #1235:
+    /// a tool not found on this Mac is not asked, and Continue counts only
+    /// the tools found here.
+    func test_aMissingToolIsNotAsked() {
+        let candidates = [candidate(.claudeCode), candidate(.codex, exists: false), candidate(.cline, exists: false)]
         var state = FirstRunState(tier: .quick, step: .folders)
-        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/claude-code")
-
-        XCTAssertFalse(
-            FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil),
-            "a tool that is not installed still needs an answer"
-        )
-
-        state.toolAnswers[.codex] = .undecided
+        state.recordDiscovery(candidates)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
 
-        state.toolAnswers[.codex] = .off
+        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/claude-code")
+        XCTAssertTrue(
+            FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil),
+            "a tool that is not installed is not asked")
+        XCTAssertNil(state.toolAnswers[.codex], "nothing is written for the missing tool")
+    }
+
+    /// The rule a missing tool is declared by. Claude Code and Codex must be
+    /// declared for the daemon to start, and an absent declaration of
+    /// either reads its conventional folder, so a tool not on this Mac
+    /// would be read unasked the day it is installed. A missing Claude Code
+    /// or Codex is declared `off`: watch nothing. A missing optional tool
+    /// is left undeclared, which constructs no adapter. An answer the
+    /// person did give always wins.
+    func test_aMissingClaudeOrCodexIsDeclaredOffAndAnOptionalOneNothing() throws {
+        let candidates = [candidate(.claudeCode, exists: false), candidate(.codex), candidate(.cline, exists: false)]
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.recordDiscovery(candidates)
+        state.toolAnswers[.codex] = .watch(path: "/Users/someone/codex")
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+
+        let json = try XCTUnwrap(state.sessionRoots.settingsJSON())
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: String]])
+        XCTAssertEqual(object["claude_source"], ["mode": "off"])
+        XCTAssertEqual(object["codex_source"]?["mode"], "watch")
+        XCTAssertNil(object["cline_source"])
+        XCTAssertEqual(
+            FirstRunPlan.calls(for: state, at: .leaveRoots).first, .startDaemon(settingsJSON: json))
+
+        // Found again later (installed while the app was away): it is asked.
+        state.recordDiscovery([candidate(.claudeCode), candidate(.codex), candidate(.cline, exists: false)])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(
+                state, candidates: [candidate(.claudeCode), candidate(.codex)], requiredScope: nil))
+        XCTAssertNil(state.sessionRoots.settingsJSON())
     }
 
     func test_anOptionalOfferedToolMustBeAnsweredToo() {
-        let candidates = [candidate(.claudeCode), candidate(.codex), candidate(.cline, exists: false)]
+        let candidates = [candidate(.claudeCode), candidate(.codex), candidate(.cline)]
         var state = FirstRunState(tier: .custom, step: .tools)
+        state.recordDiscovery(candidates)
         state.toolAnswers[.claudeCode] = .off
         state.toolAnswers[.codex] = .off
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
@@ -60,13 +90,53 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
     }
 
-    func test_anAddedFolderAnswersItsTool() {
+    /// Ron's review of #1235, item 3: a folder added with "Not seeing your
+    /// tool above?" starts unanswered, in a row of its own. Recognising its
+    /// layout stays; answering for the person does not. Nothing is written
+    /// to the matched tool's row.
+    func test_anAddedFolderStartsUnanswered() {
         let candidates = [candidate(.claudeCode), candidate(.codex)]
         var state = FirstRunState(tier: .custom, step: .tools)
         state.toolAnswers[.claudeCode] = .off
-        state.addedFolders = [AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex")]
+        state.toolAnswers[.codex] = .off
+        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
+        XCTAssertNil(state.addedFolders.first?.watched)
+        XCTAssertEqual(state.toolAnswers[.codex], .off, "the tool's own row keeps its answer")
+        XCTAssertEqual(state.sessionRoots.codex, .off, "an unanswered folder declares nothing")
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil),
+            "an added folder is a row to answer like any other")
+
+        state.answerAdded(path: "/Volumes/moved/codex", watched: true)
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
         XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
+
+        // "I don't use it" on the added row declares nothing for the tool:
+        // its own row's answer stands.
+        state.answerAdded(path: "/Volumes/moved/codex", watched: false)
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+        XCTAssertEqual(state.sessionRoots.codex, .off)
+        XCTAssertEqual(state.addedFolders.count, 1, "the row stays, answered")
+    }
+
+    /// The rule for one tool watched in two rows (Ron's item 3 left it
+    /// open): the daemon watches one folder per tool, so Continue is held
+    /// while a tool's own row and a folder added for it both read Watch,
+    /// and the added row says why. Nothing is un-answered for the person.
+    func test_oneToolWatchedInTwoRowsHoldsContinue() {
+        let candidates = [candidate(.claudeCode), candidate(.codex)]
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.toolAnswers[.claudeCode] = .off
+        state.toolAnswers[.codex] = .watch(path: "/Users/someone/codex")
+        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
+        state.answerAdded(path: "/Volumes/moved/codex", watched: true)
+        XCTAssertEqual(state.watchedTwice, [.codex])
+        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
+        XCTAssertEqual(state.toolAnswers[.codex], .watch(path: "/Users/someone/codex"))
+
+        state.toolAnswers[.codex] = .off
+        XCTAssertEqual(state.watchedTwice, [])
+        XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
     }
 
     /// With no candidates discovered, every offered tool is trivially
@@ -111,10 +181,10 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .watchOnly)), [.askMe])
         XCTAssertEqual(
             FirstRunNavigation.sharingPaths(for: FirstRunState(account: .nearAI, enrolledInvite: "INVITE-1")),
-            [.askMe, .automatic])
+            [.automatic, .askMe])
         XCTAssertEqual(
-            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkey(name: "Laptop"))), [.askMe, .automatic])
-        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .enrolled)), [.askMe, .automatic])
+            FirstRunNavigation.sharingPaths(for: FirstRunState(account: .passkey(name: "Laptop"))), [.automatic, .askMe])
+        XCTAssertEqual(FirstRunNavigation.sharingPaths(for: FirstRunState(account: .enrolled)), [.automatic, .askMe])
 
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .watchOnly
@@ -207,19 +277,16 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(returned.enrolledInvite, "INVITE-1", "the daemon still holds that enrolment")
     }
 
-    func test_aLaterAnswerReplacesAnAddedFolder() {
+    /// The added row and the tool's own row are answered apart: answering
+    /// one never removes or rewrites the other.
+    func test_anAddedFolderAndItsToolsRowAreAnsweredApart() {
         var state = FirstRunState(tier: .custom, step: .tools)
         state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
         state.answer(.codex, .off)
-        XCTAssertEqual(state.sessionRoots.codex, .off, "a later off is not turned back into a watch")
-        XCTAssertEqual(state.addedFolders, [])
-
-        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex"))
+        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.codex), path: "/Volumes/moved/codex")])
+        state.answerAdded(path: "/Volumes/moved/codex", watched: true)
+        XCTAssertEqual(state.toolAnswers[.codex], .off)
         XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
-        XCTAssertNil(state.toolAnswers[.codex])
-
-        state.add(AddedFolder(kind: .source(.codex), path: "/Volumes/other/codex"))
-        XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.codex), path: "/Volumes/other/codex")])
     }
 
     /// One folder is one thing: adding it again as another kind replaces the
@@ -231,6 +298,8 @@ final class FirstRunNavigationTests: XCTestCase {
         state.add(AddedFolder(kind: .source(.opencode), path: path))
         XCTAssertEqual(state.addedFolders, [AddedFolder(kind: .source(.opencode), path: path)])
         XCTAssertEqual(state.sessionRoots.trajectory, .undecided)
+        XCTAssertEqual(state.sessionRoots.opencode, .undecided, "unanswered until the person answers")
+        state.answerAdded(path: path, watched: true)
         XCTAssertEqual(state.sessionRoots.opencode, .watch(path: path))
 
         state.add(AddedFolder(kind: .trajectory, path: path))

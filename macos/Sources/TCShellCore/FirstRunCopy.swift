@@ -23,6 +23,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionCount: String
         /// Takes back a choice not yet acted on.
         public let undo: String
+        /// What an unanswered picker reads (Ron's `Picker` placeholder).
+        public let choose: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -55,8 +57,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let nearAiSignIn: String
         /// near.ai chosen, signed in once the daemon starts.
         public let nearAiChosen: String
-        /// near.ai waits for an invite to sign in to.
-        public let nearAiNeedsInvite: String
         /// An invite and a new passkey are not combined.
         public let inviteOrPasskey: String
         public let signedIn: String
@@ -129,6 +129,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let trajectoryLabel: String
         /// The ambiguous folder's last option: neither kind.
         public let neither: String
+        /// `{tool}`: a tool watched in two rows.
+        public let oneFolderPerTool: String
     }
 
     public struct Rules: Decodable, Equatable, Sendable {
@@ -159,6 +161,15 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sessionsUnavailable: String
         /// Watching only: picked past sessions wait on this Mac.
         public let pastSessionsWatchOnly: String
+        /// A session's weekday names, Sunday first, and month names,
+        /// January first.
+        public let weekdays: [String]
+        public let months: [String]
+        /// `{weekday}`, `{day}`, `{month}`.
+        public let sessionDate: String
+        /// `{minutes}`; then `{hours}` and `{minutes}`.
+        public let durationMinutes: String
+        public let durationHours: String
     }
 
     public struct Uses: Decodable, Equatable, Sendable {

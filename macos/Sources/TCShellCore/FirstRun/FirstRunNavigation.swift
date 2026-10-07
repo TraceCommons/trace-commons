@@ -52,8 +52,10 @@ public enum FirstRunNavigation {
     /// Whether the current step's Continue (or Start, on Uses) is enabled.
     ///
     /// - Join: an account answer, which may be "watch only".
-    /// - Folders / Tools: every offered tool answered, missing ones included,
-    ///   and a declaration the daemon would start with.
+    /// - Folders / Tools: every tool found on this Mac answered (a missing
+    ///   one is not asked, spec rule 1), every added folder answered, no
+    ///   tool watched in two rows, and a declaration the daemon would start
+    ///   with.
     /// - Rules: always; every choice there is optional.
     /// - Uses: the required use ticked, and something Start can do: finish
     ///   watching only, reopen a chosen passkey's sheets, or finish an
@@ -69,8 +71,9 @@ public enum FirstRunNavigation {
             return state.account != .none
         case .folders, .tools:
             let roots = state.sessionRoots
-            let everyOfferedAnswered = candidates.allSatisfy { roots[$0.source].isAnswered }
-            return everyOfferedAnswered && roots.settingsJSON() != nil
+            let everyOfferedAnswered = candidates.filter(\.exists).allSatisfy { roots[$0.source].isAnswered }
+            return everyOfferedAnswered && state.everyAddedFolderAnswered && state.watchedTwice.isEmpty
+                && roots.settingsJSON() != nil
         case .rules:
             return true
         case .uses:
@@ -88,9 +91,10 @@ public enum FirstRunNavigation {
         state.holdsEnrolment
     }
 
-    /// The sharing paths the Uses picker offers.
+    /// The sharing paths the Uses picker offers, in Ron's #1030 order:
+    /// Automatic first, then Ask me. The default answer stays Ask me.
     public static func sharingPaths(for state: FirstRunState) -> [SharingPath] {
-        canChooseAutomatic(state) ? [.askMe, .automatic] : [.askMe]
+        canChooseAutomatic(state) ? [.automatic, .askMe] : [.askMe]
     }
 
     private static func move(_ state: FirstRunState, by offset: Int) -> FirstRunState {

@@ -183,24 +183,104 @@ final class RulesScreenTests: XCTestCase {
 
     /// A `not_queued` row was never opened: it shows its date and size. A
     /// row with a title shows date, title and duration, and no size.
-    func test_rowsWithoutATitleShowDateAndSize() {
-        let date = RulesScreenLayout.dateText(Self.started)
+    func test_rowsWithoutATitleShowDateAndSize() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON()))).rules
+        let date = RulesScreenLayout.dateText(Self.started, copy: copy)
         let size = RulesScreenLayout.sizeText(2_048)
         XCTAssertFalse(date.isEmpty)
         XCTAssertFalse(size.isEmpty)
 
-        XCTAssertEqual(RulesScreenLayout.labelParts(session("a")), [date, size])
+        XCTAssertEqual(RulesScreenLayout.labelParts(session("a"), copy: copy), [date, size])
 
         let titled = session("b", state: .pending, title: "Fix the parser", durationSecs: 3_120)
-        let duration = RulesScreenLayout.durationText(3_120)
-        XCTAssertFalse(duration.isEmpty)
-        XCTAssertEqual(RulesScreenLayout.labelParts(titled), [date, "Fix the parser", duration])
+        let duration = RulesScreenLayout.durationText(3_120, copy: copy)
+        XCTAssertEqual(duration, "52 min")
+        XCTAssertEqual(RulesScreenLayout.labelParts(titled, copy: copy), [date, "Fix the parser", duration])
 
         // No start time: the date part is left out, never replaced.
         let undated = PastSession(
             id: "c", entryID: nil, state: .notQueued, selectable: true, startedAt: nil,
             durationSecs: nil, title: nil, sizeBytes: 2_048, source: "codex")
-        XCTAssertEqual(RulesScreenLayout.labelParts(undated), [size])
+        XCTAssertEqual(RulesScreenLayout.labelParts(undated, copy: copy), [size])
+    }
+
+    /// Ron's #1030 formats (design review of #1235, item 6): "Sat 12 Sep",
+    /// "52 min", "1 h 18 min", "2 h 04 min", every word the core's, and the
+    /// date read in UTC. 23:30 UTC on Saturday 12 September is already
+    /// Sunday in Tokyo and still Saturday in Los Angeles; it reads Saturday
+    /// whatever zone this Mac is in.
+    func test_sessionDatesAndDurationsUseRonsFormatInUTC() throws {
+        let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON()))).rules
+        let lateSaturday = Date(timeIntervalSince1970: 1_789_255_800)
+        let saved = NSTimeZone.default
+        defer { NSTimeZone.default = saved }
+        for zone in ["Asia/Tokyo", "America/Los_Angeles", "UTC"] {
+            NSTimeZone.default = try XCTUnwrap(TimeZone(identifier: zone))
+            XCTAssertEqual(RulesScreenLayout.dateText(lateSaturday, copy: copy), "Sat 12 Sep", zone)
+        }
+        XCTAssertEqual(RulesScreenLayout.durationText(0, copy: copy), "0 min")
+        XCTAssertEqual(RulesScreenLayout.durationText(52 * 60, copy: copy), "52 min")
+        XCTAssertEqual(RulesScreenLayout.durationText(78 * 60, copy: copy), "1 h 18 min")
+        XCTAssertEqual(RulesScreenLayout.durationText(65 * 60, copy: copy), "1 h 5 min")
+        XCTAssertEqual(RulesScreenLayout.durationText(124 * 60, copy: copy), "2 h 04 min")
+        // Rounded to the minute, as Ron's `Math.round`.
+        XCTAssertEqual(RulesScreenLayout.durationText(52 * 60 + 31, copy: copy), "53 min")
+        XCTAssertEqual(RulesScreenLayout.durationText(-5, copy: copy), "0 min")
+    }
+
+    /// Spec rule 9 (design review of #1235, item 5): Rules offers only the
+    /// repos found in the sessions of a tool the person chose to watch, and
+    /// in a repo only those sessions. A repo whose tools the daemon has not
+    /// named is not known to be from a watched tool, so it is left out.
+    func test_rulesOffersOnlyReposOfWatchedTools() {
+        var state = FirstRunState(tier: .custom, step: .rules)
+        state.answer(.claudeCode, .watch(path: "/Users/someone/.claude"))
+        state.answer(.codex, .off)
+        let claude = ProjectRow(
+            projectId: "p1", projectLabel: "one", mode: .ask,
+            tools: [ProjectTool(source: "claude-code", sessionCount: 3)])
+        let codex = ProjectRow(
+            projectId: "p2", projectLabel: "two", mode: .ask, tools: [ProjectTool(source: "codex", sessionCount: 2)])
+        let both = ProjectRow(
+            projectId: "p3", projectLabel: "three", mode: .ask,
+            tools: [ProjectTool(source: "claude-code", sessionCount: 1), ProjectTool(source: "codex", sessionCount: 4)])
+        let unknown = ProjectRow(projectId: "p4", projectLabel: "four", mode: .ask)
+        XCTAssertEqual(
+            RulesScreenLayout.offered([claude, codex, both, unknown], state: state).map(\.projectId), ["p1", "p3"])
+        // A repo's count is its watched tools' sessions, not the codex ones.
+        XCTAssertEqual(RulesScreenLayout.watchedSessionCount(both, state: state), 1)
+
+        let mixed = [
+            session("c1"),
+            PastSession(
+                id: "x1", entryID: nil, state: .notQueued, selectable: true, startedAt: nil, durationSecs: nil,
+                title: nil, sizeBytes: 1, source: "codex"),
+        ]
+        XCTAssertEqual(RulesScreenLayout.offered(mixed, state: state).map(\.id), ["c1"])
+
+        // An exported-traces folder the person added is a watched tool too.
+        state.addedFolders = [AddedFolder(kind: .trajectory, path: "/tmp/exports")]
+        let exported = ProjectRow(
+            projectId: "p5", projectLabel: "five", mode: .ask, tools: [ProjectTool(source: "trajectory", sessionCount: 1)])
+        XCTAssertEqual(RulesScreenLayout.offered([exported], state: state).map(\.projectId), ["p5"])
+    }
+
+    /// Ron's review of #1235, item 13: the Rules picker shows its status
+    /// dots, in Ron's order -- Ask me on the ask colour, Automatic on the
+    /// on colour, Never on the off colour. Settings' picker is unchanged.
+    func test_theRulesPickerShowsItsStatusDots() throws {
+        let modes = try XCTUnwrap(ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON()))
+        let options = ProjectModeChoices.options(
+            for: [.ask, .autoUpload, .ignore], copy: modes, dot: RulesScreenLayout.dot(for:))
+        XCTAssertEqual(options.map(\.value), [.ask, .autoUpload, .ignore])
+        XCTAssertEqual(options.map(\.dot), [.ask, .on, .off])
+        XCTAssertEqual(
+            ProjectModeChoices.options(for: [.ask, .autoUpload, .ignore], copy: modes).map(\.dot), [nil, nil, nil])
+        let screen = try String(
+            contentsOf: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent(
+                    "Sources/TraceCommonsApp/Views/FirstRun/RulesScreen.swift"), encoding: .utf8)
+        XCTAssertTrue(screen.contains("copy: modeCopy, dot: RulesScreenLayout.dot(for:))"))
     }
 
     /// "{selected} of {total} selected" counts folders that are not Never.

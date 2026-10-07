@@ -45,10 +45,10 @@ struct FirstRunWindowView: View {
                     OnboardingCoordinatorView(onComplete: {})
                         .onAppear { entered = true }
                 }
-                // Bounded by the window, not grown to the step: each step
-                // scrolls in its own ScrollView, which a pane sized to its
-                // step would let run past the window's bottom edge (a Uses
-                // step with many scopes), out of reach.
+                // Bounded by the window, not grown to the step: each step's
+                // cards scroll in the frame's ScrollView, which a pane sized
+                // to its step would let run past the window's bottom edge (a
+                // Uses step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
                 .padding(.vertical, GlassTokens.Space.windowPadding * 3)
             } else if model.requiresOnboarding {
@@ -102,6 +102,7 @@ struct StartupRefusedBanner: View {
 
 /// The first-run pane's size.
 enum FirstRunProgress {
-    /// Wide enough for Ron's screens.
-    static let paneWidth: CGFloat = 700
+    /// Ron's FTUX width (#1030 spec, Design system table: one padded pane
+    /// at 450px).
+    static let paneWidth: CGFloat = 450
 }

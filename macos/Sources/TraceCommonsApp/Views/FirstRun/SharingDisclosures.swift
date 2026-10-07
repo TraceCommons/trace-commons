@@ -17,9 +17,18 @@ struct SharingDisclosureFlow: Equatable {
         case done
     }
 
-    private(set) var step: Step = .scrub
+    private(set) var step: Step
     /// The signing address the witness sheet showed, nil for none.
     private(set) var witnessShown: String?
+    /// Private AI was turned on without the Automatic path (spec rule 10,
+    /// Ron's review of #1235, item 1): the witness sheet alone, and Start
+    /// then asks for no grant.
+    let witnessOnly: Bool
+
+    init(witnessOnly: Bool = false) {
+        self.witnessOnly = witnessOnly
+        self.step = witnessOnly ? .witness : .scrub
+    }
 
     /// The label a not-ready answer carries when the core's answer could not
     /// be read at all.
@@ -29,6 +38,13 @@ struct SharingDisclosureFlow: Equatable {
     /// that can choose it. Ask me and watching only start directly.
     static func isNeeded(for state: FirstRunState) -> Bool {
         state.sharing == .automatic && FirstRunNavigation.canChooseAutomatic(state)
+    }
+
+    /// Whether Start shows the witness disclosure alone: Private AI turned
+    /// on (Custom's switch) and the Automatic path, which already shows it,
+    /// not taken.
+    static func isWitnessOnlyNeeded(for state: FirstRunState) -> Bool {
+        UsesScreenLayout.showsPrivateAI(state) && state.privateAI && !isNeeded(for: state)
     }
 
     /// The scrub sheet's Continue. Ignored out of order.
@@ -96,9 +112,12 @@ struct SharingDisclosureSheet: View {
     @Binding var flow: SharingDisclosureFlow?
     let onFinish: (SharingDisclosureFlow) -> Void
 
-    /// The Automatic mode's own name heads the scrub sheet.
+    /// The Automatic mode's own name heads the scrub sheet; on the Private
+    /// AI path, the Private AI offer's title heads a witness sheet still
+    /// loading.
     private var automaticTitle: String {
-        ProjectModeWords.table?.label(for: .autoUpload) ?? copy.uses.sharing
+        if flow?.witnessOnly == true, let title = model.privateInferenceCopy?.offerTitle { return title }
+        return ProjectModeWords.table?.label(for: .autoUpload) ?? copy.uses.sharing
     }
 
     var body: some View {
