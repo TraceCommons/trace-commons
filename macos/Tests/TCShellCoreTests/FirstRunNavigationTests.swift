@@ -372,4 +372,48 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(state(.passkeyChosen), candidates: [], requiredScope: "required"))
         XCTAssertFalse(FirstRunNavigation.canContinue(state(.nearAI), candidates: [], requiredScope: "required"))
     }
+
+    // MARK: Welcome back (P-7), Ron's review of #1235 item 4
+
+    private func remembered(
+        _ state: String = "none", count: Int? = 1, name: String? = "Home"
+    ) -> NativePasskeyState {
+        NativePasskeyState(state: state, passkeyCount: count, rememberedName: name, nearAiConnected: nil)
+    }
+
+    /// A returning person: the first run is on Join with nothing answered,
+    /// nobody is signed in, and this Mac remembers a passkey.
+    func test_welcomeBackOpensForAReturningPersonOnJoin() {
+        let join = FirstRunState(tier: .quick, step: .join, daemonStarted: true)
+        XCTAssertTrue(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(), completed: false))
+        // A remembered passkey without a name is still a returning person.
+        XCTAssertTrue(
+            FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(name: nil), completed: false))
+    }
+
+    func test_welcomeBackStaysShutForAnyoneElse() {
+        let join = FirstRunState(tier: .quick, step: .join, daemonStarted: true)
+        // Nothing remembered here, or the daemon cannot say.
+        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(count: 0), completed: false))
+        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(count: nil), completed: false))
+        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: nil, completed: false))
+        // Already signed in, or the session cannot be read: not a sign-in to offer.
+        for state in ["unbound", "bound", "legacy", "closed", "unknown"] {
+            XCTAssertFalse(
+                FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(state), completed: false), state)
+        }
+        // Finished, or past Join.
+        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(join, passkeys: remembered(), completed: true))
+        var later = join
+        later.step = .folders
+        XCTAssertFalse(FirstRunNavigation.opensWelcomeBack(later, passkeys: remembered(), completed: false))
+        // An account is already answered or held on Join.
+        for account: AccountAnswer in [.watchOnly, .nearAI, .passkeyChosen, .passkey(name: "x"), .enrolled] {
+            var answered = join
+            answered.account = account
+            XCTAssertFalse(
+                FirstRunNavigation.opensWelcomeBack(answered, passkeys: remembered(), completed: false),
+                "\(account)")
+        }
+    }
 }

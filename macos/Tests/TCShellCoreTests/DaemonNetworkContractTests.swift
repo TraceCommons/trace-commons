@@ -71,6 +71,13 @@ final class DaemonNetworkContractTests: XCTestCase {
         XCTAssertEqual(transport.method, "passkey_state")
     }
 
+    func testPasskeyStateCarriesTheRememberedName() async throws {
+        let transport = NetworkTransport(#"{"state":"none","passkey_count":1,"remembered_name":"Home","near_ai_connected":null}"#)
+        let result = try await LiveDaemonClient(transport: transport).passkeyState()
+        XCTAssertEqual(result.passkeyCount, 1)
+        XCTAssertEqual(result.rememberedName, "Home")
+    }
+
     func testAccountUnknownDoesNotBecomeSignedOut() async throws {
         let transport = NetworkTransport(#"{"state":"unknown","signed_in":null,"account_id":null,"expires_at":null}"#)
         let result = try await LiveDaemonClient(transport: transport).accountState()

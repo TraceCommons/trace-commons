@@ -26,6 +26,26 @@ public enum FirstRunNavigation {
         return moved
     }
 
+    /// Ron's P-7, "Welcome back" (#1030 spec: "A returning user starts at
+    /// P-7"; review of #1235 item 4): the first run opens at Welcome back
+    /// when it is on Join with no account answered, nobody is signed in
+    /// (`passkey_state` says `none`), and the daemon remembers a passkey used
+    /// on this Mac. Anything the daemon cannot say (`unknown`, a null count,
+    /// no answer) opens Join as before; so does a finished first run, a held
+    /// enrolment, and any answer already given on Join.
+    public static func opensWelcomeBack(
+        _ state: FirstRunState, passkeys: NativePasskeyState?, completed: Bool
+    ) -> Bool {
+        guard mayOfferWelcomeBack(state, completed: completed), let passkeys else { return false }
+        return passkeys.state == "none" && (passkeys.passkeyCount ?? 0) > 0
+    }
+
+    /// The part of `opensWelcomeBack` the first run decides alone, before
+    /// the daemon is asked: on Join, unfinished, no account answered.
+    public static func mayOfferWelcomeBack(_ state: FirstRunState, completed: Bool) -> Bool {
+        !completed && state.step == .join && state.account == .none
+    }
+
     /// Switch tiers, keeping the person on the equivalent screen: Folders and
     /// Tools ask the same thing, and Quick has no Rules.
     public static func switchTier(_ state: FirstRunState, to tier: FirstRunTier) -> FirstRunState {
