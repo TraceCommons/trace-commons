@@ -144,7 +144,7 @@ struct SessionWithdrawalAction: View {
                     if let result = model.withdrawals[record.submissionID] {
                         WithdrawalOutcomeView(result: result)
                         if shouldOfferRetry(result) {
-                            Button(copy.withdraw) { model.withdraw(record) }
+                            Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }
@@ -192,8 +192,16 @@ struct WithdrawalOutcomeView: View {
                 return (WithdrawalCopy.failureSentence(label: label), .ask)
             }
         }()
-        GlassStatusLabel(text, status: status)
-            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // #1146 heads a completed withdrawal "Withdrawn by you".
+            if case .withdrawn = result {
+                Text(WithdrawalCopy.resultHeading)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+            }
+            GlassStatusLabel(text, status: status)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -208,7 +216,12 @@ struct WithdrawalConfirmationView: View {
         if let confirmation = WithdrawalCopy.confirmation(for: .init(status: status)) {
             confirmationBody(confirmation)
         } else {
-            // Not confirmable without the core's words; the way back stays.
+            // Not confirmable without the core's words; the way back stays,
+            // and #1146's line says why withdrawal is not offered.
+            if !WithdrawalCopy.disclosureUnavailable.isEmpty {
+                GlassStatusLabel(WithdrawalCopy.disclosureUnavailable, status: .outside)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button(keepLabel, action: onKeep)
                 .buttonStyle(GlassButtonStyle(.glass))
                 .keyboardShortcut(.cancelAction)
@@ -219,11 +232,13 @@ struct WithdrawalConfirmationView: View {
     private func confirmationBody(_ confirmation: WithdrawalCopy.Confirmation) -> some View {
         GlassWell {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                if let question = confirmation.question {
-                    Text(question)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                }
+                Text(confirmation.question)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                Text(confirmation.description)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let ambiguity = confirmation.ambiguity {
                     Text(ambiguity)
                         .glassType(GlassTokens.TypeScale.caption)
@@ -245,7 +260,7 @@ struct WithdrawalConfirmationView: View {
                         .buttonStyle(GlassButtonStyle(.glass))
                         .keyboardShortcut(.cancelAction)
                         .frame(minHeight: 44)
-                    Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)
+                    Button(inFlight ? confirmation.busyLabel : confirmation.confirmLabel, action: onConfirm)
                         .buttonStyle(GlassButtonStyle(.primary))
                         .frame(minHeight: 44)
                         .disabled(inFlight)

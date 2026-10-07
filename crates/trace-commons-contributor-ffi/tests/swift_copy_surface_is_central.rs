@@ -359,6 +359,7 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
     trace_commons_contributor::first_run_copy::PLACEHOLDERS
         .iter()
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
+        .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -595,6 +596,19 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
         .collect(),
     );
 
+    // The words the macOS shell wrote in Swift until #1146 parity
+    // (2026-10-07): withdrawal, the public profile, the queue's and
+    // History's legacy words, the scrubbing caveat and Settings.
+    add(
+        "shell_words_copy::shell_words_copy",
+        table(json!(
+            trace_commons_contributor::shell_words_copy::shell_words_copy()
+        ))
+        .into_iter()
+        .map(holed)
+        .collect(),
+    );
+
     // The legacy invite migration, connecting inference, and where sessions
     // go -- surfaces macOS has not built yet, pinned so that when it does
     // they arrive with the core's words.
@@ -679,42 +693,14 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "Nothing has been lost, and nothing has gone out.",
         "health export-failure fallback",
     ),
-    // The per-tier withdrawal confirmations (`WithdrawalCopy.canonical*`)
-    // reproduce `docs/contributor-daemon-ipc-v1_1.md`'s "Canonical
-    // confirmation copy" table, and their credit note is the same two
-    // sentences that close the core's unknown-reach prompt. The core has no
-    // export for the per-tier confirmation or the credit note on its own
-    // yet, so this note stays Swift's until it does; the unknown-reach
-    // prompt itself is the core's (`tc_withdrawal_confirmation_prompt_text`).
-    (
-        "TraceCommonsApp/Views/WithdrawalCopy.swift",
-        "Credit that has already settled stays.",
-        "per-tier withdrawal credit note; no core export yet",
-    ),
-    (
-        "TraceCommonsApp/Views/WithdrawalCopy.swift",
-        "Credit still pending is forfeited.",
-        "per-tier withdrawal credit note; no core export yet",
-    ),
     // The legacy History rollup tallies and the queue's week figures, which
     // held the core's status words as headings, left the shell with the
     // legacy screens (R15); their allowances went with them.
     //
     // Ron's #1146 inspector words (#1241) that native screens already say
     // in Swift. Each goes when its screen reads the core's table instead.
-    //
-    // The legacy queue's no-longer-waiting group, held verbatim in
-    // QueueView.swift since R15 until the core exports it.
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "Sessions no longer waiting (",
-        "legacy queue window; #1241 moves only the monitor to the core's words",
-    ),
-    (
-        "TraceCommonsApp/Views/QueueView.swift",
-        "This covers sessions that reached the queue.",
-        "legacy queue window; #1241 moves only the monitor to the core's words",
-    ),
+    // The legacy queue's no-longer-waiting group left QueueView.swift for
+    // `shell_words_copy` at #1146 parity (2026-10-07).
     // Not a sentence of its own: Look inside reads the core's
     // `session_review.cannot_show_title`, and this verbatim copy of it is
     // the fallback for a table that did not decode, so the cannot-show
@@ -833,6 +819,13 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCCoreCopy.monitorScreensCopyJSON",
         "TCBridge/TCCoreCopy.swift",
         "tc_monitor_screens_copy_json",
+    ),
+    (
+        "withdrawal, public profile, legacy queue/History, scrubbing and Settings words",
+        "TraceCommonsApp/Views/ShellWords.swift",
+        "TCCoreCopy.shellWordsCopyJSON",
+        "TCBridge/TCCoreCopy.swift",
+        "tc_shell_words_copy_json",
     ),
     (
         "monitor Traces badge words",

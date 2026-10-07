@@ -123,7 +123,7 @@ final class TracesParityTests: XCTestCase {
         let atCommitStart = try XCTUnwrap(caveat.range(of: "struct ScrubbingCaveatAtCommit")).lowerBound
         let atCommit = String(caveat[atCommitStart...])
         for needle in ["GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)",
-                       ".accessibilityLabel(\"Before you contribute. \\(ScrubbingCaveat.canonical)\")"] {
+                       ".accessibilityLabel(ScrubbingCaveat.beforeYouContribute + \" \" + ScrubbingCaveat.canonical)"] {
             XCTAssertTrue(atCommit.contains(needle), "ScrubbingCaveatAtCommit lacks \(needle)")
         }
         XCTAssertTrue(caveat.contains("Text(ScrubbingCaveat.canonical)"), "the note draws the canonical sentence")
@@ -423,13 +423,15 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(GlassSurfaceRulesTests.files.contains(rel))
         }
 
-        // The legacy queue is gone (R15); its file holds the table alone,
-        // one literal per sentence.
+        // The legacy queue is gone (R15); its words are the core's now
+        // (#1146 parity, 2026-10-07), and its file holds none.
         let queue = try Self.text("Views/QueueView.swift")
         XCTAssertTrue(queue.contains("enum QueueLegacyWords"))
-        for sentence in ["Nothing is waiting.", "Close this notice.\"", "\"Undo\"", "\"Look inside\"", "\"Agent setup\""] {
-            XCTAssertEqual(queue.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
+        for sentence in ["Nothing is waiting.", "Close this notice.", "\"Undo\"", "\"Agent setup\""] {
+            XCTAssertFalse(queue.contains(sentence), "\(sentence) is written in Swift")
         }
+        XCTAssertEqual(QueueLegacyWords.undo, "Undo")
+        XCTAssertEqual(QueueLegacyWords.agentSetup, "Agent setup")
     }
 
     /// The words table holds the legacy sentences verbatim.

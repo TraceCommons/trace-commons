@@ -17,4 +17,11 @@ final class ScrubbingCaveatTests: XCTestCase {
         let line = ScrubbingCaveat.rowLine(redactionCount: 4)
         XCTAssertFalse(line.isEmpty)
     }
+
+    /// The canonical sentence is the core's (#1146 parity, 2026-10-07),
+    /// verbatim, and never written here.
+    func testTheCanonicalSentenceIsTheCoresVerbatim() {
+        XCTAssertEqual(ScrubbingCaveat.canonical, "Scrubbing is pattern-based. It misses things it hasn't seen before.")
+        XCTAssertEqual(ScrubbingCaveat.beforeYouContribute, "Before you contribute.")
+    }
 }

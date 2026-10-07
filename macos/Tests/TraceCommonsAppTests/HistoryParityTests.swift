@@ -101,7 +101,7 @@ final class HistoryParityTests: XCTestCase {
             ".init(copy.consentPolicyVersion, detail.consentPolicyVersion, mono: true)",
             ".init(copy.redactionVersion, detail.redactionPipelineVersion, mono: true)",
             "GlassEyebrowCard(copy.nextAction)", "status: index == confirmation.gravest ? .outside : .off",
-            #"Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)"#,
+            "Button(inFlight ? confirmation.busyLabel : confirmation.confirmLabel, action: onConfirm)",
             ".buttonStyle(GlassButtonStyle(.primary))", "GlassWell {",
         ] {
             XCTAssertTrue(source.contains(needle), "SessionContributionOverview.swift lacks \(needle)")
@@ -347,12 +347,14 @@ final class HistoryParityTests: XCTestCase {
             XCTAssertTrue(homeFlat.contains(needle), "HomeViews.swift lacks \(needle)")
         }
 
-        // The legacy screen is gone (R15); its file holds the table alone.
+        // The legacy screen is gone (R15); its words are the core's now
+        // (#1146 parity, 2026-10-07), and its file holds none.
         let legacy = try Self.text("Views/HistoryView.swift")
-        for sentence in ["Typical wait: we don't have a reliable number yet.",
-                         "Do not trust the withdrawal wording on this screen."] {
-            XCTAssertEqual(legacy.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
+        for sentence in ["Typical wait", "Do not trust the withdrawal wording"] {
+            XCTAssertFalse(legacy.contains(sentence), "\(sentence) is written in Swift")
         }
+        XCTAssertEqual(HistoryLegacyWords.typicalWait, "Typical wait: we don't have a reliable number yet.")
+        XCTAssertEqual(HistoryLegacyWords.withdrawalWordingDefect, "Do not trust the withdrawal wording on this screen.")
     }
 
     static let withdrawCall = "SessionWithdrawalAction(record: record, "
@@ -459,7 +461,7 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertEqual(decide(accepted, nil, .withdrawn(nil)), .none)
         XCTAssertEqual(decide(accepted, try Self.detail("withdrawn"), .failed("withdraw-failed")), .none)
         let home = Self.flat(try Self.text("Views/Monitor/HomeViews.swift"))
-        XCTAssertTrue(home.contains("case .retry: if let record { Button(copy.withdraw) { model.withdraw(record) }"))
+        XCTAssertTrue(home.contains("case .retry: if let record { Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }"))
     }
 
     /// Ron's `HistoryRow`: wherever Withdraw would be offered and the

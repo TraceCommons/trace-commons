@@ -109,8 +109,9 @@ final class SettingsParityTests: XCTestCase {
                               "PublicProfileCopy.goPublicHandleLabel", "PublicProfileCopy.goPublicBioLabel",
                               "PublicProfileCopy.publishedHeading", "PublicProfileCopy.neverHeading",
                               "PublicProfileCopy.goPublicAcknowledgement", "PublicProfileCopyCheck.failures()",
-                              "SettingsLegacyWords.publishedLines", "SettingsLegacyWords.neverLines",
-                              "SettingsLegacyWords.doNotTrustProfileWording"],
+                              "PublicProfileCopy.publishedLines", "PublicProfileCopy.neverLines",
+                              "PublicProfileCopy.wordingDefect", "PublicProfileCopy.goPublicDescription",
+                              "PublicProfileCopy.goingPublic"],
                 confirmations: ["GlassModal(", ".glassModal(isPresented: $showingGoPublic)"],
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
         Section(glass: "Views/Settings/WatchedFoldersSection.swift",
@@ -200,6 +201,26 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains("checkmark.circle.fill"))
         XCTAssertEqual(SettingsLegacyWords.stateLabel("X", true), "X: yes")
         XCTAssertEqual(SettingsLegacyWords.stateLabel("X", false), "X: no")
+    }
+
+    /// #1146 parity (2026-10-07): the Settings and public-profile words are
+    /// the core's (`shell_words_copy`), in Ron's words where #1146 has them.
+    func test_settingsAndProfileWordsAreTheCoresInRonsWords() {
+        XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
+        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
+        XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
+        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A session counts as finished after 30 seconds of quiet.")
+        XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
+                       "Automatic contributing turned on for demo")
+        XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")
+        XCTAssertEqual(PublicProfileCopy.heading, "Public profile")
+        XCTAssertEqual(PublicProfileCopy.saveProfile, "Update profile")
+        XCTAssertEqual(PublicProfileCopy.leaveRoster, "Withdraw")
+        XCTAssertEqual(PublicProfileCopy.onRosterSince("May 1"), "On the roster since May 1")
+        XCTAssertEqual(PublicProfileCopy.failureSentence("handle-too-short"),
+                       "Handle must be at least 3 characters. Profile was not published.")
+        XCTAssertTrue(PublicProfileCopy.leaveFailureSentence("not-logged-in").hasPrefix("This device isn't connected"))
+        XCTAssertEqual(PublicProfileCopyCheck.failures(), [])
     }
 
     /// The notification refresh must hang on a node that exists while the

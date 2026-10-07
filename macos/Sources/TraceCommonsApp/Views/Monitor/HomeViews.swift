@@ -576,10 +576,11 @@ private struct HistoryListRow: View {
             .disabled(record.map { model.withdrawing.contains($0.submissionID) } ?? true)
         // Retry withdraws without asking again, as the legacy
         // `SessionWithdrawalAction` does: the first attempt already asked.
-        // (Ron's "Try again" asks again; native's behaviour is kept.)
+        // (Ron's "Try again" asks again; native's behaviour is kept, under
+        // his word.)
         case .retry:
             if let record {
-                Button(copy.withdraw) { model.withdraw(record) }
+                Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }
                     .buttonStyle(GlassButtonStyle(.glass, small: true))
                     .frame(minHeight: 44)
                     .disabled(model.withdrawing.contains(record.submissionID))
