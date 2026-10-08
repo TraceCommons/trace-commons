@@ -19,6 +19,7 @@ pub mod episodes;
 pub mod markers;
 pub mod models;
 pub mod outcomes;
+pub mod patterns;
 pub mod pricing_catalog;
 pub mod provider;
 pub mod service;
