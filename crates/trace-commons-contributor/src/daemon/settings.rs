@@ -89,6 +89,11 @@ const DEFAULT_CANARY_INTERVAL_SECS: u64 = 3600;
 /// `approve` reports no `hold_until`.
 const DEFAULT_APPROVAL_HOLD_SECS: u64 = 10;
 
+/// Whether in-app suggestions (suggestion cards and the panel row) are on for a
+/// settings file that never chose. DRAFT, owner decision 14 in the nudge
+/// decisions list.
+pub const DEFAULT_SUGGESTIONS_ENABLED: bool = true;
+
 /// How patient the watcher may be told to be, in seconds. Above the ceiling
 /// "done" never arrives in any practical session -- an unbounded value would
 /// let a session sit in `Writing` forever, which is the open-ended footgun
@@ -595,6 +600,14 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub scrub_check_defaulted_on_upgrade: bool,
 
+    /// Nudge: whether the app may show in-app suggestions -- the cards on
+    /// Traces and History and the menu-bar panel row (`status.nudge`).
+    /// Defaults to [`DEFAULT_SUGGESTIONS_ENABLED`]; a settings file written
+    /// before this key existed loads with that default. It governs no
+    /// notification and no menu-bar mark: those have switches of their own.
+    #[serde(default = "default_suggestions_enabled")]
+    pub suggestions_enabled: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -985,6 +998,10 @@ pub fn attested_bodies_dir_for(
     Some(token.parent()?.join(IRONWIRE_BODIES_SUBDIR))
 }
 
+fn default_suggestions_enabled() -> bool {
+    DEFAULT_SUGGESTIONS_ENABLED
+}
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -1033,6 +1050,7 @@ impl Default for DaemonSettings {
             private_inference_offer_seen: false,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
+            suggestions_enabled: DEFAULT_SUGGESTIONS_ENABLED,
             legacy_claude_root: None,
             legacy_codex_root: None,
         }
@@ -1581,6 +1599,13 @@ pub fn apply_settings_object(
             // `null` is refused too: it is not a mode, and a caller meaning
             // "the default" says `automatic`. Accepting it would let a shell
             // that dropped the field clear a Manual choice by accident.
+            // Nudge: in-app suggestions on or off. Also reachable as the
+            // dedicated `set_suggestions_enabled` request, which writes
+            // through here. Either way the daemon publishes `status_changed`,
+            // because `status.nudge` reads it.
+            "suggestions_enabled" => {
+                settings.suggestions_enabled = value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
             "scrub_check" => {
                 settings.scrub_check = value
                     .as_str()
@@ -2348,6 +2373,31 @@ mod tests {
             !settings.ironwire_attested_bodies,
             "an absent switch is off, never on"
         );
+    }
+
+    /// Nudge S3, owner decision 14: in-app suggestions are on unless the
+    /// person turns them off, including for a settings file written before
+    /// the switch existed. `set_settings` takes a boolean and nothing else.
+    #[test]
+    fn suggestions_default_on_and_take_only_a_boolean() {
+        assert!(DaemonSettings::default().suggestions_enabled);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(v["suggestions_enabled"], true);
+        v.as_object_mut().unwrap().remove("suggestions_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(settings.suggestions_enabled, "an absent switch is on");
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"suggestions_enabled": false})),
+            Ok(true)
+        );
+        assert!(!s.suggestions_enabled);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"suggestions_enabled": "on"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.suggestions_enabled, "a refused value changes nothing");
     }
 
     /// The offer marker is written by *either* answer, and a settings file

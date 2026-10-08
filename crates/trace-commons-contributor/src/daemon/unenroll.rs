@@ -16,6 +16,9 @@
 //! rules, the queue, the NEAR AI notice marker, and the remembered passkeys,
 //! which are not an enrollment.
 //!
+//! What also goes: the in-app suggestion ledger (`DaemonState::clear_nudges`),
+//! so a next account never inherits this one's "Not now"s or other stamps.
+//!
 //! # Order, and why it fails closed
 //!
 //! `uploader::enrollment_is_live` -- what `status.logged_in` reports and what
@@ -173,6 +176,18 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
         tracing::warn!("could not persist the queue after unenroll");
     }
     drop(queue);
+    // Nudge: every suggestion stamp belongs to this enrollment, so a next
+    // account starts with none of them. Taken after the queue guard is
+    // released, the order `status_value` already takes state in. The
+    // suggestions switch is a setting about this Mac and stays.
+    {
+        let mut state = shared.state.lock().expect("state lock");
+        if state.clear_nudges() && state.save(&shared.store).is_err() {
+            // Cleared in memory, which is what every reader consults; the
+            // next tick's save persists it.
+            tracing::warn!("could not persist the daemon state after unenroll");
+        }
+    }
     shared.account_admission.forget_enrollment();
     if let Ok(mut ceremonies) = shared.native_identity.lock() {
         ceremonies.clear();
