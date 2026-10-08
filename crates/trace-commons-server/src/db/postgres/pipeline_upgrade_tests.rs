@@ -1196,9 +1196,12 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
 /// `main` took V110 to V114 while 109 was free, so a database that runs
 /// `main` records every other version before V109, and the runner applies
 /// V109 last there (it applies each version that is not recorded, in the
-/// order of the list). The same seeded legs, the same non-superuser owner and
-/// the same results as the ascending test above; it fails when a later
-/// migration changes something a V109 statement names.
+/// order of the list). Here the runner itself (`run_migrations`) applies
+/// V109, on a history that lacks only that version, in a session whose role
+/// is the non-superuser owner. The same seeded legs and the same results as
+/// the ascending test above; it fails when a later migration changes
+/// something a V109 statement names, and when the runner leaves out a
+/// version below the newest one it finds recorded.
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn v109_applies_after_every_later_migration_on_a_database_that_runs_main() {
@@ -1211,7 +1214,7 @@ enum V109Order {
     /// After V108 and before V110: a database that goes from #1143 to a
     /// build with V109.
     Ascending,
-    /// After every other migration of the list.
+    /// After every other migration of the list, by the migration runner.
     AfterEveryLaterMigration,
 }
 
@@ -1382,7 +1385,7 @@ async fn v109_disables_v94_era_pending_legs(order: V109Order) {
                 THEN CREATE ROLE pipeline_upgrade_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF;
              END $$;
              GRANT USAGE, CREATE ON SCHEMA public TO pipeline_upgrade_owner;
-             GRANT INSERT ON _trace_commons_migrations TO pipeline_upgrade_owner;
+             GRANT SELECT, INSERT ON _trace_commons_migrations TO pipeline_upgrade_owner;
              ALTER TABLE pipeline_run_settlements OWNER TO pipeline_upgrade_owner;
              ALTER TABLE pipeline_export_snapshots OWNER TO pipeline_upgrade_owner;
              ALTER TABLE pipeline_export_snapshot_items OWNER TO pipeline_upgrade_owner;
@@ -1404,24 +1407,68 @@ async fn v109_disables_v94_era_pending_legs(order: V109Order) {
         1
     );
     set_tenant(&admin, "").await;
-    admin
-        .batch_execute("SET ROLE pipeline_upgrade_owner")
-        .await
-        .unwrap();
-    let (version, migration, sql) = MIGRATIONS
-        .iter()
-        .find(|(version, _, _)| *version == 109)
-        .expect("V109 is in the list");
-    apply_and_record_migration(&mut admin, *version, migration, sql)
-        .await
-        .expect("apply V109 as the non-superuser owner");
-    admin.batch_execute("RESET ROLE").await.unwrap();
-
-    // Ascending, the runner applies the later migrations now. With V109
-    // last it finds nothing to apply, and it accepts a history in which V109
-    // was recorded after them.
-    let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
-    migrator.run_migrations().await.expect("upgrade to current");
+    let migrator = match order {
+        V109Order::Ascending => {
+            admin
+                .batch_execute("SET ROLE pipeline_upgrade_owner")
+                .await
+                .unwrap();
+            let (version, migration, sql) = MIGRATIONS
+                .iter()
+                .find(|(version, _, _)| *version == 109)
+                .expect("V109 is in the list");
+            apply_and_record_migration(&mut admin, *version, migration, sql)
+                .await
+                .expect("apply V109 as the non-superuser owner");
+            admin.batch_execute("RESET ROLE").await.unwrap();
+            // The runner applies the later migrations now.
+            let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
+            migrator.run_migrations().await.expect("upgrade to current");
+            migrator
+        }
+        V109Order::AfterEveryLaterMigration => {
+            // Merge review M6: the runner applies V109, not the test. Each
+            // new session of the URL's role in this database starts in the
+            // owner role, so the runner's own connection is that of a
+            // migrator that owns the tables and is not a superuser. The
+            // setting goes with the database.
+            admin
+                .batch_execute(&format!(
+                    "ALTER ROLE CURRENT_USER IN DATABASE {name} SET role = 'pipeline_upgrade_owner'"
+                ))
+                .await
+                .expect("start the runner's sessions in the owner role");
+            let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
+            let role = migrator
+                .trace_pool()
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT current_user::TEXT, rolsuper OR rolbypassrls
+                       FROM pg_roles WHERE rolname = current_user",
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (role.get::<_, String>(0).as_str(), role.get::<_, bool>(1)),
+                ("pipeline_upgrade_owner", false),
+                "the runner's session is the non-superuser owner"
+            );
+            migrator
+                .run_migrations()
+                .await
+                .expect("the runner applies V109 after every later migration");
+            admin
+                .batch_execute(&format!(
+                    "ALTER ROLE CURRENT_USER IN DATABASE {name} RESET role"
+                ))
+                .await
+                .unwrap();
+            migrator
+        }
+    };
     let recorded: i64 = admin
         .query_one("SELECT COUNT(*) FROM _trace_commons_migrations", &[])
         .await
