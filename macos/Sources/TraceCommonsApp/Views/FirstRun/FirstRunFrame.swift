@@ -127,7 +127,7 @@ enum FirstRunFrameLayout {
 /// `notice` is the sentence a screen maps the runner's failure to; the
 /// frame shows it and decides nothing about it. `isCommitting` withdraws
 /// Back and the tier switch while the runner's calls are in flight.
-struct FirstRunFrame<Header: View, Content: View>: View {
+struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
     private let copy: FirstRunCopy
     @Binding private var state: FirstRunState
     private let isCommitting: Bool
@@ -135,7 +135,10 @@ struct FirstRunFrame<Header: View, Content: View>: View {
     private let footer: FirstRunFooter
     private let header: Header
     private let content: Content
+    private let pinned: Pinned
 
+    /// `pinned` sits under the scrolling cards and above the footer, always
+    /// in view (the tool screens' add tile, owner 2026-10-08).
     init(
         copy: FirstRunCopy,
         state: Binding<FirstRunState>,
@@ -143,7 +146,8 @@ struct FirstRunFrame<Header: View, Content: View>: View {
         notice: String? = nil,
         footer: FirstRunFooter,
         @ViewBuilder header: () -> Header,
-        @ViewBuilder content: () -> Content
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder pinned: () -> Pinned
     ) {
         self.copy = copy
         self._state = state
@@ -152,6 +156,7 @@ struct FirstRunFrame<Header: View, Content: View>: View {
         self.footer = footer
         self.header = header()
         self.content = content()
+        self.pinned = pinned()
     }
 
     var body: some View {
@@ -177,6 +182,7 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                pinned
                 footerRow
             }
         }
@@ -231,5 +237,22 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                 .disabled(!footer.isEnabled)
                 .help(FirstRunFrameLayout.showsAnswerEveryTool(state, footer: footer) ? copy.frame.answerEveryTool : "")
         }
+    }
+}
+
+extension FirstRunFrame where Pinned == EmptyView {
+    /// A step with nothing pinned under its cards.
+    init(
+        copy: FirstRunCopy,
+        state: Binding<FirstRunState>,
+        isCommitting: Bool = false,
+        notice: String? = nil,
+        footer: FirstRunFooter,
+        @ViewBuilder header: () -> Header,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(
+            copy: copy, state: state, isCommitting: isCommitting, notice: notice, footer: footer, header: header,
+            content: content, pinned: { EmptyView() })
     }
 }

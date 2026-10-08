@@ -92,87 +92,89 @@ enum ToolAnswerRowLayout {
     }
 }
 
-/// Ron's tool row (#1030 `tool-row.tsx`) in glass: the tool's tile, name,
-/// the folder it would watch and discovery's evidence line, then the
-/// answer. Every string is the core's or discovery's.
+/// Ron's tool row (#1030 `tool-row.tsx`) in glass: the tool's tile, name
+/// and the folder it would watch, then the answer, in one row. Every string
+/// is the core's.
 ///
-/// `meta` is the trailing line; Folders passes the evidence line, and the
-/// Tools screen may pass a shorter one. `installURL` names where "Get
-/// {tool}" leads; with none there is no button.
+/// `meta` is an optional caption under the path (`ToolsScreenLayout.meta`).
+/// `installURL` names where "Get {tool}" leads; with none there is no
+/// button.
 struct ToolAnswerRow: View {
     let copy: FirstRunCopy.Folders
     /// What the picker reads while unanswered: the core's "Choose…".
     let choose: String
     let candidate: SourceCandidate
-    let meta: String
+    /// "Added by you" for a folder the person gave; nil otherwise. Session
+    /// counts and discovery's evidence line are not shown here (owner,
+    /// 2026-10-08).
+    let meta: String?
     @Binding var state: FirstRunState
     var installURL: URL? = nil
 
     @State private var chosenFolder: String?
 
     var body: some View {
+        // One row (owner, 2026-10-08): the answer sits beside the tile and
+        // the name, centred on them, so the card is one line high.
         GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack(spacing: GlassTokens.Space.s6) {
-                    GlassToolTile(.tool(candidate.source.glassTool), large: true)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(candidate.source.displayName)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        // #1030 `ftux-ellipsis`: the path home-relative,
-                        // cut at its end; the meta never cut (`ftux-nowrap`).
-                        Text(ToolAnswerRowLayout.homeRelative(ToolAnswerRowLayout.shownPath(in: state, for: candidate)))
-                            .glassType(GlassTokens.TypeScale.mono)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .help(ToolAnswerRowLayout.shownPath(in: state, for: candidate))
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(meta)
-                        .glassType(GlassTokens.TypeScale.caption)
+            HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+                GlassToolTile(.tool(candidate.source.glassTool), large: true)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(candidate.source.displayName)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .lineLimit(1)
+                    // #1030 `ftux-ellipsis`: the path home-relative, cut at
+                    // its end.
+                    Text(ToolAnswerRowLayout.homeRelative(ToolAnswerRowLayout.shownPath(in: state, for: candidate)))
+                        .glassType(GlassTokens.TypeScale.mono)
                         .foregroundStyle(GlassColor.textTertiary)
                         .lineLimit(1)
-                        .fixedSize()
-                }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    if ToolAnswerRowLayout.asks(candidate, in: state) {
-                        Spacer(minLength: 0)
-                        GlassPicker(
-                            ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
-                            selection: answer,
-                            options: options,
-                            placeholder: choose
-                        )
-                        if ToolAnswerRowLayout.offersFolderChoice(candidate, in: state) {
-                            GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
-                                if let path = FolderPanel.choose() {
-                                    chosenFolder = path
-                                    ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
-                                }
-                            }
-                        }
-                    } else {
-                        // Not on this Mac: not asked, and no line of its own
-                        // (owner, 2026-10-08); "Get {tool}" only with an
-                        // install page.
-                        Spacer(minLength: 0)
-                        if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, in: state),
-                            let installURL
-                        {
-                            Button {
-                                NSWorkspace.shared.open(installURL)
-                            } label: {
-                                Label(
-                                    ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source),
-                                    systemImage: "arrow.down.to.line")
-                            }
-                            // Neutral, not coloured: the folder picker's
-                            // glass pill (owner, 2026-10-08).
-                            .buttonStyle(GlassButtonStyle(.glass))
-                            .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
-                        }
+                        .truncationMode(.tail)
+                        .help(ToolAnswerRowLayout.shownPath(in: state, for: candidate))
+                    if let meta {
+                        Text(meta)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .lineLimit(1)
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if ToolAnswerRowLayout.asks(candidate, in: state) {
+                    GlassPicker(
+                        ToolAnswerRowLayout.fill(copy.watchQuestion, tool: candidate.source),
+                        selection: answer,
+                        options: options,
+                        placeholder: choose
+                    )
+                    .fixedSize()
+                    if ToolAnswerRowLayout.offersFolderChoice(candidate, in: state) {
+                        GlassFolderButton(ToolAnswerRowLayout.fill(copy.chooseFolder, tool: candidate.source)) {
+                            if let path = FolderPanel.choose() {
+                                chosenFolder = path
+                                ToolAnswerRowLayout.choose(folder: path, for: candidate, in: &state)
+                            }
+                        }
+                        .fixedSize()
+                    }
+                } else if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, in: state),
+                    let installURL
+                {
+                    // Not on this Mac: not asked, and no line of its own
+                    // (owner, 2026-10-08); "Get {tool}" only with an install
+                    // page.
+                    Button {
+                        NSWorkspace.shared.open(installURL)
+                    } label: {
+                        Label(
+                            ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source),
+                            systemImage: "arrow.down.to.line")
+                    }
+                    // Neutral, not coloured: the folder picker's glass pill
+                    // (owner, 2026-10-08).
+                    .buttonStyle(GlassButtonStyle(.glass))
+                    .fixedSize()
+                    .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
                 }
             }
         }

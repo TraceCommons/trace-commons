@@ -107,9 +107,15 @@ final class FoldersScreenTests: XCTestCase {
         ToolAnswerRowLayout.select(nil, for: cline, in: &state)
         XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
 
-        // The screen's Continue is that rule, and commits the roots.
+        // The screen's Continue is that rule, through the Tools rule that
+        // also counts added folders, and commits the roots.
+        XCTAssertTrue(
+            ToolsScreenLayout.canContinue(
+                discovered: candidates,
+                state: { var answered = state; ToolAnswerRowLayout.select(.dontUse, for: cline, in: &answered); return answered }(),
+                pending: false, isCommitting: false))
         let screen = (try? Self.source("FoldersScreen.swift")) ?? ""
-        XCTAssertTrue(screen.contains("FirstRunNavigation.canContinue("))
+        XCTAssertTrue(screen.contains("ToolsScreenLayout.canContinue("))
         XCTAssertTrue(screen.contains("runner.commit(.leaveRoots)"))
         XCTAssertTrue(screen.contains("TCDiscovery.sourcesJSON()"))
         XCTAssertTrue(screen.contains("FirstRunFrame("))
@@ -239,9 +245,15 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: false))
         XCTAssertFalse(FirstRunFrameLayout.offersCustomSetupInstead(quickFolders, isCommitting: true))
 
+        // The rows and the add tile are the shared tool list's, used by
+        // Folders and Tools alike.
         let screen = try Self.source("FoldersScreen.swift")
-        XCTAssertTrue(screen.contains(".disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))"))
+        XCTAssertTrue(screen.contains("ToolList("))
         XCTAssertTrue(screen.contains("isCommitting: runner.isCommitting,"))
+        let shared = try Self.source("ToolsScreen.swift")
+        XCTAssertEqual(
+            shared.components(separatedBy: ".disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))")
+                .count - 1, 2, "the cards and the add tile")
     }
 
     /// Discovery that returns nothing readable is a failure with the core's
@@ -265,11 +277,12 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertEqual(DiscoveredRows.failed.failureLine(try copy().folders), try copy().folders.discoveryFailed)
 
         // Discovery runs again when the app comes back to the front, so an
-        // install made meanwhile shows ("Install it, then this row asks
-        // again."), and on the failure's retry.
+        // install made meanwhile is asked about, and on the failure's retry
+        // (the shared tool list's button, calling the screen's refresh).
         let screen = try Self.source("FoldersScreen.swift")
         XCTAssertTrue(screen.contains("NSApplication.didBecomeActiveNotification"))
-        XCTAssertTrue(screen.contains("copy.folders.retry"))
+        XCTAssertTrue(screen.contains("retry: refreshDiscovery"))
+        XCTAssertTrue(try Self.source("ToolsScreen.swift").contains("Button(copy.folders.retry, action: retry)"))
         XCTAssertTrue(screen.contains("FoldersScreenLayout.discovered(TCDiscovery.sourcesJSON(), keeping: discovery)"))
     }
 
