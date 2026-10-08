@@ -24882,6 +24882,23 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             "CREATE POLICY pipeline_control_test_open ON pipeline_runs
                  USING (true) WITH CHECK (true);",
         ),
+        // PR #1283 review, finding 6: a column list or a `WHEN` condition
+        // keeps the trigger's `tgtype` and lets most changes through.
+        (
+            "column-scoped trigger",
+            "DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 BEFORE UPDATE OF trace_id ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "WHEN-conditioned trigger",
+            "DROP TRIGGER phase_outcomes_reject_delete ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_delete
+                 BEFORE DELETE ON phase_outcomes
+                 FOR EACH ROW WHEN (false)
+                 EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
     ] {
         let tx = owner.transaction().await.unwrap();
         tx.batch_execute(change)

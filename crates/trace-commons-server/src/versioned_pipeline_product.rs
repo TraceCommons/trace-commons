@@ -1435,8 +1435,9 @@ pub struct PipelineControlHealth {
 ///   immutability triggers exist on that table in the current schema, fire
 ///   for ordinary sessions (`tgenabled` `O` or `A`: not disabled, not
 ///   replica-only), are row triggers that fire before the change
-///   (`tgtype`, Zaki review 3, Z3-L5), and call
-///   `reject_phase_outcome_mutation`. A function whose body was replaced is
+///   (`tgtype`, Zaki review 3, Z3-L5), on every column and with no `WHEN`
+///   condition (`tgattr` empty, `tgqual` null: PR #1283 review, finding
+///   6), and call `reject_phase_outcome_mutation`. A function whose body was replaced is
 ///   not checked: the database owner can replace any function, and the
 ///   runbook says so.
 ///
@@ -1484,6 +1485,8 @@ pub async fn pipeline_control_health(
                 AND c.relnamespace = to_regnamespace(current_schema())
                 AND NOT t.tgisinternal
                 AND t.tgenabled IN ('O', 'A')
+                AND t.tgattr = ''::int2vector
+                AND t.tgqual IS NULL
                 AND f.proname = $2
                 AND f.pronamespace = to_regnamespace(current_schema())",
             &[

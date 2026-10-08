@@ -1986,7 +1986,8 @@ policy, that no other permissive policy applies to the reading role (one
 for another role, such as `trace_gate_driver`'s, does not), and that the
 role cannot bypass row-level security. `audit_immutability_control_passed`
 checks that both of `phase_outcomes`' immutability triggers exist, fire for
-ordinary sessions as row triggers before the update or delete, and call
+ordinary sessions as row triggers before the update or delete, on every
+column and with no `WHEN` condition, and call
 `reject_phase_outcome_mutation`. Neither checks a function's body: the
 database owner can replace any function, so a replaced body is outside what
 a health check can show.
