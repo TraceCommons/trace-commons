@@ -1209,7 +1209,8 @@ nothing is kept), then publishes `status_changed`.
 {"suggestions_enabled": bool}` are the same setting by two routes; either
 publishes `status_changed` when it changes. Default `true` (DRAFT, owner
 decision 14), including for a settings file written before the key existed.
-It governs the in-app cards and the panel row only.
+It governs the in-app cards, the panel row and the menu-bar mark (owner
+decision, 2026-10-08).
 
 **What it is computed from, and when.** The suggestion ledger, the verdict
 news, the time of the last history poll, the switch, `queue_ttl_days` and
@@ -1244,12 +1245,14 @@ decides where it draws, and it never replaces or hides a higher state.
   badge takes the slot and `news` goes dark; when the badge clears, the news
   returns if it is still unacknowledged and inside its 72 hours.
 - **Gates.** `mark` is `none` while `paused`, while `consent_hold` is
-  non-null, while not `logged_in`, and while `menu_bar_mark_enabled` is off;
-  it is `unknown` while the daemon is unhealthy. It is never `news` or
-  `ready` under any of them. `suggestions_enabled` and the arming offer
-  govern the cards and the panel row, not the mark.
+  non-null, while not `logged_in`, while `suggestions_enabled` is off, and
+  while `menu_bar_mark_enabled` is off; it is `unknown` while the daemon is
+  unhealthy. It is never `news` or `ready` under any of them. Turning
+  `suggestions_enabled` off hides the mark without acknowledging anything:
+  turned back on, unacknowledged news shows again. The arming offer governs
+  the cards and the panel row, not the mark.
 - **Which switch mutes what.** The news mark has its own switch,
-  `menu_bar_mark_enabled`. `notify.verdicts_landed` governs verdict
+  `menu_bar_mark_enabled`, a finer control under `suggestions_enabled`. `notify.verdicts_landed` governs verdict
   *notifications* only: turning it off leaves the news mark lit, so a person
   can keep the calm mark and silence notifications. The halo is the
   exception the spec names: muting `notify.idle_sessions` clears it as well.
@@ -4296,8 +4299,8 @@ last one never fires, on either schedule. This is open decision #5 on issue
 setting rather than a release cliff.
 
 `suggestions_enabled` (boolean, default `true`) switches the in-app
-suggestions -- the suggestion cards on Traces and History and the menu-bar panel
-row -- on or off. It is the same setting `set_suggestions_enabled` writes,
+suggestions -- the suggestion cards on Traces and History, the menu-bar panel
+row and the menu-bar mark -- on or off. It is the same setting `set_suggestions_enabled` writes,
 and a change by either route publishes `status_changed`, because
 `status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
 

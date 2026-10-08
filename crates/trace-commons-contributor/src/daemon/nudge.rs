@@ -658,13 +658,16 @@ pub const NEWS_MARK_TTL: Duration = Duration::hours(72);
 /// mark and the lead can never read two different worlds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MarkInputs {
-    /// What `lead` reads. `suggestions_enabled` and `arming_offer_present`
-    /// govern the cards and the panel row, never the mark.
+    /// What `lead` reads. `suggestions_enabled` governs the mark as well as
+    /// the cards and the panel row: its copy says it covers the menu bar
+    /// (OWNER DECISION 2026-10-08). `arming_offer_present` never governs the
+    /// mark.
     pub lead: LeadInputs,
     /// `status.decisions_owed`, or `None` when it could not be computed.
     pub decisions_owed: Option<usize>,
-    /// The `menu_bar_mark_enabled` setting: the mark's own switch, separate
-    /// from every notification switch.
+    /// The `menu_bar_mark_enabled` setting: the mark's own switch, a finer
+    /// control under `suggestions_enabled` and separate from every
+    /// notification switch.
     pub menu_bar_mark_enabled: bool,
     /// The `notify.idle_sessions` setting. Muting the idle-session kind
     /// clears the halo too (spec section 4.1, "The halo").
@@ -748,7 +751,12 @@ pub fn mark(
 ) -> Mark {
     use super::attention::Kind;
     let gates = &inputs.lead;
-    if gates.paused || gates.consent_hold || !gates.enrolled || !inputs.menu_bar_mark_enabled {
+    if gates.paused
+        || gates.consent_hold
+        || !gates.enrolled
+        || !gates.suggestions_enabled
+        || !inputs.menu_bar_mark_enabled
+    {
         return Mark::quiet(MarkState::None);
     }
     if !gates.healthy {
@@ -1826,7 +1834,7 @@ mod tests {
     #[test]
     fn a_closed_gate_lights_nothing() {
         let at = now() - Duration::hours(1);
-        let closed: [(&str, fn(&mut MarkInputs), MarkState); 6] = [
+        let closed: [(&str, fn(&mut MarkInputs), MarkState); 7] = [
             ("paused", |m| m.lead.paused = true, MarkState::None),
             (
                 "consent hold",
@@ -1837,6 +1845,11 @@ mod tests {
             (
                 "mark off",
                 |m| m.menu_bar_mark_enabled = false,
+                MarkState::None,
+            ),
+            (
+                "suggestions off",
+                |m| m.lead.suggestions_enabled = false,
                 MarkState::None,
             ),
             ("unhealthy", |m| m.lead.healthy = false, MarkState::Unknown),
@@ -2002,14 +2015,19 @@ mod tests {
         }
     }
 
-    /// The mark has its own switch: the in-app suggestions switch and the
-    /// arming offer do not touch it.
+    /// The suggestions switch governs the mark (OWNER DECISION 2026-10-08:
+    /// its copy says it covers the menu bar), and the mark's own switch is a
+    /// finer control under it. The arming offer still does not touch it.
     #[test]
-    fn suggestions_and_the_arming_offer_do_not_govern_the_mark() {
+    fn suggestions_govern_the_mark_and_the_arming_offer_does_not() {
         let mut news = news_inputs(now() - Duration::hours(1));
-        news.lead.suggestions_enabled = false;
         news.lead.arming_offer_present = true;
         assert_eq!(mark(&news, &empty(), now()).state, MarkState::News);
+        news.lead.suggestions_enabled = false;
+        assert_eq!(mark(&news, &empty(), now()).state, MarkState::None);
+        let mut ready = ready_inputs(3);
+        ready.lead.suggestions_enabled = false;
+        assert_eq!(mark(&ready, &empty(), now()).state, MarkState::None);
     }
 
     #[test]

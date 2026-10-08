@@ -19238,8 +19238,10 @@ mod tests {
         }
 
         /// The mark clears only through `nudge_opened {verdicts_landed}`:
-        /// every other suggestion request, a switch on a notification kind
-        /// or on the suggestions, and plain reads leave it lit.
+        /// every other suggestion request, a switch on a notification kind,
+        /// and plain reads leave it lit. The suggestions switch hides it
+        /// while off but clears nothing: switched back on, the same news
+        /// shows again.
         #[test]
         fn only_opening_the_verdicts_clears_the_news_mark() {
             let s = live();
@@ -19266,7 +19268,6 @@ mod tests {
                     "nudge_decline",
                     serde_json::json!({"kind": "verdicts_landed"}),
                 ),
-                ("set_suggestions_enabled", serde_json::json!({"on": false})),
                 (
                     "set_notify_kind",
                     serde_json::json!({"kind": "verdicts_landed", "on": false}),
@@ -19276,17 +19277,24 @@ mod tests {
                     serde_json::json!({"on": false}),
                 ),
             ];
+            let lit = (
+                serde_json::json!("news"),
+                serde_json::json!(["verdicts_landed"]),
+            );
             for (method, params) in others {
                 let _ = handle_request(&s, &req(method, params.clone()));
-                assert_eq!(
-                    mark_of(&s),
-                    (
-                        serde_json::json!("news"),
-                        serde_json::json!(["verdicts_landed"])
-                    ),
-                    "{method} {params}"
-                );
+                assert_eq!(mark_of(&s), lit, "{method} {params}");
             }
+            let _ = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": false})),
+            );
+            assert_eq!(mark_of(&s).0, serde_json::json!("none"));
+            let _ = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": true})),
+            );
+            assert_eq!(mark_of(&s), lit, "suggestions back on");
             let opened = handle_request(
                 &s,
                 &req(
