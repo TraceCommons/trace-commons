@@ -1496,6 +1496,12 @@ pub unsafe extern "C" fn tc_subscribe(
                     break;
                 }
                 match tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await {
+                    // This path has no `subscribe` request to carry
+                    // `accepts`, so it is a subscriber that accepted
+                    // nothing: an opt-in event is never delivered here,
+                    // exactly as the socket withholds it from such a
+                    // subscriber. See `ipc::OPT_IN_EVENTS`.
+                    Ok(Ok(event)) if ipc::event_is_opt_in(&event.event) => continue,
                     Ok(Ok(event)) => {
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if let Ok(c) = CString::new(json) {
@@ -6502,5 +6508,81 @@ mod scalar_guard_tests {
         set_last_error("fixture-untouched");
         assert_eq!(guarded_scalar_no_err(TC_WITNESS_TONE_REFUSED, || Ok(3)), 3);
         assert_eq!(borrowed_text(tc_last_error()), "fixture-untouched");
+    }
+}
+
+/// A4 (nudge design section 5): the in-process `tc_subscribe` path cannot
+/// declare `accepts`, so it is an older shell's subscriber and must never
+/// receive an opt-in event such as `reengage_due`.
+#[cfg(test)]
+mod in_process_subscribe_tests {
+    use super::*;
+
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    extern "C" fn record_cb(event_json: *const c_char, _ctx: *mut c_void) {
+        let text = unsafe { CStr::from_ptr(event_json) }.to_string_lossy();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let name = v["event"].as_str().unwrap_or_default().to_string();
+        SEEN.lock().unwrap_or_else(|p| p.into_inner()).push(name);
+    }
+
+    #[test]
+    fn an_in_process_subscriber_never_receives_an_opt_in_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        for root in ["claude-root", "codex-root"] {
+            std::fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("claude-root"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex-root"),
+                },
+            ),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+
+        let path = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(path.as_ptr(), &mut err) };
+        assert!(!h.is_null(), "tc_daemon_start failed");
+        let shared = shared_of(unsafe { &*h }).expect("an in-process daemon");
+
+        let token = unsafe { tc_subscribe(h, Some(record_cb), std::ptr::null_mut()) };
+        assert_ne!(token, 0);
+        shared.publish(ipc::EVENT_REENGAGE_DUE, serde_json::json!({}));
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        for _ in 0..200 {
+            if SEEN
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|e| e == ipc::EVENT_QUEUE_CHANGED)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe { tc_unsubscribe(h, token) };
+        drop(shared);
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+
+        let seen = SEEN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        assert!(
+            seen.iter().any(|e| e == ipc::EVENT_QUEUE_CHANGED),
+            "the event published after it was never delivered: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
+            "an in-process subscriber received an opt-in event: {seen:?}"
+        );
     }
 }

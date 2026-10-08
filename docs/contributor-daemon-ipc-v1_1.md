@@ -601,7 +601,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
-| `subscribe` | — | `subscribed: true`, then a `snapshot` event | |
+| `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
@@ -6484,6 +6484,7 @@ relaxation of origin/CORS/CSP controls.
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
+| `reengage_due` | **opt-in**: a standalone re-engagement notification is due; sent only to a subscriber that named it in `subscribe`'s `accepts` | not published yet: the name and its opt-in rule are reserved here; the payload, `{kind, title, text, primary: {label, target}, secondary: {label}}`, is documented with the change that first publishes it |
 
 `inference_call_added` is published where the daemon already reads IronWire's
 `/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
@@ -6508,6 +6509,48 @@ no poll of its own, so a call is announced on the first tick after it lands
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call
 `list_pending` and `status` again.
+
+### Opt-in events
+
+Some events are delivered only to a subscriber that asked for them. Today
+there is one: `reengage_due`. A subscriber names the ones it can render in
+`subscribe`'s optional `accepts`:
+
+```json
+{"id": 1, "method": "subscribe", "params": {"accepts": ["reengage_due"]}}
+```
+
+- **Absent or `null` `accepts`** (every shell written before this existed):
+  the subscriber receives no opt-in event, and the response is
+  `{"subscribed": true}` exactly as before. Nothing else about the stream
+  changes.
+- **An array of strings:** the daemon keeps the opt-in names it recognizes
+  and drops the rest, so a newer shell may declare a later event to an older
+  daemon without being refused. Ordinary event names are dropped as well;
+  every subscriber already receives them. The response echoes what was kept:
+  `{"subscribed": true, "accepts": ["reengage_due"]}`. A daemon that predates
+  `accepts` answers without the field, which is how a shell tells the two
+  apart.
+- **Anything else** (not an array, or an array holding a non-string) is
+  refused with `bad_params` / `subscribe-accepts-invalid`, and the
+  connection keeps whatever subscription it had before.
+- **A repeat `subscribe` on the same connection replaces the earlier
+  declaration**; it does not add to it. Subscribing again without `accepts`
+  withdraws it.
+
+The daemon counts live connections per declared event. The attention
+arbiter that will publish `reengage_due` (not yet in this version) is to
+publish a standalone notification, and stamp it against its caps, only while
+at least one live connection has declared `reengage_due`.
+Otherwise the item stays deferred with the reason `no_renderer` and spends
+no budget, so an older shell never uses up a slot on a notification it cannot
+draw. A declaration ends with its connection, however the connection ends.
+
+The FFI's in-process `tc_subscribe` path (an embedded daemon, no socket) has
+no `subscribe` request to carry `accepts`. It behaves as a subscriber that
+accepted nothing: it never receives an opt-in event and never counts as a
+renderer. The FFI's attached path goes over the socket and follows the rules
+above.
 
 ## Queue states
 
