@@ -76,11 +76,13 @@ same body from the recorded principal replays the receipt, a different body
 is refused with `409` (`receipt id reused with different content`), another
 principal with `409` as `main` refuses one, and a tenant on neither list, or
 a build with no pipeline runtime, answers `409`
-(`submission_owned_by_pipeline_run`). This holds inside one ingest process:
-while replicas disagree on a tenant's routing (a rolling restart that
-changes its list), a legacy upload and a pipeline receipt of one submission
-id can both commit, so change a tenant's routing only with all replicas
-stopped.
+(`submission_owned_by_pipeline_run`). Between two processes the ownership
+row holds this (`pipeline_receipt_ownership`, V110): the legacy path claims
+the submission id before its first write, the pipeline commits its own
+ownership row with the run, and only one of the two commits for one id. One
+case stays open: a replica that lists the tenant on neither list makes no
+claim while the tenant has no routing row. "Run one build and one
+configuration" below gives the rule that closes it.
 
 The lists do not decide where an upload goes. The tenant's routing row
 decides, inside the scope. The row (`pipeline_tenant_routing`, one for each

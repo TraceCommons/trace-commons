@@ -891,8 +891,20 @@ Without `--single-transaction`, a failure after the first statement leaves
 `pipeline_run_settlements` without forced row security, and a second run of
 the file stops at a check or an index that the first run added.
 
+V109 does not need V110 to V114, and they do not need V109. A database that
+already has them (it ran a build of `main` from before V109) gets V109 after
+them, at the next boot with the migrator URL or by hand; the result is the
+same in both orders.
+
 Each statement locks its table until the commit. That costs nothing while
-the pipeline tables are empty, which they are until a tenant is routed.
+the pipeline tables are empty, which they are until a tenant is activated.
+On a database with an activated tenant, the build that still runs waits for
+these locks in its Settle, payout, review assessment, export and
+invalidation statements until V109 commits: the time of one read of each of
+the five tables (`pipeline_run_settlements`, `pipeline_export_snapshots`,
+`pipeline_export_snapshot_items`, `pipeline_review_assessments`,
+`pipeline_index_invalidations`). A row that fails one of the four checks
+makes V109 roll back; the routes write no such row.
 
 A test or lab database that kept the rows of the #1143 runtime suite fails
 the new requester check (those fixtures hold a requester such as
