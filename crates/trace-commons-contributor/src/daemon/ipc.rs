@@ -227,9 +227,22 @@ pub const ERR_LIST_FILTER_UNRECOGNIZED: &str = "filter-unrecognized";
 /// `list_pending` was given a `filter` that is not a string.
 pub const ERR_LIST_FILTER_INVALID: &str = "filter-invalid";
 
+/// `list_pending` was given an `order` this daemon does not know.
+pub const ERR_LIST_ORDER_UNRECOGNIZED: &str = "order-unrecognized";
+
+/// `list_pending` was given an `order` that is not a string.
+pub const ERR_LIST_ORDER_INVALID: &str = "order-invalid";
+
 /// `list_pending {filter}`: nudge U4's idle filter, exactly the set
 /// `status.idle_sessions.count` counts. The kind's own label.
 const LIST_FILTER_IDLE_SESSIONS: &str = "idle_sessions";
+
+/// `list_pending {order}`: queue insertion order, the same as no `order`.
+const LIST_ORDER_PARAM_QUEUE: &str = "queue";
+
+/// `list_pending {order}`: the suggested order (nudge value addendum, 2.2;
+/// [`super::queue::sort_suggested`]).
+const LIST_ORDER_PARAM_SUGGESTED: &str = "suggested";
 /// `nudge_decline` for a kind with no "Not now": `verdicts_landed` is news,
 /// not an ask.
 pub const ERR_NUDGE_KIND_NOT_DECLINABLE: &str = "nudge-kind-not-declinable";
@@ -1010,13 +1023,14 @@ impl EstimateTableSlot {
     }
 }
 
-/// `credit_estimate` for one queue entry, or `None`, which a caller leaves
-/// out of the row (unknown, never 0).
+/// The local estimate for one queue entry, or `None` (unknown, never 0).
+/// The one computation behind both a row's `credit_estimate` and its
+/// suggested-order tier, so the tier shown and the tier sorted on agree.
 #[must_use]
-pub fn credit_estimate_value(
+pub fn local_credit_estimate_for(
     e: &super::queue::QueueEntry,
     slot: &EstimateTableSlot,
-) -> Option<serde_json::Value> {
+) -> Option<trace_commons_protocol::local_credit_estimate::LocalCreditEstimate> {
     // Never on an entry on its way or delivered: its figure is history's,
     // or nothing (nudge value addendum, 4.7).
     let sent = matches!(
@@ -1027,7 +1041,17 @@ pub fn credit_estimate_value(
         return None;
     }
     let features = e.estimate_features.as_ref()?;
-    let estimate = trace_commons_protocol::local_credit_estimate::estimate(features, &slot.table)?;
+    trace_commons_protocol::local_credit_estimate::estimate(features, &slot.table)
+}
+
+/// `credit_estimate` for one queue entry, or `None`, which a caller leaves
+/// out of the row (unknown, never 0).
+#[must_use]
+pub fn credit_estimate_value(
+    e: &super::queue::QueueEntry,
+    slot: &EstimateTableSlot,
+) -> Option<serde_json::Value> {
+    let estimate = local_credit_estimate_for(e, slot)?;
     let mut value = serde_json::to_value(&estimate).ok()?;
     value["basis"] = serde_json::Value::from(slot.basis);
     Some(value)
@@ -3659,6 +3683,19 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         }
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_INVALID),
     };
+    // Nudge value addendum, 2.1: an optional `order`. Absent, `null` or
+    // `"queue"` is queue insertion order, exactly as before; `"suggested"`
+    // sorts what the filters selected. Unknown is refused, never answered in
+    // some other order.
+    let suggested = match req.params.get("order") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(o)) if o == LIST_ORDER_PARAM_QUEUE => false,
+        Some(serde_json::Value::String(o)) if o == LIST_ORDER_PARAM_SUGGESTED => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_ORDER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_ORDER_INVALID),
+    };
     // Settings first, in its own short lock, then policy and queue: the
     // order `status_value` takes them in.
     let idle_window = idle_filter
@@ -3681,9 +3718,30 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         (Some(_), None) => Vec::new(),
         (None, _) => queue.pending(),
     };
-    let entries: Vec<serde_json::Value> = selected
+    // Filter first, sort second.
+    let mut selected: Vec<&super::queue::QueueEntry> = selected
         .into_iter()
         .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
+        .collect();
+    if suggested {
+        let tier_of = |e: &super::queue::QueueEntry| {
+            local_credit_estimate_for(e, &estimate_table).and_then(|estimate| estimate.tier)
+        };
+        super::queue::sort_suggested(
+            &mut selected,
+            &super::queue::SuggestedOrderInputs {
+                // An entry minted after the fit was counted is missing from
+                // the map while the catalogue is live: unknown, not "fits
+                // nothing" (`SUGGESTED_ORDER_UNKNOWN_FIT_RANK`).
+                mission_fit: mission_fit.as_ref(),
+                // A one-tier table carries no ordering information.
+                estimate_tier: (estimate_table.table.tier_count() > 1)
+                    .then_some(&tier_of as &dyn Fn(&super::queue::QueueEntry) -> _),
+            },
+        );
+    }
+    let entries: Vec<serde_json::Value> = selected
+        .into_iter()
         .map(|e| {
             // Inserted after `entry_value` returns, so its signature and its
             // other callers stay as they are: every other rendering of an
@@ -19147,6 +19205,252 @@ mod tests {
             );
             assert!(declined.error.is_none(), "{:?}", declined.error);
             assert_eq!(mark_of(&s).0, "none");
+        }
+
+        // ---- list_pending {order} (nudge value addendum, 2.1-2.2) ----
+
+        /// A waiting entry for the order tests: `turns` prompts (`None`: no
+        /// recorded shape), last written `minutes` ago, and features of
+        /// `text` (`None`: no features, so no estimate).
+        fn seed_ordered(
+            s: &DaemonShared,
+            source: &str,
+            turns: Option<u32>,
+            minutes: i64,
+            text: Option<&str>,
+        ) -> String {
+            let entry_id = uuid::Uuid::new_v4();
+            let written = Utc::now() - chrono::Duration::minutes(minutes);
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: source.to_string(),
+                        project_key: ASK.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(ASK),
+                        path: std::path::PathBuf::from(format!("/tmp/order-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: written,
+                        last_modified_at: Some(written),
+                        shape: turns.map(|user_turns| crate::daemon::queue::SessionShape {
+                            user_turns,
+                            ..Default::default()
+                        }),
+                        estimate_features: text.map(features_of),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id.to_string()
+        }
+
+        fn row_ids(rows: &[serde_json::Value]) -> Vec<String> {
+            rows.iter()
+                .map(|r| r["entry_id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        /// A seeded three-tier table: the score is ln(1 + content bytes)
+        /// plus half of min(user messages, 20), cut at 4.0 and 6.0. One
+        /// user message of 3 bytes is lower, of 200 middle, of 2000 higher.
+        fn use_three_tier_table(s: &DaemonShared) {
+            let table =
+                trace_commons_protocol::local_credit_estimate::LocalEstimateTable::from_value(
+                    &serde_json::json!({
+                        "schema_version": 1,
+                        "features_version": "lef1",
+                        "version": "t7",
+                        "credit_quality_calibration": "cq3",
+                        "bytes_per_token": 4,
+                        "chunk_target_tokens": 2048,
+                        "chunk_cap": 16,
+                        "weights": [
+                            {"term": "ln_content_bytes", "weight": 1.0},
+                            {"term": "user_messages_capped", "weight": 0.5}
+                        ],
+                        "cut_offs": [4.0, 6.0],
+                        "bands": [
+                            {"low": 0.9, "high": 1.9},
+                            {"low": 1.3, "high": 2.4},
+                            {"low": 1.8, "high": 3.1}
+                        ]
+                    }),
+                )
+                .unwrap();
+            *s.estimate_table.lock().unwrap() = EstimateTableSlot {
+                table,
+                basis: ESTIMATE_BASIS_PUBLISHED,
+            };
+        }
+
+        const LOWER_TEXT: &str = "abc";
+        fn middle_text() -> String {
+            "m".repeat(200)
+        }
+        fn higher_text() -> String {
+            "h".repeat(2000)
+        }
+
+        /// `order` absent, `null` and `"queue"` are today's list, byte for
+        /// byte.
+        #[test]
+        fn order_queue_null_and_absent_are_the_same_list() {
+            let s = live();
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(0), 1, None);
+            seed_ordered(
+                &s,
+                crate::source::SOURCE_CLAUDE_CODE,
+                Some(9),
+                50,
+                Some("x"),
+            );
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, None, 5, None);
+            let absent = handle_request(&s, &req("list_pending", serde_json::json!({})));
+            let absent = serde_json::to_string(&absent.result.unwrap()).unwrap();
+            for order in [serde_json::Value::Null, serde_json::json!("queue")] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({ "order": order })),
+                );
+                assert_eq!(serde_json::to_string(&r.result.unwrap()).unwrap(), absent);
+            }
+        }
+
+        /// An unknown order is refused by label, never answered with some
+        /// other order.
+        #[test]
+        fn an_unknown_list_order_is_refused() {
+            let s = live();
+            for (order, label) in [
+                (serde_json::json!("best"), ERR_LIST_ORDER_UNRECOGNIZED),
+                (serde_json::json!(1), ERR_LIST_ORDER_INVALID),
+                (serde_json::json!(["suggested"]), ERR_LIST_ORDER_INVALID),
+            ] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({ "order": order })),
+                );
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, label);
+            }
+            assert_eq!(ERR_LIST_ORDER_UNRECOGNIZED, "order-unrecognized");
+            assert_eq!(ERR_LIST_ORDER_INVALID, "order-invalid");
+        }
+
+        /// With the built-in (one-tier) table the suggested order is
+        /// revision 1's: no catalogue, so turns bucket, then newest first,
+        /// then insertion. The same entries under a three-tier table order
+        /// differently, so the built-in table really skips the tier step.
+        #[test]
+        fn the_built_in_table_gives_the_revision_one_order() {
+            let s = live();
+            let cc = crate::source::SOURCE_CLAUDE_CODE;
+            let higher = higher_text();
+            let middle = middle_text();
+            let thin_new = seed_ordered(&s, cc, Some(0), 1, Some(&higher));
+            let rich_old = seed_ordered(&s, cc, Some(5), 90, Some(LOWER_TEXT));
+            let no_shape = seed_ordered(&s, cc, None, 2, Some(&middle));
+            let some_new = seed_ordered(&s, cc, Some(2), 3, None);
+            let rich_new = seed_ordered(&s, cc, Some(3), 10, Some(&middle));
+            let some_old = seed_ordered(&s, cc, Some(1), 60, Some(LOWER_TEXT));
+            let suggested = serde_json::json!({"order": "suggested"});
+            let got = row_ids(&list_rows(&s, suggested.clone()));
+            let revision_one = vec![
+                rich_new.clone(),
+                rich_old.clone(),
+                some_new.clone(),
+                some_old.clone(),
+                thin_new.clone(),
+                no_shape.clone(),
+            ];
+            assert_eq!(got, revision_one);
+            // The rows themselves are the queue order's rows, reordered.
+            let queue_rows = list_rows(&s, serde_json::json!({}));
+            let suggested_rows = list_rows(&s, suggested.clone());
+            for r in &suggested_rows {
+                assert!(queue_rows.contains(r), "{r}");
+            }
+            assert_eq!(queue_rows.len(), suggested_rows.len());
+
+            use_three_tier_table(&s);
+            let tiered = row_ids(&list_rows(&s, suggested));
+            assert_ne!(tiered, revision_one);
+            // Higher first; middle and unknown (some_new) together by turns
+            // then recency; lower last.
+            assert_eq!(
+                tiered,
+                vec![thin_new, rich_new, some_new, no_shape, rich_old, some_old]
+            );
+        }
+
+        /// Under a three-tier table an entry without an estimate is not
+        /// ranked as lower: it sits with the middle tier, above a lower one
+        /// that is newer and more substantive.
+        #[test]
+        fn an_unknown_estimate_is_not_ranked_as_lower() {
+            let s = live();
+            let cc = crate::source::SOURCE_CLAUDE_CODE;
+            use_three_tier_table(&s);
+            let lower = seed_ordered(&s, cc, Some(9), 1, Some(LOWER_TEXT));
+            let unknown = seed_ordered(&s, cc, Some(0), 99, None);
+            let rows = list_rows(&s, serde_json::json!({"order": "suggested"}));
+            assert!(rows[1]["credit_estimate"]["tier"] == "lower", "{rows:?}");
+            assert!(rows[0].get("credit_estimate").is_none());
+            assert_eq!(row_ids(&rows), vec![unknown, lower]);
+        }
+
+        /// A live catalogue puts the fitting entry first, ahead of a newer,
+        /// more substantive one that fits nothing.
+        #[test]
+        fn mission_fit_leads_the_suggested_order() {
+            let s = live();
+            let no_fit = seed_ordered(&s, crate::source::SOURCE_CODEX, Some(9), 1, None);
+            let fits = seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(0), 99, None);
+            let suggested = serde_json::json!({"order": "suggested"});
+            assert_eq!(
+                row_ids(&list_rows(&s, suggested.clone())),
+                vec![no_fit.clone(), fits.clone()]
+            );
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let rows = list_rows(&s, suggested);
+            assert_eq!(rows[0]["mission_fit"], 1, "{rows:?}");
+            assert_eq!(rows[1]["mission_fit"], 0, "{rows:?}");
+            assert_eq!(row_ids(&rows), vec![fits, no_fit]);
+        }
+
+        /// Filter and project first, sort second: the suggested list holds
+        /// exactly the entries the filter selects.
+        #[test]
+        fn the_order_applies_after_the_filter() {
+            let s = live();
+            let idle_old = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 30);
+            let idle_new = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 10);
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(9), 1, None);
+            let rows = list_rows(
+                &s,
+                serde_json::json!({"filter": "idle_sessions", "order": "suggested"}),
+            );
+            assert_eq!(
+                row_ids(&rows),
+                vec![idle_new.to_string(), idle_old.to_string()]
+            );
+            let unknown_filter = handle_request(
+                &s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "stale", "order": "suggested"}),
+                ),
+            );
+            assert_eq!(
+                unknown_filter.error.expect("refused").message,
+                ERR_LIST_FILTER_UNRECOGNIZED
+            );
         }
     }
 }

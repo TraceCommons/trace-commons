@@ -210,6 +210,18 @@ old behaviour, because no application has shipped against `v1` yet. See
   never in history. No new method and no new event; `nudge::lead` reads none
   of it. See
   ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status).
+- **Suggested order (nudge value addendum, section 2).** One additive request
+  parameter: `list_pending {order}`. Absent, `null` or `"queue"` is queue
+  insertion order, byte for byte as before. `"suggested"` sorts the entries
+  the other parameters selected by, in turn: mission fit (entries that fit
+  first, an entry with no known fit next, then the rest; skipped while no
+  catalogue is live), estimate tier (higher first; an entry with no estimate
+  sorts with the middle tier; skipped for a one-tier table, which the
+  built-in table is), the `user_turns` bucket (`>= 3`, `1..3`, `0`, then no
+  recorded shape), the newest write first, then queue insertion order. With
+  the built-in table the order is mission fit, then turns, then recency.
+  Any other string is refused with `order-unrecognized`, a non-string with
+  `order-invalid`. No response field changes and no new method or event.
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -591,7 +603,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional); `filter` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. The two parameters combine. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status). An entry with recorded features carries `credit_estimate`, a band; absent otherwise; see ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status) |
+| `list_pending` | `project_id` (optional); `filter` (optional); `order` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. `order: "suggested"` (nudge value addendum, section 2) sorts the selected entries by mission fit, then estimate tier (skipped for a one-tier table), then the `user_turns` bucket, then newest write, then insertion order; absent, `null` or `"queue"` is queue insertion order, as before. Any other `order` string is refused with `order-unrecognized`, a non-string with `order-invalid`. The parameters combine: filters select first, `order` sorts second. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status). An entry with recorded features carries `credit_estimate`, a band; absent otherwise; see ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |

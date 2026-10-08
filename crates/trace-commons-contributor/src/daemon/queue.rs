@@ -2609,6 +2609,108 @@ pub fn unpurposed_entries<'q>(queue: &'q Queue, policy: &ProjectPolicy) -> Vec<&
         .collect()
 }
 
+// ---- list_pending {order: "suggested"} (nudge value addendum, 2.2) ----
+
+/// Step 1 of the suggested order: an entry that fits at least one live
+/// contribution mission comes first. The step is skipped entirely while the
+/// daemon holds no live catalogue.
+///
+/// OWNER DECISION V6.
+pub const SUGGESTED_ORDER_MISSION_FIRST: bool = true;
+
+/// Where, inside step 1, an entry with no known fit sorts while a catalogue
+/// is live (an entry minted after the fit was counted): between the entries
+/// that fit and the ones that fit nothing, so an unknown is never ranked as
+/// "fits nothing". Ranks: 0 fits, 1 this, 2 fits nothing.
+///
+/// OWNER DECISION V6 (unknown is not "no fit").
+pub const SUGGESTED_ORDER_UNKNOWN_FIT_RANK: u8 = 1;
+
+/// Step 2: the tier an entry with no estimate sorts with. Neither promoted
+/// nor demoted, and never compared as 0. The step is skipped entirely for a
+/// one-tier table (the built-in default), which carries no ordering
+/// information.
+///
+/// OWNER DECISION E7.
+pub const SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER:
+    trace_commons_protocol::local_credit_estimate::EstimateTier =
+    trace_commons_protocol::local_credit_estimate::EstimateTier::Middle;
+
+/// Step 3: a session with at least this many prompts the person typed
+/// (`SessionShape::user_turns`) is substantive. Buckets, first to last:
+/// `>= SUBSTANTIVE_TURNS`, `1..SUBSTANTIVE_TURNS`, `0`, and no recorded
+/// shape.
+///
+/// OWNER DECISION V7.
+pub const SUBSTANTIVE_TURNS: u32 = 3;
+
+/// The suggested order's inputs that live outside the entry, each `None`
+/// when its step is skipped.
+pub struct SuggestedOrderInputs<'a> {
+    /// Step 1: mission fit by entry id. `None` while no catalogue is live.
+    pub mission_fit: Option<&'a std::collections::BTreeMap<Uuid, usize>>,
+    /// Step 2: an entry's estimate tier. `None` for a one-tier table.
+    pub estimate_tier: Option<
+        &'a dyn Fn(
+            &QueueEntry,
+        ) -> Option<trace_commons_protocol::local_credit_estimate::EstimateTier>,
+    >,
+}
+
+/// Sorts `entries`, given in queue insertion order, into the suggested
+/// order (nudge value addendum, 2.2), keyed in turn by:
+///
+/// 1. mission fit ([`SUGGESTED_ORDER_MISSION_FIRST`]);
+/// 2. estimate tier, higher first ([`SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER`]);
+/// 3. the `user_turns` bucket ([`SUBSTANTIVE_TURNS`]);
+/// 4. most recently written first, by
+///    `last_modified_at.unwrap_or(discovered_at)`;
+/// 5. queue insertion order, the final tie-break, which makes the order
+///    total and stable.
+pub fn sort_suggested(entries: &mut Vec<&QueueEntry>, inputs: &SuggestedOrderInputs<'_>) {
+    use trace_commons_protocol::local_credit_estimate::EstimateTier;
+    // Every key is an integer or a timestamp, so the comparison is total;
+    // the insertion index makes it strict.
+    let mut keyed: Vec<(
+        (u8, u8, u8, std::cmp::Reverse<DateTime<Utc>>, usize),
+        &QueueEntry,
+    )> = entries
+        .drain(..)
+        .enumerate()
+        .map(|(inserted, e)| {
+            // A skipped step is the same value for every entry.
+            let fit = match inputs.mission_fit {
+                Some(fits) if SUGGESTED_ORDER_MISSION_FIRST => match fits.get(&e.entry_id) {
+                    Some(&n) if n > 0 => 0,
+                    Some(_) => 2,
+                    None => SUGGESTED_ORDER_UNKNOWN_FIT_RANK,
+                },
+                _ => 0,
+            };
+            let tier = match inputs.estimate_tier {
+                Some(tier_of) => {
+                    match tier_of(e).unwrap_or(SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER) {
+                        EstimateTier::Higher => 0,
+                        EstimateTier::Middle => 1,
+                        EstimateTier::Lower => 2,
+                    }
+                }
+                None => 0,
+            };
+            let substance = match &e.shape {
+                Some(shape) if shape.user_turns >= SUBSTANTIVE_TURNS => 0,
+                Some(shape) if shape.user_turns >= 1 => 1,
+                Some(_) => 2,
+                None => 3,
+            };
+            let written = std::cmp::Reverse(e.last_modified_at.unwrap_or(e.discovered_at));
+            ((fit, tier, substance, written, inserted), e)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, _)| *key);
+    entries.extend(keyed.into_iter().map(|(_, e)| e));
+}
+
 /// Nudge U4: the waiting sessions nobody has written to for
 /// `idle_days_eff` days, which the idle-session suggestion, its status
 /// field, the Traces card's idle filter and (later) its announcement all
@@ -5501,5 +5603,205 @@ mod tests {
             1,
             "decisions_owed excludes the gate-held armed one"
         );
+    }
+
+    // ---- suggested order (nudge value addendum, 2.2) ----
+
+    mod suggested_order {
+        use super::super::*;
+        use crate::daemon::test_support::at;
+        use std::collections::BTreeMap;
+        use trace_commons_protocol::local_credit_estimate::EstimateTier;
+
+        /// An entry with every suggested-order key held equal: no shape, the
+        /// same write time. Each test varies one key.
+        fn plain(n: u8) -> QueueEntry {
+            QueueEntry {
+                entry_id: Uuid::from_bytes([n; 16]),
+                session_hash: format!("sha256:{n}"),
+                discovered_at: at("2026-10-01T00:00:00Z"),
+                ..Default::default()
+            }
+        }
+
+        fn turns(n: u8, user_turns: u32) -> QueueEntry {
+            QueueEntry {
+                shape: Some(SessionShape {
+                    user_turns,
+                    ..Default::default()
+                }),
+                ..plain(n)
+            }
+        }
+
+        fn ids(entries: &[&QueueEntry]) -> Vec<u8> {
+            entries.iter().map(|e| e.entry_id.as_bytes()[0]).collect()
+        }
+
+        fn sorted(entries: &[QueueEntry], inputs: &SuggestedOrderInputs<'_>) -> Vec<u8> {
+            let mut refs: Vec<&QueueEntry> = entries.iter().collect();
+            sort_suggested(&mut refs, inputs);
+            ids(&refs)
+        }
+
+        const SKIPPED: SuggestedOrderInputs<'static> = SuggestedOrderInputs {
+            mission_fit: None,
+            estimate_tier: None,
+        };
+
+        #[test]
+        fn the_owner_decisions_are_as_ruled() {
+            const { assert!(SUGGESTED_ORDER_MISSION_FIRST) };
+            assert_eq!(SUGGESTED_ORDER_UNKNOWN_FIT_RANK, 1);
+            assert_eq!(SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER, EstimateTier::Middle);
+            assert_eq!(SUBSTANTIVE_TURNS, 3);
+        }
+
+        /// Step 1 alone: fits first, an unknown fit next, "fits nothing" last.
+        #[test]
+        fn mission_fit_orders_fits_then_unknown_then_none() {
+            let entries = [plain(1), plain(2), plain(3), plain(4)];
+            let fit = BTreeMap::from([
+                (entries[0].entry_id, 0),
+                (entries[2].entry_id, 2),
+                (entries[3].entry_id, 1),
+            ]);
+            let inputs = SuggestedOrderInputs {
+                mission_fit: Some(&fit),
+                estimate_tier: None,
+            };
+            // 3 and 4 fit (insertion order between them), 2 is unknown, 1
+            // fits nothing.
+            assert_eq!(sorted(&entries, &inputs), vec![3, 4, 2, 1]);
+        }
+
+        /// With no live catalogue step 1 is skipped: every entry ties on it.
+        #[test]
+        fn mission_fit_is_skipped_with_no_catalogue() {
+            let entries = [plain(1), plain(2), plain(3)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![1, 2, 3]);
+        }
+
+        /// Step 2 alone: higher first; an unknown sorts with the middle tier,
+        /// so it is never ranked below a lower tier.
+        #[test]
+        fn estimate_tier_orders_higher_first_and_unknown_with_middle() {
+            let entries = [plain(1), plain(2), plain(3), plain(4)];
+            let tier_of = |e: &QueueEntry| match e.entry_id.as_bytes()[0] {
+                1 => Some(EstimateTier::Lower),
+                2 => None,
+                3 => Some(EstimateTier::Higher),
+                _ => Some(EstimateTier::Middle),
+            };
+            let inputs = SuggestedOrderInputs {
+                mission_fit: None,
+                estimate_tier: Some(&tier_of),
+            };
+            // 3 higher; 2 (unknown) and 4 (middle) tie, insertion order; 1
+            // lower last.
+            assert_eq!(sorted(&entries, &inputs), vec![3, 2, 4, 1]);
+        }
+
+        /// A one-tier table skips step 2 even if tiers were somehow known.
+        #[test]
+        fn estimate_tier_is_skipped_for_a_one_tier_table() {
+            let entries = [turns(1, 0), turns(2, 5)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![2, 1]);
+        }
+
+        /// Step 3 alone: `>= 3` turns, then 1..3, then 0, then no shape.
+        #[test]
+        fn user_turns_buckets_with_no_shape_last() {
+            let entries = [
+                plain(1),
+                turns(2, 0),
+                turns(3, 1),
+                turns(4, 2),
+                turns(5, 3),
+                turns(6, 40),
+            ];
+            // 5 and 6 share the top bucket, 3 and 4 the second: insertion
+            // order inside a bucket, never the raw count.
+            assert_eq!(sorted(&entries, &SKIPPED), vec![5, 6, 3, 4, 2, 1]);
+        }
+
+        /// Step 4 alone: newest write first, by `last_modified_at`, falling
+        /// back to `discovered_at`.
+        #[test]
+        fn recency_orders_newest_write_first() {
+            let old = QueueEntry {
+                discovered_at: at("2026-09-01T00:00:00Z"),
+                ..plain(1)
+            };
+            let written_late = QueueEntry {
+                discovered_at: at("2026-09-01T00:00:00Z"),
+                last_modified_at: Some(at("2026-10-05T00:00:00Z")),
+                ..plain(2)
+            };
+            let discovered_mid = QueueEntry {
+                discovered_at: at("2026-10-03T00:00:00Z"),
+                ..plain(3)
+            };
+            let entries = [old, written_late, discovered_mid];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![2, 3, 1]);
+        }
+
+        /// Each step outranks every later one.
+        #[test]
+        fn earlier_steps_outrank_later_ones() {
+            let newest_no_fit = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 9)
+            };
+            let fits_but_thin = turns(2, 0);
+            let entries = [newest_no_fit, fits_but_thin];
+            let fit = BTreeMap::from([(entries[0].entry_id, 0), (entries[1].entry_id, 1)]);
+            let lower = |_: &QueueEntry| Some(EstimateTier::Lower);
+            let inputs = SuggestedOrderInputs {
+                mission_fit: Some(&fit),
+                estimate_tier: Some(&lower),
+            };
+            assert_eq!(sorted(&entries, &inputs), vec![2, 1]);
+
+            // Tier outranks turns and recency.
+            let a = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 9)
+            };
+            let b = turns(2, 0);
+            let tier_of = |e: &QueueEntry| {
+                Some(if e.entry_id.as_bytes()[0] == 2 {
+                    EstimateTier::Higher
+                } else {
+                    EstimateTier::Lower
+                })
+            };
+            let inputs = SuggestedOrderInputs {
+                mission_fit: None,
+                estimate_tier: Some(&tier_of),
+            };
+            assert_eq!(sorted(&[a, b], &inputs), vec![2, 1]);
+
+            // Turns outrank recency.
+            let a = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 0)
+            };
+            let b = turns(2, 3);
+            assert_eq!(sorted(&[a, b], &SKIPPED), vec![2, 1]);
+        }
+
+        /// Equal keys keep queue insertion order, whatever order the ids
+        /// would sort in, and sorting twice changes nothing.
+        #[test]
+        fn the_order_is_total_and_stable() {
+            let entries = [plain(9), plain(1), plain(5), plain(3)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![9, 1, 5, 3]);
+            let mut refs: Vec<&QueueEntry> = entries.iter().collect();
+            sort_suggested(&mut refs, &SKIPPED);
+            let once = ids(&refs);
+            sort_suggested(&mut refs, &SKIPPED);
+            assert_eq!(ids(&refs), once);
+        }
     }
 }
