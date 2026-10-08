@@ -229,11 +229,42 @@ impl IdentifiedPerplexityScorer for NearAiPipelineScorer {
 pub(crate) struct FastEmbedPipelineEmbedder {
     inner: Arc<dyn Embedder>,
     descriptor: FastEmbedDescriptor,
+    index_model_id: String,
+}
+
+/// The identifier index entries and sealed index commands record for
+/// `model_id`: a sealed command accepts only `[a-z0-9_.-]{1,64}`, which a
+/// hosted model id such as `BAAI/bge-large-en-v1.5` is not. Lowercased with
+/// every other byte replaced by `_`, or, when that is longer than 64,
+/// `fastembed_` and 32 hex characters of the id's SHA-256. The descriptor
+/// keeps the configured id, so the package binds the exact model either way.
+fn index_model_identifier(model_id: &str) -> String {
+    let mapped = model_id
+        .chars()
+        .map(|c| {
+            let c = c.to_ascii_lowercase();
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if !mapped.is_empty() && mapped.len() <= 64 {
+        mapped
+    } else {
+        format!("fastembed_{}", &sha256_hex(model_id.as_bytes())[..32])
+    }
 }
 
 impl FastEmbedPipelineEmbedder {
     pub(crate) fn new(inner: Arc<dyn Embedder>, descriptor: FastEmbedDescriptor) -> Self {
-        Self { inner, descriptor }
+        let index_model_id = index_model_identifier(&descriptor.model_id);
+        Self {
+            inner,
+            descriptor,
+            index_model_id,
+        }
     }
 
     #[cfg(test)]
@@ -254,7 +285,7 @@ impl IdentifiedEmbedder for FastEmbedPipelineEmbedder {
     }
 
     fn model_id(&self) -> &str {
-        &self.descriptor.model_id
+        &self.index_model_id
     }
 
     fn content_descriptor(&self) -> Vec<u8> {
@@ -487,6 +518,25 @@ pub struct PipelineGateComponents {
         Option<trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag>,
 }
 
+/// The Settle caps of the production assembly: `trace_credit` at `main`'s
+/// `NoveltyUtility` delta, the only amount the compatibility Score awards,
+/// so an award above it fails as `credit_cap_exceeded` (Settle refuses a
+/// leg with no cap at all as `settlement_cap_missing`).
+pub(crate) fn production_pipeline_caps(
+    main_gate: &trace_commons_server::versioned_pipeline_compat::MainGateConfig,
+) -> trace_commons_server::versioned_pipeline::PipelineCaps {
+    trace_commons_server::versioned_pipeline::PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+                .as_str()
+                .to_string(),
+            trace_commons_gate_api::pipeline::AtomicUnits::from_raw(u128::from(
+                main_gate.novelty_utility_microcredits,
+            )),
+        )]),
+    }
+}
+
 /// The production pipeline assembly (spec A-D10): the compatibility bundle
 /// under `main`'s gate configuration, over the shared NEAR AI scorer,
 /// fastembed embedder and usearch pipeline index, the tenant-policy
@@ -499,7 +549,7 @@ impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
         &self,
         context: pipeline_runtime::IngestPipelineRuntimeContext,
     ) -> anyhow::Result<Arc<PipelineService>> {
-        use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+        use trace_commons_server::versioned_pipeline::PipelineServiceBuilder;
         use trace_commons_server::versioned_pipeline_bundle::MinimalPolicyBundle;
         use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
         use trace_commons_server::versioned_pipeline_credit::SettlementAdapterRegistry;
@@ -539,9 +589,7 @@ impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
             components.index_reader.clone(),
             components.index_writer.clone(),
             registry,
-            PipelineCaps {
-                per_instrument_atomic_units: BTreeMap::new(),
-            },
+            production_pipeline_caps(&context.main_gate),
         )
         .with_scorer(scorer)
         .with_embedder(embedder)
@@ -1335,4 +1383,4 @@ mod usearch_pipeline_index {
 
 #[cfg(test)]
 #[path = "production_assembly_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -248,7 +248,7 @@ fn adapter_identities_are_safe_labels() {
 
     let embedder = pipeline_embedder();
     assert_eq!(embedder.dependency_identity(), "fastembed_text_embedder");
-    assert_eq!(embedder.model_id(), "BAAI/bge-large-en-v1.5");
+    assert_eq!(embedder.model_id(), "baai_bge-large-en-v1.5");
     assert!(embedder.production_qualified());
     assert_eq!(embedder.content_descriptor(), embedder.descriptor().bytes());
     assert_eq!(embedder.embed(b"x").unwrap(), vec![1.0, 0.0]);
@@ -846,8 +846,8 @@ async fn tenant_policy_authority_matches_legacy_admission() {
 
 /// Wraps `IsolatedPipelineIndex` and reports itself production-qualified,
 /// standing in for the usearch-backed index in a default-features build.
-struct QualifiedIsolatedIndex(
-    Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
+pub(crate) struct QualifiedIsolatedIndex(
+    pub(crate) Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
 );
 
 impl trace_commons_gate_api::VectorIndexReader for QualifiedIsolatedIndex {
@@ -950,6 +950,17 @@ fn test_components(
     let index = Arc::new(QualifiedIsolatedIndex(
         trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
     ));
+    test_components_with_index(privacy, index.clone(), index)
+}
+
+/// `test_components` over the given index halves.
+pub(crate) fn test_components_with_index(
+    privacy: Option<
+        Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
+    >,
+    index_reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
+    index_writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+) -> Arc<PipelineGateComponents> {
     Arc::new(PipelineGateComponents {
         scorer: Arc::new(FixedScorer),
         scorer_descriptor: scorer_descriptor(&scorer_env()),
@@ -959,8 +970,8 @@ fn test_components(
             TRACE_COMMONS_VECTOR_INDEX_DIM,
             "2",
         )),
-        index_reader: index.clone(),
-        index_writer: index,
+        index_reader,
+        index_writer,
         index_root_shared_with_legacy: false,
         authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
             Arc::new(BTreeMap::new()),
@@ -975,7 +986,7 @@ fn test_components(
     })
 }
 
-fn classifying_privacy()
+pub(crate) fn classifying_privacy()
 -> Option<Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>> {
     Some(Arc::new(ClassifyingPrivacy))
 }
@@ -1016,7 +1027,7 @@ async fn assembly_fixture(
 
 /// `main`'s gate configuration for these tests: the pilot template's floors
 /// (0, 0, 500000) and `main`'s defaults.
-const MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
+pub(crate) const MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
     trace_commons_server::versioned_pipeline_compat::MainGateConfig {
         perplexity_floor_micros: Some(0),
         tail_fraction_floor_micros: Some(0),
@@ -1724,5 +1735,76 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     assert_eq!(
         evidence["infrastructure_blockers"],
         serde_json::json!(["artifact_store_not_production"])
+    );
+}
+
+/// The embedder's `model_id` is what every index entry and sealed index
+/// command records, and a sealed command refuses one that is not a lowercase
+/// identifier of at most 64 characters (`[a-z0-9_.-]`). The configured model
+/// id (`BAAI/bge-large-en-v1.5`) is not one, so the adapter reports a
+/// deterministic identifier derived from it; the descriptor keeps the
+/// configured id, so the package still binds the exact model.
+#[test]
+fn embedder_model_id_is_an_index_identifier() {
+    use trace_commons_gate_api::IdentifiedEmbedder;
+    let identifier = |model_id: &'static str| {
+        FastEmbedPipelineEmbedder::new(
+            Arc::new(FixedEmbedder),
+            embedder_descriptor(&with(
+                &embedder_env(),
+                TRACE_COMMONS_EMBEDDER_MODEL_ID,
+                model_id,
+            )),
+        )
+        .model_id()
+        .to_string()
+    };
+    assert_eq!(
+        identifier("BAAI/bge-large-en-v1.5"),
+        "baai_bge-large-en-v1.5"
+    );
+    assert_eq!(identifier("bge-small.v1"), "bge-small.v1");
+    let long = identifier(
+        "Organisation-With-A-Very-Long-Name/an-embedding-model-whose-name-is-long-too-v1",
+    );
+    assert!(long.starts_with("fastembed_"), "{long}");
+    for value in [
+        identifier("BAAI/bge-large-en-v1.5"),
+        identifier("Weird Model:Name"),
+        long,
+    ] {
+        assert!(
+            !value.is_empty()
+                && value.len() <= 64
+                && value.bytes().all(|byte| byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'.')),
+            "{value}"
+        );
+    }
+    assert_ne!(
+        identifier("BAAI/bge-large-en-v1.5"),
+        identifier("BAAI/bge-small-en-v1.5")
+    );
+}
+
+/// Settle refuses a leg whose instrument has no cap
+/// (`settlement_cap_missing`). The compatibility Score awards exactly
+/// `main`'s `NoveltyUtility` delta, so the production cap for `trace_credit`
+/// is that delta: an award above what `main` is configured to grant fails
+/// as `credit_cap_exceeded` instead of settling.
+#[test]
+fn production_caps_bound_trace_credit_by_mains_delta() {
+    let mut gate = MAIN_GATE;
+    gate.novelty_utility_microcredits = 2_500_000;
+    let caps = production_pipeline_caps(&gate);
+    assert_eq!(
+        caps.per_instrument_atomic_units,
+        BTreeMap::from([(
+            trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+                .as_str()
+                .to_string(),
+            trace_commons_gate_api::pipeline::AtomicUnits::from_raw(2_500_000),
+        )])
     );
 }

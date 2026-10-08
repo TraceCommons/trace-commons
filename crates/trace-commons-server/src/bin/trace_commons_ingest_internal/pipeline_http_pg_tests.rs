@@ -11957,3 +11957,149 @@ async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
         );
     }
 }
+
+/// Spec 2026-10-08, 4.2 item 14: the production assembler, through the seam
+/// a production boot uses (`TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, a
+/// routed tenant, no test opt-in), over qualified scorer and embedder
+/// doubles and the usearch pipeline index on a temporary root
+/// (`near-ai-scorer`) or a qualified wrapper over `IsolatedPipelineIndex`
+/// (default features), takes a receipt to a complete Settle: the Trace
+/// Credit ledger row is written and no payout exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_serves_a_routed_tenant_end_to_end() {
+    use super::super::production_assembly::tests as production;
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-production-assembly-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-production-assembly-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    #[cfg(feature = "near-ai-scorer")]
+    let index = Arc::new(
+        super::super::production_assembly::UsearchPipelineIndex::open(
+            &dir.path().join("pipeline-index"),
+            trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig {
+                dim: 2,
+                hnsw_m: 16,
+                ef_construction: 64,
+                ef_search: 64,
+                max_open: 8,
+                flush_every: 1_000,
+                flush_interval: None,
+            },
+        )
+        .expect("open the pipeline index"),
+    );
+    #[cfg(not(feature = "near-ai-scorer"))]
+    let index = Arc::new(production::QualifiedIsolatedIndex(
+        IsolatedPipelineIndex::new(),
+    ));
+    let components = production::test_components_with_index(
+        production::classifying_privacy(),
+        index.clone(),
+        index,
+    );
+    let mut main_gate = production::MAIN_GATE;
+    main_gate.novelty_utility_microcredits = 2_500_000;
+    let connections = TraceCorpusDbConnections {
+        database: runtime.clone() as Arc<dyn Database>,
+        postgres: runtime.clone(),
+    };
+    let service = assemble_ingest_pipeline_runtime_with_components(
+        Some(&super::super::production_assembly::ProductionPipelineAssembler),
+        Some(&connections),
+        Some(&ConfiguredTraceArtifactStore::legacy(local_artifacts(&dir))),
+        true,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        false,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+        main_gate,
+        Some(components),
+    )
+    .expect("a production assembly starts with a routed tenant and no test opt-in")
+    .expect("an assembler was given, so a service is returned");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+    assert!(!service.payout_enabled());
+
+    // A production runtime routes only a tenant with a routing row (no
+    // unqualified routing): the operator activated this one.
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let envelope = model_training_envelope().await;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let created = match service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    {
+        PipelineReceiptResult::Created(created) => created,
+        other => panic!("the receipt creates a run: {other:?}"),
+    };
+    for _ in 0..3 {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let run = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(
+        (run.state, run.last_error_label.as_deref()),
+        (PipelineRunState::Complete, None),
+        "{run:?}"
+    );
+    let ledger = ledger_rows(&owner, &tenant, run.submission_id).await;
+    let rows = ledger.as_array().expect("ledger rows");
+    assert_eq!(rows.len(), 1, "{ledger}");
+    assert_eq!(rows[0]["event_type"], "novelty_utility", "{ledger}");
+    assert_eq!(rows[0]["microcredits"], 2_500_000, "{ledger}");
+    assert_eq!(rows[0]["actor_role"], "vector_worker", "{ledger}");
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let payout_lines: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_near_credit_outbox WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(payout_lines, 0, "no payout");
+}
