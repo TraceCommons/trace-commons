@@ -186,6 +186,26 @@ pub struct DaemonState {
     /// keeps writing the bytes it always did.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub nudges: BTreeMap<String, super::nudge::NudgeLedger>,
+    /// Nudge U2: the high-water mark verdict news is diffed against, keyed
+    /// by submission id (opaque) and pruned to ids still in the history
+    /// cache. Only the daemon writes it, unlike the shared cache. Flags only.
+    /// See `nudge::verdict_delta`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub verdict_marks: BTreeMap<String, super::nudge::VerdictMark>,
+    /// Whether `verdict_marks` has been seeded. False on the first poll after
+    /// an upgrade or after `unenroll`, which seeds the marks silently so
+    /// history that already existed never reads as news; an empty mark map
+    /// alone cannot tell "never seeded" from "seeded against an empty cache".
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verdict_marks_seeded: bool,
+    /// Nudge U2: verdicts landed and not yet acknowledged, counts and times
+    /// only. Cleared by `nudge_opened {kind: "verdicts_landed"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdicts_pending: Option<super::nudge::VerdictDelta>,
+    /// Nudge U2: the `newest_at` of the last delta acknowledged by
+    /// `nudge_opened {kind: "verdicts_landed"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verdicts_acked_through: Option<DateTime<Utc>>,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -216,6 +236,10 @@ impl DaemonState {
             last_community_poll_at: None,
             community: None,
             nudges: BTreeMap::new(),
+            verdict_marks: BTreeMap::new(),
+            verdict_marks_seeded: false,
+            verdicts_pending: None,
+            verdicts_acked_through: None,
             last_written: LastWritten::default(),
         }
     }
@@ -254,14 +278,24 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Forget every in-app suggestion stamp: what `unenroll` calls so a next
-    /// account inherits none of this one's. Returns whether anything was
-    /// there to forget, so the caller saves only when it must. Later nudge
-    /// slices clear their own fields here too, so one call stays "every
-    /// nudge field".
+    /// Forget every in-app suggestion stamp and the verdict news with its
+    /// high-water mark: what `unenroll` calls so a next account inherits none
+    /// of this one's. The marks go back to unseeded, so the next account's
+    /// first poll seeds silently and the history cache this Mac keeps never
+    /// replays as its news. Returns whether anything was there to forget, so
+    /// the caller saves only when it must. Later nudge slices clear their
+    /// own fields here too, so one call stays "every nudge field".
     pub fn clear_nudges(&mut self) -> bool {
-        let had = !self.nudges.is_empty();
+        let had = !self.nudges.is_empty()
+            || !self.verdict_marks.is_empty()
+            || self.verdict_marks_seeded
+            || self.verdicts_pending.is_some()
+            || self.verdicts_acked_through.is_some();
         self.nudges.clear();
+        self.verdict_marks.clear();
+        self.verdict_marks_seeded = false;
+        self.verdicts_pending = None;
+        self.verdicts_acked_through = None;
         had
     }
 
@@ -596,8 +630,21 @@ mod tests {
         .unwrap();
         let loaded = DaemonState::load(&store).unwrap();
         assert!(loaded.nudges.is_empty());
+        // Nudge S4: the verdict fields load empty and unseeded too.
+        assert!(loaded.verdict_marks.is_empty());
+        assert!(!loaded.verdict_marks_seeded);
+        assert_eq!(loaded.verdicts_pending, None);
+        assert_eq!(loaded.verdicts_acked_through, None);
         let written = serde_json::to_value(DaemonState::new()).unwrap();
-        assert!(written.get("nudges").is_none(), "{written}");
+        for key in [
+            "nudges",
+            "verdict_marks",
+            "verdict_marks_seeded",
+            "verdicts_pending",
+            "verdicts_acked_through",
+        ] {
+            assert!(written.get(key).is_none(), "{key}: {written}");
+        }
     }
 
     /// A stamped ledger survives a restart, and `clear_nudges` (what

@@ -159,6 +159,30 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
     }
     let off = handle_request(&s, &req("set_suggestions_enabled", json!({"on": false})));
     assert!(off.error.is_none(), "{:?}", off.error);
+    // Nudge S4: verdict marks, news and acknowledgement belong to this
+    // account too.
+    {
+        let mut state = s.state.lock().unwrap();
+        let at = chrono::Utc::now();
+        state.verdict_marks.insert(
+            uuid::Uuid::from_bytes([7; 16]).to_string(),
+            crate::daemon::nudge::VerdictMark {
+                accepted: true,
+                ..Default::default()
+            },
+        );
+        state.verdict_marks_seeded = true;
+        state.verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+            newly_accepted: 1,
+            newly_held: 0,
+            newly_final: 0,
+            credit_final_delta: 0.0,
+            since: at,
+            newest_at: at,
+        });
+        state.verdicts_acked_through = Some(at);
+        state.save(&s.store).unwrap();
+    }
     assert!(
         !crate::daemon::state::DaemonState::load(&s.store)
             .unwrap()
@@ -168,13 +192,17 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
 
     assert!(call(&s).await.error.is_none());
 
-    assert!(s.state.lock().unwrap().nudges.is_empty());
+    let cleared = |state: &crate::daemon::state::DaemonState| {
+        state.nudges.is_empty()
+            && state.verdict_marks.is_empty()
+            && !state.verdict_marks_seeded
+            && state.verdicts_pending.is_none()
+            && state.verdicts_acked_through.is_none()
+    };
+    assert!(cleared(&s.state.lock().unwrap()), "cleared in memory");
     assert!(
-        crate::daemon::state::DaemonState::load(&s.store)
-            .unwrap()
-            .nudges
-            .is_empty(),
-        "the cleared ledger is persisted"
+        cleared(&crate::daemon::state::DaemonState::load(&s.store).unwrap()),
+        "the cleared ledger and marks are persisted"
     );
     assert!(!s.settings.lock().unwrap().suggestions_enabled);
 }

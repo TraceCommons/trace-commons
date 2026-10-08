@@ -16,8 +16,11 @@
 //! rules, the queue, the NEAR AI notice marker, and the remembered passkeys,
 //! which are not an enrollment.
 //!
-//! What also goes: the in-app suggestion ledger (`DaemonState::clear_nudges`),
-//! so a next account never inherits this one's "Not now"s or other stamps.
+//! What also goes: the in-app suggestion ledger and the verdict news with its
+//! high-water marks (`DaemonState::clear_nudges`), so a next account never
+//! inherits this one's "Not now"s, stamps or news. The marks return to
+//! unseeded, so the history cache this Mac keeps is seeded silently on the
+//! next account's first poll rather than replayed as its news.
 //!
 //! # Order, and why it fails closed
 //!

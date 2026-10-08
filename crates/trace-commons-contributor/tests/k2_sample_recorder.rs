@@ -474,6 +474,12 @@ fn seed_sessions_seen(store: &ConfigStore, projects: &[(&Project, u32)]) {
             );
         }
     }
+    // A daemon that has been through a working day has also read its
+    // history back recently, so `status.nudge` can speak to verdict news
+    // (nudge S4) rather than reading `unknown` for a poll that never ran.
+    // Stamped at recording time, because freshness is judged against the
+    // clock `status` reads.
+    state.last_history_poll_at = Some(Utc::now());
     state.save(store).unwrap();
 }
 
