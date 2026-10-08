@@ -3,6 +3,7 @@
 //! No discovery, enrollment, network, or contribution path is invoked. A file
 //! is a provisional session boundary, never an inferred completed task.
 pub mod analytics_constants;
+pub mod analytics_copy;
 pub mod cache_share;
 pub mod card_presentation;
 pub mod card_store;
@@ -33,6 +34,7 @@ pub mod time_evidence;
 pub mod turn_series;
 pub mod usage;
 pub mod usage_evidence;
+pub mod week_glance;
 pub mod week_rollup;
 pub mod what_if;
 #[cfg(windows)]

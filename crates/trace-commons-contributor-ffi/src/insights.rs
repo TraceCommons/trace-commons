@@ -30,6 +30,13 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// "recorded_activity","episode_outcomes","observed_models","estimated_cost"],
 /// "snapshot_ids":[],"episode_ids":[]}`. This read returns typed `result`
 /// cards plus shared rendered `text`; empty selections create no absent store.
+/// Token week over saved snapshots (feed S): `{"type":"week_overview",
+/// "week_start":"2026-10-05","tz":3600}` and `{"type":"card_inputs","card":
+/// "tokens|cache_share|sessions","week_start":"2026-10-05","tz":3600}`.
+/// `week_start` is any date in the local ISO week (absent: the current week);
+/// `tz` is the UTC offset in seconds east, refused as `insights_tz_invalid`
+/// beyond 18 hours. Sessions are dated by their own records, never the import
+/// time; nothing is compared with another week. Reads create no absent store.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -294,6 +301,125 @@ mod tests {
             serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
         unsafe { tc_string_free(result) };
         Ok(value)
+    }
+
+    /// A Codex rollout, which needs no digest key: a saved Claude snapshot
+    /// would reach the OS keychain from this test binary.
+    fn codex_rollout(path: &std::path::Path, final_input: u64) {
+        let token = |time: &str, input: u64, cached: u64, output: u64| {
+            serde_json::json!({
+                "type":"event_msg", "timestamp":time,
+                "payload":{"type":"token_count","info":{"total_token_usage":{
+                    "input_tokens":input,"cached_input_tokens":cached,"output_tokens":output,
+                    "reasoning_output_tokens":0,"total_tokens":input + output
+                }}}
+            })
+        };
+        let rows = [
+            serde_json::json!({"type":"session_meta","timestamp":"2026-09-11T00:00:00Z","payload":{"id":"PRIVATE_SESSION_ID","model_provider":"openai"}}),
+            serde_json::json!({"type":"turn_context","timestamp":"2026-09-11T00:00:00Z","payload":{"model":"fixture-model"}}),
+            token("2026-09-11T00:00:01Z", 100, 20, 20),
+            token("2026-09-11T00:00:03Z", final_input, 40, 30),
+        ];
+        std::fs::write(
+            path,
+            rows.iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn week_overview_and_card_inputs_cross_the_abi_and_follow_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let week = || serde_json::json!({"type":"week_overview","week_start":"2026-09-09","tz":0});
+        let empty = json_call(&store, week()).unwrap();
+        assert_eq!(empty["type"], "week_overview");
+        assert_eq!(empty["overview"]["sessions"], 0);
+        assert!(!store.exists());
+
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        let analyze = serde_json::json!({
+            "type":"analyze","source":"codex","file":source,"save":true
+        });
+        let saved = json_call(&store, analyze.clone()).unwrap();
+        let first = json_call(&store, week()).unwrap();
+        let overview = &first["overview"];
+        assert_eq!(overview["feed"], "saved");
+        assert_eq!(overview["week_start"], "2026-09-07");
+        assert_eq!(overview["sources"][0]["tokens"], 60);
+        assert_eq!(overview["sources"][0]["cache_share"]["permille"], 400);
+        assert_eq!(overview["sources"][0]["change"], "needs_counter_pass");
+        assert_eq!(overview["sources"][0]["best_week"], "needs_counter_pass");
+        assert_eq!(overview["by_project"], "not_available_for_analyzed_files");
+        assert_eq!(overview["weeks"], serde_json::json!(["2026-09-07"]));
+        assert!(!first.to_string().contains("PRIVATE_SESSION_ID"));
+
+        let inputs = json_call(
+            &store,
+            serde_json::json!({"type":"card_inputs","card":"sessions","week_start":"2026-09-09","tz":0}),
+        )
+        .unwrap();
+        assert_eq!(inputs["type"], "card_inputs");
+        assert_eq!(
+            inputs["inputs"]["sessions"][0]["session_ref"],
+            saved["insight"]["id"]
+        );
+
+        // Replace: new bytes at the same path.
+        codex_rollout(&source, 250);
+        json_call(&store, analyze).unwrap();
+        let replaced = json_call(&store, week()).unwrap();
+        assert_ne!(
+            replaced["overview"]["generation"],
+            first["overview"]["generation"]
+        );
+        assert_eq!(replaced["overview"]["sources"][0]["tokens"], 160);
+        assert_eq!(replaced["overview"]["sessions"], 1);
+
+        // Delete.
+        let id =
+            json_call(&store, serde_json::json!({"type":"list"})).unwrap()["insights"][0]["id"]
+                .clone();
+        json_call(&store, serde_json::json!({"type":"delete","id":id})).unwrap();
+        let deleted = json_call(&store, week()).unwrap();
+        assert_eq!(deleted["overview"]["sessions"], 0);
+        assert_eq!(deleted["overview"]["sources"], serde_json::json!([]));
+
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"week_overview","tz":-65_000})
+            )
+            .unwrap_err(),
+            "insights_tz_invalid"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"card_inputs","card":"spend","tz":0})
+            )
+            .unwrap_err(),
+            "insights-request-invalid"
+        );
+    }
+
+    #[test]
+    fn the_analytics_words_cross_the_abi_marked_by_key() {
+        let result = tc_insights_copy_json();
+        let copy: serde_json::Value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { tc_string_free(result) };
+        assert_eq!(copy["analytics_tab_analyze"], "Analyze");
+        assert_eq!(copy["analytics_later"], "Later");
+        assert_eq!(
+            copy["analytics_feed_saved"],
+            "Only sessions you analyzed are counted."
+        );
     }
 
     #[test]

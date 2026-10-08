@@ -360,6 +360,7 @@ fn placeholders() -> impl Iterator<Item = &'static &'static str> {
         .iter()
         .chain(trace_commons_contributor::preview_copy::MONITOR_PLACEHOLDERS)
         .chain(trace_commons_contributor::shell_words_copy::SHELL_WORDS_PLACEHOLDERS)
+        .chain(trace_commons_contributor::insights::analytics_copy::ANALYTICS_PLACEHOLDERS)
 }
 
 /// The core sentences no Swift literal may hold, by where they come from.
@@ -484,6 +485,15 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
                 .collect(),
         );
     }
+    // The Insights token analytics words (spec section 8, DRAFT): tabs,
+    // Overview, Patterns, Sessions, the glance, the weekly summary card.
+    add(
+        "insights::analytics_copy::ANALYTICS_COPY",
+        trace_commons_contributor::insights::analytics_copy::ANALYTICS_COPY
+            .iter()
+            .map(|(_, words)| holed((*words).to_owned()))
+            .collect(),
+    );
     // The menu-bar Contribution mode pill, its override confirmations and
     // their refusal lines (#1173).
     add(

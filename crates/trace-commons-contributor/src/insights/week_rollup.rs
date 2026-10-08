@@ -226,6 +226,9 @@ pub struct SessionWeek {
     pub tokens: Option<u64>,
     pub state: CoverageState,
     pub reasons: Vec<CoverageReason>,
+    /// This session's own share of input read from cache, normalized for its
+    /// source. `None` when its figure is unknown.
+    pub cache_share: Option<CacheShare>,
 }
 
 /// Claude tokens on one local date, stacked. Cache write is its own series.
@@ -540,6 +543,7 @@ pub fn week_rollup<Tz: TimeZone>(
         for reason in &contribution.reasons {
             *coverage.reasons.entry(*reason).or_default() += 1;
         }
+        let mut session_share = None;
         if let Some(source) = input.source() {
             let line = lines.entry(source).or_insert(SourceWeek {
                 source,
@@ -562,6 +566,7 @@ pub fn week_rollup<Tz: TimeZone>(
                         .codex
                         .and_then(|o| CacheShare::codex(o.input, o.cached_input)),
                 };
+                session_share = share;
                 if let Some(share) = share {
                     match &mut line.cache_share {
                         Some(total) => total.merge(share),
@@ -576,6 +581,7 @@ pub fn week_rollup<Tz: TimeZone>(
             tokens: contribution.tokens,
             state,
             reasons: contribution.reasons.into_iter().collect(),
+            cache_share: session_share,
         });
     }
 
@@ -682,6 +688,11 @@ impl RollupCache {
 
     pub fn insert(&mut self, key: RollupCacheKey, generation: u64, rollup: WeekRollup) {
         self.entries.insert(key, (generation, rollup));
+    }
+
+    /// Every key held, at whatever generation it was stamped.
+    pub fn keys(&self) -> impl Iterator<Item = &RollupCacheKey> {
+        self.entries.keys()
     }
 }
 
@@ -1134,6 +1145,36 @@ mod tests {
         let line = source(&rollup, AnalyticsSource::ClaudeCode);
         assert_eq!(line.largest_session_tokens, Some(2 * TURN_TOTAL));
         assert_eq!(line.sessions, 2);
+    }
+
+    #[test]
+    fn each_session_row_carries_its_own_cache_share_for_the_drill_down() {
+        let rollup = roll(&[
+            claude("a", 1, vec![turn(0, Some(at(6, 9)), None)]),
+            codex("c", 2, at(7, 9), at(7, 10)),
+            unknown("u", UnknownReason::NoUsageCounters, Some(at(8, 9))),
+        ]);
+        assert_eq!(
+            session(&rollup, "a").cache_share,
+            CacheShare::claude(100, 600, 300)
+        );
+        assert_eq!(
+            session(&rollup, "c").cache_share,
+            CacheShare::codex(1_000, 400)
+        );
+        assert_eq!(session(&rollup, "u").cache_share, None);
+    }
+
+    #[test]
+    fn the_cache_lists_the_keys_it_holds() {
+        let mut cache = RollupCache::default();
+        let key = RollupCacheKey {
+            feed: Feed::Saved,
+            week_start: monday(),
+            tz: "+00:00".into(),
+        };
+        cache.insert(key.clone(), 3, roll(&[]));
+        assert_eq!(cache.keys().cloned().collect::<Vec<_>>(), vec![key]);
     }
 
     #[test]

@@ -2135,6 +2135,10 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * a typed result plus shared rendered text. It is a read-only local operation;
  * an empty selection creates no absent store. Questions are recorded_activity,
  * episode_outcomes, observed_models, and estimated_cost.
+ * Token week (feed S): week_overview {week_start?,tz} and card_inputs
+ * {card:tokens|cache_share|sessions,week_start?,tz} read saved snapshots by
+ * their own recorded dates. tz is the UTC offset in seconds east; a bad one
+ * is insights_tz_invalid. Reads create no absent store; no week comparison.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;

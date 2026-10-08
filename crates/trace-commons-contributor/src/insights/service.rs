@@ -388,7 +388,10 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_limitation_source_formats_are_not_model_identity", "Source formats identify the imported file format, not which model performed the work."),
         ("summary_limitation_no_model_rankings_time_savings_or_cost", "These observations do not establish model rankings, time saved, or cost."),
     ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned()))
-    .chain(super::card_presentation::ui_copy()).collect()
+    .chain(super::card_presentation::ui_copy())
+    // Token analytics, DRAFT, NEEDS APPROVAL (owner decision D17, open).
+    .chain(super::analytics_copy::ANALYTICS_COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
+    .collect()
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -527,7 +530,40 @@ pub enum LocalInsightsOperation {
         source: UsageSource,
         file: PathBuf,
     },
+    /// Feed S "This week": the saved snapshots dated in one local ISO week.
+    /// `week_start` is any date in the week (absent: the current week);
+    /// `tz` is the shell's UTC offset in seconds east. A read: an absent
+    /// store is not created.
+    WeekOverview {
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
+    /// The drill-down behind one Overview card: what makes up the number.
+    CardInputs {
+        card: super::week_glance::OverviewCard,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
 }
+
+/// Fixed labels for a malformed analytics read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnalyticsRequestError {
+    /// `tz` is not a UTC offset within 18 hours.
+    TzInvalid,
+}
+
+impl std::fmt::Display for AnalyticsRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::TzInvalid => "insights_tz_invalid",
+        })
+    }
+}
+
+impl std::error::Error for AnalyticsRequestError {}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -641,6 +677,12 @@ pub enum LocalInsightsResponse {
     Usage {
         usage: UsageSummary,
     },
+    WeekOverview {
+        overview: Box<super::week_glance::WeekOverview>,
+    },
+    CardInputs {
+        inputs: Box<super::week_glance::CardInputs>,
+    },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
@@ -673,6 +715,31 @@ fn existing_store(store_dir: Option<&std::path::Path>) -> Result<Option<LocalIns
         Err(_) => bail!("insights-local-directory-unavailable"),
         Ok(_) => LocalInsightStore::open(&path).map(Some),
     }
+}
+
+/// The feed S week for a request. An absent store is read as empty and is
+/// not created.
+fn saved_week(
+    store_dir: Option<&std::path::Path>,
+    week_start: Option<chrono::NaiveDate>,
+    tz: i32,
+) -> Result<super::week_glance::WeekGlance> {
+    use super::week_glance::{compute, request_tz, week_glance};
+    let tz = request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+    let week_start =
+        week_start.unwrap_or_else(|| chrono::Utc::now().with_timezone(&tz).date_naive());
+    match existing_store(store_dir)? {
+        Some(store) => week_glance(&store, week_start, tz),
+        None => Ok(compute(&[], week_start, tz)),
+    }
+}
+
+/// Recompute the store's cached weeks after a snapshot mutation, before the
+/// mutation returns. The mutation has already committed, so a failure here
+/// is not reported as its failure: the stale entry's generation no longer
+/// matches, and the next read recomputes it.
+fn refresh_saved_weeks(store: &LocalInsightStore) {
+    let _ = super::week_glance::refresh_after_mutation(store);
 }
 
 /// Synchronous local IO. Native callers must schedule this off the UI thread.
@@ -951,7 +1018,9 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         },
         LocalInsightsOperation::Analyze { source, file, save } => {
             let (insight, mutation_effects) = if save {
-                let result = store()?.import_with_effects(source, &file)?;
+                let store = store()?;
+                let result = store.import_with_effects(source, &file)?;
+                refresh_saved_weeks(&store);
                 (result.value, result.mutation_effects)
             } else {
                 (analyze_file(source, &file)?, MutationEffects::default())
@@ -972,9 +1041,14 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             }
         }
         // A repair is a write, so it resolves the store the way writes do.
-        LocalInsightsOperation::Repair {} => LocalInsightsResponse::Repair {
-            repaired: Box::new(store()?.repair()?),
-        },
+        LocalInsightsOperation::Repair {} => {
+            let store = store()?;
+            let repaired = store.repair()?;
+            refresh_saved_weeks(&store);
+            LocalInsightsResponse::Repair {
+                repaired: Box::new(repaired),
+            }
+        }
         LocalInsightsOperation::Summary {} => LocalInsightsResponse::Summary {
             summary: Box::new(super::summary::read_saved(request.store_dir.as_deref())?),
         },
@@ -989,7 +1063,9 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             ),
         },
         LocalInsightsOperation::Delete { id } => {
-            let result = store()?.delete_with_effects(&id)?;
+            let store = store()?;
+            let result = store.delete_with_effects(&id)?;
+            refresh_saved_weeks(&store);
             LocalInsightsResponse::Delete {
                 deleted: result.value,
                 mutation_effects: result.mutation_effects,
@@ -1041,6 +1117,22 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
         LocalInsightsOperation::Usage { source, file } => LocalInsightsResponse::Usage {
             usage: extract_usage(source, &super::bounded_read(&file)?)?,
         },
+        LocalInsightsOperation::WeekOverview { week_start, tz } => {
+            let glance = saved_week(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::WeekOverview {
+                overview: Box::new(super::week_glance::overview(&glance)),
+            }
+        }
+        LocalInsightsOperation::CardInputs {
+            card,
+            week_start,
+            tz,
+        } => {
+            let glance = saved_week(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::CardInputs {
+                inputs: Box::new(super::week_glance::card_inputs(&glance, card)),
+            }
+        }
     })
 }
 
@@ -1094,6 +1186,9 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
         return anyhow!(error.to_string());
     }
     if let Some(error) = error.downcast_ref::<ComparisonSpecificationError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<AnalyticsRequestError>() {
         return anyhow!(error.to_string());
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
@@ -1166,6 +1261,168 @@ mod tests {
             let key = format!("model_coordinates_{}", wire.as_str().unwrap());
             assert!(copy.contains_key(&key), "missing ui_copy key {key}");
         }
+    }
+
+    #[test]
+    fn ui_copy_carries_the_analytics_words_and_none_of_the_held_ones() {
+        use super::super::analytics_copy::{ANALYTICS_COPY, ANALYTICS_PLACEHOLDERS};
+        use super::super::week_rollup::CoverageReason;
+        let copy = ui_copy();
+        let mut keys = std::collections::BTreeSet::new();
+        for (key, value) in ANALYTICS_COPY {
+            assert!(keys.insert(*key), "duplicate {key}");
+            assert_eq!(copy.get(*key).map(String::as_str), Some(*value), "{key}");
+        }
+        for (key, words) in [
+            ("analytics_tab_overview", "Overview"),
+            ("analytics_tab_analyze", "Analyze"),
+            ("analytics_later", "Later"),
+            ("analytics_unavailable", "\u{2014}"),
+            (
+                "analytics_feed_saved",
+                "Only sessions you analyzed are counted.",
+            ),
+            (
+                "analytics_feed_comparisons_need_counter_pass",
+                "Week-to-week comparisons need watched-folder counting.",
+            ),
+            (
+                "analytics_by_project_unavailable",
+                "Not available for analyzed files",
+            ),
+            (
+                "analytics_coverage_line",
+                "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+            ),
+        ] {
+            assert_eq!(copy[key], words, "{key}");
+        }
+        // Owner decision D2, open: no advice, what-if or tip sentence.
+        let held = [
+            "Naming these files in project memory",
+            "Starting fresh with a summary",
+            "Past 200K every turn costs more",
+            "Start a fresh session",
+            "fewer input tokens",
+            "Assumes the next turns start",
+            "already in context",
+            "files that had not changed",
+            "Cache expired",
+            "Correction loops",
+            "After compaction",
+        ];
+        // Owner decision D1, open: no run of weeks, no ring.
+        let banned = ["in a row", "streak", "$", "USD"];
+        for (key, value) in ANALYTICS_COPY {
+            assert!(key.starts_with("analytics_"), "{key}");
+            for phrase in held.iter().chain(&banned) {
+                assert!(
+                    !value.to_lowercase().contains(&phrase.to_lowercase()),
+                    "{key} holds {phrase}"
+                );
+            }
+            // Every hole is a declared placeholder.
+            let mut rest = *value;
+            while let Some(open) = rest.find('{') {
+                let close = rest[open..].find('}').expect("closed hole") + open;
+                let name = &rest[open + 1..close];
+                assert!(ANALYTICS_PLACEHOLDERS.contains(&name), "{key}: {{{name}}}");
+                rest = &rest[close + 1..];
+            }
+        }
+        // Every coverage reason and state has its words, so a shell never
+        // shows a wire label.
+        let reason_key = |reason: CoverageReason| {
+            let wire = serde_json::to_value(reason).unwrap();
+            format!("analytics_reason_{}", wire.as_str().unwrap())
+        };
+        for reason in [
+            CoverageReason::CodexBaselineExcluded,
+            CoverageReason::Truncated,
+            CoverageReason::SomeTurnsUnknown,
+            CoverageReason::SpansWeeks,
+            CoverageReason::NoUsageCounters,
+            CoverageReason::SourceUnsupported,
+            CoverageReason::Undated,
+            CoverageReason::ReimportOverlap,
+            CoverageReason::NotRouted,
+            CoverageReason::Stale,
+        ] {
+            // Exhaustive: a new reason fails to compile here until it is
+            // listed above and given words.
+            match reason {
+                CoverageReason::CodexBaselineExcluded
+                | CoverageReason::Truncated
+                | CoverageReason::SomeTurnsUnknown
+                | CoverageReason::SpansWeeks
+                | CoverageReason::NoUsageCounters
+                | CoverageReason::SourceUnsupported
+                | CoverageReason::Undated
+                | CoverageReason::ReimportOverlap
+                | CoverageReason::NotRouted
+                | CoverageReason::Stale => {}
+            }
+            assert!(copy.contains_key(&reason_key(reason)), "{reason:?}");
+        }
+        for state in ["known", "partial", "unknown"] {
+            assert!(copy.contains_key(&format!("analytics_state_{state}")));
+        }
+    }
+
+    #[test]
+    fn week_reads_on_an_absent_store_are_empty_typed_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": directory, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let overview: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "week_overview", "week_start": "2026-10-08", "tz": 3600
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(overview["type"], "week_overview");
+        let overview = &overview["overview"];
+        assert_eq!(overview["feed"], "saved");
+        assert_eq!(overview["week_start"], "2026-10-05");
+        assert_eq!(overview["week_end"], "2026-10-11");
+        assert_eq!(overview["tz"], 3600);
+        assert_eq!(overview["sessions"], 0);
+        assert_eq!(overview["sources"], serde_json::json!([]));
+        assert!(overview["by_day"].is_null());
+        assert_eq!(overview["by_project"], "not_available_for_analyzed_files");
+        let inputs: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "card_inputs", "card": "cache_share", "tz": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inputs["inputs"]["card"], "cache_share");
+        assert_eq!(inputs["inputs"]["sessions"], serde_json::json!([]));
+        assert!(!directory.exists());
+
+        let refused =
+            call(serde_json::json!({"type": "week_overview", "tz": 19 * 3600})).unwrap_err();
+        assert_eq!(refused.to_string(), "insights_tz_invalid");
+        // A rate, an assumption or a path is not a field of these reads.
+        for extra in [
+            serde_json::json!({"type": "week_overview", "tz": 0, "file": "/tmp/x"}),
+            serde_json::json!({"type": "card_inputs", "card": "tokens", "tz": 0, "rate": 1}),
+            serde_json::json!({"type": "card_inputs", "card": "spend", "tz": 0}),
+        ] {
+            assert_eq!(
+                call(extra).unwrap_err().to_string(),
+                "insights-request-invalid"
+            );
+        }
+        assert!(!directory.exists());
     }
 
     #[test]
