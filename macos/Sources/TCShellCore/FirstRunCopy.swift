@@ -214,6 +214,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let createNew: String
         public let chooseNote: String
         public let nameTitle: String
+        /// P-2's submit button; the popup's title stays `nameTitle`.
+        public let nameSubmit: String
         public let nameField: String
         public let clearName: String
         public let defaultName: String

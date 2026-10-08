@@ -135,8 +135,8 @@ pub const OFFER_EXPOSURE: &str = "While it is on, anything else running on this 
 pub const OFFER_NO_REPOINT: &str = "Turning this on does not change where any tool sends its calls. That \
      stays a separate choice, made one tool at a time.";
 
-/// The accept button.
-pub const OFFER_ACCEPT: &str = "Turn it on";
+/// The accept button. Approved 2026-10-08 (button rule).
+pub const OFFER_ACCEPT: &str = "Turn on";
 
 /// The decline button. "Not now" rather than "No", because the switch stays.
 pub const OFFER_DECLINE: &str = "Not now";
@@ -786,15 +786,16 @@ pub const SETTINGS_MOVED: &str = "Private AI has its own screen now.";
 ///
 /// Turning it OFF from a menu is safe in a way turning it on is not: it only
 /// ever reduces what this computer will answer, so it needs no sentence in
-/// front of it.
-pub const TRAY_TURN_OFF: &str = "Stop answering model calls";
+/// front of it. Approved 2026-10-08 (button rule).
+pub const TRAY_TURN_OFF: &str = "Stop answering";
 
 /// The tray action while it is off.
 ///
 /// Trailing ellipsis because it opens the screen rather than acting: turning
 /// it ON changes what anything else on this computer may send through, and
 /// that is not a decision to take from a menu with the consequence off-screen.
-pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
+/// Approved 2026-10-08 (button rule).
+pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 
 /// The heading over the list of tools found on this computer.
 ///
@@ -890,14 +891,12 @@ pub const HARNESS_DISCONNECT: &str = "Disconnect";
 /// consequence is stated where the decision is taken.
 pub const HARNESS_PREVIEW_TITLE: &str = "Connection settings";
 
-/// The button that writes the change.
-pub const HARNESS_PREVIEW_CONFIRM: &str = "Make this change";
+/// The button that writes the change. Approved 2026-10-08 (button rule).
+pub const HARNESS_PREVIEW_CONFIRM: &str = "Apply";
 
-/// The button that does not.
-///
-/// Not "Cancel". The file is the contributor's, and the outcome of saying no
-/// is that it keeps every value it has.
-pub const HARNESS_PREVIEW_CANCEL: &str = "Leave the file as it is";
+/// The button that does not: the file keeps every value it has.
+/// Approved 2026-10-08 (button rule).
+pub const HARNESS_PREVIEW_CANCEL: &str = "Cancel";
 
 /// A slot that already had a value in it, which was left alone.
 ///
@@ -1237,8 +1236,8 @@ pub const CREDENTIAL_OBTAIN: &str = "Connect credential";
 /// Cut to one verb (owner ruling, 2026-10-07).
 pub const CREDENTIAL_CANCEL: &str = "Cancel";
 
-/// The button that removes a stored key from this machine.
-pub const CREDENTIAL_FORGET: &str = "Forget local credential";
+/// The button that removes a stored key from this machine. Approved 2026-10-08 (button rule).
+pub const CREDENTIAL_FORGET: &str = "Forget credential";
 
 /// What forgetting does, and the larger part it does not do.
 ///
@@ -1254,7 +1253,8 @@ pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference k
 
 /// The button behind `migration_available`: copy the sign-in an earlier
 /// build kept in the login keychain into the store this build uses.
-pub const CREDENTIAL_MIGRATE: &str = "Move my sign-in";
+/// Approved 2026-10-08 (button rule).
+pub const CREDENTIAL_MIGRATE: &str = "Move sign-in";
 
 /// What moving does, beside the button, and the one prompt it can cause.
 ///
@@ -1812,13 +1812,13 @@ pub const FUNDING_WHAT: &str = "The billing link opens only after your account a
 /// Kept over #1146's "Manage credits" (owner ruling): the offer surface
 /// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";
-/// #1146's "Verify current account".
-pub const FUNDING_REFRESH: &str = "Verify current account";
+/// #1146's "Verify current account", cut. Approved 2026-10-08 (button rule).
+pub const FUNDING_REFRESH: &str = "Verify account";
 /// #1146's "Account destination not read.", then the remedy, by the
 /// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str =
-    "Account destination not read. Verify current account to try again.";
+    "Account destination not read. Choose Verify account to try again.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(

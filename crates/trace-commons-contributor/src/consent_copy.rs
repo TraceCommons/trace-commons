@@ -265,8 +265,8 @@ pub const VOID_PROJECT_REARM: &str = "You can turn automatic contributing back o
 /// the terms now in force. A shell sends it as `set_project_mode` with the
 /// element's `project_id` and `auto_upload` -- the same call, and the same
 /// `armed-auto-upload` audit row, as arming the project by hand. Arming
-/// clears the notice.
-pub const VOID_REARM_ACTION: &str = "Turn back on";
+/// clears the notice. Approved 2026-10-08 (button rule).
+pub const VOID_REARM_ACTION: &str = "Turn on";
 
 /// Shown when the daemon refuses the re-arm (no config to record terms from,
 /// a project it no longer knows, the unknown bucket). The notice stays, and
@@ -530,8 +530,8 @@ pub const VOID_GRANT_REGRANT: &str = "You can turn automatic contributing back o
 /// The button beside [`VOID_GRANT_REGRANT`]. It opens the grant screens; it
 /// gives nothing by itself.
 ///
-/// Approved 2026-10-06.
-pub const VOID_GRANT_REGRANT_ACTION: &str = "Review and turn back on";
+/// Approved 2026-10-06. Approved 2026-10-08 (button rule).
+pub const VOID_GRANT_REGRANT_ACTION: &str = "Review settings";
 
 /// A void notice for a shell that can give the Flow 1 grant.
 ///
@@ -880,8 +880,8 @@ pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 /// declining changes nothing, because coexistence is the default.
 pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
-/// Approved 2026-10-06. The button that starts the move.
-pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move to my NEAR AI account";
+/// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
+pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
 
 /// Approved 2026-10-06. Shown while the move runs.
 pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
@@ -3095,7 +3095,7 @@ mod tests {
     /// an action on this project, and the refusal line says nothing changed.
     #[test]
     fn the_rearm_button_turns_it_back_on_and_a_refusal_changes_nothing() {
-        assert_eq!(VOID_REARM_ACTION, "Turn back on");
+        assert_eq!(VOID_REARM_ACTION, "Turn on");
         assert!(VOID_REARM_FAILED.contains("still asks first"));
         assert!(VOID_PROJECT_REARM.contains("agrees to the new settings"));
     }

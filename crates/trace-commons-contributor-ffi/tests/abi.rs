@@ -5917,7 +5917,7 @@ fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
     let value = json_owned(tc_contributor_disclosure_copy_json());
     assert_eq!(value, contributor_disclosure_copy());
     // The three tables the macOS bridge decodes (`ContributorDisclosureCopy`).
-    assert_eq!(value["outcome"]["submit_all_as"], "Submit all as...");
+    assert_eq!(value["outcome"]["submit_all_as"], "Submit as...");
     assert!(value["outcome"]["max_correction_chars"].is_u64());
     assert!(value["history_ui"]["status_labels"].is_object());
     assert!(value["folder_mode_labels"].is_object());

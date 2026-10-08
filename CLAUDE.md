@@ -270,6 +270,13 @@ too, so the manual runs above are a pre-flight, not the only enforcement.
 If the boundary test fails, remove the dependency. Do not edit the expected sets
 in `license_boundary.rs` to match your diff -- those sets are the specification.
 
+## Product text
+
+When adding or changing user-facing UI text, follow
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
+preserved context, separate titles and accessibility names, and shared-copy
+review checks.
+
 ## Conventions specific to this repo
 
 - **Hash-only audit and logging.** Audit rows, error logs, and operational

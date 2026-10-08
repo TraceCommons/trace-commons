@@ -1,9 +1,13 @@
 //! Shared wording for every managed-session shell.
+//!
+//! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
+//! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
             "description": "Choose a saved account for each new session. Standard sessions can keep running alongside it.",
-            "launch": "Launch managed session",
+            "launch": "Launch",
+            "launch_title": "Launch managed session",
             "add": "Add account",
             "refresh": "Refresh",
             "terminal_scope": "App launches open in {destination}. CLI launches stay in their current terminal.",
@@ -23,9 +27,9 @@ pub fn copy() -> serde_json::Value {
             "remove_description": "This removes the saved credentials and isolated profile from this computer.",
             "manage": "Manage",
             "default": "Default",
-            "use_default": "Use as default",
+            "use_default": "Make default",
             "rename_short": "Rename",
-            "reconnect": "Sign in / reconnect",
+            "reconnect": "Reconnect",
             "verify": "Verify account",
             "near_ai": "NEAR AI",
             "api_key": "API key",
@@ -38,7 +42,7 @@ pub fn copy() -> serde_json::Value {
             "label_placeholder": "Label, such as Personal or Work",
             "login_description": "Sign in through the native tool in Terminal. Repeat Add account to save another subscription.",
             "key_storage": "The key is stored in the operating system credential store.",
-            "save_login": "Save and sign in",
+            "save_login": "Sign in",
             "save_account": "Save account",
             "saved_account": "Saved account",
             "choose_account": "Choose account",

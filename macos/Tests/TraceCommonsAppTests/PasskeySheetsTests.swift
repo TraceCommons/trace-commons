@@ -627,7 +627,9 @@ final class PasskeySheetsTests: XCTestCase {
         // Verify, which is the outlined one, and P-7's link.
         XCTAssertTrue(source.contains("blockButton(copy.passkey.useExisting, .primary)"))
         XCTAssertTrue(source.contains("blockButton(copy.passkey.createNew, .glass)"))
-        XCTAssertTrue(source.contains("blockButton(copy.passkey.nameTitle, .primary)"))
+        // P-2's submit is its own word, not the popup's title.
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.nameSubmit, .primary)"))
+        XCTAssertFalse(source.contains("blockButton(copy.passkey.nameTitle"))
         XCTAssertTrue(source.contains("blockButton(copy.passkey.cancel, .glass)"))
         XCTAssertTrue(source.contains("blockButton(copy.passkey.welcomeSignIn, .primary)"))
         XCTAssertTrue(source.contains(".glassEdge(GlassTokens.Shadow.cardEdge, in: Circle())"))

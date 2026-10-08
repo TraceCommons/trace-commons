@@ -137,7 +137,9 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("ui/onboarding.rs", 2),
     ("ui/preview.rs", 10),
     ("ui/queue.rs", 8),
-    ("ui/settings.rs", 22),
+    // Lowered from 22 (button rule, 2026-10-08): "For 1 hour" became
+    // "1 hour", which is a length, not a sentence.
+    ("ui/settings.rs", 21),
     ("update.rs", 2),
     ("worker.rs", 1),
 ];

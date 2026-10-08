@@ -1047,10 +1047,10 @@
                             AutomationProperties.Name="Pause watching">
                         <Button.Flyout>
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="For 1 hour" Click="OnPauseForHour" />
-                                <MenuFlyoutItem Text="Until tomorrow morning"
+                                <MenuFlyoutItem Text="1 hour" Click="OnPauseForHour" />
+                                <MenuFlyoutItem Text="Until morning"
                                                 Click="OnPauseUntilTomorrow" />
-                                <MenuFlyoutItem Text="Until I turn it back on"
+                                <MenuFlyoutItem Text="Until resumed"
                                                 Click="OnPauseUntilResumed" />
                             </MenuFlyout>
                         </Button.Flyout>
