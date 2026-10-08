@@ -97797,6 +97797,12 @@ mod pipeline_http_pg_tests;
 #[path = "pipeline_corpus_pg_tests.rs"]
 mod pipeline_corpus_pg_tests;
 
+/// `pipeline.py compare`: the corpus reader, the envelope builder, and the
+/// gate calibration of the comparison harness. Nested here beside
+/// `pipeline_corpus_pg_tests`, whose `sha256_bytes` it reuses.
+#[path = "pipeline_compare_pg_tests.rs"]
+mod pipeline_compare_pg_tests;
+
 /// `pipeline.py restore-drill`: the ignored `pipeline_restore_seed` leaves
 /// one completed run and one run stopped after a durable Settle selection,
 /// and the ignored `pipeline_restore_resume` proves the restored copy
