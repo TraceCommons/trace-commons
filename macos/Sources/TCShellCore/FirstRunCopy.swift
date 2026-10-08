@@ -195,6 +195,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sharing: String
         public let sharingLoading: String
         public let sharingUnavailable: String
+        /// `{title}`: the info button's accessible name.
+        public let moreAbout: String
         public let start: String
         /// Start's failures, one per call that can stop it, and the refused
         /// grant, which finishes on Ask me.
@@ -243,6 +245,11 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let loading: String
         public let unavailable: String
         public let toggleLoading: String
+        /// The offer's first two sentences, shown before "Learn more".
+        public let offerLead: String
+        /// The rest of the offer's first paragraph, disclosed by "Learn more".
+        public let offerMore: String
+        public let learnMore: String
     }
 
     public let frame: Frame

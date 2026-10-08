@@ -165,13 +165,15 @@ final class UsesScreenTests: XCTestCase {
         var state = FirstRunState(
             tier: .quick, step: .uses, account: .nearAI, scopes: ["debugging_evaluation"], enrolledInvite: "INVITE-1")
 
-        let noAskFirst = try grant(without: "path_ask_first")
+        let noAskFirst = try grant(without: "path_ask_first_title")
         XCTAssertEqual(
             UsesScreenLayout.sharingLine(uses, path: .askMe, grant: noAskFirst), uses.sharingUnavailable)
         XCTAssertFalse(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAskFirst, isCommitting: false))
 
-        let noAutomatic = try grant(without: "path_automatic")
+        // A detail missing reads the fallback too: no line is shown
+        // without the rest of its answer.
+        let noAutomatic = try grant(without: "path_automatic_detail")
         XCTAssertTrue(UsesScreenLayout.canStart(
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
         state.sharing = .automatic
@@ -186,20 +188,31 @@ final class UsesScreenTests: XCTestCase {
             state, uses: uses, requiredScope: required, grant: noAutomatic, isCommitting: false))
     }
 
-    /// The Sharing card's line is the core's: Ask me reads `path_ask_first`;
-    /// Automatic reads `path_automatic` then the scrub's scope and limit; no
-    /// copy reads the fallbacks. Watching only offers Ask me alone.
+    /// The Sharing card's line is the core's first line for the path, the
+    /// rest behind an info button (owner, 2026-10-08): Ask me reads
+    /// `path_ask_first_title`, then `path_ask_first_detail` behind the
+    /// button; Automatic reads `path_automatic_title`, then its detail and
+    /// the scrub's scope and limit behind the button. No copy reads the
+    /// fallbacks. Watching only offers Ask me alone.
     func test_theSharingLineIsTheCores() throws {
         let uses = try copy().uses
         let grant = try grant()
         let scrub = try XCTUnwrap(grant.scrub)
-        let pathAskFirst = try XCTUnwrap(grant.pathAskFirst)
-        let pathAutomatic = try XCTUnwrap(grant.pathAutomatic)
-        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .askMe, grant: grant), pathAskFirst)
+        XCTAssertEqual(grant.pathAskFirstTitle, "Review each session yourself.")
+        XCTAssertEqual(grant.pathAskFirstDetail, "Nothing is contributed until you approve it.")
+        XCTAssertEqual(grant.pathAutomaticTitle, "Contribute automatically from projects that first appear.")
+        XCTAssertFalse(try XCTUnwrap(grant.pathAskFirst).contains("later"))
+        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .askMe, grant: grant), grant.pathAskFirstTitle)
+        XCTAssertEqual(UsesScreenLayout.sharingDetail(path: .askMe, grant: grant), grant.pathAskFirstDetail)
+        XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .automatic, grant: grant), grant.pathAutomaticTitle)
         XCTAssertEqual(
-            UsesScreenLayout.sharingLine(uses, path: .automatic, grant: grant),
-            [pathAutomatic, scrub.scope, scrub.limit].joined(separator: " "))
+            UsesScreenLayout.sharingDetail(path: .automatic, grant: grant),
+            [try XCTUnwrap(grant.pathAutomaticDetail), scrub.scope, scrub.limit].joined(separator: " "))
         XCTAssertEqual(UsesScreenLayout.sharingLine(uses, path: .automatic, grant: nil), uses.sharingUnavailable)
+        XCTAssertNil(UsesScreenLayout.sharingDetail(path: .automatic, grant: nil))
+        XCTAssertNil(UsesScreenLayout.sharingDetail(path: .askMe, grant: try self.grant(without: "path_ask_first_detail")))
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("infoButton(title: copy.uses.sharing, text: detail)"))
 
         let modes = try modes()
         let joined = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
@@ -332,7 +345,7 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertEqual(UsesScreenLayout.effectiveSharing(watching), .askMe)
         XCTAssertEqual(
             UsesScreenLayout.sharingLine(uses, path: UsesScreenLayout.effectiveSharing(watching), grant: grant),
-            grant.pathAskFirst)
+            grant.pathAskFirstTitle)
         let joined = FirstRunState(
             tier: .quick, step: .uses, account: .nearAI, sharing: .automatic, enrolledInvite: "INVITE-1")
         XCTAssertEqual(UsesScreenLayout.effectiveSharing(joined), .automatic)
@@ -340,6 +353,48 @@ final class UsesScreenTests: XCTestCase {
         let source = try Self.source()
         XCTAssertFalse(source.contains("path: runner.state.sharing"))
         XCTAssertFalse(source.contains("get: { runner.state.sharing }"))
+    }
+
+    /// Owner, 2026-10-08: each scope's description sits behind an info
+    /// button right after its title, named by the core's "More about
+    /// {title}", and no description is drawn as a caption. The same screen
+    /// serves Quick and Custom, so both get it.
+    func test_scopeDescriptionsAreBehindInfoButtons() throws {
+        let uses = try copy().uses
+        XCTAssertEqual(UsesScreenLayout.moreAbout("Benchmarks", uses: uses), "More about Benchmarks")
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("GlassInfoButton(UsesScreenLayout.moreAbout(title, uses: copy.uses), text: text)"))
+        XCTAssertTrue(source.contains("infoButton(title: required.title, text: required.description)"))
+        XCTAssertTrue(source.contains("infoButton(title: option.title, text: option.description)"))
+        XCTAssertFalse(source.contains("checkCaption("))
+        // The button follows the title, inside the row.
+        let row = try XCTUnwrap(source.range(of: "private func scopeRow("))
+        let rowBody = String(source[row.upperBound...].prefix(400))
+        let toggle = try XCTUnwrap(rowBody.range(of: "Toggle(option.title"))
+        let info = try XCTUnwrap(rowBody.range(of: "infoButton(title: option.title"))
+        XCTAssertLessThan(toggle.lowerBound, info.lowerBound)
+    }
+
+    /// Owner, 2026-10-08: the Private AI card shows the offer's first two
+    /// sentences (the core's, split once) and discloses the rest in place
+    /// behind the core's "Learn more"; nothing of the disclosure is dropped.
+    func test_thePrivateAICardLeadsWithTwoSentencesAndLearnMore() throws {
+        let words: FirstRunCopy = try copy()
+        XCTAssertTrue(words.privateAi.offerLead.hasPrefix("Connect your tools to NEAR AI through this app."))
+        XCTAssertEqual(words.privateAi.learnMore, "Learn more")
+        let source = try Self.source()
+        let lead = try XCTUnwrap(source.range(of: "cardBody(copy.privateAi.offerLead)"))
+        let more = try XCTUnwrap(source.range(of: "if privateAIMore {"))
+        XCTAssertLessThan(lead.lowerBound, more.lowerBound)
+        let rest = String(source[more.upperBound...].prefix(500))
+        for line in [
+            "cardBody(copy.privateAi.offerMore)", "cardBody(privateAI.offerExposure)",
+            "cardBody(privateAI.offerNoRepoint)", "Button(copy.privateAi.learnMore) { privateAIMore = true }",
+            "GlassButtonStyle(.link)",
+        ] {
+            XCTAssertTrue(rest.contains(line), line)
+        }
+        XCTAssertFalse(source.contains("cardBody(privateAI.offerWhat)"))
     }
 
     /// The grant copy is read once; until then the line is the loading one

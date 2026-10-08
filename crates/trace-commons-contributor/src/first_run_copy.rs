@@ -65,8 +65,14 @@
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
+//! - Uses adds `more_about`, the accessible name of the info button that
+//!   holds a scope's description or a Sharing answer's detail, and the
+//!   Private AI card adds `offer_lead`, `offer_more` and `learn_more`: the
+//!   card shows the offer's first two sentences and discloses the rest in
+//!   place (owner, 2026-10-08).
+//!
 //! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
-//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, and the
+//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
 //! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
 //! `{minutes}`; the shell fills them and adds nothing else.
 
@@ -83,6 +89,7 @@ pub const PLACEHOLDERS: &[&str] = &[
     "selected",
     "total",
     "tools",
+    "title",
     "weekday",
     "day",
     "month",
@@ -317,6 +324,10 @@ pub struct UsesCopy {
     pub sharing: &'static str,
     pub sharing_loading: &'static str,
     pub sharing_unavailable: &'static str,
+    /// `{title}`: a scope's or the Sharing card's title. The accessible
+    /// name of the info button holding its longer text. DRAFT, NEEDS
+    /// APPROVAL (2026-10-08): the owner's example wording.
+    pub more_about: &'static str,
     pub start: &'static str,
     /// Start finished on Ask me because the Automatic grant was refused.
     pub sharing_refused: &'static str,
@@ -391,6 +402,17 @@ pub struct PrivateAiCopy {
     pub loading: &'static str,
     pub unavailable: &'static str,
     pub toggle_loading: &'static str,
+    /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
+    /// the only words the Uses card shows before "Learn more" (owner,
+    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
+    /// exactly, so nothing of the disclosure is reworded or lost.
+    pub offer_lead: &'static str,
+    /// The rest of `OFFER_WHAT`, shown with the exposure and no-repoint
+    /// sentences once "Learn more" is pressed.
+    pub offer_more: &'static str,
+    /// Discloses the rest of the Private AI offer in place. Approved
+    /// 2026-10-08 (owner).
+    pub learn_more: &'static str,
 }
 
 /// Every first-run string, grouped by screen.
@@ -534,6 +556,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing: "Sharing",
             sharing_loading: "Loading sharing copy…",
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
+            more_about: "More about {title}",
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -572,6 +595,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             loading: "Loading disclosure…",
             unavailable: "Disclosure unavailable. Enabling is disabled.",
             toggle_loading: "Loading disclosure",
+            offer_lead: "Connect your tools to NEAR AI through this app. Requests use the provider configured for each tool; enabling this alone does not switch existing provider connections to NEAR AI.",
+            offer_more: "A record of requests is kept on this computer.",
+            learn_more: "Learn more",
         },
     }
 }
@@ -756,6 +782,28 @@ mod tests {
         let json = serde_json::to_value(first_run_copy()).unwrap();
         assert!(json["uses"].get("base_use_note").is_none());
         assert!(!json.to_string().contains("Tick the first use"));
+    }
+
+    /// The Private AI card's lead and the rest it discloses are the offer's
+    /// own sentences, split once: together they are `OFFER_WHAT` exactly,
+    /// in the core's NEAR AI spelling (owner, 2026-10-08).
+    #[test]
+    fn the_private_ai_lead_and_rest_are_the_offer_split_once() {
+        let copy = first_run_copy().private_ai;
+        assert_eq!(
+            format!("{} {}", copy.offer_lead, copy.offer_more),
+            crate::private_inference_copy::OFFER_WHAT
+        );
+        assert!(copy.offer_lead.starts_with("Connect your tools to NEAR AI"));
+        assert!(!copy.offer_lead.contains("Near.AI"));
+        assert_eq!(copy.offer_lead.matches(". ").count(), 1, "two sentences");
+        assert_eq!(copy.learn_more, "Learn more");
+    }
+
+    /// The info button's name carries the row's title.
+    #[test]
+    fn the_info_buttons_name_carries_the_title() {
+        assert!(first_run_copy().uses.more_about.contains("{title}"));
     }
 
     /// Back is the frame's one word, read by the first-run footer and the

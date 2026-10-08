@@ -6,9 +6,6 @@ import TCShellCore
 /// The Uses screen's decisions, apart from the view so they can be tested.
 /// Every string is the core's; these only choose and fill placeholders.
 enum UsesScreenLayout {
-    /// A check row's caption inset: the 15pt box and the gap after it.
-    static let checkCaptionIndent: CGFloat = 15 + GlassTokens.Space.s4
-
     /// The optional group's checkbox: every optional use on, some, or none.
     enum Group: Equatable {
         case all
@@ -115,24 +112,45 @@ enum UsesScreenLayout {
         FirstRunNavigation.canChooseAutomatic(state) ? state.sharing : .askMe
     }
 
-    /// The Sharing card's line: the core's words for the path chosen, the
-    /// loading line until they are read, or the fallback that disables
-    /// Start.
+    /// The Sharing card's line: the first line of the core's words for the
+    /// path chosen (owner, 2026-10-08), the loading line until they are
+    /// read, or the fallback that disables Start. The rest is
+    /// `sharingDetail`, behind an info button; a copy missing either half
+    /// reads the fallback, so nothing of the answer is shown without the
+    /// rest being there to read.
     static func sharingLine(
         _ uses: FirstRunCopy.Uses, path: SharingPath, grant: AutomaticGrantCopy?, isLoading: Bool = false
     ) -> String {
         if isLoading { return uses.sharingLoading }
-        guard let grant else { return uses.sharingUnavailable }
+        guard let grant, let split = split(path: path, grant: grant) else { return uses.sharingUnavailable }
+        return split.line
+    }
+
+    /// The rest of the path's words, behind the Sharing line's info button:
+    /// Ask me's detail; Automatic's detail, then the scrub's scope and
+    /// limit. Nil whenever the line is a fallback.
+    static func sharingDetail(path: SharingPath, grant: AutomaticGrantCopy?) -> String? {
+        grant.flatMap { split(path: path, grant: $0)?.detail }
+    }
+
+    private static func split(path: SharingPath, grant: AutomaticGrantCopy) -> (line: String, detail: String)? {
         switch path {
         case .askMe:
-            guard let line = grant.pathAskFirst, !line.isEmpty else { return uses.sharingUnavailable }
-            return line
+            guard let line = grant.pathAskFirstTitle, !line.isEmpty, let detail = grant.pathAskFirstDetail,
+                !detail.isEmpty
+            else { return nil }
+            return (line, detail)
         case .automatic:
-            guard let line = grant.pathAutomatic, !line.isEmpty, let scrub = grant.scrub else {
-                return uses.sharingUnavailable
-            }
-            return [line, scrub.scope, scrub.limit].joined(separator: " ")
+            guard let line = grant.pathAutomaticTitle, !line.isEmpty, let detail = grant.pathAutomaticDetail,
+                !detail.isEmpty, let scrub = grant.scrub
+            else { return nil }
+            return (line, [detail, scrub.scope, scrub.limit].joined(separator: " "))
         }
+    }
+
+    /// The info button's accessible name for a row titled `title`.
+    static func moreAbout(_ title: String, uses: FirstRunCopy.Uses) -> String {
+        FirstRunCopy.fill(uses.moreAbout, ["title": title])
     }
 
     /// The picker's options, named by the contribution mode table (Ask me,
@@ -251,6 +269,8 @@ struct UsesScreen: View {
     @ObservedObject var runner: FirstRunRunner
 
     @State private var optionalOpen = false
+    /// The Private AI card's "Learn more" was pressed.
+    @State private var privateAIMore = false
     @State private var disclosure: SharingDisclosureFlow?
     /// The core's sharing words for this configuration, read once on
     /// appear; nil disables Start. Start writes the configuration they
@@ -318,19 +338,17 @@ struct UsesScreen: View {
         return GlassEyebrowCard(copy.uses.eyebrow) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 if let required {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            // Always included, so ticked and locked: the
-                            // person cannot untick it (owner, 2026-10-08).
-                            Toggle(required.title, isOn: .constant(true))
-                                .toggleStyle(GlassCheckboxStyle())
-                                .disabled(true)
-                            // Ron's inline "required" in the on colour.
-                            Text(copy.uses.required)
-                                .glassType(GlassTokens.TypeScale.mono)
-                                .foregroundStyle(GlassTokens.Color.statusOnText.color)
-                        }
-                        checkCaption(required.description)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        // Always included, so ticked and locked: the person
+                        // cannot untick it (owner, 2026-10-08).
+                        Toggle(required.title, isOn: .constant(true))
+                            .toggleStyle(GlassCheckboxStyle())
+                            .disabled(true)
+                        infoButton(title: required.title, text: required.description)
+                        // Ron's inline "required" in the on colour.
+                        Text(copy.uses.required)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .foregroundStyle(GlassTokens.Color.statusOnText.color)
                     }
                 }
                 if !optional.isEmpty {
@@ -365,12 +383,19 @@ struct UsesScreen: View {
         }
     }
 
+    /// A scope's box, then its description behind an info button right
+    /// after the title (owner, 2026-10-08). The description is the core
+    /// consent table's.
     private func scopeRow(_ option: ConsentScope, options: [ConsentScope]) -> some View {
-        VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+        HStack(spacing: GlassTokens.Space.s4) {
             Toggle(option.title, isOn: scope(option.name))
                 .toggleStyle(GlassCheckboxStyle())
-            checkCaption(option.description)
+            infoButton(title: option.title, text: option.description)
         }
+    }
+
+    private func infoButton(title: String, text: String) -> some View {
+        GlassInfoButton(UsesScreenLayout.moreAbout(title, uses: copy.uses), text: text)
     }
 
     /// One optional scope's box. The person's toggle is the only thing that
@@ -397,10 +422,18 @@ struct UsesScreen: View {
                     Text(copy.uses.sharing)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
-                    cardBody(
-                        UsesScreenLayout.sharingLine(
-                            copy.uses, path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant,
-                            isLoading: !grantRead))
+                    // The path's first line; the rest behind the info button.
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                        cardBody(
+                            UsesScreenLayout.sharingLine(
+                                copy.uses, path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant,
+                                isLoading: !grantRead))
+                        if let detail = UsesScreenLayout.sharingDetail(
+                            path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant)
+                        {
+                            infoButton(title: copy.uses.sharing, text: detail)
+                        }
+                    }
                 }
                 Spacer(minLength: 0)
                 GlassPicker(
@@ -428,9 +461,17 @@ struct UsesScreen: View {
                         Text(privateAI.destination)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                             .foregroundStyle(GlassColor.textPrimary)
-                        cardBody(privateAI.offerWhat)
-                        cardBody(privateAI.offerExposure)
-                        cardBody(privateAI.offerNoRepoint)
+                        // The offer's first two sentences; "Learn more"
+                        // discloses the rest in place (owner, 2026-10-08).
+                        cardBody(copy.privateAi.offerLead)
+                        if privateAIMore {
+                            cardBody(copy.privateAi.offerMore)
+                            cardBody(privateAI.offerExposure)
+                            cardBody(privateAI.offerNoRepoint)
+                        } else {
+                            Button(copy.privateAi.learnMore) { privateAIMore = true }
+                                .buttonStyle(GlassButtonStyle(.link))
+                        }
                     } else {
                         cardBody(copy.privateAi.unavailable)
                     }
@@ -483,19 +524,6 @@ struct UsesScreen: View {
         let request = SharingDisclosureFlow.grantRequest(
             flow.progress(connected: model.status.loggedIn, scopes: runner.state.scopes))
         Task { pendingRefusal = await UsesStart.finish(runner: runner, request: request, pending: pendingRefusal) }
-    }
-
-    private func caption(_ text: String) -> some View {
-        Text(text)
-            .glassType(GlassTokens.TypeScale.caption)
-            .foregroundStyle(GlassColor.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// A check row's caption, under the label rather than the box (#1030
-    /// `tc-check-row`: the box beside a span holding both).
-    private func checkCaption(_ text: String) -> some View {
-        caption(text).padding(.leading, UsesScreenLayout.checkCaptionIndent)
     }
 
     /// The Sharing and Private AI cards' words (#1030 `tc-label` in
