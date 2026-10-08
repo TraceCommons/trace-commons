@@ -1040,7 +1040,7 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Pause watcher"
+                            Content="{x:Bind interop:MonitorShellCopy.PauseWatcher}"
                             Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             VerticalAlignment="Center"
@@ -1058,7 +1058,7 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Resume watcher"
+                            Content="{x:Bind interop:MonitorShellCopy.ResumeWatcher}"
                             Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             Click="OnResumeWatching"

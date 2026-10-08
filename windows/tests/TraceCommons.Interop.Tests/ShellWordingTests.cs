@@ -55,7 +55,7 @@ public class ShellWordingTests
             // than in a view model so a machine that cannot build WinUI can
             // still test it -- which is precisely why the same sentences are
             // written a second time in the GTK and macOS shells today.
-            { "TraceCommons.Interop/ArmingOffer.cs", 4 },
+            { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
             { "TraceCommons.Interop/HealthCopy.cs", 22 },
             { "TraceCommons.Interop/HistoryCopy.cs", 24 },
@@ -109,7 +109,7 @@ public class ShellWordingTests
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            { "TraceCommons.App/Controls/SettingsView.xaml", 16 },
+            { "TraceCommons.App/Controls/SettingsView.xaml", 15 },
             { "TraceCommons.App/MainWindow.xaml", 18 },
             { "TraceCommons.App/OnboardingWindow.xaml", 16 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },

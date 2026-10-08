@@ -467,7 +467,7 @@ public sealed class TrayIcon : IDisposable
 
             if (_menu.IsPaused)
             {
-                AppendMenu(menu, MF_STRING, MenuIdResume, "Resume watcher");
+                AppendMenu(menu, MF_STRING, MenuIdResume, MonitorShellCopy.ResumeWatcher);
             }
             else
             {
@@ -481,7 +481,7 @@ public sealed class TrayIcon : IDisposable
                         MF_STRING,
                         MenuIdPauseUntilResumed,
                         "Until I turn it back on");
-                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, "Pause watcher");
+                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, MonitorShellCopy.PauseWatcher);
                 }
             }
 

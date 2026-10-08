@@ -1130,6 +1130,23 @@ internal static class NativeMethods
     internal static extern IntPtr tc_contributor_disclosure_copy_json();
 
     /// <summary>
+    /// The monitor's other screens' words
+    /// (<c>preview_copy::monitor_screens_copy</c>) as an owned JSON object.
+    /// This shell reads only <c>shell</c> from it today
+    /// (<see cref="MonitorShellCopy"/>). NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_monitor_screens_copy_json();
+
+    /// <summary>
+    /// The decisions-owed badge's text (<c>preview_copy::decisions_owed_text</c>)
+    /// as an owned string; a negative count is an unknown one. Empty for
+    /// zero. NULL only on a caught panic.
+    /// </summary>
+    [DllImport(Library, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr tc_decisions_owed_text(long decisionsOwed);
+
+    /// <summary>
     /// The quit prompt true for the process holding <paramref name="handle"/>
     /// (<c>quit_copy::quit_prompt</c>), as an owned JSON object
     /// <c>{role, title, body, confirm, cancel}</c>. The role is read off the
