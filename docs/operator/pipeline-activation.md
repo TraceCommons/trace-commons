@@ -1610,7 +1610,8 @@ not the trace's fault:
   derivation, or its object writes. When the store reached the object and
   found it missing (a missing file on the local and file stores, a 404 from
   Google Cloud Storage) or not what its receipt names (a hash or reference
-  mismatch, a decode or decrypt failure), the attempt is charged instead, as
+  mismatch, a decode or decrypt failure, a wrapped data key the key wrapper
+  cannot decode, size or authenticate), the attempt is charged instead, as
   `artifact_integrity_failed`, and the phase's attempt budget ends the run.
   Charged attempts under this label are one hour apart, not the short
   backoff of the other charged labels: with the default budget of 5
@@ -1620,8 +1621,12 @@ not the trace's fault:
   failure, so correct the store within that time; a run that fails is not
   put back. This time holds for a run in Review or Score only.
   Any other Google Cloud Storage fetch failure (credentials, network, 429,
-  5xx) and a KMS unwrap failure wait here, uncharged, retried at most once
-  an hour.
+  5xx), a key-wrap service call that fails, and a record wrapped by another
+  kind of key wrapper (what a key-provider migration shows) wait here,
+  uncharged, retried at most once an hour. A cloud KMS that refuses a
+  corrupt wrapped key answers through that same call, so on a cloud KMS
+  that case waits uncharged too: the client cannot tell a refusal from an
+  outage.
   Settle's read of the stored index command is always charged
   (`index_command_invalid`), a store failure of that read included, with
   the short backoff: a run in Settle can fail about one second after such a
