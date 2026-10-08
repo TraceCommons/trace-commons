@@ -549,6 +549,10 @@ async fn run(args: Args) -> anyhow::Result<Value> {
         args.local_jsonl_dir.is_some() || declared.is_empty(),
         "declared privacy risk needs a local directory"
     );
+    anyhow::ensure!(
+        args.with_events || declared.is_empty(),
+        "declared privacy risk needs events"
+    );
     let session_names: BTreeSet<String> = args.session_name.iter().cloned().collect();
     let mut configuration = json!({
         "repository": args.repository,
@@ -996,6 +1000,20 @@ mod tests {
         .await
         .expect_err("a risk other than medium or high is refused");
         assert!(low.to_string().contains("medium or high"));
+
+        let output = tempfile::tempdir().expect("temporary directory");
+        let without_events = run(compare_args(
+            output.path(),
+            false,
+            &["--declared-privacy-risk", "s01.jsonl=high"],
+        ))
+        .await
+        .expect_err("a declared risk without events is refused");
+        assert!(
+            without_events
+                .to_string()
+                .contains("declared privacy risk needs events")
+        );
 
         let output = tempfile::tempdir().expect("temporary directory");
         let remote = Args::parse_from([
