@@ -768,8 +768,11 @@ private struct MonitorMapPane: View {
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
                 focus: scene.focusPoint(tool: focusTool))
         case .privateAI:
-            if model.harnesses != .none, let privateAILabel {
-                let harnesses = model.harnesses
+            // The one tool list, while this window's client has read it and
+            // the core still answers; otherwise nothing is drawn as current.
+            let harnesses = PrivateAIInspectorView.liveHarnesses(
+                model.harnesses, read: inference.harnesses, failure: inference.failures["harness_list"])
+            if harnesses != .none, let privateAILabel {
                 FlowMapView(
                     scene: .privateAI(
                         harnesses, destinationLabel: privateAILabel,

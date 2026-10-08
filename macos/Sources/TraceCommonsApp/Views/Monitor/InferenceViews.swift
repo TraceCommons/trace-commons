@@ -312,6 +312,20 @@ struct PrivateAIInspectorView: View {
         list == .none ? nil : list.harnesses
     }
 
+    /// The one list, while it is current: this window's client has read
+    /// the tools (`read`, which `InferenceStore.attach` forgets on a new
+    /// client) and its last read did not fail. Otherwise `.none`, so a new
+    /// client or a core that stopped answering is unknown, never the last
+    /// list. Only whether `read` is there is asked, never its rows.
+    static func liveHarnesses(_ list: HarnessList, read: HarnessList?, failure: DaemonDataError?) -> HarnessList {
+        read == nil || failure != nil ? .none : list
+    }
+
+    /// `model.harnesses`, while this inspector's store says it is current.
+    private var harnesses: HarnessList {
+        Self.liveHarnesses(model.harnesses, read: store.harnesses, failure: store.failures["harness_list"])
+    }
+
     var body: some View {
         let copy = runningCopy
         ScrollView {
@@ -321,7 +335,7 @@ struct PrivateAIInspectorView: View {
                         .glassType(GlassTokens.TypeScale.heading.weight(.bold))
                         .foregroundStyle(GlassColor.textPrimary)
                         .accessibilityAddTraits(.isHeader)
-                    if let copy, let sub = Self.subLine(Self.rows(model.harnesses), copy: copy) {
+                    if let copy, let sub = Self.subLine(Self.rows(harnesses), copy: copy) {
                         Text(sub)
                             .glassType(GlassTokens.TypeScale.label.weight(.regular))
                             .foregroundStyle(GlassColor.textSecondary)
@@ -342,7 +356,7 @@ struct PrivateAIInspectorView: View {
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let rows = Self.rows(model.harnesses)
+        let rows = Self.rows(harnesses)
         let counts = Self.counts(rows)
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,

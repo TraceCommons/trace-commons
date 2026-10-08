@@ -92,10 +92,50 @@ final class GlassParityRoundOneTests: XCTestCase {
     /// card and the map; a list not read is nil, never no tools.
     func test_theInferenceInspectorReadsTheOneToolList() throws {
         XCTAssertNil(PrivateAIInspectorView.rows(.none))
+        // The Inference store's read is consulted only for whether the list
+        // is current (`liveHarnesses`), never for its rows.
         let source = try TracesParityTests.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertFalse(source.contains("store.harnesses"), "the inspector reads a second tool list")
+        XCTAssertEqual(source.components(separatedBy: "store.harnesses").count - 1,
+                       source.components(separatedBy: "read: store.harnesses,").count - 1,
+                       "the inspector reads a second tool list")
         let window = try TracesParityTests.text("Views/MonitorWindowView.swift")
-        XCTAssertFalse(window.contains("inference.harnesses"), "the map reads a second tool list")
+        XCTAssertEqual(window.components(separatedBy: "inference.harnesses").count - 1,
+                       window.components(separatedBy: "read: inference.harnesses,").count - 1,
+                       "the map reads a second tool list")
+    }
+
+    /// The one tool list is only drawn as current while this window's
+    /// client has read it and its last read did not fail: a new client, or
+    /// a core that stopped answering, reads as unknown (a dash, no map),
+    /// never as the last list (`InferenceStore.attach` forgets it).
+    func test_theToolListIsUnknownWhenTheCoreIsDownOrTheClientChanged() async throws {
+        let list = try await SampleDaemonClient(.normalDay).harnessList()
+        XCTAssertNotEqual(list, .none)
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(list, read: list, failure: nil), list)
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(list, read: nil, failure: nil), .none,
+                       "a list this client never read is drawn as current")
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(list, read: list, failure: .unreachable), .none,
+                       "a list the core stopped answering for is drawn as current")
+        XCTAssertNil(PrivateAIInspectorView.rows(PrivateAIInspectorView.liveHarnesses(list, read: nil, failure: nil)))
+
+        // A store on a live client has read it; a new client forgets it.
+        let store = InferenceStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(
+            list, read: store.harnesses, failure: store.failures["harness_list"]), list)
+        store.attach(SampleDaemonClient(.coreDown))
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(
+            list, read: store.harnesses, failure: store.failures["harness_list"]), .none)
+        await store.load()
+        XCTAssertEqual(PrivateAIInspectorView.liveHarnesses(
+            list, read: store.harnesses, failure: store.failures["harness_list"]), .none)
+
+        // The inspector's rows and the map both read through it.
+        let source = try TracesParityTests.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertFalse(source.contains("Self.rows(model.harnesses)"), "the inspector reads the list unguarded")
+        let window = try TracesParityTests.text("Views/MonitorWindowView.swift")
+        XCTAssertFalse(window.contains("let harnesses = model.harnesses\n"), "the map reads the list unguarded")
+        XCTAssertTrue(window.contains("PrivateAIInspectorView.liveHarnesses("))
     }
 
     /// HH-4: a History row's tile is the folder's first letter (#1146).
