@@ -2583,14 +2583,20 @@ class RequiredCheckTests(unittest.TestCase):
 
     def test_rust_package_checks_are_the_checks_that_require_digests(self):
         """`evaluate_promotion` enforces which checks name the package
-        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same
-        (`digests_required`): the two lists are one set."""
+        (`PROMOTION_PACKAGE_CHECKS`) and this tooling enforces the same: the
+        four `qualify` produces with `digests_required`, and (spec
+        2026-10-08, A-D12) the three promotion-only checks, which run against
+        the production assembly and name its package. The lists are one
+        set, `checks.PROMOTION_PACKAGE_CHECK_IDS`."""
         rust = _rust_check_list("PROMOTION_PACKAGE_CHECKS")
         self.assertEqual(len(rust), len(set(rust)), "no duplicate package check id")
-        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS))
+        self.assertEqual(set(rust), set(_CANDIDATE_CHECKS) | _PROMOTION_ONLY)
+        self.assertEqual(len(rust), 7)
         self.assertTrue(set(rust).issubset(_promotion_required_checks()))
+        self.assertEqual(frozenset(rust), checks.PROMOTION_PACKAGE_CHECK_IDS)
+        self.assertEqual(checks.PROMOTION_ONLY_CHECK_IDS, _PROMOTION_ONLY)
         self.assertEqual(
-            set(rust),
+            checks.PROMOTION_PACKAGE_CHECK_IDS - checks.PROMOTION_ONLY_CHECK_IDS,
             {spec.check_id for spec in checks.required_specs().values() if spec.digests_required},
         )
 
