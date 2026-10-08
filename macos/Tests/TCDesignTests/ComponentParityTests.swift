@@ -48,10 +48,11 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassKeyValueList.inset, 6)
     }
 
-    /// The tree's folder and session tiles carry #1146's marks.
+    /// The tree's session tile carries #1146's mark; the folder's is the
+    /// core's word, from the window's root, and none is drawn without it.
     func test_theTileMarks() {
-        XCTAssertEqual(GlassToolTile.folderMark, "dir")
         XCTAssertEqual(GlassToolTile.sessionMark, "▤")
+        XCTAssertEqual(EnvironmentValues().glassFolderMark, "")
     }
 
     /// A row reserves the watch switch's column when it has no switch, so a
@@ -108,7 +109,8 @@ final class ComponentParityTests: XCTestCase {
     func test_theModalHeaderScrimAndFade() throws {
         let modal = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["Modal.swift"])
         XCTAssertTrue(modal.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s6)"))
-        XCTAssertTrue(modal.contains(".preference(key: GlassModalScrimAction.self, value: GlassModalScrimAction.Action(run: onCancel))"))
+        XCTAssertTrue(modal.contains(
+            ".preference(key: GlassModalScrimAction.self, value: GlassModalScrimAction.Action(run: cancellable ? onCancel : {}))"))
         XCTAssertTrue(modal.contains("GlassModalScrim(onTap: isTopmost ? action?.run : nil)"))
         XCTAssertTrue(modal.contains(".onTapGesture { onTap?() }"))
         XCTAssertTrue(modal.contains(".animation(GlassMotion.standard(reduceMotion), value: requests.map(\\.id))"))
@@ -126,6 +128,28 @@ final class ComponentParityTests: XCTestCase {
         GlassModalScrimAction.reduce(value: &empty) { GlassModalScrimAction.Action(run: { first += 100 }) }
         empty?.run()
         XCTAssertEqual(first, 101)
+    }
+
+    /// #1273 review: a busy modal, or one whose cancel action is disabled
+    /// while work is in flight, ignores the scrim, Escape and its close
+    /// button, so a click beside it never abandons that work.
+    func test_aBusyModalIgnoresTheScrim() throws {
+        let cancel = GlassModalAction.cancel("Cancel") {}
+        let held = GlassModalAction("Cancel", role: .cancel, isEnabled: false) {}
+        let go = GlassModalAction("Go", isDefault: true) {}
+        XCTAssertTrue(GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: false))
+        XCTAssertTrue(GlassModal<EmptyView>.cancellable(actions: [], busy: false))
+        XCTAssertFalse(GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: true))
+        XCTAssertFalse(GlassModal<EmptyView>.cancellable(actions: [held, go], busy: false))
+        let modal = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["Modal.swift"])
+        for needle in ["let cancellable = Self.cancellable(actions: actions, busy: busy)",
+                       ".onExitCommand(perform: isTopmost && cancellable ? onCancel : nil)",
+                       "GlassRoundButton(closeLabel, systemImage: \"xmark\", small: true, action: onCancel)\n"
+                           + "                        .disabled(!cancellable)",
+                       ".disabled(!action.isEnabled || (action.role == .cancel && !cancellable))",
+                       "actions: actions, busy: busy, onCancel: onCancel)"] {
+            XCTAssertTrue(modal.contains(needle), "Modal.swift lacks \(needle)")
+        }
     }
 
     // MARK: Layout

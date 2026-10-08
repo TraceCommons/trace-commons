@@ -1043,7 +1043,10 @@ final class AppModel: ObservableObject {
                 waiting,
                 projectID: \.projectID,
                 projectLabel: \.projectLabel,
-                sizeBytes: \.sizeBytes
+                // Every decoded queue entry carries its size; only a
+                // carried-over preview entry can lack one, and none is
+                // ever in `pending`.
+                sizeBytes: { $0.sizeBytes ?? 0 }
             )
         )
         recomputeNothingMatched()

@@ -407,6 +407,7 @@ struct ManagedLaunchSheet: View {
                     model.managedText("launch_short"), isDefault: true,
                     isEnabled: !accountID.isEmpty && project != nil && !model.managedBusy, id: "launch", action: launch),
             ],
+            busy: model.managedBusy,
             onCancel: onClose
         ) {
             GlassModalBody {

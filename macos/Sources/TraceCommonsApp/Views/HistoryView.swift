@@ -5,7 +5,7 @@
 /// History's sentences the glass History draws, read from the core's table
 /// (`shell_words_copy::history_words`, through `ShellWords`).
 enum HistoryLegacyWords {
-    static var withdrawalWordingDefect: String { WithdrawalCopy.wordingDefect }
+    static var withdrawalWordingDefect: String? { WithdrawalCopy.wordingDefect }
     static var typicalWait: String { ShellWords.table?.history.typicalWait ?? "" }
 }
 

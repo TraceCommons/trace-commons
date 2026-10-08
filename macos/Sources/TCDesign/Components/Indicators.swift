@@ -239,20 +239,23 @@ public struct GlassToolTile: View {
     }
 
     /// A name's first letter, upper-cased; the folder mark for none.
-    public static func initial(_ name: String) -> String {
-        name.first.map { String($0).uppercased() } ?? folderMark
+    public static func initial(_ name: String, mark: String) -> String {
+        name.first.map { String($0).uppercased() } ?? mark
     }
 
     private let kind: Kind
     private let large: Bool
+    /// The folder tile's mark, the core's (`glassFolderMark`, set at the
+    /// window's root); none drawn without it.
+    @Environment(\.glassFolderMark) private var folderMark
 
     public init(_ kind: Kind, large: Bool = false) {
         self.kind = kind
         self.large = large
     }
 
-    /// The folder and session tiles' marks, as #1146 draws them.
-    public static let folderMark = "dir"
+    /// The session tile's mark, as #1146 draws it. The folder's is the
+    /// core's word (`glassFolderMark`).
     static let sessionMark = "▤"
 
     public var body: some View {
@@ -279,13 +282,13 @@ public struct GlassToolTile: View {
             // #1146 `ToolTile` marks a folder "dir" and a session "▤": a
             // glyph, hidden from assistive tech with the rest of the tile.
             case .folder:
-                Text(Self.folderMark)
+                Text(folderMark)
                     .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)
                     .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
             case let .folderInitial(name):
-                Text(Self.initial(name))
+                Text(Self.initial(name, mark: folderMark))
                     .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)

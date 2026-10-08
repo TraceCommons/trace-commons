@@ -49,6 +49,11 @@ final class MonitorTracesCopyExportTests: XCTestCase {
         let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         XCTAssertEqual(copy.tree.submitCount, "Submit \u{00B7} {count}")
         XCTAssertEqual(copy.tree.dismissSessionTitle, "Dismiss this session?")
+        // #1273 review: the folder tile's mark and the bucket's note are the
+        // core's, the note keeping "You'll always be asked".
+        XCTAssertEqual(copy.tree.folderMark, "dir")
+        XCTAssertEqual(copy.tree.unresolvedBucketNote,
+                       "These sessions cannot be contributed automatically. You'll always be asked.")
         XCTAssertEqual(copy.counts.sessionsWaiting, "{count} sessions waiting")
         XCTAssertEqual(copy.inspector.noRule, "This folder has no rule of its own yet.")
         XCTAssertEqual(copy.inspector.applyOutcome, "Apply one outcome to {count} eligible sessions.")

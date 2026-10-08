@@ -140,9 +140,15 @@ final class GlassParityRoundOneTests: XCTestCase {
 
     /// HH-4: a History row's tile is the folder's first letter (#1146).
     func test_aHistoryTileIsTheFoldersInitial() {
-        XCTAssertEqual(GlassToolTile.initial("api"), "A")
-        XCTAssertEqual(GlassToolTile.initial("ébène"), "É")
-        XCTAssertEqual(GlassToolTile.initial(""), GlassToolTile.folderMark)
+        XCTAssertEqual(GlassToolTile.initial("api", mark: "m"), "A")
+        XCTAssertEqual(GlassToolTile.initial("ébène", mark: "m"), "É")
+        XCTAssertEqual(GlassToolTile.initial("", mark: "m"), "m")
+        // The mark is the core's word, set at both window roots.
+        XCTAssertEqual(TracesTreeWords.table?.folderMark, "dir")
+        for rel in ["Views/MonitorWindowView.swift", "Views/Monitor/FirstRunViews.swift"] {
+            XCTAssertTrue(try TracesParityTests.text(rel).contains(
+                ".environment(\\.glassFolderMark, TracesTreeWords.table?.folderMark ?? \"\")"), rel)
+        }
     }
 
     /// HH-1: the stat card's eyebrow wraps to a second line instead of
@@ -185,5 +191,62 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/ab/x", home: "/Users/a"), "/Users/ab/x")
         XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/tmp/x", home: "/Users/a"), "/tmp/x")
         XCTAssertEqual(UsesScreenLayout.checkCaptionIndent, 15 + GlassTokens.Space.s4)
+    }
+
+    // MARK: #1273 review, macOS minors
+
+    /// A wording-defect notice is never titled with an empty string: the
+    /// table's own words, else the core's unavailable word.
+    func test_aWordingDefectTitleIsNeverEmpty() throws {
+        let unavailable = try XCTUnwrap(ShellWords.unavailableTitle)
+        XCTAssertEqual(unavailable, "Status unavailable")
+        XCTAssertEqual(ShellWords.defectTitle(nil), unavailable)
+        XCTAssertEqual(ShellWords.defectTitle(""), unavailable)
+        XCTAssertEqual(ShellWords.defectTitle("Do not trust this"), "Do not trust this")
+        XCTAssertNotNil(WithdrawalCopy.wordingDefect)
+        XCTAssertNotNil(PublicProfileCopy.wordingDefect)
+        for rel in ["Views/WithdrawalCopy.swift", "Views/PublicProfileCopy.swift"] {
+            let source = try TracesParityTests.text(rel)
+            XCTAssertFalse(source.contains("?? \"\"\n    }\n}"), "\(rel) falls back to an empty title")
+            XCTAssertTrue(source.contains("static var wordingDefect: String? { ShellWords.defectTitle(words?.wordingDefect) }"), rel)
+        }
+    }
+
+    /// The modals that wait on work in flight say so, so the scrim, Escape
+    /// and the close button cannot abandon it.
+    func test_theBusyModalsIgnoreTheScrimWhileBusy() throws {
+        for (rel, needle) in [("Views/HarnessListView.swift", "busy: model.harnessBusy"),
+                              ("Views/Settings/PublicProfileSection.swift", "busy: model.profileBusy,"),
+                              ("Views/ManagedSessionsView.swift", "busy: model.managedBusy,")] {
+            XCTAssertTrue(try TracesParityTests.text(rel).contains(needle), "\(rel) lacks \(needle)")
+        }
+        XCTAssertEqual(
+            try TracesParityTests.text("Views/HarnessListView.swift").components(separatedBy: "busy: model.harnessBusy").count - 1,
+            2, "the preview and the exposure question both wait on the write")
+    }
+
+    /// The Runtime tile reads the core's `runtime_word`; no Swift switch
+    /// re-implements it.
+    func test_theRuntimeWordIsTheCores() throws {
+        let account = try TracesParityTests.text("Views/Monitor/InferenceAccount.swift")
+        XCTAssertTrue(account.contains("TCPrivateInference.runtimeWord(state: state?.state ?? \"\") ?? copy.runtimeUnknown"))
+        XCTAssertFalse(account.contains("case \"running_elsewhere\""))
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        XCTAssertEqual(TCPrivateInference.runtimeWord(state: "off"), copy.runtimeOff)
+        XCTAssertEqual(TCPrivateInference.runtimeWord(state: "running"), copy.runtimeOn)
+        XCTAssertEqual(TCPrivateInference.runtimeWord(state: ""), copy.runtimeUnknown)
+        XCTAssertEqual(TCPrivateInference.runtimeWord(state: "a_later_state"), copy.runtimeUnknown)
+    }
+
+    /// zmanian's follow-up on #1273: the Traces graph footer counts History
+    /// by the map's rule, so a capped or stale page is a dash, never a total.
+    func test_theGraphFooterCountsOnlyAWholeCurrentPage() throws {
+        XCTAssertNil(TracesGraphFooter.countable(nil, failure: nil))
+        XCTAssertEqual(TracesGraphFooter.countable([], failure: nil), [])
+        XCTAssertNil(TracesGraphFooter.countable([], failure: .unreachable), "a stale page is counted as current")
+        let window = try TracesParityTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains(
+            "history: TracesGraphFooter.countable(home.history, failure: home.failures[\"list_history\"]),"))
+        XCTAssertFalse(window.contains("history: home.history, sessions:"))
     }
 }

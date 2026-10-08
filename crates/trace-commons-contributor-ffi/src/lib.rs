@@ -3551,6 +3551,34 @@ pub unsafe extern "C" fn tc_private_inference_state_line(state: *const c_char) -
     })
 }
 
+/// The Private AI runtime tile's word for one `private_inference_state`
+/// label (`private_inference_copy::runtime_word`): every running label is
+/// "On", a stopped one "Off", and an unreported or unfamiliar label
+/// "Unknown", never "Off".
+///
+/// Exported so no shell re-implements the label-to-word mapping: a native
+/// copy agrees today and reads a later daemon's state as off tomorrow.
+///
+/// An empty, NULL or non-UTF-8 label answers the unknown word. Returns an
+/// owned string; free it with [`tc_string_free`]. NULL only on a caught
+/// panic.
+///
+/// # Safety
+/// `state`, if non-null, must point to a valid, NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_private_inference_runtime_word(state: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let state = if state.is_null() {
+            ""
+        } else {
+            unsafe { borrow_str(state) }.unwrap_or("")
+        };
+        Ok(to_owned_cstring(
+            trace_commons_contributor::private_inference_copy::runtime_word(state),
+        ))
+    })
+}
+
 /// How firmly the sentence [`tc_private_inference_state_line`] returned
 /// reads: one of the `TC_PRIVATE_INFERENCE_TONE_*` values.
 ///

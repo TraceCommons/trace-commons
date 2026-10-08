@@ -166,6 +166,10 @@ public struct MonitorTreeCopy: MonitorWordTable {
     /// A session row's sub line after its size: dropped to fit, or waiting.
     public let sessionTrimmed: String
     public let sessionWaiting: String
+    /// The mark on a folder's tile (`GlassToolTile`, via `glassFolderMark`).
+    public let folderMark: String
+    /// Under the bucket of sessions whose folder could not be resolved.
+    public let unresolvedBucketNote: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
@@ -189,6 +193,8 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case dismissSessionFailed = "dismiss_session_failed"
         case sessionTrimmed = "session_trimmed"
         case sessionWaiting = "session_waiting"
+        case folderMark = "folder_mark"
+        case unresolvedBucketNote = "unresolved_bucket_note"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }

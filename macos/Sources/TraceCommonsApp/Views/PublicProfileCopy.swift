@@ -85,12 +85,10 @@ enum PublicProfileCopy {
         return ShellWords.fill(words.leaveFailure, ["reason": reason])
     }
 
-    /// The defect notice's title when `PublicProfileCopyCheck` fails. When
-    /// the table did not decode -- the likeliest defect -- the check's own
-    /// first line titles the notice rather than an empty string.
-    static var wordingDefect: String {
-        words?.wordingDefect ?? PublicProfileCopyCheck.failures().first ?? ""
-    }
+    /// The defect notice's title when `PublicProfileCopyCheck` fails; the
+    /// core's unavailable word when the table did not decode (the likeliest
+    /// defect), never "".
+    static var wordingDefect: String? { ShellWords.defectTitle(words?.wordingDefect) }
 }
 
 /// The assertions this copy has to keep passing, checked at render time on

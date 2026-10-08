@@ -93,7 +93,7 @@ final class TracesStore {
     /// outcome words, and History's filter labels. Every one of those reads
     /// this copy, so no two can hold different words. Without it the card
     /// draws no verdict and Contribute stays disarmed.
-    static let disclosureCopy: ContributorDisclosureCopy? =
+    nonisolated static let disclosureCopy: ContributorDisclosureCopy? =
         ContributorDisclosureCopy.decode(fromJSON: TCCoreCopy.contributorDisclosureCopyJSON())
     /// `disclosureCopy`, for a view that holds this store.
     var disclosure: ContributorDisclosureCopy? { Self.disclosureCopy }

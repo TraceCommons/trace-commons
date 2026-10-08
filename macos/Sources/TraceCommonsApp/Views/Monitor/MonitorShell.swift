@@ -192,6 +192,9 @@ enum TracesGraphModel {
 /// the selected session's tool, zoom out, the range, zoom in, next, and
 /// jump to now.
 struct TracesGraphFooter: View {
+    /// History as the graph may count it (`countable`): nil while unread,
+    /// after a failed read, or when the daemon capped the page, and then
+    /// the shared figure is a dash, never a part count drawn as a total.
     let history: [DaemonData.HistoryRow]?
     let sessions: [DaemonData.QueueEntry]
     /// The selected session's tool; the graph counts only it, and the
@@ -237,7 +240,7 @@ struct TracesGraphFooter: View {
                     action: onFocus)
                     .disabled(tool == nil)
                     .accessibilityAddTraits(focus && tool != nil ? .isSelected : [])
-                GlassPillIconButton(words?.zoomOut ?? "", glyph: "\u{2212}") { zoom(range.zoomedOut) }
+                GlassPillIconButton(words?.zoomOut ?? "", glyph: words?.zoomOutGlyph ?? "") { zoom(range.zoomedOut) }
                     .disabled(range.zoomedOut == nil)
                 Text(Self.rangeLabel(range: range, offset: offset, hovered: shown?.start, words: words))
                     .glassType(GlassTokens.TypeScale.label)
@@ -249,11 +252,11 @@ struct TracesGraphFooter: View {
                     .background(Capsule().fill(GlassColor.ink(0.07)))
                     .glassEdge(Self.rangeEdge, in: Capsule())
                     .accessibilityAddTraits(.updatesFrequently)
-                GlassPillIconButton(words?.zoomIn ?? "", glyph: "+") { zoom(range.zoomedIn) }
+                GlassPillIconButton(words?.zoomIn ?? "", glyph: words?.zoomInGlyph ?? "") { zoom(range.zoomedIn) }
                     .disabled(range.zoomedIn == nil)
                 GlassPillIconButton(MonitorShellWords.next, glyph: "\u{203A}") { step(1, from: .leading) }
                     .disabled(offset == 0)
-                GlassPillIconButton(words?.jumpToNow ?? "", glyph: "\u{203A}|") {
+                GlassPillIconButton(words?.jumpToNow ?? "", glyph: words?.jumpToNowGlyph ?? "") {
                     slide = .leading
                     withAnimation(Self.slideAnimation(reduceMotion)) { offset = 0 }
                 }
@@ -302,6 +305,14 @@ struct TracesGraphFooter: View {
 
     /// A count, or a dash while History has not been read: an unread record
     /// is never drawn as nothing shared.
+    /// The history the graph counts, by the map's rule
+    /// (`FlowMapScene.Contributions`, `FolderInspector.shared`): only a
+    /// whole page from a read that did not fail.
+    @MainActor
+    static func countable(_ history: [DaemonData.HistoryRow]?, failure: DaemonDataError?) -> [DaemonData.HistoryRow]? {
+        SummaryFacts.wholeHistory(SummaryFacts.fresh(history, unless: failure))
+    }
+
     static func figure(_ count: Int, known: Bool) -> String {
         known ? String(count) : "—"
     }

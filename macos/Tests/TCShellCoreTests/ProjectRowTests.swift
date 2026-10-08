@@ -140,12 +140,6 @@ final class ProjectRowTests: XCTestCase {
         XCTAssertEqual(row.displayLabel, "unknown-project")
     }
 
-    /// The note states what the daemon does, in #1146's words. Pinned so a
-    /// reword in one shell does not pass unnoticed.
-    func testTheNoteSaysWhatTheDaemonDoes() {
-        XCTAssertEqual(ProjectCopy.unresolvedBucketNote, "These sessions cannot be contributed automatically.")
-    }
-
     /// A daemon predating the flag leaves rows plain rather than explained.
     /// Defaulting the other way would tell a contributor their own repository
     /// can never be contributed automatically, which is a lie about their

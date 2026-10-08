@@ -1,4 +1,5 @@
 import SwiftUI
+import TCBridge
 import TCDesign
 import TCShellCore
 
@@ -89,19 +90,13 @@ struct InferenceAccountSection: View {
         PrivateInferenceState(label: state?.state ?? "", port: state?.port.flatMap { UInt16(exactly: $0) })
     }
 
-    /// The Runtime tile's word for the listener's report, as the core's
-    /// `runtime_word` picks it: every running label is on, a stopped one is
+    /// The Runtime tile's word for the listener's report, read from the
+    /// core's `runtime_word` (`tc_private_inference_runtime_word`), never
+    /// re-implemented here: every running label is on, a stopped one is
     /// off, and an unreported or unfamiliar label is unknown, never off.
+    /// A caught panic is the core's unknown word too.
     static func runtimeWord(_ state: DaemonData.PrivateInferenceState?, copy: PrivateInferenceCopy) -> String {
-        switch state?.state ?? "" {
-        case "off": copy.runtimeOff
-        case "stopping": copy.runtimeStopping
-        case "running", "running_no_backends", "running_answered_elsewhere", "running_destination_unknown":
-            copy.runtimeOn
-        case "running_elsewhere": copy.runtimeElsewhere
-        case "port_in_use", "start_failed", "crashed": copy.runtimeNotRunning
-        default: copy.runtimeUnknown
-        }
+        TCPrivateInference.runtimeWord(state: state?.state ?? "") ?? copy.runtimeUnknown
     }
 }
 

@@ -466,8 +466,11 @@ struct SessionReviewCard: View {
             .fixedSize()
             .disabled(!armed(entry))
             // Why it is armed or not, in the core's words, as the review
-            // sheet's Contribute says it.
-            .help(consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
+            // sheet's Contribute says it; over a core that stopped
+            // answering, that it stopped, never the consent gate's reason.
+            .help(Self.coreAnswering(store.phase)
+                ? (consent == nil ? "" : TCConsentCopy.gateHelp(pinned: armed(entry)) ?? "")
+                : Self.coreDownHelp)
     }
 
     /// "Session · <tool>" in the core's words, the tool the session
@@ -510,6 +513,14 @@ struct SessionReviewCard: View {
     static func coreAnswering(_ phase: TracesStore.Phase) -> Bool {
         if case .failed = phase { return false }
         return true
+    }
+
+    /// Contribute's tooltip while the core is not answering: the core-down
+    /// banner's own title, else the core's unknown word. Never the consent
+    /// gate's not-ready reason, which would blame a missing enrollment for
+    /// a core that is down.
+    static var coreDownHelp: String {
+        TracesHealth.coreDownLine?.title ?? TracesHealth.unknownWord ?? ""
     }
 
     /// Whether everything the card must say before Contribute could be
@@ -633,8 +644,8 @@ extension QueueEntryBridge {
         return QueueEntry(
             entryID: entry.entryId, sessionHash: entry.sessionHash ?? "", source: entry.source,
             declaredSource: entry.declaredSource, projectID: entry.projectId, projectLabel: entry.projectLabel,
-            projectPath: entry.projectPath ?? "", sessionPath: entry.sessionPath, sizeBytes: entry.sizeBytes ?? 0,
-            discoveredAt: entry.discoveredAt ?? entry.startedAt ?? Date(timeIntervalSince1970: 0),
+            projectPath: entry.projectPath ?? "", sessionPath: entry.sessionPath, sizeBytes: entry.sizeBytes,
+            discoveredAt: entry.discoveredAt ?? entry.startedAt,
             state: QueueState(rawValue: entry.state) ?? .pending, reasonLabel: entry.reasonLabel,
             attempts: entry.attempts ?? 0, subagentCount: entry.subagentCount,
             subagentsDropped: entry.subagentsDropped, eligibility: entry.eligibility,

@@ -240,12 +240,10 @@ enum WithdrawalCopy {
     /// report, and rule 1 -- never a generic "withdrawn" -- cannot hold.
     static var noBulkAction: String { words?.noBulkAction ?? "" }
 
-    /// The defect notice's title when `WithdrawalCopyCheck` fails. When the
-    /// table did not decode -- the likeliest defect -- the check's own first
-    /// line titles the notice rather than an empty string.
-    static var wordingDefect: String {
-        words?.wordingDefect ?? WithdrawalCopyCheck.failures().first ?? ""
-    }
+    /// The defect notice's title when `WithdrawalCopyCheck` fails; the
+    /// core's unavailable word when the table did not decode (the likeliest
+    /// defect), never "".
+    static var wordingDefect: String? { ShellWords.defectTitle(words?.wordingDefect) }
 }
 
 /// Assertions that belong on the copy, not on the plumbing.
@@ -312,23 +310,20 @@ enum WithdrawalCopyCheck {
 
         // A failed withdrawal must say nothing happened, as a sentence of
         // its own (at the start, or right after a full stop), and a
-        // not-found must disclose neither existence nor ownership.
+        // not-found must disclose neither existence nor ownership. The
+        // signed-out line is said before any request is made, so it never
+        // claims an answer from the server either. (The core's tests pin
+        // each sentence and each tier's result in full.)
+        let nothing = "Nothing was withdrawn"
+        let signedOut = WithdrawalCopy.accountSessionRequired.lowercased()
+        let claimsAnAnswer = ["rejected", "refused", "server", "commons", "declined"]
+            .contains(where: { signedOut.contains($0) })
         for sentence in [
             WithdrawalCopy.accountSessionRequired,
             WithdrawalCopy.notFound,
             WithdrawalCopy.failureSentence(label: "withdraw-failed"),
-        ] where !(sentence.hasPrefix("Nothing was withdrawn")
-            || sentence.contains(". Nothing was withdrawn"))
-        {
-            problems.append("a failure sentence does not say, on its own, that nothing happened")
-        }
-        // The signed-out line is said before any request is made, so it
-        // never claims an answer from the server.
-        let signedOut = WithdrawalCopy.accountSessionRequired.lowercased()
-        if ["rejected", "refused", "server", "commons", "declined"]
-            .contains(where: { signedOut.contains($0) })
-        {
-            problems.append("the signed-out sentence claims a server answer")
+        ] where claimsAnAnswer || !(sentence.hasPrefix(nothing) || sentence.contains(". " + nothing)) {
+            problems.append("a failure sentence does not say nothing happened")
         }
         let lowerNotFound = WithdrawalCopy.notFound.lowercased()
         if lowerNotFound.contains("belongs to") || lowerNotFound.contains("does not exist") {
@@ -343,18 +338,8 @@ enum WithdrawalCopyCheck {
         if Set(outcomes).count != outcomes.count || outcomes.contains(where: \.isEmpty) {
             problems.append("an outcome does not name its tier")
         }
-        // Each tier's outcome keeps what its canonical body says: the
-        // furthest is never recallable, the middle one is excluded from what
-        // is published next, and the nearest claims neither.
         if !WithdrawalCopy.resultSentence(.commonsDistributed).contains("cannot be recalled") {
             problems.append("a distributed trace is reported as though it could be recalled")
-        }
-        if !WithdrawalCopy.resultSentence(.commonsNotDistributed).contains("excluded from future exports") {
-            problems.append("a commons trace is reported without its exclusion")
-        }
-        let nearest = WithdrawalCopy.resultSentence(.notDistributed)
-        if ["excluded", "recalled", "distributed"].contains(where: { nearest.contains($0) }) {
-            problems.append("a trace outside the commons is reported with a commons tier's outcome")
         }
         if !WithdrawalCopy.resultSentence(nil).contains("cannot be recalled") {
             problems.append("an unknown tier is reported as though nothing were distributed")

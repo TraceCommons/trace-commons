@@ -278,6 +278,14 @@ pub struct MonitorTreeCopy {
     /// nothing else to say.
     pub session_trimmed: &'static str,
     pub session_waiting: &'static str,
+    /// The mark on a folder's tile (#1146 `ToolTile`), and on a History
+    /// row's tile when its folder has no name to take a letter from.
+    pub folder_mark: &'static str,
+    /// Under the bucket of sessions whose folder could not be resolved (#1146
+    /// `projects-panel.tsx`), in the tree, the folder inspector and Settings.
+    /// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): #1146's line, with
+    /// "You'll always be asked" restored from the approved note it replaced.
+    pub unresolved_bucket_note: &'static str,
 }
 
 /// Counted lines the tree, the inspectors and the summary share.
@@ -538,6 +546,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             dismiss_session_failed: "Could not dismiss session.",
             session_trimmed: "trimmed to fit",
             session_waiting: "waiting",
+            folder_mark: "dir",
+            unresolved_bucket_note: "These sessions cannot be contributed automatically. \
+                You'll always be asked.",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 session waiting",
@@ -882,6 +893,11 @@ pub struct MonitorTracesGraphCopy {
     pub zoom_out: &'static str,
     pub zoom_in: &'static str,
     pub jump_to_now: &'static str,
+    /// The glyphs drawn on the zoom out, zoom in and jump-to-now pills (#1146
+    /// `traces-graph.tsx`); each pill's name is the word above.
+    pub zoom_out_glyph: &'static str,
+    pub zoom_in_glyph: &'static str,
+    pub jump_to_now_glyph: &'static str,
     /// The range pill at now: `{hours}` or `{days}` is the window's span.
     pub last_hours: &'static str,
     pub last_days: &'static str,
@@ -1300,6 +1316,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             zoom_out: "Zoom out",
             zoom_in: "Zoom in",
             jump_to_now: "Jump to now",
+            zoom_out_glyph: "\u{2212}",
+            zoom_in_glyph: "+",
+            jump_to_now_glyph: "\u{203a}|",
             last_hours: "Last {hours} hours",
             last_days: "Last {days} days",
             hours_back_one: "{hours} hours, 1 window back",
@@ -1727,6 +1746,9 @@ mod tests {
         let graph = &screens.traces_graph;
         assert_eq!(graph.zoom_out, "Zoom out");
         assert_eq!(graph.jump_to_now, "Jump to now");
+        assert_eq!(graph.zoom_out_glyph, "\u{2212}");
+        assert_eq!(graph.zoom_in_glyph, "+");
+        assert_eq!(graph.jump_to_now_glyph, "\u{203a}|");
         assert_eq!(graph.last_days, "Last {days} days");
         assert!(!graph.days_back_one.contains("{count}"));
         assert!(graph.days_back.contains("{count}") && graph.days_back.contains("{days}"));
