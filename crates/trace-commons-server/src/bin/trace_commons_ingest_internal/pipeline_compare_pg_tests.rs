@@ -15,10 +15,13 @@
 //!   with floors of zero and derives the three floors from the measured
 //!   values.
 //!
-//! The run takes the traces in serial order, one after the other, because
-//! the two indexes must hold the same entries before each trace. Code marked
-//! `// baseline-old-path:` applies to the old path only and goes away with
-//! it. Nested inside `tests` beside `pipeline_corpus_pg_tests`.
+//! `pipeline_compare_run` is the run. It takes the traces in serial order,
+//! one after the other, because the two indexes must hold the same entries
+//! before each trace. It writes two records for each trace to the records
+//! file, and it writes the report before it fails for a difference.
+//!
+//! Code marked `// baseline-old-path:` applies to the old path only and goes
+//! away with it. Nested inside `tests` beside `pipeline_corpus_pg_tests`.
 
 use super::*;
 
@@ -47,9 +50,11 @@ use trace_commons_server::versioned_pipeline_bundle::{
     MINIMAL_INDEX_ID, MINIMAL_PROJECTION_ID, MinimalPolicyBundle,
 };
 use trace_commons_server::versioned_pipeline_comparison::{
-    AdmissionLabel, AlignmentAction, ComparisonRecord, ComparisonSide, CreditEvent, DerivedFloors,
-    GateValues, ReviewLabel, ReviewSource, TraceComparison, alignment_action, compare_records,
-    derive_floors, hash_rule,
+    AdmissionLabel, AlignmentAction, COMPARISON_ALIGNMENT_LABEL, COMPARISON_BRANCH_LABEL,
+    COMPARISON_REFUSED_LABEL, COMPARISON_UNEXPLAINED_LABEL, ComparisonRecord,
+    ComparisonReportInput, ComparisonSide, ComparisonSummary, CreditEvent, DerivedFloors,
+    GateValues, ReviewLabel, ReviewSource, TraceComparison, alignment_action, alignment_lost,
+    compare_records, comparison_report, derive_floors, hash_rule,
 };
 use trace_commons_server::versioned_pipeline_compat::{CompatibilityBundleConfig, MainGateConfig};
 use trace_commons_server::versioned_pipeline_credit::{
@@ -57,8 +62,11 @@ use trace_commons_server::versioned_pipeline_credit::{
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_product::PipelineProductStore;
+use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, is_safe_label};
 
-use super::pipeline_corpus_pg_tests::sha256_bytes;
+use super::pipeline_corpus_pg_tests::{
+    ARTIFACT_ROOT_VAR, TEST_MASTER_KEY_VAR, sha256_bytes, write_atomically,
+};
 use super::pipeline_http_pg_tests::{
     LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
     allow_all_test_authority, join_within, mains_database, post_trace, runtime_backend, send_http,
@@ -157,8 +165,11 @@ impl CompareCorpusReader {
 
 /// The envelope of one fixture. The same fixture gives the same bytes on
 /// every call: each field that the protocol crate fills at random or from the
-/// clock is a function of the fixture here.
-async fn compare_envelope(fixture: &CompareFixture) -> TraceContributionEnvelope {
+/// clock is a function of the fixture here. A redactor error is
+/// `compare_envelope_failed`, so the run can write its partial report.
+async fn compare_envelope(
+    fixture: &CompareFixture,
+) -> Result<TraceContributionEnvelope, &'static str> {
     // `from_recorded_trace` gives `Utc::now()` to a step with no timestamp.
     let mut trace = fixture.trace_file.clone();
     for step in &mut trace.steps {
@@ -200,10 +211,10 @@ async fn compare_envelope(fixture: &CompareFixture) -> TraceContributionEnvelope
             .and_then(|parent| new_ids.get(&parent).copied());
     }
     let mut envelope = DeterministicTraceRedactor::try_default()
-        .expect("compare_redactor_unavailable")
+        .map_err(|_| "compare_envelope_failed")?
         .redact_trace(raw)
         .await
-        .expect("compare_redaction_failed");
+        .map_err(|_| "compare_envelope_failed")?;
     envelope.privacy.residual_pii_risk = match fixture.privacy_risk.as_str() {
         "low" => ResidualPiiRisk::Low,
         "medium" | "high" => {
@@ -220,7 +231,7 @@ async fn compare_envelope(fixture: &CompareFixture) -> TraceContributionEnvelope
     envelope.consent.scopes = vec![ConsentScope::ModelTraining];
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
     envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
-    envelope
+    Ok(envelope)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +297,7 @@ async fn calibrate_floors(bootstrap: &Path) -> Result<DerivedFloors, &'static st
     let mut novelty = Vec::new();
     let mut reader = CompareCorpusReader::open("bootstrap", bootstrap)?;
     while let Some(fixture) = reader.next_fixture()? {
-        let bytes = serde_json::to_vec(&compare_envelope(&fixture).await)
+        let bytes = serde_json::to_vec(&compare_envelope(&fixture).await?)
             .map_err(|_| "comparison_calibration_failed")?;
         let gate = std::sync::Arc::clone(&orchestrator);
         let decision =
@@ -379,6 +390,8 @@ struct CompareApp {
     root: PathBuf,
     /// The HTTP calls that the drivers sent through `CompareApp::send`.
     http_calls: std::sync::atomic::AtomicU64,
+    /// The time that the drivers spent inside those calls.
+    http_nanos: std::sync::atomic::AtomicU64,
     stop: tokio::sync::oneshot::Sender<()>,
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
     _state_dir: tempfile::TempDir,
@@ -418,9 +431,14 @@ impl CompareApp {
                 .header("content-type", "application/json")
                 .body(body);
         }
+        let started = std::time::Instant::now();
         let response = request.send().await.map_err(|_| "compare_http_failed")?;
         let code = response.status().as_u16();
         let received = response.bytes().await.map_err(|_| "compare_http_failed")?;
+        self.http_nanos.fetch_add(
+            u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+            AtomicOrdering::Relaxed,
+        );
         probes.check(&received, "compare_probe_in_response");
         Ok((
             code,
@@ -679,6 +697,7 @@ async fn start_compare_app(
         tenants,
         root,
         http_calls: std::sync::atomic::AtomicU64::new(0),
+        http_nanos: std::sync::atomic::AtomicU64::new(0),
         stop,
         server,
         _state_dir: state_dir,
@@ -1511,6 +1530,627 @@ fn clear_baseline_derived(app: &CompareApp) -> Result<u64, &'static str> {
 }
 
 // ---------------------------------------------------------------------------
+// One trace through the two sides.
+// ---------------------------------------------------------------------------
+
+fn trace_hash_of(fixture: &CompareFixture) -> String {
+    sha256_bytes(fixture.trace_id.to_string().as_bytes())
+}
+
+/// Splits the time of a driver step into the time inside HTTP calls and the
+/// rest, which is the database reads of the step.
+struct StepClock {
+    started: std::time::Instant,
+    http_nanos: u64,
+}
+
+impl StepClock {
+    fn start(app: &CompareApp) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            http_nanos: app.http_nanos.load(AtomicOrdering::Relaxed),
+        }
+    }
+
+    /// The HTTP time and the other time since the start or the last lap.
+    fn lap(&mut self, app: &CompareApp) -> (std::time::Duration, std::time::Duration) {
+        let now = std::time::Instant::now();
+        let http_nanos = app.http_nanos.load(AtomicOrdering::Relaxed);
+        let http = std::time::Duration::from_nanos(http_nanos - self.http_nanos);
+        let other = (now - self.started).saturating_sub(http);
+        self.started = now;
+        self.http_nanos = http_nanos;
+        (http, other)
+    }
+}
+
+/// The milliseconds of one trace, for the timing file. The five values add
+/// up to the time of the four driver steps.
+struct PairTiming {
+    // baseline-old-path: the HTTP call of the receipt.
+    baseline_receipt_ms: u64,
+    // baseline-old-path: the HTTP calls of the finish step, which are the
+    // review calls (when the action has a review) and the gate call.
+    baseline_gate_ms: u64,
+    /// The HTTP call of the receipt.
+    candidate_receipt_ms: u64,
+    /// The whole finish step: the wait for the worker, the review calls
+    /// (when the action has a review), and the reads of the result.
+    candidate_wait_ms: u64,
+    /// The database reads of the other three steps.
+    reads_ms: u64,
+}
+
+/// The two records of one trace, and what the drivers did for them.
+struct Pair {
+    action: AlignmentAction,
+    baseline: ComparisonRecord,
+    candidate: ComparisonRecord,
+    /// The probes of this trace. Each received body and the two records went
+    /// through `Probes::check`.
+    probes: Probes,
+    /// The HTTP calls of the two sides for this trace.
+    http_calls: u64,
+    timing: PairTiming,
+}
+
+/// Drives one fixture through the two sides in the order of spec section
+/// 7.4. The run and the tests call this one function, so they cannot use two
+/// sequences.
+///
+/// 1. The two receipts with the same body bytes: the baseline first, then
+///    the candidate, as the parity test requires.
+/// 2. The alignment action for the two admissions.
+/// 3. The two finish steps. The candidate is first when its review can fail
+///    (`ApproveCandidate` and `HashRuleBoth(Approve)`): the baseline index
+///    then does not get a trace that the candidate index does not get.
+///
+/// The envelope and the body live only inside this call.
+async fn compare_pair(
+    app: &CompareApp,
+    fixture: &CompareFixture,
+    partition: &'static str,
+    position: u64,
+) -> Result<Pair, &'static str> {
+    let envelope = compare_envelope(fixture).await?;
+    let body = serde_json::to_vec(&envelope).map_err(|_| "compare_envelope_failed")?;
+    let probes = Probes::new(&app.tenants, fixture, &envelope);
+    drop(envelope);
+    let trace_hash = trace_hash_of(fixture);
+    let base = || RecordBase {
+        position,
+        partition,
+        trace_hash: trace_hash.clone(),
+    };
+    let calls_before = app.http_call_count();
+    let mut clock = StepClock::start(app);
+
+    let baseline_seen = baseline_admission(app, &probes, &body, fixture.submission_id).await?;
+    let baseline_receipt = clock.lap(app);
+    let candidate_seen = candidate_admission(app, &probes, &body, fixture.submission_id).await?;
+    let candidate_receipt = clock.lap(app);
+    drop(body);
+
+    let action = alignment_action(
+        baseline_seen.admission,
+        candidate_seen.admission,
+        &trace_hash,
+    );
+    let candidate_first = matches!(
+        action,
+        AlignmentAction::ApproveCandidate | AlignmentAction::HashRuleBoth(ReviewLabel::Approve)
+    );
+    let (baseline, baseline_finished, candidate, candidate_finished) = if candidate_first {
+        let candidate =
+            candidate_finish(app, &probes, fixture, candidate_seen, action, base()).await?;
+        let candidate_finished = clock.lap(app);
+        let baseline =
+            baseline_finish(app, &probes, fixture, baseline_seen, action, base()).await?;
+        (baseline, clock.lap(app), candidate, candidate_finished)
+    } else {
+        let baseline =
+            baseline_finish(app, &probes, fixture, baseline_seen, action, base()).await?;
+        let baseline_finished = clock.lap(app);
+        let candidate =
+            candidate_finish(app, &probes, fixture, candidate_seen, action, base()).await?;
+        (baseline, baseline_finished, candidate, clock.lap(app))
+    };
+
+    let millis = |time: std::time::Duration| u64::try_from(time.as_millis()).unwrap_or(u64::MAX);
+    Ok(Pair {
+        action,
+        baseline,
+        candidate,
+        http_calls: app.http_call_count() - calls_before,
+        timing: PairTiming {
+            baseline_receipt_ms: millis(baseline_receipt.0),
+            baseline_gate_ms: millis(baseline_finished.0),
+            candidate_receipt_ms: millis(candidate_receipt.0),
+            candidate_wait_ms: millis(candidate_finished.0 + candidate_finished.1),
+            reads_ms: millis(baseline_receipt.1 + candidate_receipt.1 + baseline_finished.1),
+        },
+        probes,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// The run: its configuration, the record guard, and the loop body.
+// ---------------------------------------------------------------------------
+
+const COMPARE_BOOTSTRAP_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_BOOTSTRAP_PATH";
+const COMPARE_HOLDOUT_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_HOLDOUT_PATH";
+const COMPARE_MANIFEST_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH";
+const COMPARE_CHECK_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID";
+const COMPARE_REPORT_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH";
+const COMPARE_RECORDS_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH";
+const COMPARE_LIMIT_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_LIMIT";
+// baseline-old-path:
+const COMPARE_SKEW_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_SKEW";
+const COMPARE_TIMING_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_COMPARE_TIMING_PATH";
+
+const COMPARE_CHECK_IDS: [&str; 2] = ["pipeline_comparison_local", "pipeline_comparison_hf"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompareRunConfig {
+    bootstrap: PathBuf,
+    holdout: PathBuf,
+    manifest: PathBuf,
+    check_id: String,
+    report_path: PathBuf,
+    records_path: PathBuf,
+    /// The run compares only the first `limit` traces.
+    limit: Option<u64>,
+    /// `None`, or `baseline_quality_floor` (PC-D8).
+    // baseline-old-path:
+    skew: Option<String>,
+    timing_path: Option<PathBuf>,
+    artifact_root: Option<PathBuf>,
+    master_key_hex: Option<String>,
+}
+
+impl CompareRunConfig {
+    /// `Ok(None)` when none of the compare variables is set (nothing to
+    /// run). If one is set, each required variable must be set and not
+    /// empty, and each value must be valid.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
+        const RUN_VARS: [&str; 9] = [
+            COMPARE_BOOTSTRAP_PATH_VAR,
+            COMPARE_HOLDOUT_PATH_VAR,
+            COMPARE_MANIFEST_PATH_VAR,
+            COMPARE_CHECK_ID_VAR,
+            COMPARE_REPORT_PATH_VAR,
+            COMPARE_RECORDS_PATH_VAR,
+            COMPARE_LIMIT_VAR,
+            COMPARE_SKEW_VAR,
+            COMPARE_TIMING_PATH_VAR,
+        ];
+        if RUN_VARS.iter().all(|name| var(name).is_none()) {
+            return Ok(None);
+        }
+        let required = |name: &str, label: &'static str| {
+            var(name).filter(|value| !value.is_empty()).ok_or(label)
+        };
+        let bootstrap = required(COMPARE_BOOTSTRAP_PATH_VAR, "compare_bootstrap_path_missing")?;
+        let holdout = required(COMPARE_HOLDOUT_PATH_VAR, "compare_holdout_path_missing")?;
+        let manifest = required(COMPARE_MANIFEST_PATH_VAR, "compare_manifest_path_missing")?;
+        let check_id = required(COMPARE_CHECK_ID_VAR, "compare_check_id_missing")?;
+        let report = required(COMPARE_REPORT_PATH_VAR, "compare_report_path_missing")?;
+        let records = required(COMPARE_RECORDS_PATH_VAR, "compare_records_path_missing")?;
+        if !COMPARE_CHECK_IDS.contains(&check_id.as_str()) {
+            return Err("compare_check_id_invalid");
+        }
+        let limit = var(COMPARE_LIMIT_VAR)
+            .map(|text| {
+                text.parse::<u64>()
+                    .ok()
+                    .filter(|limit| *limit > 0)
+                    .ok_or("compare_limit_invalid")
+            })
+            .transpose()?;
+        let skew = var(COMPARE_SKEW_VAR);
+        if skew
+            .as_deref()
+            .is_some_and(|skew| skew != "baseline_quality_floor")
+        {
+            return Err("compare_skew_invalid");
+        }
+        Ok(Some(Self {
+            bootstrap: PathBuf::from(bootstrap),
+            holdout: PathBuf::from(holdout),
+            manifest: PathBuf::from(manifest),
+            check_id,
+            report_path: PathBuf::from(report),
+            records_path: PathBuf::from(records),
+            limit,
+            skew,
+            timing_path: var(COMPARE_TIMING_PATH_VAR).map(PathBuf::from),
+            artifact_root: var(ARTIFACT_ROOT_VAR).map(PathBuf::from),
+            master_key_hex: var(TEST_MASTER_KEY_VAR),
+        }))
+    }
+}
+
+/// `sha256:` and 64 lowercase hex characters.
+fn is_sha256_value(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+/// What the run takes from the manifest of the export.
+struct ComparePin {
+    /// The keys of `ComparisonReportInput::pin_digests`: `source`, `order`,
+    /// `configuration`, `bootstrap_corpus`, `holdout_corpus`.
+    digests: BTreeMap<String, String>,
+    /// `sample_count`: the number of traces in the two corpus files.
+    trace_count: u64,
+}
+
+/// Reads `source-manifest.json` of an export. A file that cannot be read or
+/// parsed, or that lacks a digest or `sample_count`, is
+/// `compare_manifest_invalid`. An export without `--with-events` is
+/// `compare_manifest_without_events`: its corpus files have no session
+/// events.
+fn read_compare_manifest(path: &Path) -> Result<ComparePin, &'static str> {
+    const INVALID: &str = "compare_manifest_invalid";
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path).map_err(|_| INVALID)?).map_err(|_| INVALID)?;
+    if manifest["source"]["with_events"] != true {
+        return Err("compare_manifest_without_events");
+    }
+    let mut digests = BTreeMap::new();
+    for key in [
+        "source",
+        "order",
+        "configuration",
+        "bootstrap_corpus",
+        "holdout_corpus",
+    ] {
+        let digest = manifest[format!("{key}_digest")]
+            .as_str()
+            .filter(|digest| is_sha256_value(digest))
+            .ok_or(INVALID)?;
+        digests.insert(key.to_string(), digest.to_string());
+    }
+    Ok(ComparePin {
+        digests,
+        trace_count: manifest["sample_count"].as_u64().ok_or(INVALID)?,
+    })
+}
+
+/// Review Focus 3. A record holds a text in four fields, and each text comes
+/// from a database row. The run writes a record only when `trace_hash` is a
+/// `sha256:` value, `privacy_risk` is one of the three risk labels, and each
+/// `privacy_basis` entry and each credit `event_type` is a safe label.
+fn check_record_values(record: &ComparisonRecord) -> Result<(), &'static str> {
+    let safe = is_sha256_value(&record.trace_hash)
+        && record
+            .privacy_risk
+            .as_deref()
+            .is_none_or(|risk| matches!(risk, "low" | "medium" | "high"))
+        && record
+            .privacy_basis
+            .iter()
+            .all(|basis| is_safe_label(basis))
+        && record
+            .credit_events
+            .iter()
+            .all(|event| is_safe_label(&event.event_type));
+    if safe {
+        Ok(())
+    } else {
+        Err("compare_record_value_unsafe")
+    }
+}
+
+fn output_failed<E>(_: E) -> &'static str {
+    "compare_output_write_failed"
+}
+
+/// Creates the file `path`, and its directory, for a writer of lines.
+fn create_output(path: &Path) -> Result<std::io::BufWriter<std::fs::File>, &'static str> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(output_failed)?;
+    }
+    std::fs::File::create(path)
+        .map(std::io::BufWriter::new)
+        .map_err(output_failed)
+}
+
+/// What the run keeps from one trace to the next. Nothing here grows with
+/// the number of traces: the summary holds counts and a bounded list, and
+/// the records go to the file.
+struct CompareRun {
+    summary: ComparisonSummary,
+    /// The number of pairs in the summary and in the records file, which is
+    /// also the position of the next trace. The position counts through the
+    /// two partitions, from 0.
+    compared: u64,
+    records: std::io::BufWriter<std::fs::File>,
+    /// The SHA-256 of the bytes that `records` got.
+    records_digest: sha2::Sha256,
+    /// The optional timing file. It is not part of the report or of a digest.
+    timing: Option<std::io::BufWriter<std::fs::File>>,
+    /// PC-D20: the position of the pair at which the run stopped.
+    alignment_lost_position: Option<u64>,
+    /// The probes of the last trace, for the check of the report.
+    probes: Option<Probes>,
+}
+
+impl CompareRun {
+    /// Opens the records file and, when the configuration names one, the
+    /// timing file, whose first line is the calibration time.
+    fn open(
+        config: &CompareRunConfig,
+        calibration: std::time::Duration,
+    ) -> Result<Self, &'static str> {
+        let timing = match &config.timing_path {
+            Some(path) => {
+                let mut timing = create_output(path)?;
+                let line = serde_json::json!({ "calibration_seconds": calibration.as_secs_f64() });
+                writeln!(timing, "{line}").map_err(output_failed)?;
+                timing.flush().map_err(output_failed)?;
+                Some(timing)
+            }
+            None => None,
+        };
+        Ok(Self {
+            summary: ComparisonSummary::default(),
+            compared: 0,
+            records: create_output(&config.records_path)?,
+            records_digest: sha2::Sha256::new(),
+            timing,
+            alignment_lost_position: None,
+            probes: None,
+        })
+    }
+
+    /// The loop body: one trace through the two sides, the guard for its two
+    /// records, the comparison, and the two lines of the records file.
+    ///
+    /// An `Err` ends the run. A pair that loses the alignment (PC-D20) is in
+    /// the summary and in the records file before this function answers
+    /// `Err(COMPARISON_ALIGNMENT_LABEL)`. The fixture is dropped at the
+    /// return.
+    async fn compare_trace(
+        &mut self,
+        app: &CompareApp,
+        fixture: CompareFixture,
+        partition: &'static str,
+    ) -> Result<(), &'static str> {
+        let position = self.compared;
+        let pair = compare_pair(app, &fixture, partition, position).await?;
+        check_record_values(&pair.baseline)?;
+        check_record_values(&pair.candidate)?;
+        let result = compare_records(&pair.baseline, &pair.candidate);
+        self.summary
+            .observe(&pair.baseline, &pair.candidate, &result);
+        self.compared += 1;
+        for record in [&pair.baseline, &pair.candidate] {
+            let mut line = record_bytes(record);
+            line.push(b'\n');
+            self.records.write_all(&line).map_err(output_failed)?;
+            self.records_digest.update(&line);
+        }
+        self.records.flush().map_err(output_failed)?;
+        if let Some(timing) = &mut self.timing {
+            let gate = pair.baseline.gate.as_ref().or(pair.candidate.gate.as_ref());
+            let line = serde_json::json!({
+                "position": position,
+                "chunk_count": gate.map(|gate| gate.total_chunk_count),
+                "baseline_receipt_ms": pair.timing.baseline_receipt_ms,
+                "baseline_gate_ms": pair.timing.baseline_gate_ms,
+                "candidate_receipt_ms": pair.timing.candidate_receipt_ms,
+                "candidate_wait_ms": pair.timing.candidate_wait_ms,
+                "reads_ms": pair.timing.reads_ms,
+            });
+            writeln!(timing, "{line}").map_err(output_failed)?;
+            timing.flush().map_err(output_failed)?;
+        }
+        // baseline-old-path: PC-D18. Each call and each read of this trace is
+        // complete, and the next baseline receipt did not start.
+        clear_baseline_derived(app)?;
+        let lost = alignment_lost(pair.action, &pair.baseline, &pair.candidate);
+        self.probes = Some(pair.probes);
+        if lost {
+            self.alignment_lost_position = Some(position);
+            return Err(COMPARISON_ALIGNMENT_LABEL);
+        }
+        Ok(())
+    }
+}
+
+/// `pipeline.py compare`. Each trace of the two corpus files goes through the
+/// old gate path and through the pipeline, in the order of the files. The
+/// run writes two records for each trace and one report. It fails when the
+/// two sides differ, and the report that it wrote before names each
+/// difference. A check result is emitted only for a full run with no skew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "the implementation of `pipeline.py compare`: run it through that command"]
+async fn pipeline_compare_run() {
+    fn fail<T>(label: &'static str) -> T {
+        panic!("{label}")
+    }
+
+    // 1. The configuration. A configured run needs its database: it never
+    // skips.
+    let config = match CompareRunConfig::from_vars(|name| std::env::var(name).ok()) {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(label) => fail(label),
+    };
+    assert!(
+        std::env::var_os("TRACE_COMMONS_PG_TEST_DATABASE_URL").is_some(),
+        "compare_database_url_missing"
+    );
+    // 1a. The two corpus files are the files of the pin, before the first
+    // trace: a streamed read with no parse.
+    let pin = read_compare_manifest(&config.manifest).unwrap_or_else(fail);
+    let partitions = [
+        ("bootstrap", &config.bootstrap),
+        ("holdout", &config.holdout),
+    ];
+    let pinned_digest = |partition: &str| &pin.digests[&format!("{partition}_corpus")];
+    for (partition, path) in partitions {
+        let digest = CompareCorpusReader::open(partition, path)
+            .and_then(CompareCorpusReader::finish)
+            .unwrap_or_else(fail);
+        assert!(
+            digest == *pinned_digest(partition),
+            "compare_corpus_digest_mismatch"
+        );
+    }
+
+    // 2. The floors, from the full bootstrap partition (also with a limit).
+    let calibration_started = std::time::Instant::now();
+    let floors = calibrate_floors(&config.bootstrap)
+        .await
+        .unwrap_or_else(fail);
+    let calibration = calibration_started.elapsed();
+
+    // 3. One app for the two sides.
+    let generated_root = tempfile::tempdir().expect("temp dir");
+    let artifact_root = config
+        .artifact_root
+        .clone()
+        .unwrap_or_else(|| generated_root.path().to_path_buf());
+    let master_key = config
+        .master_key_hex
+        .clone()
+        .unwrap_or_else(trace_commons_server::secrets::keychain::generate_master_key_hex);
+    let app = start_compare_app(
+        compare_main_gate(floors),
+        &artifact_root,
+        &master_key,
+        CompareAppOptions {
+            tenants: CompareTenants::run(),
+            skew: config.skew.as_deref(),
+            accept_medium_risk: true,
+        },
+    )
+    .await;
+
+    // 4. The records file.
+    let mut run = CompareRun::open(&config, calibration).unwrap_or_else(fail);
+
+    // 5. Each trace, in the order of the two files, until the limit. The
+    // first error ends the loop, and the run keeps its label.
+    let mut readers = partitions
+        .map(|(partition, path)| CompareCorpusReader::open(partition, path).unwrap_or_else(fail));
+    let mut failure = None;
+    'partitions: for reader in &mut readers {
+        while config.limit.is_none_or(|limit| run.compared < limit) {
+            let step = match reader.next_fixture() {
+                Ok(Some(fixture)) => run.compare_trace(&app, fixture, reader.partition).await,
+                Ok(None) => break,
+                Err(label) => Err(label),
+            };
+            if let Err(label) = step {
+                failure = Some(label);
+                break 'partitions;
+            }
+        }
+    }
+
+    // 6. The readers read the bytes that step 1a checked. With a limit,
+    // `finish` reads the rest of a file and builds no envelope.
+    if failure.is_none() {
+        for reader in readers {
+            let partition = reader.partition;
+            let digest = reader.finish().unwrap_or_else(fail);
+            assert!(
+                digest == *pinned_digest(partition),
+                "compare_corpus_digest_mismatch"
+            );
+        }
+        // The manifest counts the traces that the two files hold.
+        let expected = config
+            .limit
+            .map_or(pin.trace_count, |limit| limit.min(pin.trace_count));
+        assert!(run.compared == expected, "compare_manifest_invalid");
+    }
+
+    // 7. Stop the app.
+    let package = app.package.clone();
+    app.shutdown().await;
+
+    // 8. The report, before each check of step 9: a failed run leaves a
+    // report that names its differences.
+    let records_digest = format!("sha256:{}", hex::encode(run.records_digest.finalize()));
+    let partial = run.compared < pin.trace_count;
+    let report = comparison_report(
+        &ComparisonReportInput {
+            check_id: &config.check_id,
+            trace_count: pin.trace_count,
+            partial,
+            pin_digests: &pin.digests,
+            package: &package,
+            floors,
+            skew: config.skew.as_deref(),
+            alignment_lost_position: run.alignment_lost_position,
+            records_digest: &records_digest,
+        },
+        &run.summary,
+    )
+    .unwrap_or_else(|label| panic!("{label}"));
+    let mut report_bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&report)
+        .expect("the report serialises");
+    report_bytes.push(b'\n');
+    if let Some(probes) = &run.probes {
+        probes.check(&report_bytes, "compare_probe_in_report");
+    }
+    write_atomically(&config.report_path, &report_bytes);
+
+    // 9. The order is fixed. A pair that loses the alignment and a refused
+    // pair are also unexplained, and the more exact label must win.
+    if let Some(label) = failure {
+        panic!("{label}");
+    }
+    assert!(
+        run.summary.refused_total() == 0,
+        "{COMPARISON_REFUSED_LABEL}"
+    );
+    assert!(
+        run.summary.unexplained_total() == 0,
+        "{COMPARISON_UNEXPLAINED_LABEL}"
+    );
+    if partial {
+        return;
+    }
+    assert!(
+        run.summary.branch_gaps().is_empty(),
+        "{COMPARISON_BRANCH_LABEL}"
+    );
+
+    // 10. A check result only for a full run with no skew.
+    // baseline-old-path: the skew.
+    if config.skew.is_some() {
+        return;
+    }
+    let permitted: u64 = report["permitted_counts"]
+        .as_object()
+        .into_iter()
+        .flat_map(|counts| counts.values())
+        .filter_map(serde_json::Value::as_u64)
+        .sum();
+    PipelineCheckEmitter::emit_pass_from_env(
+        &config.check_id,
+        Some(&package),
+        serde_json::json!({
+            "traces": report["compared_count"],
+            "equal": report["equal_count"],
+            "permitted": permitted,
+            "unexplained": 0,
+            "records_hash": records_digest,
+            "report_hash": sha256_bytes(&report_bytes),
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Tests.
 // ---------------------------------------------------------------------------
 
@@ -1607,8 +2247,8 @@ fn the_reader_digest_is_the_file_digest() {
 #[tokio::test]
 async fn the_same_fixture_gives_the_same_envelope_bytes() {
     let fixture = fixture_from(fixture_line("same_bytes", "low", tool_steps()));
-    let first = compare_envelope(&fixture).await;
-    let second = compare_envelope(&fixture).await;
+    let first = compare_envelope(&fixture).await.unwrap();
+    let second = compare_envelope(&fixture).await.unwrap();
     assert_eq!(
         serde_json::to_vec(&first).unwrap(),
         serde_json::to_vec(&second).unwrap()
@@ -1651,7 +2291,7 @@ async fn the_same_fixture_gives_the_same_envelope_bytes() {
 #[tokio::test]
 async fn a_tool_session_keeps_its_tool_events() {
     let fixture = fixture_from(fixture_line("tool_events", "low", tool_steps()));
-    let envelope = compare_envelope(&fixture).await;
+    let envelope = compare_envelope(&fixture).await.unwrap();
     assert!(
         envelope
             .events
@@ -1673,7 +2313,7 @@ async fn a_declared_risk_gives_a_metadata_only_envelope() {
         ("high", ResidualPiiRisk::High),
     ] {
         let fixture = fixture_from(fixture_line("risky", risk, prose_steps("secret words")));
-        let envelope = compare_envelope(&fixture).await;
+        let envelope = compare_envelope(&fixture).await.unwrap();
         assert_eq!(envelope.privacy.residual_pii_risk, expected);
         assert!(!envelope.consent.message_text_included);
         assert!(
@@ -1849,7 +2489,7 @@ async fn one_trace_reaches_both_gates() {
         "low",
         prose_steps(&long_text("spike")),
     ));
-    let body = serde_json::to_vec(&compare_envelope(&fixture).await).unwrap();
+    let body = serde_json::to_vec(&compare_envelope(&fixture).await.unwrap()).unwrap();
 
     // 1. The baseline receipt stays on the old path.
     let (code, receipt) = post_trace(
@@ -1952,10 +2592,6 @@ fn risk_fixture(label: &str, risk: &str) -> CompareFixture {
     fixture_from(fixture_line(label, risk, prose_steps(&long_text(label))))
 }
 
-fn trace_hash_of(fixture: &CompareFixture) -> String {
-    sha256_bytes(fixture.trace_id.to_string().as_bytes())
-}
-
 fn record_base(fixture: &CompareFixture, position: u64) -> RecordBase {
     RecordBase {
         position,
@@ -1964,64 +2600,12 @@ fn record_base(fixture: &CompareFixture, position: u64) -> RecordBase {
     }
 }
 
-/// The two records of one trace, and what the drivers did for them.
-struct Pair {
-    action: AlignmentAction,
-    baseline: ComparisonRecord,
-    candidate: ComparisonRecord,
-    /// The HTTP calls of the two sides for this trace.
-    http_calls: u64,
-    /// The `Probes::check` calls for this trace.
-    probe_checks: u64,
-}
-
-/// Drives one fixture through the two sides as the run does: the two
-/// receipts with the same body bytes, the alignment action, and the two
-/// finish steps in the order that the action needs.
+/// `compare_pair` for a test: the partition is `holdout`, and an error
+/// panics.
 async fn drive_pair(app: &CompareApp, fixture: &CompareFixture, position: u64) -> Pair {
-    let envelope = compare_envelope(fixture).await;
-    let body = serde_json::to_vec(&envelope).unwrap();
-    let probes = Probes::new(&app.tenants, fixture, &envelope);
-    let calls_before = app.http_call_count();
-    let baseline_seen = baseline_admission(app, &probes, &body, fixture.submission_id)
+    compare_pair(app, fixture, "holdout", position)
         .await
-        .unwrap();
-    let candidate_seen = candidate_admission(app, &probes, &body, fixture.submission_id)
-        .await
-        .unwrap();
-    let action = alignment_action(
-        baseline_seen.admission,
-        candidate_seen.admission,
-        &trace_hash_of(fixture),
-    );
-    // The candidate is first when its review can fail: the baseline index
-    // then does not get a trace that the candidate index does not get.
-    let candidate_first = matches!(
-        action,
-        AlignmentAction::ApproveCandidate | AlignmentAction::HashRuleBoth(ReviewLabel::Approve)
-    );
-    let finish_baseline = || {
-        let base = record_base(fixture, position);
-        baseline_finish(app, &probes, fixture, baseline_seen.clone(), action, base)
-    };
-    let finish_candidate = || {
-        let base = record_base(fixture, position);
-        candidate_finish(app, &probes, fixture, candidate_seen.clone(), action, base)
-    };
-    let (baseline, candidate) = if candidate_first {
-        let candidate = finish_candidate().await.unwrap();
-        (finish_baseline().await.unwrap(), candidate)
-    } else {
-        let baseline = finish_baseline().await.unwrap();
-        (baseline, finish_candidate().await.unwrap())
-    };
-    Pair {
-        action,
-        baseline,
-        candidate,
-        http_calls: app.http_call_count() - calls_before,
-        probe_checks: probes.check_count(),
-    }
+        .unwrap()
 }
 
 /// The number of `.json` files in the `derived/` directory of `tenant`.
@@ -2229,7 +2813,7 @@ async fn no_probe_reaches_a_body_or_a_record() {
     };
     // (Quarantine, Admit): the old review routes and the old gate route.
     let prose = prose_fixture("probe_prose");
-    let envelope = compare_envelope(&prose).await;
+    let envelope = compare_envelope(&prose).await.unwrap();
     let probes = Probes::new(&app.tenants, &prose, &envelope);
     assert_eq!(probes.tokens.len(), 5);
     assert_eq!(probes.secret_probe, prose.secret_probe);
@@ -2241,7 +2825,7 @@ async fn no_probe_reaches_a_body_or_a_record() {
     let pair = drive_pair(&app, &prose, 0).await;
     assert_eq!(pair.action, AlignmentAction::ApproveBaseline);
     assert_eq!(pair.http_calls, 5);
-    assert_eq!(pair.probe_checks, pair.http_calls + 2);
+    assert_eq!(pair.probes.check_count(), pair.http_calls + 2);
 
     // (Quarantine, Quarantine) with an approval: the pipeline review routes.
     let approved = hash_rule_fixture("probe_review", ReviewLabel::Approve);
@@ -2251,7 +2835,7 @@ async fn no_probe_reaches_a_body_or_a_record() {
         AlignmentAction::HashRuleBoth(ReviewLabel::Approve)
     );
     assert!(pair.http_calls >= 8, "{}", pair.http_calls);
-    assert_eq!(pair.probe_checks, pair.http_calls + 2);
+    assert_eq!(pair.probes.check_count(), pair.http_calls + 2);
     app.shutdown().await;
 }
 
@@ -2271,7 +2855,8 @@ fn panic_text(call: impl FnOnce()) -> Option<String> {
 async fn a_token_in_checked_bytes_panics_with_the_label() {
     let fixture = prose_fixture("probe_token");
     let tenants = CompareTenants::run();
-    let probes = Probes::new(&tenants, &fixture, &compare_envelope(&fixture).await);
+    let envelope = compare_envelope(&fixture).await.unwrap();
+    let probes = Probes::new(&tenants, &fixture, &envelope);
     assert_eq!(
         tenants.tokens(),
         [
@@ -2314,7 +2899,7 @@ async fn the_content_probe_in_checked_bytes_panics_with_the_label() {
     );
     assert!(!text.is_char_boundary(48));
     let fixture = fixture_from(fixture_line("probe_content", "low", prose_steps(&text)));
-    let envelope = compare_envelope(&fixture).await;
+    let envelope = compare_envelope(&fixture).await.unwrap();
     let tenants = CompareTenants::run();
     let probes = Probes::new(&tenants, &fixture, &envelope);
     let window = &text[..47];
@@ -2340,15 +2925,19 @@ async fn the_content_probe_in_checked_bytes_panics_with_the_label() {
     // metadata-only envelope has no text.
     let short = fixture_from(fixture_line("probe_short", "low", prose_steps("short")));
     assert!(
-        Probes::new(&tenants, &short, &compare_envelope(&short).await)
+        Probes::new(&tenants, &short, &compare_envelope(&short).await.unwrap())
             .content
             .is_empty()
     );
     let declared = risk_fixture("probe_declared", "medium");
     assert!(
-        Probes::new(&tenants, &declared, &compare_envelope(&declared).await)
-            .content
-            .is_empty()
+        Probes::new(
+            &tenants,
+            &declared,
+            &compare_envelope(&declared).await.unwrap()
+        )
+        .content
+        .is_empty()
     );
 }
 
@@ -2393,7 +2982,7 @@ async fn thirty_five_receipts_pass_the_rate_limit() {
             "low",
             prose_steps(&format!("receipt number {number}")),
         ));
-        let envelope = compare_envelope(&fixture).await;
+        let envelope = compare_envelope(&fixture).await.unwrap();
         let body = serde_json::to_vec(&envelope).unwrap();
         let probes = Probes::new(&app.tenants, &fixture, &envelope);
         let baseline = baseline_admission(&app, &probes, &body, fixture.submission_id)
@@ -2556,7 +3145,7 @@ async fn skip_baseline_gate_and_stop_are_driven() {
     };
     // `SkipBaselineGate` for a trace that the two sides accepted.
     let fixture = prose_fixture("skip_gate");
-    let envelope = compare_envelope(&fixture).await;
+    let envelope = compare_envelope(&fixture).await.unwrap();
     let body = serde_json::to_vec(&envelope).unwrap();
     let probes = Probes::new(&app.tenants, &fixture, &envelope);
     let baseline_seen = baseline_admission(&app, &probes, &body, fixture.submission_id)
@@ -2602,7 +3191,8 @@ async fn skip_baseline_gate_and_stop_are_driven() {
     // `Stop` for a trace that the two sides refused (PC-D19): no call, no
     // poll, and no wait.
     let refused = prose_fixture("stop_refused");
-    let probes = Probes::new(&app.tenants, &refused, &compare_envelope(&refused).await);
+    let envelope = compare_envelope(&refused).await.unwrap();
+    let probes = Probes::new(&app.tenants, &refused, &envelope);
     let seen = AdmissionObservation {
         receipt_code: 429,
         privacy_risk: None,
@@ -2657,7 +3247,8 @@ async fn a_second_gate_decision_is_refused() {
     let pair = drive_pair(&app, &fixture, 0).await;
     assert!(pair.baseline.scored);
     assert_eq!(gate_decision_count(&app, fixture.submission_id).await, 1);
-    let probes = Probes::new(&app.tenants, &fixture, &compare_envelope(&fixture).await);
+    let envelope = compare_envelope(&fixture).await.unwrap();
+    let probes = Probes::new(&app.tenants, &fixture, &envelope);
     let seen = AdmissionObservation {
         receipt_code: 200,
         privacy_risk: pair.baseline.privacy_risk.clone(),
@@ -2688,7 +3279,7 @@ async fn a_refused_review_call_is_not_terminal() {
         return;
     };
     let fixture = prose_fixture("review_refused");
-    let envelope = compare_envelope(&fixture).await;
+    let envelope = compare_envelope(&fixture).await.unwrap();
     let body = serde_json::to_vec(&envelope).unwrap();
     let probes = Probes::new(&app.tenants, &fixture, &envelope);
     let baseline_seen = baseline_admission(&app, &probes, &body, fixture.submission_id)
@@ -2850,6 +3441,331 @@ async fn removing_the_derived_files_changes_no_record() {
     // (c) The six records are equal with and without the removal.
     assert_eq!(records[0].len(), 6);
     assert_eq!(records[0], records[1]);
+}
+
+// ---------------------------------------------------------------------------
+// Tests of the run configuration and of the record guard.
+// ---------------------------------------------------------------------------
+
+/// The six required variables with valid values, and no other variable.
+fn compare_vars() -> BTreeMap<&'static str, String> {
+    BTreeMap::from([
+        (COMPARE_BOOTSTRAP_PATH_VAR, "/pin/bootstrap-compare.jsonl"),
+        (COMPARE_HOLDOUT_PATH_VAR, "/pin/holdout-compare.jsonl"),
+        (COMPARE_MANIFEST_PATH_VAR, "/pin/source-manifest.json"),
+        (COMPARE_CHECK_ID_VAR, "pipeline_comparison_local"),
+        (COMPARE_REPORT_PATH_VAR, "/run/report.json"),
+        (COMPARE_RECORDS_PATH_VAR, "/run/comparison-records.jsonl"),
+    ])
+    .into_iter()
+    .map(|(name, value)| (name, value.to_string()))
+    .collect()
+}
+
+fn config_from(
+    vars: &BTreeMap<&'static str, String>,
+) -> Result<Option<CompareRunConfig>, &'static str> {
+    CompareRunConfig::from_vars(|name| vars.get(name).cloned())
+}
+
+/// Each required variable with the label of a run that does not have it.
+const REQUIRED_COMPARE_VARS: [(&str, &str); 6] = [
+    (COMPARE_BOOTSTRAP_PATH_VAR, "compare_bootstrap_path_missing"),
+    (COMPARE_HOLDOUT_PATH_VAR, "compare_holdout_path_missing"),
+    (COMPARE_MANIFEST_PATH_VAR, "compare_manifest_path_missing"),
+    (COMPARE_CHECK_ID_VAR, "compare_check_id_missing"),
+    (COMPARE_REPORT_PATH_VAR, "compare_report_path_missing"),
+    (COMPARE_RECORDS_PATH_VAR, "compare_records_path_missing"),
+];
+
+#[test]
+fn no_compare_variable_means_nothing_to_run() {
+    assert_eq!(CompareRunConfig::from_vars(|_| None), Ok(None));
+    // The two variables that `pipeline_corpus_run` reads too start no run.
+    let shared = BTreeMap::from([
+        (ARTIFACT_ROOT_VAR, "/artifacts".to_string()),
+        (TEST_MASTER_KEY_VAR, "00".repeat(32)),
+    ]);
+    assert_eq!(config_from(&shared), Ok(None));
+}
+
+#[test]
+fn every_required_variable_is_checked() {
+    assert_eq!(
+        config_from(&compare_vars()),
+        Ok(Some(CompareRunConfig {
+            bootstrap: PathBuf::from("/pin/bootstrap-compare.jsonl"),
+            holdout: PathBuf::from("/pin/holdout-compare.jsonl"),
+            manifest: PathBuf::from("/pin/source-manifest.json"),
+            check_id: "pipeline_comparison_local".to_string(),
+            report_path: PathBuf::from("/run/report.json"),
+            records_path: PathBuf::from("/run/comparison-records.jsonl"),
+            limit: None,
+            skew: None,
+            timing_path: None,
+            artifact_root: None,
+            master_key_hex: None,
+        }))
+    );
+    for (name, label) in REQUIRED_COMPARE_VARS {
+        let mut vars = compare_vars();
+        vars.remove(name);
+        assert_eq!(config_from(&vars), Err(label), "{name}");
+    }
+    // One optional variable alone is a run with no required variable.
+    for name in [COMPARE_LIMIT_VAR, COMPARE_SKEW_VAR, COMPARE_TIMING_PATH_VAR] {
+        let vars = BTreeMap::from([(name, "1".to_string())]);
+        assert_eq!(
+            config_from(&vars),
+            Err("compare_bootstrap_path_missing"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn the_check_id_and_the_limit_are_validated() {
+    let with = |name: &'static str, value: &str| {
+        let mut vars = compare_vars();
+        vars.insert(name, value.to_string());
+        config_from(&vars)
+    };
+    for check_id in ["pipeline_comparison_local", "pipeline_comparison_hf"] {
+        let config = with(COMPARE_CHECK_ID_VAR, check_id).unwrap().unwrap();
+        assert_eq!(config.check_id, check_id);
+    }
+    for check_id in ["pipeline_comparison", "pipeline_corpus_hf_local", "local"] {
+        assert_eq!(
+            with(COMPARE_CHECK_ID_VAR, check_id),
+            Err("compare_check_id_invalid"),
+            "{check_id}"
+        );
+    }
+
+    assert_eq!(
+        with(COMPARE_LIMIT_VAR, "25").unwrap().unwrap().limit,
+        Some(25)
+    );
+    for limit in ["0", "-1", "ten", "1.5", ""] {
+        assert_eq!(
+            with(COMPARE_LIMIT_VAR, limit),
+            Err("compare_limit_invalid"),
+            "{limit:?}"
+        );
+    }
+
+    assert_eq!(
+        with(COMPARE_SKEW_VAR, "baseline_quality_floor")
+            .unwrap()
+            .unwrap()
+            .skew
+            .as_deref(),
+        Some("baseline_quality_floor")
+    );
+    for skew in ["candidate_quality_floor", "none", ""] {
+        assert_eq!(
+            with(COMPARE_SKEW_VAR, skew),
+            Err("compare_skew_invalid"),
+            "{skew:?}"
+        );
+    }
+
+    // The three other optional variables are taken as they are.
+    let mut vars = compare_vars();
+    vars.insert(COMPARE_TIMING_PATH_VAR, "/run/timing.jsonl".to_string());
+    vars.insert(ARTIFACT_ROOT_VAR, "/artifacts".to_string());
+    vars.insert(TEST_MASTER_KEY_VAR, "00".repeat(32));
+    let config = config_from(&vars).unwrap().unwrap();
+    assert_eq!(config.timing_path, Some(PathBuf::from("/run/timing.jsonl")));
+    assert_eq!(config.artifact_root, Some(PathBuf::from("/artifacts")));
+    assert_eq!(config.master_key_hex, Some("00".repeat(32)));
+}
+
+#[test]
+fn the_manifest_gives_the_pin_digests() {
+    let digest = |digit: char| format!("sha256:{}", digit.to_string().repeat(64));
+    let manifest = serde_json::json!({
+        "schema": "trace_commons.pipeline_hf_corpus_manifest.v1",
+        "source": { "translator": "swival", "with_events": true },
+        "source_digest": digest('1'),
+        "configuration_digest": digest('3'),
+        "order_digest": digest('2'),
+        "bootstrap_corpus_digest": digest('4'),
+        "holdout_corpus_digest": digest('5'),
+        "sample_count": 10,
+        "bootstrap_count": 4,
+        "holdout_count": 6,
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("source-manifest.json");
+    let read = |manifest: &serde_json::Value| {
+        std::fs::write(&path, manifest.to_string()).unwrap();
+        read_compare_manifest(&path)
+    };
+    let pin = read(&manifest).unwrap();
+    assert_eq!(
+        pin.digests,
+        BTreeMap::from([
+            ("source".to_string(), digest('1')),
+            ("order".to_string(), digest('2')),
+            ("configuration".to_string(), digest('3')),
+            ("bootstrap_corpus".to_string(), digest('4')),
+            ("holdout_corpus".to_string(), digest('5')),
+        ])
+    );
+    assert_eq!(pin.trace_count, 10);
+
+    // A v1 export has no `with_events` key.
+    let mut without = manifest.clone();
+    without["source"]
+        .as_object_mut()
+        .unwrap()
+        .remove("with_events");
+    assert_eq!(
+        read(&without).err(),
+        Some("compare_manifest_without_events")
+    );
+    let mut without = manifest.clone();
+    without["source"]["with_events"] = serde_json::json!(false);
+    assert_eq!(
+        read(&without).err(),
+        Some("compare_manifest_without_events")
+    );
+
+    for key in [
+        "source_digest",
+        "order_digest",
+        "configuration_digest",
+        "bootstrap_corpus_digest",
+        "holdout_corpus_digest",
+        "sample_count",
+    ] {
+        let mut missing = manifest.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert_eq!(
+            read(&missing).err(),
+            Some("compare_manifest_invalid"),
+            "{key}"
+        );
+    }
+    let mut short = manifest.clone();
+    short["order_digest"] = serde_json::json!("sha256:abc");
+    assert_eq!(read(&short).err(), Some("compare_manifest_invalid"));
+    std::fs::write(&path, "this is not json").unwrap();
+    assert_eq!(
+        read_compare_manifest(&path).err(),
+        Some("compare_manifest_invalid")
+    );
+    assert_eq!(
+        read_compare_manifest(&dir.path().join("no-such-file.json")).err(),
+        Some("compare_manifest_invalid")
+    );
+}
+
+#[test]
+fn an_empty_variable_is_a_missing_variable() {
+    for (name, label) in REQUIRED_COMPARE_VARS {
+        let mut vars = compare_vars();
+        vars.insert(name, String::new());
+        assert_eq!(config_from(&vars), Err(label), "{name}");
+    }
+}
+
+/// The helper record of the library's tests
+/// (`versioned_pipeline_comparison.rs`): each field has a value.
+fn full_record() -> ComparisonRecord {
+    ComparisonRecord {
+        position: 7,
+        partition: "holdout".into(),
+        trace_hash: format!("sha256:{}", "a".repeat(64)),
+        side: ComparisonSide::Baseline,
+        receipt_code: 200,
+        terminal: true,
+        privacy_risk: Some("medium".into()),
+        privacy_basis: vec!["consent_content_flag".into()],
+        admission: AdmissionLabel::Admit,
+        review: ReviewLabel::None,
+        review_source: ReviewSource::None,
+        gate_skipped_by_alignment: false,
+        scored: true,
+        gate: Some(GateValues {
+            quality_passed: true,
+            novelty_passed: true,
+            perplexity_micros: 31_000_000,
+            tail_fraction_micros: 120_000,
+            peak_perplexity_micros: 40_000_000,
+            novelty_score_micros: 600_000,
+            peak_novelty_micros: 900_000,
+            chunk_count: 3,
+            total_chunk_count: 3,
+            chunks_capped: false,
+            index_cardinality: Some(12),
+            credit_quality_micros: Some(450_000),
+            credit_quality_version: Some(2),
+        }),
+        member: true,
+        member_chunks: vec![0, 1, 2],
+        credit_events: vec![CreditEvent {
+            event_type: "novelty_utility".into(),
+            microcredits: 2_500_000,
+        }],
+    }
+}
+
+/// Review Focus 3. The record type permits a text in four fields. The run
+/// refuses a record in which one of them is not a hash or a label.
+#[test]
+fn an_unsafe_record_value_is_refused() {
+    const UNSAFE: Result<(), &str> = Err("compare_record_value_unsafe");
+    let record = full_record();
+    assert_eq!(check_record_values(&record), Ok(()));
+    let mut unscored = full_record();
+    unscored.privacy_risk = None;
+    unscored.privacy_basis.clear();
+    unscored.credit_events.clear();
+    assert_eq!(check_record_values(&unscored), Ok(()));
+    for risk in ["low", "medium", "high"] {
+        let mut record = full_record();
+        record.privacy_risk = Some(risk.to_string());
+        assert_eq!(check_record_values(&record), Ok(()), "{risk}");
+    }
+
+    // 1. `trace_hash`: `sha256:` and 64 lowercase hex characters.
+    for trace_hash in [
+        "5f0c2b1e-7c1d-4c58-9d0e-0a6c5b1f2e3d".to_string(),
+        "a".repeat(64),
+        format!("sha256:{}", "a".repeat(63)),
+        format!("sha256:{}", "a".repeat(65)),
+        format!("sha256:{}", "A".repeat(64)),
+        format!("sha256:{}", "g".repeat(64)),
+        format!("sha512:{}", "a".repeat(64)),
+        String::new(),
+    ] {
+        let mut record = full_record();
+        record.trace_hash = trace_hash.clone();
+        assert_eq!(check_record_values(&record), UNSAFE, "{trace_hash}");
+    }
+    // 2. `privacy_risk`: one of the three risk labels.
+    for risk in ["critical", "Medium", "", "the user wrote a name"] {
+        let mut record = full_record();
+        record.privacy_risk = Some(risk.to_string());
+        assert_eq!(check_record_values(&record), UNSAFE, "{risk:?}");
+    }
+    // 3. Each `privacy_basis` entry is a label.
+    for basis in ["Consent Content Flag", "a name: Ada", "", &"a".repeat(65)] {
+        let mut record = full_record();
+        record.privacy_basis.push(basis.to_string());
+        assert_eq!(check_record_values(&record), UNSAFE, "{basis:?}");
+    }
+    // 4. Each credit `event_type` is a label.
+    for event_type in ["Novelty Utility", "credit for ada@example.com", ""] {
+        let mut record = full_record();
+        record.credit_events.push(CreditEvent {
+            event_type: event_type.to_string(),
+            microcredits: 1,
+        });
+        assert_eq!(check_record_values(&record), UNSAFE, "{event_type:?}");
+    }
 }
 
 fn prose_steps(text: &str) -> Vec<TraceStep> {
