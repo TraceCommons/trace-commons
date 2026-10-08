@@ -1967,6 +1967,8 @@ impl DaemonShared {
             last_history_poll_at,
             history_poll_secs: settings.history_poll_secs,
             verdicts_pending,
+            menu_bar_mark_enabled: settings.menu_bar_mark_enabled,
+            notify_idle_sessions: settings.notify.idle_sessions,
         }
     }
 
@@ -2039,8 +2041,10 @@ impl DaemonShared {
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
         let consent_hold = crate::config::consent_hold(cfg.as_ref());
-        let nudge = nudge_value(&super::nudge::lead(
-            &super::nudge::LeadInputs {
+        // One set of inputs for the lead and the mark (nudge A3), so the
+        // two can never read different gates, counts or news.
+        let mark_inputs = super::nudge::MarkInputs {
+            lead: super::nudge::LeadInputs {
                 paused,
                 consent_hold: consent_hold.is_some(),
                 enrolled: logged_in,
@@ -2056,9 +2060,14 @@ impl DaemonShared {
                 verdicts_pending: nudge_snapshot.verdicts_pending,
                 idle_candidates: idle_candidate_count,
             },
-            &nudge_snapshot.ledger,
-            now,
-        ));
+            decisions_owed: Some(decisions_owed),
+            menu_bar_mark_enabled: nudge_snapshot.menu_bar_mark_enabled,
+            notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
+        };
+        let nudge = nudge_value(
+            &super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now),
+            &super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now),
+        );
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": logged_in,
@@ -4977,6 +4986,10 @@ pub(crate) struct NudgeSnapshot {
     pub last_history_poll_at: Option<chrono::DateTime<Utc>>,
     pub history_poll_secs: u64,
     pub verdicts_pending: Option<super::nudge::VerdictDelta>,
+    /// A3: the mark's own switch, and the idle-session kind's switch, which
+    /// the halo also obeys.
+    pub menu_bar_mark_enabled: bool,
+    pub notify_idle_sessions: bool,
 }
 
 /// `status.idle_sessions` on the wire: how many candidates, the display
@@ -5001,11 +5014,19 @@ fn idle_sessions_value(
 
 /// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
 /// unless `state` is `armed`), `count` only with a lead, `cooldown_until`
-/// only while a "Not now" silences one. Labels, a count and a time only.
-fn nudge_value(lead: &super::nudge::NudgeLead) -> serde_json::Value {
+/// only while a "Not now" silences one. `mark` and `mark_kinds` always
+/// (nudge A3): the menu-bar icon state and the kinds that lit it. Labels,
+/// a count and a time only.
+fn nudge_value(lead: &super::nudge::NudgeLead, mark: &super::nudge::Mark) -> serde_json::Value {
     let mut value = serde_json::json!({
         "state": lead.state.label(),
         "lead": lead.lead.map(super::nudge::NudgeKind::label),
+        "mark": mark.state.label(),
+        "mark_kinds": mark
+            .kinds
+            .iter()
+            .map(|k| k.label())
+            .collect::<Vec<_>>(),
     });
     if let Some(count) = lead.count {
         value["count"] = serde_json::Value::from(count);
@@ -17460,7 +17481,15 @@ mod tests {
             assert_eq!(
                 keys,
                 [
-                    "accepted", "count", "final", "held", "lead", "since", "state"
+                    "accepted",
+                    "count",
+                    "final",
+                    "held",
+                    "lead",
+                    "mark",
+                    "mark_kinds",
+                    "since",
+                    "state"
                 ],
                 "{nudge}"
             );
@@ -17488,7 +17517,9 @@ mod tests {
                 Some(Utc::now() - chrono::Duration::days(1));
             assert_eq!(
                 nudge_of(&s),
-                serde_json::json!({"state": "unknown", "lead": null})
+                serde_json::json!({
+                    "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": []
+                })
             );
             s.state.lock().unwrap().last_history_poll_at = None;
             assert_eq!(nudge_of(&s)["state"], "unknown");
@@ -17516,7 +17547,9 @@ mod tests {
             assert!(saw_status_changed(&mut rx));
             assert_eq!(
                 nudge_of(&s),
-                serde_json::json!({"state": "none", "lead": null})
+                serde_json::json!({
+                    "state": "none", "lead": null, "mark": "none", "mark_kinds": []
+                })
             );
             let reloaded = DaemonState::load(&s.store).unwrap();
             assert_eq!(reloaded.verdicts_pending, None);
@@ -17622,7 +17655,9 @@ mod tests {
             seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD - 1);
             assert_eq!(
                 nudge_of(&s),
-                serde_json::json!({"state": "none", "lead": null}),
+                serde_json::json!({
+                    "state": "none", "lead": null, "mark": "none", "mark_kinds": []
+                }),
             );
         }
 
@@ -17655,7 +17690,9 @@ mod tests {
             );
             assert_eq!(
                 nudge_of(&unhealthy),
-                serde_json::json!({"state": "unknown", "lead": null}),
+                serde_json::json!({
+                    "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": []
+                }),
             );
         }
 
@@ -18196,6 +18233,246 @@ mod tests {
                     .declined_at
                     .is_some()
             );
+        }
+
+        // ---- A3: the news mark and the halo ----
+
+        fn mark_of(s: &DaemonShared) -> (serde_json::Value, serde_json::Value) {
+            let nudge = nudge_of(s);
+            (nudge["mark"].clone(), nudge["mark_kinds"].clone())
+        }
+
+        /// Verdict news with nothing owed lights `news`, with its kind.
+        #[test]
+        fn verdict_news_with_nothing_owed_lights_the_news_mark() {
+            let s = live();
+            land_verdicts(&s, 2, 1, Utc::now() - chrono::Duration::hours(1));
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 0, "{status}");
+            assert_eq!(status["nudge"]["mark"], "news", "{status}");
+            assert_eq!(
+                status["nudge"]["mark_kinds"],
+                serde_json::json!(["verdicts_landed"])
+            );
+        }
+
+        /// While a decision is owed the badge takes the slot: never `news`.
+        #[test]
+        fn news_is_never_reported_while_decisions_are_owed() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            seed_entry(&s, ASK);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["nudge"]["mark"], "none", "{status}");
+        }
+
+        /// Paused, consent-held, signed out and unhealthy daemons never
+        /// report `news` or `ready`.
+        #[test]
+        fn closed_gates_light_no_mark() {
+            let at = Utc::now() - chrono::Duration::hours(1);
+
+            let paused = live();
+            land_verdicts(&paused, 1, 0, at);
+            assert!(
+                handle_request(&paused, &req("pause", serde_json::json!({})))
+                    .error
+                    .is_none()
+            );
+            assert_eq!(mark_of(&paused).0, "none");
+
+            let held = unchosen_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&held.store).unwrap();
+            held.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
+            land_verdicts(&held, 1, 0, at);
+            assert_eq!(mark_of(&held).0, "none");
+
+            let signed_out = shared();
+            signed_out.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
+            land_verdicts(&signed_out, 1, 0, at);
+            assert_eq!(mark_of(&signed_out).0, "none");
+
+            let unhealthy = live();
+            land_verdicts(&unhealthy, 1, 0, at);
+            unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(mark_of(&unhealthy).0, "unknown");
+
+            let idle_unhealthy = live();
+            seed_idle(&idle_unhealthy, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            idle_unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(mark_of(&idle_unhealthy).0, "unknown");
+        }
+
+        /// The mark clears only through `nudge_opened {verdicts_landed}`:
+        /// every other suggestion request, a switch on a notification kind
+        /// or on the suggestions, and plain reads leave it lit.
+        #[test]
+        fn only_opening_the_verdicts_clears_the_news_mark() {
+            let s = live();
+            land_verdicts(&s, 1, 1, Utc::now() - chrono::Duration::hours(1));
+            let others = [
+                ("status", serde_json::json!({})),
+                ("list_pending", serde_json::json!({})),
+                ("list_history", serde_json::json!({})),
+                ("get_settings", serde_json::json!({})),
+                ("nudge_opened", serde_json::json!({"kind": "idle_sessions"})),
+                (
+                    "nudge_opened",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+                ("set_suggestions_enabled", serde_json::json!({"on": false})),
+                (
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "verdicts_landed", "on": false}),
+                ),
+                (
+                    "set_notifications_enabled",
+                    serde_json::json!({"on": false}),
+                ),
+            ];
+            for (method, params) in others {
+                let _ = handle_request(&s, &req(method, params.clone()));
+                assert_eq!(
+                    mark_of(&s),
+                    (
+                        serde_json::json!("news"),
+                        serde_json::json!(["verdicts_landed"])
+                    ),
+                    "{method} {params}"
+                );
+            }
+            let opened = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            assert!(opened.error.is_none(), "{:?}", opened.error);
+            assert_eq!(
+                mark_of(&s),
+                (serde_json::json!("none"), serde_json::json!([]))
+            );
+        }
+
+        /// The news ages out `NEWS_MARK_TTL` after its newest verdict; the
+        /// card stays.
+        #[test]
+        fn the_news_mark_ages_out() {
+            let s = live();
+            land_verdicts(
+                &s,
+                1,
+                0,
+                Utc::now() - crate::daemon::nudge::NEWS_MARK_TTL - chrono::Duration::minutes(1),
+            );
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["mark"], "none", "{nudge}");
+            assert_eq!(nudge["lead"], "verdicts_landed", "{nudge}");
+        }
+
+        /// Its own switch turns the mark off, and publishes
+        /// `status_changed`.
+        #[test]
+        fn the_mark_switch_turns_the_mark_off() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_menu_bar_mark_enabled",
+                    serde_json::json!({"on": false}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(
+                mark_of(&s),
+                (serde_json::json!("none"), serde_json::json!([]))
+            );
+        }
+
+        /// Idle candidates under a lit badge report `ready`; muting the
+        /// idle-session kind or a "Not now" clears it, and so does the
+        /// candidate set emptying.
+        #[test]
+        fn idle_candidates_draw_the_halo_until_muted_declined_or_decided() {
+            let s = live();
+            s.settings.lock().unwrap().notify.idle_sessions = true;
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["nudge"]["mark"], "ready", "{status}");
+            assert_eq!(
+                status["nudge"]["mark_kinds"],
+                serde_json::json!(["idle_sessions"])
+            );
+
+            // Muted.
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "idle_sessions", "on": false}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert_eq!(mark_of(&s).0, "none");
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "idle_sessions", "on": true}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert_eq!(mark_of(&s).0, "ready");
+
+            // The candidate set empties (the idle session is dismissed)
+            // while another session, not idle, is still owed.
+            seed_entry(&s, ASK);
+            let dismissed = handle_request(
+                &s,
+                &req("dismiss", serde_json::json!({"entry_id": idle.to_string()})),
+            );
+            assert!(dismissed.error.is_none(), "{:?}", dismissed.error);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["idle_sessions"]["count"], 0, "{status}");
+            assert_eq!(status["nudge"]["mark"], "none", "{status}");
+
+            // A fresh candidate, then the in-app "Not now".
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 5);
+            assert_eq!(mark_of(&s).0, "ready");
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+            );
+            assert!(declined.error.is_none(), "{:?}", declined.error);
+            assert_eq!(mark_of(&s).0, "none");
         }
     }
 }

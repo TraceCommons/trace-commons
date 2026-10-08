@@ -179,6 +179,16 @@ old behaviour, because no application has shipped against `v1` yet. See
   are stored and reported now; the digest, the news mark and the
   re-engagement arbiter read them in later slices, so today no behaviour
   changes. See ["Notification settings"](#notification-settings).
+- **Nudge A3 (the news mark and the halo).** `status.nudge` gains `mark`
+  (`news`, `ready`, `none` or `unknown`) and `mark_kinds` (the kind labels
+  that lit it), both always present: the menu-bar icon state. `news` is a
+  hollow ring below paused, only while `decisions_owed` is 0, for verdict
+  news that is unacknowledged and younger than 72 hours; `ready` is a halo
+  around the badge, only while `decisions_owed` is above 0, for idle-session
+  candidates. No new method and no new event: the mark reads
+  `menu_bar_mark_enabled` and `notify.idle_sessions`, and clears the news
+  only through `nudge_opened {kind: "verdicts_landed"}` or by ageing out. See
+  ["The menu-bar mark"](#the-menu-bar-mark-statusnudgemark).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -663,7 +673,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "queue_depth": 0,
   "decisions_owed": 0,
   "unpurposed_traces": 0,
-  "nudge": { "state": "none", "lead": null },
+  "nudge": { "state": "none", "lead": null, "mark": "none", "mark_kinds": [] },
   "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
@@ -1036,12 +1046,12 @@ menu-bar panel -- if any. Labels, one count and one time; never a path, a
 folder label, an id or a title.
 
 ```json
-"nudge": { "state": "armed", "lead": "idle_sessions", "count": 2 }
-"nudge": { "state": "armed", "lead": "review_backlog", "count": 6 }
-"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 0, "since": "2026-10-07T09:30:00Z" }
-"nudge": { "state": "none", "lead": null }
-"nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z" }
-"nudge": { "state": "unknown", "lead": null }
+"nudge": { "state": "armed", "lead": "idle_sessions", "count": 2, "mark": "ready", "mark_kinds": ["idle_sessions"] }
+"nudge": { "state": "armed", "lead": "review_backlog", "count": 6, "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 0, "since": "2026-10-07T09:30:00Z", "mark": "news", "mark_kinds": ["verdicts_landed"] }
+"nudge": { "state": "none", "lead": null, "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z", "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": [] }
 ```
 
 - `state` is `armed`, `none` or `unknown`, always present. **A shell draws
@@ -1161,6 +1171,61 @@ the daemon state file. `unenroll` clears all of them, and returns the mark to
 unseeded so the next account's first poll records this Mac's cached history
 silently; a next account inherits none of this one's stamps or news.
 `suggestions_enabled` is a setting about this Mac and stays.
+
+#### The menu-bar mark (`status.nudge.mark`)
+
+Added in `trace_commons.daemon.v1_1` as two additive fields of `status.nudge`
+(nudge A3): `mark` and `mark_kinds`, both always present on a daemon that
+has them. `mark` is the menu-bar icon state the daemon computes; the shell
+decides where it draws, and it never replaces or hides a higher state.
+
+| `mark` | Means | Holds only while |
+|---|---|---|
+| `news` | Something new to look at, nothing to decide: a hollow ring in the badge's slot, below paused | `decisions_owed` is 0, every gate below is open, the history poll is fresh, and verdict news is waiting unacknowledged and its newest verdict is less than 72 hours old (DRAFT, owner decision 19) |
+| `ready` | Some of the decisions owed are idle sessions: a halo around the badge. The number is unchanged | `decisions_owed` is above 0, every gate below is open, `status.idle_sessions.count` is at least 1, `notify.idle_sessions` is on, and no in-app "Not now" for `idle_sessions` or `review_backlog` is in force |
+| `none` | Nothing is lit | otherwise, or a gate below is closed |
+| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set or `daily_budget.blocked`), or, with nothing owed, the history poll is stale (as for `state`) |
+
+- **Never both.** `news` needs `decisions_owed == 0` and `ready` needs it
+  above 0, so the two cannot hold together. When a decision becomes owed the
+  badge takes the slot and `news` goes dark; when the badge clears, the news
+  returns if it is still unacknowledged and inside its 72 hours.
+- **Gates.** `mark` is `none` while `paused`, while `consent_hold` is
+  non-null, while not `logged_in`, and while `menu_bar_mark_enabled` is off;
+  it is `unknown` while the daemon is unhealthy. It is never `news` or
+  `ready` under any of them. `suggestions_enabled` and the arming offer
+  govern the cards and the panel row, not the mark.
+- **Which switch mutes what.** The news mark has its own switch,
+  `menu_bar_mark_enabled`. `notify.verdicts_landed` governs verdict
+  *notifications* only: turning it off leaves the news mark lit, so a person
+  can keep the calm mark and silence notifications. The halo is the
+  exception the spec names: muting `notify.idle_sessions` clears it as well.
+- `mark_kinds` lists the kind labels that lit the mark, highest precedence
+  first, for the accessibility clause and the panel: `["verdicts_landed"]`
+  with `news`, `["idle_sessions"]` with `ready`, and `[]` with `none` or
+  `unknown`. Later revisions add `weekly_recap` and `insights_tip` as mark
+  kinds; a shell that meets a kind it does not know ignores that kind.
+
+**What clears it, by fact.** The news mark clears when its own action
+acknowledges it -- `nudge_opened {kind: "verdicts_landed"}`, sent from the
+History card's See history, the panel row's tap, or a verdict notification's
+See history or body click -- or when its newest verdict is 72 hours old. A
+later verdict re-arms it. No other request clears it: opening the panel or
+the window, reading `status`, a "Not now" for another kind, and switching a
+notification kind off all leave it as it is. The halo clears when the idle
+candidates are gone (each decided, kept, dismissed, written to again,
+expired, or its folder set to Never or armed), or on a mute or a "Not now" as
+above.
+
+**No event of its own.** `mark` changes with `status_changed` like the rest
+of `status.nudge`, but it can also change with nothing but time passing --
+the news ages out, or a session crosses the idle threshold -- and no event is
+published for that. A shell reads it with the rest of `status`.
+
+**Older daemons.** A daemon predating A3 sends no `mark`. A shell draws no
+ring and no halo for an absent `mark`, for `none` or for `unknown`: absent
+news is no news, and the badge, attention, unavailable and paused states keep
+their own fail-closed rules.
 
 #### `routing`
 
