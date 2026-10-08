@@ -730,6 +730,18 @@ extension DaemonData {
         public let privateInferenceOfferSeen: Bool?
         /// Whether in-app suggestions (upsell cards, panel row) are on.
         public let suggestionsEnabled: Bool?
+        /// "Notifications from Trace Commons", the master switch (upsell
+        /// A2). Decoded only; no screen draws it yet.
+        public let notificationsEnabled: Bool?
+        /// The menu-bar news mark and halo switch (upsell A2).
+        public let menuBarMarkEnabled: Bool?
+        /// One switch per notification kind (upsell A2).
+        public let notify: NotifyKinds?
+        /// The one-time History-card offer for verdict notifications, on an
+        /// install that predates the kind. Absent means no offer.
+        public let verdictsOfferPending: Bool?
+        /// The one-time Traces-card offer for idle-session notifications.
+        public let idleOfferPending: Bool?
         /// The listener's own report; never assumed running.
         public let privateInferenceState: PrivateInferenceState?
         /// `unset`, `off` or `watch` per tool. `unset` is never drawn as off.
@@ -756,6 +768,11 @@ extension DaemonData {
             case privateInference = "private_inference"
             case privateInferenceOfferSeen = "private_inference_offer_seen"
             case suggestionsEnabled = "suggestions_enabled"
+            case notificationsEnabled = "notifications_enabled"
+            case menuBarMarkEnabled = "menu_bar_mark_enabled"
+            case notify
+            case verdictsOfferPending = "verdicts_offer_pending"
+            case idleOfferPending = "idle_offer_pending"
             case privateInferenceState = "private_inference_state"
             case claudeSourceMode = "claude_source_mode"
             case codexSourceMode = "codex_source_mode"
@@ -766,6 +783,24 @@ extension DaemonData {
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
+    }
+
+    /// `get_settings.notify` (upsell A2): one switch per notification kind.
+    /// Decoded only. A kind a newer daemon adds is ignored here.
+    public struct NotifyKinds: Codable, Equatable, Sendable {
+        public let digest: Bool?
+        public let idleSessions: Bool?
+        public let verdictsLanded: Bool?
+        public let weeklyRecap: Bool?
+        public let insightsTip: Bool?
+
+        public enum CodingKeys: String, CodingKey, CaseIterable {
+            case digest
+            case idleSessions = "idle_sessions"
+            case verdictsLanded = "verdicts_landed"
+            case weeklyRecap = "weekly_recap"
+            case insightsTip = "insights_tip"
+        }
     }
 
     /// What `setSource` throws for a choice that is not an answer, sending

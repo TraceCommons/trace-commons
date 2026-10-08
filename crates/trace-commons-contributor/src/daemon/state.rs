@@ -26,6 +26,27 @@ use crate::config::{ConfigStore, DAEMON_STATE_FILE};
 
 pub const DAEMON_STATE_SCHEMA: &str = "trace_commons.daemon_state.v1";
 
+/// How long the attention log keeps an entry. Derived, not an owner
+/// decision: the longest window a cap counts over is one local ISO week
+/// (owner decision 4's `STANDALONE_PER_WEEK` and the per-kind weekly caps),
+/// and a week plus one day covers it from any local offset.
+pub const ATTENTION_LOG_RETENTION: chrono::Duration = chrono::Duration::days(8);
+
+/// Read the attention log entry by entry, dropping any this build cannot
+/// parse. See `DaemonState::attention_log`.
+fn readable_attention_entries<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<super::attention::AttentionEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(raw
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect())
+}
+
 /// What the daemon last shipped for a given session file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriorUpload {
@@ -213,6 +234,26 @@ pub struct DaemonState {
     /// cleared by `unenroll` (`clear_nudges`). Never a path.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub idle_announced: BTreeSet<uuid::Uuid>,
+    /// Upsell A2: every notification the arbiter announced, folded or
+    /// standalone, as kind label, route and time only -- the budget the
+    /// global and per-kind caps are counted against. Pruned to
+    /// [`ATTENTION_LOG_RETENTION`] by `record_attention` and
+    /// `prune_attention_log`. Cleared by `unenroll` (`clear_nudges`).
+    ///
+    /// An entry this build cannot read (a kind a newer build added, then a
+    /// downgrade) is dropped on load rather than refusing the whole file,
+    /// which would stop the daemon starting. That can only loosen the
+    /// budget for the week the entry would have counted in.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "readable_attention_entries"
+    )]
+    pub attention_log: Vec<super::attention::AttentionEntry>,
+    /// Upsell A2: when anything last notified -- the digest included -- for
+    /// `attention::MIN_GAP_ANY`. Cleared by `unenroll` (`clear_nudges`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_notified_at: Option<DateTime<Utc>>,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -248,6 +289,8 @@ impl DaemonState {
             verdicts_pending: None,
             verdicts_acked_through: None,
             idle_announced: BTreeSet::new(),
+            attention_log: Vec::new(),
+            last_notified_at: None,
             last_written: LastWritten::default(),
         }
     }
@@ -287,8 +330,9 @@ impl DaemonState {
     }
 
     /// Forget every in-app suggestion stamp, the verdict news with its
-    /// high-water mark, and the idle-session batching set: what `unenroll` calls so a next account inherits none
-    /// of this one's. The marks go back to unseeded, so the next account's
+    /// high-water mark, the idle-session batching set, and the attention log
+    /// with the last-notified stamp: what `unenroll` calls so a next account
+    /// inherits none of this one's stamps, news or notification budget. The marks go back to unseeded, so the next account's
     /// first poll seeds silently and the history cache this Mac keeps never
     /// replays as its news. Returns whether anything was there to forget, so
     /// the caller saves only when it must. Later upsell slices clear their
@@ -299,14 +343,43 @@ impl DaemonState {
             || self.verdict_marks_seeded
             || self.verdicts_pending.is_some()
             || self.verdicts_acked_through.is_some()
-            || !self.idle_announced.is_empty();
+            || !self.idle_announced.is_empty()
+            || !self.attention_log.is_empty()
+            || self.last_notified_at.is_some();
         self.nudges.clear();
         self.verdict_marks.clear();
         self.verdict_marks_seeded = false;
         self.verdicts_pending = None;
         self.verdicts_acked_through = None;
         self.idle_announced.clear();
+        self.attention_log.clear();
+        self.last_notified_at = None;
         had
+    }
+
+    /// Record one announcement (folded into a digest or standalone), stamp
+    /// `last_notified_at`, and prune the log. The caller saves.
+    pub fn record_attention(
+        &mut self,
+        kind: super::attention::Kind,
+        route: super::attention::Route,
+        now: DateTime<Utc>,
+    ) {
+        self.attention_log.push(super::attention::AttentionEntry {
+            kind,
+            at: now,
+            route,
+        });
+        self.last_notified_at = Some(self.last_notified_at.map_or(now, |was| was.max(now)));
+        self.prune_attention_log(now);
+    }
+
+    /// Drop log entries older than [`ATTENTION_LOG_RETENTION`] behind `now`.
+    /// An entry stamped after `now` is kept: a clock that went backwards may
+    /// only suppress (see `attention`'s module doc), so it must still count.
+    pub fn prune_attention_log(&mut self, now: DateTime<Utc>) {
+        let floor = now - ATTENTION_LOG_RETENTION;
+        self.attention_log.retain(|entry| entry.at >= floor);
     }
 
     /// Reset the daily volume counters when the UTC day has rolled over.
@@ -655,6 +728,8 @@ mod tests {
             "verdicts_pending",
             "verdicts_acked_through",
             "idle_announced",
+            "attention_log",
+            "last_notified_at",
         ] {
             assert!(written.get(key).is_none(), "{key}: {written}");
         }
@@ -701,5 +776,120 @@ mod tests {
         assert!(loaded.clear_nudges(), "a non-empty set reports a change");
         assert!(loaded.idle_announced.is_empty());
         assert!(!loaded.clear_nudges());
+    }
+
+    fn utc(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Upsell A2: the attention log (kind labels, routes and times only) and
+    /// the last-notified stamp survive a restart, spelled as the arbiter
+    /// spells its kinds, and `clear_nudges` (what `unenroll` calls) empties
+    /// both, so a next account never inherits this one's budget.
+    #[test]
+    fn the_attention_log_round_trips_by_label_and_clears_on_unenroll() {
+        use super::super::attention::{AttentionEntry, Kind, Route};
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let now = utc("2026-10-07T12:00:00Z");
+        for (kind, route) in [
+            (Kind::IdleSessions, Route::Folded),
+            (Kind::VerdictsLanded, Route::Standalone),
+        ] {
+            state.record_attention(kind, route, now);
+        }
+        assert_eq!(state.last_notified_at, Some(now));
+        state.save(&store).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(body["attention_log"][0]["kind"], "idle_sessions");
+        assert_eq!(body["attention_log"][0]["route"], "folded");
+        assert_eq!(body["attention_log"][1]["kind"], "verdicts_landed");
+        assert_eq!(body["attention_log"][1]["route"], "standalone");
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded, state);
+        assert_eq!(
+            loaded.attention_log[1],
+            AttentionEntry {
+                kind: Kind::VerdictsLanded,
+                at: now,
+                route: Route::Standalone
+            }
+        );
+        assert!(loaded.clear_nudges(), "a non-empty log reports a change");
+        assert!(loaded.attention_log.is_empty());
+        assert_eq!(loaded.last_notified_at, None);
+        assert!(!loaded.clear_nudges());
+
+        // The stamp alone is enough to report a change.
+        loaded.last_notified_at = Some(now);
+        assert!(loaded.clear_nudges());
+    }
+
+    /// Every arbiter kind serializes as its own label, so the file, the
+    /// wire and the logs spell a kind one way.
+    #[test]
+    fn every_kind_serializes_as_its_label() {
+        for kind in super::super::attention::Kind::ALL {
+            assert_eq!(serde_json::to_value(kind).unwrap(), kind.label());
+        }
+    }
+
+    /// Pruned to `ATTENTION_LOG_RETENTION` behind `now`, and never ahead of
+    /// it: an entry stamped after `now` (a clock that went backwards) is
+    /// kept, because it may only suppress.
+    #[test]
+    fn the_attention_log_is_pruned_to_its_retention_and_keeps_future_entries() {
+        use super::super::attention::{AttentionEntry, Kind, Route};
+        let now = utc("2026-10-20T12:00:00Z");
+        let mut state = DaemonState::new();
+        let too_old = now - ATTENTION_LOG_RETENTION - chrono::Duration::seconds(1);
+        let boundary = now - ATTENTION_LOG_RETENTION;
+        let future = now + chrono::Duration::days(30);
+        for when in [too_old, boundary, future] {
+            state.attention_log.push(AttentionEntry {
+                kind: Kind::WeeklyRecap,
+                at: when,
+                route: Route::Standalone,
+            });
+        }
+        state.prune_attention_log(now);
+        let kept: Vec<_> = state.attention_log.iter().map(|e| e.at).collect();
+        assert_eq!(kept, vec![boundary, future]);
+        assert_eq!(ATTENTION_LOG_RETENTION, chrono::Duration::days(8));
+
+        // `record_attention` prunes as it pushes.
+        state.record_attention(
+            Kind::IdleSessions,
+            Route::Folded,
+            now + chrono::Duration::days(1),
+        );
+        assert!(!state.attention_log.iter().any(|e| e.at == boundary));
+    }
+
+    /// A kind this build does not know (a newer build wrote it, then the
+    /// install was downgraded) is dropped from the log rather than refusing
+    /// the whole state file, which would stop the daemon starting.
+    #[test]
+    fn an_unknown_kind_in_the_attention_log_is_dropped_not_fatal() {
+        let (_d, store) = temp_store();
+        let mut v = serde_json::to_value(DaemonState::new()).unwrap();
+        v["attention_log"] = serde_json::json!([
+            {"kind": "future_kind", "at": "2026-10-07T12:00:00Z", "route": "standalone"},
+            {"kind": "idle_sessions", "at": "2026-10-07T12:00:00Z", "route": "folded"},
+            {"kind": "idle_sessions", "at": "2026-10-07T12:00:00Z", "route": "beamed"}
+        ]);
+        store
+            .write_daemon_file(DAEMON_STATE_FILE, v.to_string().as_bytes())
+            .unwrap();
+        let loaded = DaemonState::load(&store).expect("state still loads");
+        assert_eq!(loaded.attention_log.len(), 1);
+        assert_eq!(
+            loaded.attention_log[0].kind,
+            super::super::attention::Kind::IdleSessions
+        );
     }
 }

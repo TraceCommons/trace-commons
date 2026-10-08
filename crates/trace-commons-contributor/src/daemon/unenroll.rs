@@ -17,9 +17,11 @@
 //! which are not an enrollment.
 //!
 //! What also goes: the in-app suggestion ledger, the verdict news with its
-//! high-water marks and the idle-session batching set
-//! (`DaemonState::clear_nudges`), so a next account never inherits this
-//! one's "Not now"s, stamps, news or announced sessions. The marks return to
+//! high-water marks, the idle-session batching set, and the attention log
+//! with the last-notified stamp (`DaemonState::clear_nudges`), so a next
+//! account never inherits this one's "Not now"s, stamps, news, announced
+//! sessions or notification budget. The notification switches are settings
+//! about this Mac and stay. The marks return to
 //! unseeded, so the history cache this Mac keeps is seeded silently on the
 //! next account's first poll rather than replayed as its news.
 //!
