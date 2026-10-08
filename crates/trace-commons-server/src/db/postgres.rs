@@ -1755,6 +1755,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "account_trust_frontier_backfill",
         include_str!("../../../../migrations/V115__account_trust_frontier_backfill.sql"),
     ),
+    // V116 (spec 2026-10-08, Slice C) marks the trace_gate_decisions rows
+    // the pipeline's Settle writes: `source` and `pipeline_run_id`, both
+    // defaulted so main's writers are unchanged, one pipeline row per
+    // submission, and the gate driver's read of `source`.
+    (
+        116,
+        "pipeline_gate_decision_rows",
+        include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

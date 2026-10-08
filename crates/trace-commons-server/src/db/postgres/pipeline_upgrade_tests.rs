@@ -1553,3 +1553,188 @@ async fn v109_disables_v94_era_pending_legs(order: V109Order) {
         eprintln!("pipeline_upgrade_owner was kept: {error}");
     }
 }
+
+/// V116 (spec 2026-10-08, Slice C, C-D4): `trace_gate_decisions` gains
+/// `source` and `pipeline_run_id`, both defaulted so `main`'s writers are
+/// unchanged; the two must agree (a pipeline row names its run, a legacy row
+/// names none); one pipeline row at most per submission; and the gate
+/// driver may read `source`, which the credit-quality sweep filters on.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v116_adds_source_and_pipeline_run_id_with_defaults() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
+    let base = isolated_upgrade_database_url();
+    let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
+    let (base_name, query) = base_name
+        .split_once('?')
+        .map_or((base_name, String::new()), |(name, query)| {
+            (name, format!("?{query}"))
+        });
+    let name = format!("{base_name}_v116");
+    let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+        .await
+        .expect("connect to the isolated database");
+    tokio::spawn(async move { connection.await.expect("setup connection") });
+    setup
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    setup
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = format!("{prefix}/{name}{query}");
+    let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect upgrade admin");
+    let admin_connection =
+        tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    let last = MIGRATIONS
+        .iter()
+        .map(|(version, _, _)| *version)
+        .max()
+        .expect("a migration list");
+    assert!(last >= 116, "V116 is registered in the migration list");
+    apply_real_migrations_through(&mut admin, last).await;
+
+    let tenant = "upgrade-v116";
+    set_tenant(&admin, tenant).await;
+    let hash = |byte: &str| format!("sha256:{}", byte.repeat(64));
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    let submission_id = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[&tenant, &submission_id, &uuid::Uuid::new_v4(), &hash("d")],
+        )
+        .await
+        .unwrap();
+    // `main`'s column list, without the two new columns.
+    let insert = |source: Option<&'static str>, run: Option<uuid::Uuid>| {
+        let admin = &admin;
+        async move {
+            let decision_id = uuid::Uuid::new_v4();
+            let base_columns = "tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash";
+            let result = match source {
+                None => {
+                    admin
+                        .execute(
+                            &format!(
+                                "INSERT INTO trace_gate_decisions ({base_columns})
+                                 VALUES ($1,$2,$3,'v1','gv',1,0,true,1,'nn',true,'ee','aa')"
+                            ),
+                            &[&tenant, &decision_id, &submission_id],
+                        )
+                        .await
+                }
+                Some(source) => {
+                    admin
+                        .execute(
+                            &format!(
+                                "INSERT INTO trace_gate_decisions ({base_columns},
+                                     source, pipeline_run_id)
+                                 VALUES ($1,$2,$3,'v1','gv',1,0,true,1,'nn',true,'ee','aa',$4,$5)"
+                            ),
+                            &[&tenant, &decision_id, &submission_id, &source, &run],
+                        )
+                        .await
+                }
+            };
+            result.map(|_| decision_id)
+        }
+    };
+
+    // A legacy insert is unchanged and reads back as `legacy_gate` with no run.
+    let legacy = insert(None, None)
+        .await
+        .expect("main's insert is unchanged");
+    let row = admin
+        .query_one(
+            "SELECT source, pipeline_run_id FROM trace_gate_decisions
+              WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant, &legacy],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "legacy_gate");
+    assert_eq!(row.get::<_, Option<uuid::Uuid>>(1), None);
+    // A second legacy row for the same submission is still legal (`Cached`).
+    insert(None, None)
+        .await
+        .expect("main may write more than one row per submission");
+
+    let check_violation = |error: tokio_postgres::Error| {
+        assert_eq!(error.code(), Some(&SqlState::CHECK_VIOLATION), "{error}");
+    };
+    check_violation(
+        insert(Some("pipeline_settle"), None)
+            .await
+            .expect_err("a pipeline row names its run"),
+    );
+    check_violation(
+        insert(Some("legacy_gate"), Some(uuid::Uuid::new_v4()))
+            .await
+            .expect_err("a legacy row names no run"),
+    );
+    check_violation(
+        insert(Some("other"), Some(uuid::Uuid::new_v4()))
+            .await
+            .expect_err("only the two sources exist"),
+    );
+
+    insert(Some("pipeline_settle"), Some(uuid::Uuid::new_v4()))
+        .await
+        .expect("one pipeline row for the submission");
+    let error = insert(Some("pipeline_settle"), Some(uuid::Uuid::new_v4()))
+        .await
+        .expect_err("a second pipeline row for the submission is refused");
+    assert_eq!(error.code(), Some(&SqlState::UNIQUE_VIOLATION), "{error}");
+
+    let index: String = admin
+        .query_one(
+            "SELECT indexdef FROM pg_indexes
+              WHERE tablename = 'trace_gate_decisions'
+                AND indexname = 'trace_gate_decisions_one_pipeline_row'",
+            &[],
+        )
+        .await
+        .expect("the partial unique index exists")
+        .get(0);
+    assert!(index.starts_with("CREATE UNIQUE INDEX"), "{index}");
+    assert!(index.contains("(tenant_id, submission_id)"), "{index}");
+    assert!(index.contains("'pipeline_settle'"), "{index}");
+
+    let readable: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_gate_decisions',
+                                         'source', 'SELECT')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(readable, "the gate driver reads `source`");
+
+    drop(admin);
+    admin_connection.await.expect("the admin connection closes");
+    setup
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .expect("drop the test's own database");
+}
