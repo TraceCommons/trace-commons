@@ -3400,7 +3400,10 @@ fn wire_inference_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_inference_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.inference_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_INFERENCE_DISCLOSURE,
             copy::WITNESS_INFERENCE_CAPTURE_NOTE,
             copy::WITNESS_INFERENCE_SCOPE_NOTE,
@@ -3408,7 +3411,7 @@ fn wire_inference_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_INFERENCE_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
@@ -3518,7 +3521,10 @@ fn wire_token_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_token_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.token_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_TOKEN_DISCLOSURE,
             copy::WITNESS_TOKEN_CAPTURE_NOTE,
             copy::WITNESS_TOKEN_SCOPE_NOTE,
@@ -3526,7 +3532,7 @@ fn wire_token_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_TOKEN_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
