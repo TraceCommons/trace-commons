@@ -573,6 +573,36 @@ mod usearch_pipeline_index {
         );
     }
 
+    /// A crash between the usearch flush and the first manifest write of a
+    /// namespace leaves a usearch file no manifest describes; the start
+    /// refuses it rather than serve a namespace whose entries it cannot name.
+    #[test]
+    fn an_orphaned_usearch_file_refuses_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = tenant(1);
+        {
+            let index = open(dir.path()).unwrap();
+            index
+                .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+                .unwrap();
+        }
+        let files = |suffix: &str| {
+            std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.to_string_lossy().ends_with(suffix))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(files(".usearch").len(), 1);
+        for manifest in files(".manifest.json") {
+            std::fs::remove_file(manifest).unwrap();
+        }
+        assert_eq!(
+            open(dir.path()).err().unwrap().to_string(),
+            "pipeline_vector_index_manifest_mismatch"
+        );
+    }
+
     /// Every write persists before it returns, and returns well within the
     /// 60 s index write fence margin (measured with a generous bound).
     #[test]

@@ -1059,6 +1059,8 @@ mod usearch_pipeline_index {
 
     const MANIFEST_SCHEMA: &str = "trace_commons.pipeline_vector_index_manifest.v1";
     const MANIFEST_SUFFIX: &str = ".manifest.json";
+    /// The extension of the usearch implementation's per-namespace files.
+    const USEARCH_SUFFIX: &str = ".usearch";
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
     struct ManifestEntry {
@@ -1142,17 +1144,21 @@ mod usearch_pipeline_index {
                 .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
             let index: Arc<dyn VectorIndex> = Arc::new(usearch);
             let mut namespaces = BTreeMap::new();
+            let mut usearch_files = 0_usize;
             let listing = std::fs::read_dir(root)
                 .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
             for entry in listing {
                 let path = entry
                     .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?
                     .path();
-                if !path
+                let name = path
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .is_some_and(|name| name.ends_with(MANIFEST_SUFFIX))
-                {
+                    .unwrap_or_default();
+                if name.ends_with(USEARCH_SUFFIX) {
+                    usearch_files += 1;
+                }
+                if !name.ends_with(MANIFEST_SUFFIX) {
                     continue;
                 }
                 let bytes = std::fs::read(&path).map_err(|_| mismatch())?;
@@ -1176,6 +1182,13 @@ mod usearch_pipeline_index {
                         entries: manifest.entries,
                     },
                 );
+            }
+            // Every usearch file this index writes has a manifest (the
+            // manifest is written right after the flush that creates the
+            // file). One without -- a crash between the two on a namespace's
+            // first write -- holds entries no manifest names.
+            if usearch_files > namespaces.len() {
+                return Err(mismatch());
             }
             Ok(Self {
                 root: root.to_path_buf(),
