@@ -1541,4 +1541,15 @@ async fn v109_disables_v94_era_pending_legs(order: V109Order) {
         .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
         .await
         .expect("drop the test's own database");
+    // PR #1283 review, finding 8: the owner role is cluster-wide, so it is
+    // dropped too. Its objects and its per-database setting went with the
+    // database. A role a crashed earlier run left with objects in another
+    // database cannot be dropped; that is reported, not failed, since the
+    // test's own work is done and the next run reuses the role.
+    if let Err(error) = setup
+        .batch_execute("DROP ROLE IF EXISTS pipeline_upgrade_owner")
+        .await
+    {
+        eprintln!("pipeline_upgrade_owner was kept: {error}");
+    }
 }
