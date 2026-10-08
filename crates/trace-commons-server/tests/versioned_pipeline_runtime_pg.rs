@@ -386,6 +386,39 @@ async fn stale_lease_cannot_commit_after_reclaim() {
     );
 }
 
+/// PR #1283 review, finding 7: the index-write state is set on a
+/// transaction held across the index write, so its lease check reads the
+/// database clock (`clock_timestamp()`), as the Score commit's does. A
+/// lease that ended after the transaction began is stale; `NOW()`, the
+/// transaction's start, would still call it live.
+#[tokio::test]
+async fn the_index_write_state_lease_check_reads_the_database_clock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("index-write-clock-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    // The transaction began inside the lease; the lease ends while it is
+    // open.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let stale = PgPipelineStore::set_index_write_state_on_tx(&tx, &claimed, "pending")
+        .await
+        .expect_err("a lease that ended during the transaction is stale");
+    assert!(
+        stale.to_string().contains("pipeline lease is stale"),
+        "{stale}"
+    );
+    tx.rollback().await.unwrap();
+}
+
 /// The token-only fence. `record_lease_expired` is fenced by the lease
 /// token alone, with no expiry predicate (unlike every other lease-checked
 /// write) -- but once another claim has moved the run onto a new token, the
@@ -24882,6 +24915,23 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             "CREATE POLICY pipeline_control_test_open ON pipeline_runs
                  USING (true) WITH CHECK (true);",
         ),
+        // PR #1283 review, finding 6: a column list or a `WHEN` condition
+        // keeps the trigger's `tgtype` and lets most changes through.
+        (
+            "column-scoped trigger",
+            "DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 BEFORE UPDATE OF trace_id ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "WHEN-conditioned trigger",
+            "DROP TRIGGER phase_outcomes_reject_delete ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_delete
+                 BEFORE DELETE ON phase_outcomes
+                 FOR EACH ROW WHEN (false)
+                 EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
     ] {
         let tx = owner.transaction().await.unwrap();
         tx.batch_execute(change)
@@ -26866,6 +26916,100 @@ async fn the_sweep_goes_on_after_one_failed_follow_up() {
         index_invalidation_of(&backend, &tenant, failing.run_id).await,
         Some(("revoked".to_string(), "pending".to_string()))
     );
+}
+
+/// PR #1283 review, finding 4: follow-ups that fail on every pass do not
+/// hold the sweep's window. Each pass resumes after the last submission the
+/// previous pass read, wrapping to the start, so a lost follow-up behind a
+/// full window of failing ones is reached on the next pass, and the failing
+/// ones are still tried again.
+#[tokio::test]
+async fn failing_follow_ups_do_not_starve_the_sweep() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-starve-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up-starve";
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    // The sweep reads in id order: the two lowest fail on every pass and
+    // fill a window of two.
+    runs.sort_by_key(|run| run.submission_id);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in &runs {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(owner);
+
+    let faults = [
+        InvalidationFault::install(&tenant, runs[0].submission_id).await,
+        InvalidationFault::install(&tenant, runs[1].submission_id).await,
+    ];
+    let first = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    let second = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    for fault in faults {
+        fault.remove().await;
+    }
+    assert!(
+        first.is_err(),
+        "the first window holds only failing follow-ups"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, runs[2].run_id).await,
+        Some(("revoked".to_string(), "pending".to_string())),
+        "the second pass resumes after the first one's window"
+    );
+    assert_eq!(
+        second.expect("the follow-up behind the failing ones succeeded"),
+        1
+    );
+    for run in &runs[..2] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            None
+        );
+    }
+    // The cursor wraps: the failing follow-ups are tried again, and once
+    // they can succeed they are recovered.
+    let mut recovered = 0;
+    for _ in 0..2 {
+        recovered += service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+            .await
+            .unwrap();
+    }
+    assert_eq!(recovered, 2);
+    for run in &runs {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            Some(("revoked".to_string(), "pending".to_string()))
+        );
+    }
 }
 
 /// Merge review M4: a listed tenant with no pipeline run has nothing to
