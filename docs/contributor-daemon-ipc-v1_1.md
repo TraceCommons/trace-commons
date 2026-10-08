@@ -152,6 +152,14 @@ old behaviour, because no application has shipped against `v1` yet. See
   suggestion's own action) and `set_suggestions_enabled` (the switch, which
   `set_settings` also accepts as `suggestions_enabled`). Each publishes
   `status_changed`. See ["`status.nudge`"](#statusnudge).
+- **Upsell S4 (verdict news).** `status.nudge` gains a second kind,
+  `verdicts_landed` (U2), with `accepted`, `held`, `final` and `since`, and
+  can read `unknown` while the history poll is stale. A new event,
+  `history_changed` (counts only), is published when the daemon's own
+  history poll finds verdicts that are new against its high-water mark.
+  `nudge_opened {kind: "verdicts_landed"}` acknowledges them;
+  `nudge_decline` refuses that kind with `nudge-kind-not-declinable`. See
+  ["`status.nudge`"](#statusnudge) and ["Events"](#events).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -607,8 +615,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
-| `nudge_decline` | `kind` (**required**: a suggestion kind label, today only `review_backlog`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
-| `nudge_opened` | `kind` (**required**, as above); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_decline` | `kind` (**required**: a suggestion kind label with a "Not now", today only `review_backlog`; `verdicts_landed` is refused with `nudge-kind-not-declinable`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_opened` | `kind` (**required**: `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
@@ -955,6 +963,7 @@ folder label, an id or a title.
 
 ```json
 "nudge": { "state": "armed", "lead": "review_backlog", "count": 6 }
+"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 0, "since": "2026-10-07T09:30:00Z" }
 "nudge": { "state": "none", "lead": null }
 "nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z" }
 "nudge": { "state": "unknown", "lead": null }
@@ -965,18 +974,49 @@ folder label, an id or a title.
   daemon predating it). `unknown` is never read as "nothing to suggest", and
   absent is never read as `none`.
 - `lead` is always present: a kind label when `state` is `armed`, `null`
-  otherwise. Today the only kind is `review_backlog` (U1). Later revisions add
-  kinds ahead of and behind it; a shell that meets a `lead` it does not know
-  draws nothing.
+  otherwise. Today the kinds are `review_backlog` (U1) and, behind it,
+  `verdicts_landed` (U2). Later revisions add kinds ahead of them; a shell
+  that meets a `lead` it does not know draws nothing.
 - `count` is present only with a lead: for `review_backlog` it is
-  `unpurposed_traces`. It is for the card's sentence, never a badge number,
-  and it never moves `decisions_owed`.
+  `unpurposed_traces`; for `verdicts_landed` it is `accepted + held +
+  final`. It is for the card's sentence, never a badge number, and it never
+  moves `decisions_owed`.
+- `accepted`, `held`, `final` and `since` are present exactly when `lead` is
+  `verdicts_landed`: how many submissions newly reached `accepted`, newly
+  reached `quarantined` (held for privacy review; reported beside accepted
+  ones, DRAFT, owner decision 2), and newly carry a final credit figure, and
+  when the first of that news was found. Counts and a time only: no credit
+  figure, no label, no submission id.
 - `cooldown_until` is present only while an in-app "Not now" silences a kind
-  that would otherwise lead, and says when that lapses.
+  that would otherwise lead and nothing else leads, and says when that
+  lapses.
 
 **When `review_backlog` leads.** `unpurposed_traces` is at least 5 (DRAFT,
 owner decision 10), every gate below is open, the arming offer is absent, and
 no "Not now" is in force.
+
+**When `verdicts_landed` leads.** `review_backlog` does not lead (below the
+threshold, or silenced by a "Not now"), every gate below is open, the arming
+offer is absent, the history poll is fresh, and verdict news is waiting
+unacknowledged. The news is found by the daemon's own history poll
+(`refresh_history`), which diffs the history cache against a high-water mark
+only the daemon writes, per submission: newly `accepted`, newly
+`quarantined`, newly carrying final credit. So a verdict the CLI's `history`
+command or an upload already wrote into the shared cache is still news, once.
+Withdrawn and revoked submissions are never counted, nor are submissions from
+a folder that now resolves to Never (or any folder while a Never override is
+in force); `rejected` is not news. The first poll after an upgrade, or after
+`unenroll`, records the mark silently, so history that already existed never
+reads as news. Unacknowledged news accumulates across polls. It has no
+"Not now": it is information, not an ask.
+
+**Stale history is `unknown`.** Once `review_backlog` does not lead, `state`
+is `unknown` (with no lead) when the last successful history poll is older
+than twice `history_poll_secs` (DRAFT, spec section 3), when no poll has
+succeeded yet, or when the last poll is stamped after the current time. A
+failed poll serves the cache as it was, so a stale cache is never news, and
+"no news" from it is not known either. `review_backlog` does not depend on
+history and still leads while history is stale.
 
 **Gates, checked first.** `state` is `none`, with no lead and no count,
 whenever any of these holds: `paused`; `consent_hold` is non-null; not
@@ -997,8 +1037,13 @@ calls this; it writes nothing.
 
 **`nudge_opened {kind}`.** Sent only from the suggestion's own action (the
 card's Review, the panel row's tap), never because a card or row was shown.
-It records when, and does not retire the suggestion: `review_backlog` retires
-by fact, when the count falls below the threshold.
+It records when. For `review_backlog` it does not retire the suggestion:
+`review_backlog` retires by fact, when the count falls below the threshold.
+For `verdicts_landed` it acknowledges the news: the waiting news is cleared
+and the daemon records that it was acknowledged through the latest poll that
+added to it, so a verdict found by a later poll is news again.
+`nudge_decline {kind: "verdicts_landed"}` is refused with `bad_params` /
+`nudge-kind-not-declinable` and writes and publishes nothing.
 
 Both requests refuse a missing or non-string `kind` with `bad_params` /
 `nudge-kind-required`, a kind this daemon does not know with `bad_params` /
@@ -1014,15 +1059,19 @@ publishes `status_changed` when it changes. Default `true` (DRAFT, owner
 decision 14), including for a settings file written before the key existed.
 It governs the in-app cards and the panel row only.
 
-**What it is computed from, and when.** The suggestion ledger, the switch and
-`queue_ttl_days` are snapshotted before the policy and queue section of
+**What it is computed from, and when.** The suggestion ledger, the verdict
+news, the time of the last history poll, the switch, `queue_ttl_days` and
+`history_poll_secs` are snapshotted before the policy and queue section of
 `status`, each in its own short lock; `unpurposed_traces` and whether the
 arming offer is present are read inside that section, under the same guards
 as `decisions_owed`. Reading `status` never writes the ledger.
 
-**Lifetime.** The ledger (kind labels and times only) lives in the daemon
-state file. `unenroll` clears it, so a next account inherits none of this
-one's stamps; `suggestions_enabled` is a setting about this Mac and stays.
+**Lifetime.** The ledger (kind labels and times only), the verdict high-water
+mark (flags per submission id) and the verdict news (counts and times) live in
+the daemon state file. `unenroll` clears all of them, and returns the mark to
+unseeded so the next account's first poll records this Mac's cached history
+silently; a next account inherits none of this one's stamps or news.
+`suggestions_enabled` is a setting about this Mac and stays.
 
 #### `routing`
 
@@ -6573,12 +6622,13 @@ relaxation of origin/CORS/CSP controls.
 |---|---|---|
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
-| `status_changed` | pause/resume, a lapsed timed pause, or health changed | `{}` |
+| `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, or a history poll found verdict news or made a stale `status.nudge` readable again (a routine poll publishes nothing) | `{}` |
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
+| `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (upsell S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
 | `reengage_due` | **opt-in**: a standalone re-engagement notification is due; sent only to a subscriber that named it in `subscribe`'s `accepts` | not published yet: the name and its opt-in rule are reserved here; the payload, `{kind, title, text, primary: {label, target}, secondary: {label}}`, is documented with the change that first publishes it |
 
 `inference_call_added` is published where the daemon already reads IronWire's
@@ -6600,6 +6650,15 @@ no poll of its own, so a call is announced on the first tick after it lands
 - Rows without an id (a proxy too old to expose one) are never announced.
 - At most 64 per tick, the newest kept, so a burst cannot push a subscriber
   into `resync_required`. Re-read `tool_destinations` for exact counts.
+
+`history_changed` is published by the daemon's own history poll, which runs
+on `history_poll_secs` and about a minute and a half after an upload. Its
+counts are what that one poll found, by the same rule as
+`status.nudge`'s `verdicts_landed` (see "`status.nudge`"): no credit figure,
+no label, no submission id. A shell that shows history should re-read
+`list_history`; one that shows the suggestion re-reads `status`, which the
+`status_changed` that follows tells it to do. A shell that does not know the
+event ignores it, as with every event it does not know.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call

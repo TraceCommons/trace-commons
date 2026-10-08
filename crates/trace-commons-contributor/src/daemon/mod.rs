@@ -1732,10 +1732,78 @@ async fn refresh_history(
     let previous = run_blocking(|| history::HistoryCache::load(&shared.store).unwrap_or_default());
     let records = history::join(&receipts, &updates, &labels, &previous, now);
     history::HistoryCache::save(&shared.store, &records)?;
+    record_history_poll(shared, &records, now)
+}
+
+/// Stamp a successful history poll and advance the verdict news (upsell
+/// U2) from the cache it produced.
+///
+/// The diff is against `DaemonState::verdict_marks`, never against the cache
+/// this poll replaced: the CLI's `history` and `note_uploads` write that
+/// cache too, so a verdict can already be in it, and it must still be news
+/// once. The first poll after an upgrade or `unenroll` seeds the marks
+/// silently. What lands is added to `verdicts_pending` and published as
+/// `history_changed` (counts only), then `status_changed`. `status_changed`
+/// also goes out when the previous poll was stale, because `status.nudge`
+/// reads the poll's age; a routine poll publishes nothing.
+///
+/// Locks: policy then queue, for the Never set, released; then settings
+/// alone; then state alone. Logs nothing.
+fn record_history_poll(
+    shared: &ipc::DaemonShared,
+    records: &[history::HistoryRecord],
+    now: chrono::DateTime<Utc>,
+) -> Result<()> {
+    let never = {
+        let policy = shared.policy.lock().expect("policy lock");
+        let queue = shared.queue.lock().expect("queue lock");
+        let keys = policy::known_keys(&policy, queue.all().iter().map(|e| e.project_key.clone()));
+        nudge::NeverProjects::from_policy(&policy, &keys)
+    };
+    let history_poll_secs = shared
+        .settings
+        .lock()
+        .expect("settings lock")
+        .history_poll_secs;
     let mut state = shared.state.lock().expect("state lock");
+    // Whether `status.nudge` could read U2 before this poll; if not, this
+    // poll changes what it says even when nothing lands.
+    let was_fresh = nudge::history_is_fresh(state.last_history_poll_at, history_poll_secs, now);
+    let poll = nudge::after_history_poll(
+        state.verdict_marks_seeded,
+        &state.verdict_marks,
+        state.verdicts_pending.as_ref(),
+        records,
+        &never,
+        now,
+    );
+    state.verdict_marks = poll.marks;
+    state.verdict_marks_seeded = true;
+    state.verdicts_pending = poll.pending;
     state.last_history_poll_at = Some(now);
-    state.save(&shared.store)?;
-    Ok(())
+    // In memory first, which is what every reader consults; a failed save is
+    // reported to the caller after the news is published, and the next poll
+    // persists it.
+    let saved = state.save(&shared.store);
+    drop(state);
+    let landed_any = poll.landed.is_some();
+    if let Some(landed) = poll.landed {
+        shared.publish(
+            ipc::EVENT_HISTORY_CHANGED,
+            serde_json::json!({
+                "newly_accepted": landed.newly_accepted,
+                "newly_held": landed.newly_held,
+                "newly_final": landed.newly_final,
+            }),
+        );
+    }
+    // News changes `status.nudge`, and so does a poll that turns a stale
+    // (`unknown`) one readable. A routine poll changes neither, and stays
+    // silent, so a shell that predates this sees no new events from it.
+    if landed_any || !was_fresh {
+        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+    saved
 }
 
 /// Refresh this contributor's line on the public community roster, on its own
@@ -1950,6 +2018,204 @@ fn signal_stream() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Upsell S4: `record_history_poll` and the verdict high-water mark.
+    mod verdict_news {
+        use super::*;
+        use crate::daemon::history::{
+            HistoryRecord, STATUS_ACCEPTED, STATUS_QUARANTINED, STATUS_SUBMITTED,
+        };
+
+        const ASK: &str = "/tmp/verdict-ask";
+        const NEVER: &str = "/tmp/verdict-never";
+
+        fn at(minutes: i64) -> chrono::DateTime<Utc> {
+            chrono::DateTime::parse_from_rfc3339("2026-10-07T12:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc)
+                + chrono::Duration::minutes(minutes)
+        }
+
+        fn rec(n: u8, key: &str, status: &str) -> HistoryRecord {
+            HistoryRecord {
+                submission_id: uuid::Uuid::from_bytes([n; 16]),
+                submitted_at: at(-60),
+                project_id: policy::project_id_for(key),
+                project_label: "label-must-not-leak".to_string(),
+                source: "claude".to_string(),
+                session_hash: format!("h{n}"),
+                status: status.to_string(),
+                consent_scopes: vec![],
+                credit_points_pending: 1.0,
+                credit_points_final: None,
+                explanations: vec![],
+                last_refreshed_at: Some(at(0)),
+                withdrawn_at: None,
+                revoked_at: None,
+                approved_unattended: Some(false),
+                approved_verdict: None,
+                uploaded_bytes: None,
+            }
+        }
+
+        fn fixture() -> (tempfile::TempDir, ipc::DaemonShared) {
+            let (dir, store) = crate::config::tests_support::temp_store();
+            let shared = ipc::DaemonShared::load(store).unwrap();
+            (dir, shared)
+        }
+
+        fn drain(
+            rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+        ) -> Vec<(String, serde_json::Value)> {
+            let mut out = Vec::new();
+            while let Ok(e) = rx.try_recv() {
+                out.push((e.event.clone(), e.data));
+            }
+            out
+        }
+
+        fn history_events(events: &[(String, serde_json::Value)]) -> Vec<serde_json::Value> {
+            events
+                .iter()
+                .filter(|(name, _)| name == ipc::EVENT_HISTORY_CHANGED)
+                .map(|(_, data)| data.clone())
+                .collect()
+        }
+
+        /// First run fires nothing; a verdict the CLI already saved into the
+        /// cache still fires once, with counts only, followed by
+        /// `status_changed`; the same cache again fires nothing.
+        #[test]
+        fn the_first_poll_is_silent_and_a_cached_verdict_fires_once() {
+            let (_d, s) = fixture();
+            let mut rx = s.events.subscribe();
+
+            record_history_poll(&s, &[rec(1, ASK, STATUS_ACCEPTED)], at(0)).unwrap();
+            assert!(
+                history_events(&drain(&mut rx)).is_empty(),
+                "seeding is silent"
+            );
+            {
+                let state = s.state.lock().unwrap();
+                assert!(state.verdict_marks_seeded);
+                assert_eq!(state.verdicts_pending, None);
+                assert_eq!(state.last_history_poll_at, Some(at(0)));
+            }
+
+            // The CLI joined a held verdict for a second submission into the
+            // shared cache; the daemon reads the same cache back.
+            let cache = [
+                rec(1, ASK, STATUS_ACCEPTED),
+                rec(2, ASK, STATUS_QUARANTINED),
+            ];
+            record_history_poll(&s, &cache, at(30)).unwrap();
+            let events = drain(&mut rx);
+            assert_eq!(
+                history_events(&events),
+                vec![serde_json::json!({
+                    "newly_accepted": 0,
+                    "newly_held": 1,
+                    "newly_final": 0,
+                })]
+            );
+            let names: Vec<&str> = events.iter().map(|(n, _)| n.as_str()).collect();
+            let h = names.iter().position(|n| *n == ipc::EVENT_HISTORY_CHANGED);
+            let st = names.iter().rposition(|n| *n == ipc::EVENT_STATUS_CHANGED);
+            assert!(h.is_some() && st > h, "status_changed follows: {names:?}");
+            for (_, data) in &events {
+                let text = data.to_string();
+                assert!(!text.contains("label-must-not-leak"), "{text}");
+                assert!(!text.contains(&uuid::Uuid::from_bytes([2; 16]).to_string()));
+            }
+
+            record_history_poll(&s, &cache, at(60)).unwrap();
+            assert!(history_events(&drain(&mut rx)).is_empty(), "never twice");
+
+            // Persisted: a restarted daemon has the marks and the news.
+            let reloaded = state::DaemonState::load(&s.store).unwrap();
+            assert!(reloaded.verdict_marks_seeded);
+            assert_eq!(reloaded.verdict_marks.len(), 2);
+            assert_eq!(
+                reloaded
+                    .verdicts_pending
+                    .map(|d| (d.newly_held, d.newest_at)),
+                Some((1, at(30)))
+            );
+        }
+
+        /// A Never folder's verdicts give 0 while an Ask-me folder's, in
+        /// the same poll, count; the Never record's mark still advances, so
+        /// setting the folder back later does not replay it.
+        #[test]
+        fn a_never_folders_verdicts_give_nothing() {
+            let (_d, s) = fixture();
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(NEVER, policy::ProjectMode::Ignore, at(0))
+                .unwrap();
+            record_history_poll(
+                &s,
+                &[
+                    rec(1, NEVER, STATUS_SUBMITTED),
+                    rec(2, ASK, STATUS_SUBMITTED),
+                ],
+                at(0),
+            )
+            .unwrap();
+            let mut rx = s.events.subscribe();
+            record_history_poll(
+                &s,
+                &[rec(1, NEVER, STATUS_ACCEPTED), rec(2, ASK, STATUS_ACCEPTED)],
+                at(30),
+            )
+            .unwrap();
+            assert_eq!(
+                history_events(&drain(&mut rx)),
+                vec![serde_json::json!({
+                    "newly_accepted": 1,
+                    "newly_held": 0,
+                    "newly_final": 0,
+                })]
+            );
+            let state = s.state.lock().unwrap();
+            assert_eq!(
+                state.verdicts_pending.as_ref().map(|d| d.newly_accepted),
+                Some(1)
+            );
+            assert!(
+                state.verdict_marks[&uuid::Uuid::from_bytes([1; 16]).to_string()].accepted,
+                "the Never record's mark advanced silently"
+            );
+        }
+
+        /// `status_changed` goes out when news lands or when the poll turns
+        /// a stale `status.nudge` readable, not on every routine poll, so an
+        /// older shell sees no new chatter.
+        #[test]
+        fn a_routine_poll_publishes_nothing() {
+            let (_d, s) = fixture();
+            let poll_secs = s.settings.lock().unwrap().history_poll_secs as i64;
+            let mut rx = s.events.subscribe();
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], at(0)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED),
+                "the first poll turns unknown into readable"
+            );
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], at(30)).unwrap();
+            assert!(drain(&mut rx).is_empty(), "a routine poll is silent");
+            // After a gap long enough to go stale, the next poll speaks.
+            let later = at(30) + chrono::Duration::seconds(poll_secs * 3);
+            record_history_poll(&s, &[rec(1, ASK, STATUS_SUBMITTED)], later).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED)
+            );
+        }
+    }
 
     /// Only rule 3's refusals cancel account admission: the account was
     /// refused, its allowance is spent, or it is not linked.

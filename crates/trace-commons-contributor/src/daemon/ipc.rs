@@ -220,6 +220,9 @@ pub const ERR_NUDGE_KIND_REQUIRED: &str = "nudge-kind-required";
 pub const ERR_NUDGE_KIND_UNRECOGNIZED: &str = "nudge-kind-unrecognized";
 /// A `subject` for a kind that takes none (no kind takes one yet).
 pub const ERR_NUDGE_SUBJECT_UNRECOGNIZED: &str = "nudge-subject-unrecognized";
+/// `nudge_decline` for a kind with no "Not now": `verdicts_landed` is news,
+/// not an ask.
+pub const ERR_NUDGE_KIND_NOT_DECLINABLE: &str = "nudge-kind-not-declinable";
 /// `approve` carried a correction without a `partly` or `failed` outcome.
 ///
 /// The shells only show the field for those two verdicts, and the same rule
@@ -574,6 +577,11 @@ pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 /// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
 /// per tick, newest kept.
 pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
+/// Verdict news landed (upsell U2): `refresh_history` found submissions that
+/// newly reached accepted, held for privacy review or final credit, against
+/// the daemon's own high-water mark. Counts only: `{newly_accepted,
+/// newly_held, newly_final}`. Always followed by `status_changed`.
+pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
 
 /// A standalone re-engagement notification (upsell spec section 5, "Knowing
 /// a standalone will render"). Opt-in: written only to a connection whose
@@ -1926,12 +1934,22 @@ impl DaemonShared {
     /// returning, so `status_value` can call this before its policy and
     /// queue section without nesting either under them.
     pub(crate) fn nudge_snapshot(&self) -> NudgeSnapshot {
-        let ledger = self.state.lock().expect("state lock").nudges.clone();
+        let (ledger, last_history_poll_at, verdicts_pending) = {
+            let state = self.state.lock().expect("state lock");
+            (
+                state.nudges.clone(),
+                state.last_history_poll_at,
+                state.verdicts_pending.clone(),
+            )
+        };
         let settings = self.settings.lock().expect("settings lock");
         NudgeSnapshot {
             ledger,
             suggestions_enabled: settings.suggestions_enabled,
             queue_ttl_days: settings.queue_ttl_days,
+            last_history_poll_at,
+            history_poll_secs: settings.history_poll_secs,
+            verdicts_pending,
         }
     }
 
@@ -2000,6 +2018,9 @@ impl DaemonShared {
                 arming_offer_present,
                 unpurposed_traces: Some(unpurposed_traces),
                 queue_ttl_days: nudge_snapshot.queue_ttl_days,
+                last_history_poll_at: nudge_snapshot.last_history_poll_at,
+                history_poll_secs: nudge_snapshot.history_poll_secs,
+                verdicts_pending: nudge_snapshot.verdicts_pending,
             },
             &nudge_snapshot.ledger,
             now,
@@ -2948,7 +2969,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
-                    "managed_changed",
+                    "managed_changed", EVENT_HISTORY_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -4870,6 +4891,11 @@ pub(crate) struct NudgeSnapshot {
     pub ledger: std::collections::BTreeMap<String, super::nudge::NudgeLedger>,
     pub suggestions_enabled: bool,
     pub queue_ttl_days: i64,
+    /// U2: when history was last read back, the poll interval that ages
+    /// it, and the verdicts landed and not yet acknowledged.
+    pub last_history_poll_at: Option<chrono::DateTime<Utc>>,
+    pub history_poll_secs: u64,
+    pub verdicts_pending: Option<super::nudge::VerdictDelta>,
 }
 
 /// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
@@ -4885,6 +4911,14 @@ fn nudge_value(lead: &super::nudge::NudgeLead) -> serde_json::Value {
     }
     if let Some(until) = lead.cooldown_until {
         value["cooldown_until"] = serde_json::json!(until);
+    }
+    // U2's breakdown: counts and the time the news began, never a credit
+    // figure.
+    if let Some(v) = lead.verdicts {
+        value["accepted"] = serde_json::Value::from(v.accepted);
+        value["held"] = serde_json::Value::from(v.held);
+        value["final"] = serde_json::Value::from(v.final_credit);
+        value["since"] = serde_json::json!(v.since);
     }
     value
 }
@@ -4916,14 +4950,26 @@ fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -
     if req.params.get("subject").is_some_and(|v| !v.is_null()) {
         return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_SUBJECT_UNRECOGNIZED);
     }
+    if matches!(stamp, NudgeStamp::Declined) && !kind.declinable() {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_NOT_DECLINABLE);
+    }
     let key = super::nudge::ledger_key(kind, None);
     let now = Utc::now();
     let mut state = shared.state.lock().expect("state lock");
     let before = state.nudges.get(&key).cloned();
+    let pending_before = state.verdicts_pending.clone();
+    let acked_before = state.verdicts_acked_through;
     let entry = state.nudges.entry(key.clone()).or_default();
     match stamp {
         NudgeStamp::Declined => entry.declined_at = Some(now),
         NudgeStamp::Opened => entry.opened_at = Some(now),
+    }
+    // U2's own action acknowledges the news: through the newest poll that
+    // added to it, so a verdict found after that is still news.
+    if matches!(stamp, NudgeStamp::Opened) && kind == super::nudge::NudgeKind::VerdictsLanded {
+        if let Some(news) = state.verdicts_pending.take() {
+            state.verdicts_acked_through = Some(news.newest_at);
+        }
     }
     if state.save(&shared.store).is_err() {
         // Fail closed: a stamp that did not reach disk is not kept in
@@ -4936,6 +4982,8 @@ fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -
                 state.nudges.remove(&key);
             }
         }
+        state.verdicts_pending = pending_before;
+        state.verdicts_acked_through = acked_before;
         return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
     }
     drop(state);
@@ -17195,12 +17243,155 @@ mod tests {
         const ASK: &str = "/tmp/nudge-ask";
 
         /// A live enrollment: config with chosen scopes and a device key, so
-        /// `status.logged_in` is true.
+        /// `status.logged_in` is true, that has read history back just now,
+        /// so U2 is readable (not `unknown`).
         fn live() -> DaemonShared {
             let s = enrolled_shared();
             crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
             assert!(s.logged_in());
+            s.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
             s
+        }
+
+        /// Verdicts landed and unacknowledged, as `refresh_history` leaves
+        /// them.
+        fn land_verdicts(s: &DaemonShared, accepted: u32, held: u32, at: chrono::DateTime<Utc>) {
+            s.state.lock().unwrap().verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+                newly_accepted: accepted,
+                newly_held: held,
+                newly_final: 0,
+                credit_final_delta: 0.0,
+                since: at,
+                newest_at: at,
+            });
+        }
+
+        /// U2 on `status.nudge`: the lead, a total count, the breakdown and
+        /// `since`; never a credit figure, a label or an id.
+        #[test]
+        fn landed_verdicts_lead_on_status_with_counts_only() {
+            let s = live();
+            let at = Utc::now() - chrono::Duration::hours(1);
+            land_verdicts(&s, 2, 1, at);
+            let nudge = nudge_of(&s);
+            let since: chrono::DateTime<Utc> =
+                serde_json::from_value(nudge["since"].clone()).unwrap();
+            assert_eq!(since, at);
+            let mut keys: Vec<&str> = nudge
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "accepted", "count", "final", "held", "lead", "since", "state"
+                ],
+                "{nudge}"
+            );
+            assert_eq!(nudge["state"], "armed");
+            assert_eq!(nudge["lead"], "verdicts_landed");
+            assert_eq!(nudge["count"], 3);
+            assert_eq!(nudge["accepted"], 2);
+            assert_eq!(nudge["held"], 1);
+            assert_eq!(nudge["final"], 0);
+
+            // The backlog leads first, and the breakdown goes with U2.
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "review_backlog");
+            assert!(nudge.get("accepted").is_none(), "{nudge}");
+        }
+
+        /// A stale or missing history poll reads `unknown`, whatever is
+        /// pending.
+        #[test]
+        fn a_stale_history_poll_reads_unknown() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            s.state.lock().unwrap().last_history_poll_at =
+                Some(Utc::now() - chrono::Duration::days(1));
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({"state": "unknown", "lead": null})
+            );
+            s.state.lock().unwrap().last_history_poll_at = None;
+            assert_eq!(nudge_of(&s)["state"], "unknown");
+        }
+
+        /// `nudge_opened {verdicts_landed}` acknowledges through the news's
+        /// newest poll, clears it, persists, and publishes `status_changed`.
+        #[test]
+        fn opening_verdicts_acknowledges_and_clears_them() {
+            let s = live();
+            let at = Utc::now() - chrono::Duration::minutes(10);
+            land_verdicts(&s, 1, 1, at);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("opened answers"),
+                serde_json::json!({"opened": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({"state": "none", "lead": null})
+            );
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert_eq!(reloaded.verdicts_pending, None);
+            assert_eq!(reloaded.verdicts_acked_through, Some(at));
+            assert!(
+                reloaded.nudges[&ledger_key(NudgeKind::VerdictsLanded, None)]
+                    .opened_at
+                    .is_some()
+            );
+        }
+
+        /// U2 is news, not an ask: it has no "Not now", and a decline of it
+        /// is refused by label and writes nothing.
+        #[test]
+        fn verdicts_cannot_be_declined() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_NUDGE_KIND_NOT_DECLINABLE);
+            assert!(!saw_status_changed(&mut rx));
+            assert!(s.state.lock().unwrap().nudges.is_empty());
+            assert_eq!(nudge_of(&s)["lead"], "verdicts_landed");
+        }
+
+        /// `hello` advertises the new event.
+        #[test]
+        fn hello_lists_history_changed() {
+            let s = live();
+            let hello = handle_request(&s, &req("hello", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert!(
+                hello["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e == EVENT_HISTORY_CHANGED),
+                "{hello}"
+            );
         }
 
         /// `n` previewed, undecided entries in an Ask-me folder.
