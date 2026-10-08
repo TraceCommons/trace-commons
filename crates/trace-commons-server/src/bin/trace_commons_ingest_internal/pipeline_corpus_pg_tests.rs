@@ -116,7 +116,7 @@ const PACKAGE_KEY_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID";
 /// the run's check results, the staging directory the attestations are written
 /// to, the ids of the checks the run accepted (comma separated), the PKCS#8
 /// key and its id, and the maximum age the signer gives each result.
-const CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
+pub(super) const CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
 const CHECK_ATTESTATION_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR";
 const CHECK_IDS_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_IDS";
 const CHECK_SIGNING_KEY_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH";

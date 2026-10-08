@@ -65,7 +65,7 @@ use trace_commons_server::versioned_pipeline_product::PipelineProductStore;
 use trace_commons_server::versioned_pipeline_qualification::{PipelineCheckEmitter, is_safe_label};
 
 use super::pipeline_corpus_pg_tests::{
-    ARTIFACT_ROOT_VAR, TEST_MASTER_KEY_VAR, sha256_bytes, write_atomically,
+    ARTIFACT_ROOT_VAR, CHECK_RESULT_DIR_VAR, TEST_MASTER_KEY_VAR, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
     LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
@@ -106,7 +106,8 @@ impl CompareFixture {
 struct CompareCorpusReader {
     reader: BufReader<std::fs::File>,
     partition: &'static str,
-    position: u64,
+    /// The number of lines that were read.
+    lines: u64,
     digest: sha2::Sha256,
     line: Vec<u8>,
 }
@@ -117,7 +118,7 @@ impl CompareCorpusReader {
         Ok(Self {
             reader: BufReader::new(file),
             partition,
-            position: 0,
+            lines: 0,
             digest: sha2::Sha256::new(),
             line: Vec::new(),
         })
@@ -131,6 +132,9 @@ impl CompareCorpusReader {
             .read_until(b'\n', &mut self.line)
             .map_err(|_| "compare_corpus_read_failed")?;
         self.digest.update(&self.line);
+        if read > 0 {
+            self.lines += 1;
+        }
         Ok(read > 0)
     }
 
@@ -138,14 +142,15 @@ impl CompareCorpusReader {
         if !self.read_line()? {
             return Ok(None);
         }
-        let position = self.position;
-        self.position += 1;
         match serde_json::from_slice::<CompareFixture>(&self.line) {
             Ok(fixture) if fixture.is_valid() => Ok(Some(fixture)),
             _ => {
+                // The line number in this file, from 1. It is not the
+                // `position` of a record, which counts through the two
+                // partitions.
                 eprintln!(
-                    "compare_corpus_line_invalid partition={} position={position}",
-                    self.partition
+                    "compare_corpus_line_invalid partition={} line={}",
+                    self.partition, self.lines
                 );
                 Err("compare_corpus_line_invalid")
             }
@@ -153,9 +158,18 @@ impl CompareCorpusReader {
     }
 
     /// The digest of the whole file; reads the lines that are left.
-    fn finish(mut self) -> Result<String, &'static str> {
+    fn finish(self) -> Result<String, &'static str> {
+        self.finish_with_lines().map(|(digest, _)| digest)
+    }
+
+    /// The digest of the whole file and the number of its lines; reads the
+    /// lines that are left.
+    fn finish_with_lines(mut self) -> Result<(String, u64), &'static str> {
         while self.read_line()? {}
-        Ok(format!("sha256:{}", hex::encode(self.digest.finalize())))
+        Ok((
+            format!("sha256:{}", hex::encode(self.digest.finalize())),
+            self.lines,
+        ))
     }
 }
 
@@ -1860,6 +1874,72 @@ fn create_output(path: &Path) -> Result<std::io::BufWriter<std::fs::File>, &'sta
         .map_err(output_failed)
 }
 
+/// The report path at the start of the run, so that the run does not find
+/// a directory that it cannot write after the last trace. It creates the
+/// directory, proves that a file can be created in it, and removes a report
+/// that exists already: a run that fails before it writes its report then
+/// leaves no report of an earlier run beside its new records file.
+fn prepare_report_path(path: &Path) -> Result<(), &'static str> {
+    let parent = path.parent().ok_or("compare_output_write_failed")?;
+    std::fs::create_dir_all(parent).map_err(output_failed)?;
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err("compare_output_write_failed"),
+    }
+    // Removed at the drop.
+    tempfile::NamedTempFile::new_in(parent).map_err(output_failed)?;
+    Ok(())
+}
+
+/// What `PipelineCheckEmitter::emit_pass_from_env` refuses after the last
+/// trace, examined at the start of the run with no write: a check result
+/// environment that is not complete or not valid, and a result of
+/// `check_id` that exists already.
+fn check_result_preflight(check_id: &str) -> Result<(), String> {
+    if PipelineCheckEmitter::from_env()?.is_none() {
+        return Ok(());
+    }
+    let dir = std::env::var(CHECK_RESULT_DIR_VAR)
+        .map_err(|_| "pipeline_check_environment_invalid".to_string())?;
+    if Path::new(&dir)
+        .join(format!("{check_id}.result.json"))
+        .exists()
+    {
+        return Err("pipeline_check_already_emitted".to_string());
+    }
+    Ok(())
+}
+
+/// The verdict of a run. The order is fixed: a pair that loses the alignment
+/// and a refused pair are also unexplained, and the more exact label must
+/// win.
+///
+/// 1. `failure`: the label that the loop kept (a driver error, or
+///    `COMPARISON_ALIGNMENT_LABEL`).
+/// 2. A refused receipt (PC-D19), for each run, also a partial one.
+/// 3. An unexplained difference.
+/// 4. For a run that is not partial: a gate branch with no evidence.
+fn run_verdict(
+    failure: Option<&'static str>,
+    summary: &ComparisonSummary,
+    partial: bool,
+) -> Result<(), &'static str> {
+    if let Some(label) = failure {
+        return Err(label);
+    }
+    if summary.refused_total() != 0 {
+        return Err(COMPARISON_REFUSED_LABEL);
+    }
+    if summary.unexplained_total() != 0 {
+        return Err(COMPARISON_UNEXPLAINED_LABEL);
+    }
+    if !partial && !summary.branch_gaps().is_empty() {
+        return Err(COMPARISON_BRANCH_LABEL);
+    }
+    Ok(())
+}
+
 /// What the run keeps from one trace to the next. Nothing here grows with
 /// the number of traces: the summary holds counts and a bounded list, and
 /// the records go to the file.
@@ -1872,11 +1952,13 @@ struct CompareRun {
     records: std::io::BufWriter<std::fs::File>,
     /// The SHA-256 of the bytes that `records` got.
     records_digest: sha2::Sha256,
-    /// The optional timing file. It is not part of the report or of a digest.
+    /// The optional timing file. It is not part of the report or of a
+    /// digest, so its first write error ends the timing and not the run.
     timing: Option<std::io::BufWriter<std::fs::File>>,
     /// PC-D20: the position of the pair at which the run stopped.
     alignment_lost_position: Option<u64>,
-    /// The probes of the last trace, for the check of the report.
+    /// The probes of the last trace that was driven, for the check of the
+    /// report.
     probes: Option<Probes>,
 }
 
@@ -1887,25 +1969,42 @@ impl CompareRun {
         config: &CompareRunConfig,
         calibration: std::time::Duration,
     ) -> Result<Self, &'static str> {
-        let timing = match &config.timing_path {
-            Some(path) => {
-                let mut timing = create_output(path)?;
-                let line = serde_json::json!({ "calibration_seconds": calibration.as_secs_f64() });
-                writeln!(timing, "{line}").map_err(output_failed)?;
-                timing.flush().map_err(output_failed)?;
-                Some(timing)
-            }
-            None => None,
-        };
-        Ok(Self {
+        let mut run = Self {
             summary: ComparisonSummary::default(),
             compared: 0,
             records: create_output(&config.records_path)?,
             records_digest: sha2::Sha256::new(),
-            timing,
+            timing: None,
             alignment_lost_position: None,
             probes: None,
-        })
+        };
+        if let Some(path) = &config.timing_path {
+            match create_output(path) {
+                Ok(timing) => {
+                    run.timing = Some(timing);
+                    run.write_timing(
+                        serde_json::json!({ "calibration_seconds": calibration.as_secs_f64() }),
+                    );
+                }
+                Err(_) => eprintln!("compare_timing_write_failed"),
+            }
+        }
+        Ok(run)
+    }
+
+    /// One line of the timing file. The first error prints one label line
+    /// and drops the writer, and the run continues.
+    fn write_timing(&mut self, line: serde_json::Value) {
+        let Some(timing) = &mut self.timing else {
+            return;
+        };
+        if writeln!(timing, "{line}")
+            .and_then(|()| timing.flush())
+            .is_err()
+        {
+            eprintln!("compare_timing_write_failed");
+            self.timing = None;
+        }
     }
 
     /// The loop body: one trace through the two sides, the guard for its two
@@ -1922,40 +2021,45 @@ impl CompareRun {
         partition: &'static str,
     ) -> Result<(), &'static str> {
         let position = self.compared;
-        let pair = compare_pair(app, &fixture, partition, position).await?;
-        check_record_values(&pair.baseline)?;
-        check_record_values(&pair.candidate)?;
-        let result = compare_records(&pair.baseline, &pair.candidate);
-        self.summary
-            .observe(&pair.baseline, &pair.candidate, &result);
+        let Pair {
+            action,
+            baseline,
+            candidate,
+            probes,
+            timing,
+            ..
+        } = compare_pair(app, &fixture, partition, position).await?;
+        // At once: an error below must not leave the probes of the trace
+        // before for the check of the report.
+        self.probes = Some(probes);
+        check_record_values(&baseline)?;
+        check_record_values(&candidate)?;
+        let result = compare_records(&baseline, &candidate);
+        self.summary.observe(&baseline, &candidate, &result);
         self.compared += 1;
-        for record in [&pair.baseline, &pair.candidate] {
+        for record in [&baseline, &candidate] {
             let mut line = record_bytes(record);
             line.push(b'\n');
             self.records.write_all(&line).map_err(output_failed)?;
             self.records_digest.update(&line);
         }
         self.records.flush().map_err(output_failed)?;
-        if let Some(timing) = &mut self.timing {
-            let gate = pair.baseline.gate.as_ref().or(pair.candidate.gate.as_ref());
-            let line = serde_json::json!({
+        if self.timing.is_some() {
+            let gate = baseline.gate.as_ref().or(candidate.gate.as_ref());
+            self.write_timing(serde_json::json!({
                 "position": position,
                 "chunk_count": gate.map(|gate| gate.total_chunk_count),
-                "baseline_receipt_ms": pair.timing.baseline_receipt_ms,
-                "baseline_gate_ms": pair.timing.baseline_gate_ms,
-                "candidate_receipt_ms": pair.timing.candidate_receipt_ms,
-                "candidate_wait_ms": pair.timing.candidate_wait_ms,
-                "reads_ms": pair.timing.reads_ms,
-            });
-            writeln!(timing, "{line}").map_err(output_failed)?;
-            timing.flush().map_err(output_failed)?;
+                "baseline_receipt_ms": timing.baseline_receipt_ms,
+                "baseline_gate_ms": timing.baseline_gate_ms,
+                "candidate_receipt_ms": timing.candidate_receipt_ms,
+                "candidate_wait_ms": timing.candidate_wait_ms,
+                "reads_ms": timing.reads_ms,
+            }));
         }
         // baseline-old-path: PC-D18. Each call and each read of this trace is
         // complete, and the next baseline receipt did not start.
         clear_baseline_derived(app)?;
-        let lost = alignment_lost(pair.action, &pair.baseline, &pair.candidate);
-        self.probes = Some(pair.probes);
-        if lost {
+        if alignment_lost(action, &baseline, &candidate) {
             self.alignment_lost_position = Some(position);
             return Err(COMPARISON_ALIGNMENT_LABEL);
         }
@@ -1967,7 +2071,9 @@ impl CompareRun {
 /// old gate path and through the pipeline, in the order of the files. The
 /// run writes two records for each trace and one report. It fails when the
 /// two sides differ, and the report that it wrote before names each
-/// difference. A check result is emitted only for a full run with no skew.
+/// difference. The report is written before the app stops, so a failed stop
+/// does not remove it. A check result is emitted only for a full run with no
+/// skew.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "the implementation of `pipeline.py compare`: run it through that command"]
 async fn pipeline_compare_run() {
@@ -1987,21 +2093,34 @@ async fn pipeline_compare_run() {
         "compare_database_url_missing"
     );
     // 1a. The two corpus files are the files of the pin, before the first
-    // trace: a streamed read with no parse.
+    // trace: a streamed read with no parse. The manifest counts their lines.
     let pin = read_compare_manifest(&config.manifest).unwrap_or_else(fail);
     let partitions = [
         ("bootstrap", &config.bootstrap),
         ("holdout", &config.holdout),
     ];
     let pinned_digest = |partition: &str| &pin.digests[&format!("{partition}_corpus")];
+    let mut corpus_lines = 0;
     for (partition, path) in partitions {
-        let digest = CompareCorpusReader::open(partition, path)
-            .and_then(CompareCorpusReader::finish)
+        let (digest, lines) = CompareCorpusReader::open(partition, path)
+            .and_then(CompareCorpusReader::finish_with_lines)
             .unwrap_or_else(fail);
         assert!(
             digest == *pinned_digest(partition),
             "compare_corpus_digest_mismatch"
         );
+        corpus_lines += lines;
+    }
+    assert!(
+        corpus_lines == pin.trace_count,
+        "compare_trace_count_mismatch"
+    );
+    // What the end of the run needs, examined now: the report path, and the
+    // check result environment when this run can emit a result (item 10).
+    prepare_report_path(&config.report_path).unwrap_or_else(fail);
+    // baseline-old-path: the skew.
+    if config.skew.is_none() && config.limit.is_none_or(|limit| limit >= pin.trace_count) {
+        check_result_preflight(&config.check_id).unwrap_or_else(|label| panic!("{label}"));
     }
 
     // 2. The floors, from the full bootstrap partition (also with a limit).
@@ -2037,7 +2156,9 @@ async fn pipeline_compare_run() {
     let mut run = CompareRun::open(&config, calibration).unwrap_or_else(fail);
 
     // 5. Each trace, in the order of the two files, until the limit. The
-    // first error ends the loop, and the run keeps its label.
+    // first error ends the loop. The run prints its label at once, because
+    // a later panic (the app stop, for example) would hide it, and keeps it
+    // for the verdict.
     let mut readers = partitions
         .map(|(partition, path)| CompareCorpusReader::open(partition, path).unwrap_or_else(fail));
     let mut failure = None;
@@ -2049,6 +2170,7 @@ async fn pipeline_compare_run() {
                 Err(label) => Err(label),
             };
             if let Err(label) = step {
+                eprintln!("{label}");
                 failure = Some(label);
                 break 'partitions;
             }
@@ -2066,19 +2188,16 @@ async fn pipeline_compare_run() {
                 "compare_corpus_digest_mismatch"
             );
         }
-        // The manifest counts the traces that the two files hold.
         let expected = config
             .limit
             .map_or(pin.trace_count, |limit| limit.min(pin.trace_count));
-        assert!(run.compared == expected, "compare_manifest_invalid");
+        assert!(run.compared == expected, "compare_trace_count_mismatch");
     }
 
-    // 7. Stop the app.
-    let package = app.package.clone();
-    app.shutdown().await;
-
-    // 8. The report, before each check of step 9: a failed run leaves a
-    // report that names its differences.
+    // 8. The report, before the app stop and before the verdict: a run that
+    // fails, also in the app stop, leaves a report that names its
+    // differences. The tokens do not depend on a trace, so each report is
+    // checked for them.
     let records_digest = format!("sha256:{}", hex::encode(run.records_digest.finalize()));
     let partial = run.compared < pin.trace_count;
     let report = comparison_report(
@@ -2087,7 +2206,7 @@ async fn pipeline_compare_run() {
             trace_count: pin.trace_count,
             partial,
             pin_digests: &pin.digests,
-            package: &package,
+            package: &app.package,
             floors,
             skew: config.skew.as_deref(),
             alignment_lost_position: run.alignment_lost_position,
@@ -2099,35 +2218,24 @@ async fn pipeline_compare_run() {
     let mut report_bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&report)
         .expect("the report serialises");
     report_bytes.push(b'\n');
+    for token in app.tenants.tokens() {
+        assert!(!holds(&report_bytes, token), "compare_probe_in_report");
+    }
     if let Some(probes) = &run.probes {
         probes.check(&report_bytes, "compare_probe_in_report");
     }
     write_atomically(&config.report_path, &report_bytes);
 
-    // 9. The order is fixed. A pair that loses the alignment and a refused
-    // pair are also unexplained, and the more exact label must win.
-    if let Some(label) = failure {
-        panic!("{label}");
-    }
-    assert!(
-        run.summary.refused_total() == 0,
-        "{COMPARISON_REFUSED_LABEL}"
-    );
-    assert!(
-        run.summary.unexplained_total() == 0,
-        "{COMPARISON_UNEXPLAINED_LABEL}"
-    );
-    if partial {
-        return;
-    }
-    assert!(
-        run.summary.branch_gaps().is_empty(),
-        "{COMPARISON_BRANCH_LABEL}"
-    );
+    // 7. Stop the app.
+    let package = app.package.clone();
+    app.shutdown().await;
+
+    // 9. The verdict.
+    run_verdict(failure, &run.summary, partial).unwrap_or_else(fail::<()>);
 
     // 10. A check result only for a full run with no skew.
     // baseline-old-path: the skew.
-    if config.skew.is_some() {
+    if partial || config.skew.is_some() {
         return;
     }
     let permitted: u64 = report["permitted_counts"]
@@ -3766,6 +3874,147 @@ fn an_unsafe_record_value_is_refused() {
         });
         assert_eq!(check_record_values(&record), UNSAFE, "{event_type:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests of the verdict of the run.
+// ---------------------------------------------------------------------------
+
+/// The two records of one trace: `full_record` with `change` applied to the
+/// two sides.
+fn verdict_pair(change: impl Fn(&mut ComparisonRecord)) -> (ComparisonRecord, ComparisonRecord) {
+    let mut baseline = full_record();
+    let mut candidate = full_record();
+    candidate.side = ComparisonSide::Candidate;
+    change(&mut baseline);
+    change(&mut candidate);
+    (baseline, candidate)
+}
+
+/// A summary of `pairs`, each compared with `compare_records`.
+fn summary_of(pairs: &[(ComparisonRecord, ComparisonRecord)]) -> ComparisonSummary {
+    let mut summary = ComparisonSummary::default();
+    for (baseline, candidate) in pairs {
+        summary.observe(baseline, candidate, &compare_records(baseline, candidate));
+    }
+    summary
+}
+
+/// A receipt that the side did not accept (PC-D19).
+fn refuse(record: &mut ComparisonRecord) {
+    record.receipt_code = 429;
+    record.terminal = false;
+    record.privacy_risk = None;
+    record.privacy_basis.clear();
+    record.admission = AdmissionLabel::Refused;
+    unscore(record);
+}
+
+/// A trace that the gate did not see.
+fn unscore(record: &mut ComparisonRecord) {
+    record.scored = false;
+    record.gate = None;
+    record.member = false;
+    record.member_chunks.clear();
+    record.credit_events.clear();
+}
+
+#[test]
+fn a_kept_label_wins_over_a_refused_pair() {
+    let summary = summary_of(&[verdict_pair(refuse)]);
+    assert_eq!(summary.refused_total(), 2);
+    for label in ["compare_http_failed", COMPARISON_ALIGNMENT_LABEL] {
+        for partial in [true, false] {
+            assert_eq!(run_verdict(Some(label), &summary, partial), Err(label));
+        }
+    }
+    // A kept label fails a run whose pairs are all equal, too.
+    let equal = summary_of(&[verdict_pair(|_| {})]);
+    assert_eq!(equal.unexplained_total(), 0);
+    assert_eq!(
+        run_verdict(Some("compare_database_failed"), &equal, true),
+        Err("compare_database_failed")
+    );
+}
+
+#[test]
+fn a_refused_pair_that_is_unexplained_is_reported_as_refused() {
+    let summary = summary_of(&[verdict_pair(refuse)]);
+    // Two refused records are not terminal, so the pair is unexplained too.
+    assert_eq!(summary.unexplained_total(), 1);
+    for partial in [true, false] {
+        assert_eq!(
+            run_verdict(None, &summary, partial),
+            Err("comparison_receipt_refused")
+        );
+    }
+    // One refused side is sufficient.
+    let (baseline, mut candidate) = verdict_pair(|_| {});
+    refuse(&mut candidate);
+    let one_side = summary_of(&[(baseline, candidate)]);
+    assert_eq!(one_side.refused_total(), 1);
+    assert_eq!(
+        run_verdict(None, &one_side, true),
+        Err("comparison_receipt_refused")
+    );
+}
+
+#[test]
+fn an_unexplained_pair_fails_the_run() {
+    let (baseline, mut candidate) = verdict_pair(|_| {});
+    candidate.admission = AdmissionLabel::Quarantine;
+    let summary = summary_of(&[(baseline, candidate)]);
+    assert_eq!(summary.refused_total(), 0);
+    assert_eq!(summary.unexplained_total(), 1);
+    for partial in [true, false] {
+        assert_eq!(
+            run_verdict(None, &summary, partial),
+            Err("comparison_has_unexplained_differences")
+        );
+    }
+}
+
+#[test]
+fn a_branch_gap_fails_only_a_full_run() {
+    // One pair that passed the two gates and is a member: the three `false`
+    // branches have no evidence.
+    let passed = verdict_pair(|_| {});
+    let summary = summary_of(std::slice::from_ref(&passed));
+    assert_eq!(summary.unexplained_total(), 0);
+    assert_eq!(
+        summary.branch_gaps(),
+        [
+            "quality_passed_false",
+            "novelty_passed_false",
+            "member_false"
+        ]
+    );
+    assert_eq!(
+        run_verdict(None, &summary, false),
+        Err("comparison_gate_branch_not_exercised")
+    );
+    assert_eq!(run_verdict(None, &summary, true), Ok(()));
+
+    // A second pair that failed the two gates gives the other three branches.
+    let failed = verdict_pair(|record| {
+        let gate = record.gate.as_mut().unwrap();
+        gate.quality_passed = false;
+        gate.novelty_passed = false;
+        record.member = false;
+        record.member_chunks.clear();
+        record.credit_events.clear();
+    });
+    let complete = summary_of(&[passed, failed]);
+    assert!(complete.branch_gaps().is_empty());
+    assert_eq!(run_verdict(None, &complete, false), Ok(()));
+
+    // A run with no scored trace has each gap.
+    let empty = summary_of(&[verdict_pair(unscore)]);
+    assert_eq!(empty.unexplained_total(), 0);
+    assert_eq!(
+        run_verdict(None, &empty, false),
+        Err("comparison_gate_branch_not_exercised")
+    );
 }
 
 fn prose_steps(text: &str) -> Vec<TraceStep> {
