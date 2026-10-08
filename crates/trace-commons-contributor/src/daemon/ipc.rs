@@ -561,6 +561,109 @@ pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 /// per tick, newest kept.
 pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 
+/// A standalone re-engagement notification (upsell spec section 5, "Knowing
+/// a standalone will render"). Opt-in: written only to a connection whose
+/// `subscribe` named it in `accepts`, so an older shell, which sends no
+/// `accepts`, never receives a frame it cannot draw.
+pub const EVENT_REENGAGE_DUE: &str = "reengage_due";
+
+/// Events a subscriber receives only after naming them in `subscribe`'s
+/// `accepts`. Every other event goes to every subscriber, as it always has.
+pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE];
+
+/// Whether `event` is withheld from a subscriber that did not accept it.
+pub fn event_is_opt_in(event: &str) -> bool {
+    OPT_IN_EVENTS.contains(&event)
+}
+
+/// `subscribe` carried an `accepts` that is not an array of strings.
+pub const ERR_SUBSCRIBE_ACCEPTS_INVALID: &str = "subscribe-accepts-invalid";
+
+/// `subscribe`'s optional `accepts`: which [`OPT_IN_EVENTS`] this
+/// subscriber can render.
+///
+/// `Ok(None)` when `params` has no `accepts` (or it is `null`), which is
+/// every shell written before it existed: such a subscriber receives no
+/// opt-in event, exactly as today. Names this daemon does not know are
+/// dropped rather than refused, so a newer shell can declare a later event
+/// to an older daemon; ordinary event names are dropped too, since every
+/// subscriber already receives them. Anything other than an array of
+/// strings is refused, fail closed.
+fn subscribe_accepts(params: &serde_json::Value) -> Result<Option<Vec<&'static str>>, ()> {
+    let raw = match params.get("accepts") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(raw)) => raw,
+        Some(_) => return Err(()),
+    };
+    let mut accepted = Vec::new();
+    for name in raw {
+        let name = name.as_str().ok_or(())?;
+        if let Some(known) = OPT_IN_EVENTS.iter().find(|e| **e == name) {
+            if !accepted.contains(known) {
+                accepted.push(*known);
+            }
+        }
+    }
+    Ok(Some(accepted))
+}
+
+/// Live socket subscribers per opt-in event they accepted. Shared between
+/// [`DaemonShared`] and every [`RendererDeclaration`], which is what lets a
+/// declaration retract itself when its connection ends.
+#[derive(Default)]
+pub(crate) struct RendererCounts(Mutex<std::collections::BTreeMap<&'static str, usize>>);
+
+impl RendererCounts {
+    fn count(&self, event: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(event)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// One connection's `accepts`, counted for as long as it lives. Dropped
+/// when the connection ends, however it ends, or when the same connection
+/// subscribes again, so the count can never outlive the subscriber.
+pub(crate) struct RendererDeclaration {
+    counts: Arc<RendererCounts>,
+    events: Vec<&'static str>,
+}
+
+impl RendererDeclaration {
+    fn new(counts: &Arc<RendererCounts>, events: Vec<&'static str>) -> Self {
+        let mut map = counts.0.lock().unwrap_or_else(|p| p.into_inner());
+        for event in &events {
+            *map.entry(event).or_insert(0) += 1;
+        }
+        drop(map);
+        Self {
+            counts: Arc::clone(counts),
+            events,
+        }
+    }
+
+    fn accepts(&self, event: &str) -> bool {
+        self.events.contains(&event)
+    }
+}
+
+impl Drop for RendererDeclaration {
+    fn drop(&mut self) {
+        let mut map = self.counts.0.lock().unwrap_or_else(|p| p.into_inner());
+        for event in &self.events {
+            if let Some(n) = map.get_mut(event) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    map.remove(event);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
     pub id: u64,
@@ -703,6 +806,11 @@ pub struct DaemonShared {
     /// long poll makes it most likely to arrive.
     pub shutdown_signal: Arc<Notify>,
     pub events: broadcast::Sender<Event>,
+    /// Live socket subscribers per opt-in event they declared in
+    /// `subscribe`'s `accepts`; see [`Self::has_renderer`]. In-process
+    /// subscribers (the FFI's `tc_subscribe` without a socket) never count
+    /// and never receive an opt-in event.
+    pub(crate) renderers: Arc<RendererCounts>,
     /// The daemon-wide bound on concurrent preview work.
     ///
     /// `Arc` rather than a plain field because the worker pool outlives any
@@ -956,6 +1064,7 @@ impl DaemonShared {
             derived: false,
         });
         let (events, _) = broadcast::channel(256);
+        let renderers = Arc::new(RendererCounts::default());
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
@@ -975,6 +1084,7 @@ impl DaemonShared {
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
+            renderers,
             previews: Arc::new(PreviewScheduler::default()),
             routing,
             private_inference_endpoint: Mutex::new(None),
@@ -1694,6 +1804,22 @@ impl DaemonShared {
             event: event.to_string(),
             data,
         });
+    }
+
+    /// Whether at least one live socket subscriber accepts `event`.
+    ///
+    /// The attention arbiter asks this before it publishes a standalone
+    /// notification: every standalone kind renders through
+    /// [`EVENT_REENGAGE_DUE`], so it passes that name. While this is false
+    /// the item stays deferred (`no_renderer`) and spends no budget,
+    /// because no attached shell would draw it.
+    pub fn has_renderer(&self, event: &str) -> bool {
+        self.renderer_count(event) > 0
+    }
+
+    /// How many live socket subscribers accept `event`.
+    pub(crate) fn renderer_count(&self, event: &str) -> usize {
+        self.renderers.count(event)
     }
 
     fn logged_in(&self) -> bool {
@@ -3050,8 +3176,18 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "preview_request" => handle_preview_request(shared, req),
         "preview_visible" => handle_preview_visible(shared, req),
         "preview_cancel" => handle_preview_cancel(shared, req),
-        // subscribe is handled by the connection loop, which owns the stream.
-        "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+        // subscribe is handled by the connection loop, which owns the stream;
+        // this validates `accepts` for both dispatchers and echoes the opt-in
+        // events this daemon recognized, only when the request named any, so
+        // a request without `accepts` is answered exactly as before it existed.
+        "subscribe" => match subscribe_accepts(&req.params) {
+            Err(()) => Response::err(req.id, ERR_BAD_PARAMS, ERR_SUBSCRIBE_ACCEPTS_INVALID),
+            Ok(None) => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+            Ok(Some(accepted)) => Response::ok(
+                req.id,
+                serde_json::json!({ "subscribed": true, "accepts": accepted }),
+            ),
+        },
         // Reading a public profile back is a local cache read -- there is no
         // server read-back to make, see `daemon::profile` -- so unlike
         // claiming and withdrawing a handle it is complete here.
@@ -7198,6 +7334,10 @@ where
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut subscription: Option<broadcast::Receiver<Event>> = None;
+    // This connection's `accepts`. `None` -- never subscribed, or subscribed
+    // without `accepts` -- withholds every opt-in event. Dropped with the
+    // connection, which retracts it from `DaemonShared::has_renderer`.
+    let mut declaration: Option<RendererDeclaration> = None;
     let mut line = String::new();
 
     loop {
@@ -7229,6 +7369,16 @@ where
                     // Snapshot first, so an application never has to race the
                     // event stream against a separate list call.
                     subscription = Some(shared.events.subscribe());
+                    // Declared after the receiver exists, so nothing the
+                    // arbiter publishes on the strength of this declaration
+                    // can precede the receiver. A repeat subscribe replaces
+                    // the previous declaration rather than adding to it.
+                    declaration = match subscribe_accepts(&req.params) {
+                        Ok(Some(accepted)) if !accepted.is_empty() => {
+                            Some(RendererDeclaration::new(&shared.renderers, accepted))
+                        }
+                        _ => None,
+                    };
                     let snap = Event {
                         event: EVENT_SNAPSHOT.to_string(),
                         data: shared.snapshot_value(),
@@ -7244,7 +7394,13 @@ where
                 }
             } => {
                 match event {
-                    Ok(ev) => write_json(&mut write_half, &ev).await?,
+                    Ok(ev) => {
+                        let withheld = event_is_opt_in(&ev.event)
+                            && !declaration.as_ref().is_some_and(|d| d.accepts(&ev.event));
+                        if !withheld {
+                            write_json(&mut write_half, &ev).await?;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let ev = Event {
                             event: EVENT_RESYNC_REQUIRED.to_string(),
@@ -16611,5 +16767,200 @@ mod tests {
         cfg.consent_scopes_chosen = None;
         s.store.save_config(&cfg).unwrap();
         assert!(s.status_value()["consent_hold"].is_null());
+    }
+
+    /// A4 (upsell spec section 5, "Knowing a standalone will render"):
+    /// `subscribe` takes an optional `accepts`, and only a subscriber that
+    /// named an opt-in event ever receives it or counts as its renderer.
+    mod subscribe_accepts {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        type Client = (
+            BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+            tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            tokio::task::JoinHandle<Result<()>>,
+        );
+
+        fn connect(shared: &Arc<DaemonShared>) -> Client {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(serve_connection(server, Arc::clone(shared)));
+            let (r, w) = tokio::io::split(client);
+            (BufReader::new(r), w, task)
+        }
+
+        async fn send(w: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, v: serde_json::Value) {
+            let mut line = serde_json::to_vec(&v).unwrap();
+            line.push(b'\n');
+            w.write_all(&line).await.unwrap();
+            w.flush().await.unwrap();
+        }
+
+        async fn frame(
+            r: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        ) -> serde_json::Value {
+            let mut line = String::new();
+            tokio::time::timeout(std::time::Duration::from_secs(10), r.read_line(&mut line))
+                .await
+                .expect("no frame within the timeout")
+                .unwrap();
+            serde_json::from_str(line.trim()).unwrap()
+        }
+
+        /// Subscribe and consume the response and the snapshot; returns the
+        /// response.
+        async fn subscribe(
+            client: &mut Client,
+            params: Option<serde_json::Value>,
+        ) -> serde_json::Value {
+            let mut req = serde_json::json!({ "id": 1, "method": "subscribe" });
+            if let Some(p) = params {
+                req["params"] = p;
+            }
+            send(&mut client.1, req).await;
+            let resp = frame(&mut client.0).await;
+            if resp.get("error").is_none() {
+                assert_eq!(frame(&mut client.0).await["event"], EVENT_SNAPSHOT);
+            }
+            resp
+        }
+
+        fn reengage() -> serde_json::Value {
+            serde_json::json!({ "kind": "idle_sessions" })
+        }
+
+        #[tokio::test]
+        async fn a_subscriber_without_accepts_never_receives_reengage_due() {
+            let shared = Arc::new(shared());
+            for params in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({ "accepts": [] })),
+            ] {
+                let mut c = connect(&shared);
+                let resp = subscribe(&mut c, params).await;
+                assert_eq!(resp["result"]["subscribed"], true);
+                assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+                shared.publish(EVENT_REENGAGE_DUE, reengage());
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                // The very next frame is the delta that followed it: the
+                // opt-in event was never written to this connection.
+                assert_eq!(frame(&mut c.0).await["event"], EVENT_QUEUE_CHANGED);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_subscriber_that_accepts_reengage_due_receives_it_and_counts() {
+            let shared = Arc::new(shared());
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            let mut c = connect(&shared);
+            let resp = subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["reengage_due"] })),
+            )
+            .await;
+            assert_eq!(resp["result"]["subscribed"], true);
+            assert_eq!(
+                resp["result"]["accepts"],
+                serde_json::json!(["reengage_due"])
+            );
+            assert!(shared.has_renderer(EVENT_REENGAGE_DUE));
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            let ev = frame(&mut c.0).await;
+            assert_eq!(ev["event"], EVENT_REENGAGE_DUE);
+            assert_eq!(ev["data"], reengage());
+        }
+
+        #[tokio::test]
+        async fn disconnect_drops_the_count() {
+            let shared = Arc::new(shared());
+            let mut a = connect(&shared);
+            let mut b = connect(&shared);
+            let accepts = serde_json::json!({ "accepts": ["reengage_due"] });
+            subscribe(&mut a, Some(accepts.clone())).await;
+            subscribe(&mut b, Some(accepts)).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 2);
+
+            drop(a.0);
+            drop(a.1);
+            a.2.await.unwrap().unwrap();
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            assert!(shared.has_renderer(EVENT_REENGAGE_DUE));
+
+            drop(b.0);
+            drop(b.1);
+            b.2.await.unwrap().unwrap();
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 0);
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+        }
+
+        /// A second `subscribe` on the same connection replaces the first
+        /// declaration rather than adding to it.
+        #[tokio::test]
+        async fn resubscribing_without_accepts_withdraws_the_declaration() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            let accepts = serde_json::json!({ "accepts": ["reengage_due"] });
+            subscribe(&mut c, Some(accepts.clone())).await;
+            subscribe(&mut c, Some(accepts)).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            subscribe(&mut c, None).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 0);
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            assert_eq!(frame(&mut c.0).await["event"], EVENT_STATUS_CHANGED);
+        }
+
+        /// Names this daemon does not know are ignored, so a newer shell
+        /// can declare a later event without being refused; they are not
+        /// echoed back, so the shell can tell what this daemon will send.
+        #[tokio::test]
+        async fn unknown_accepted_names_are_ignored_and_not_echoed() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            let resp = subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["some_future_event", "queue_changed"] })),
+            )
+            .await;
+            assert_eq!(resp["result"]["subscribed"], true);
+            assert_eq!(resp["result"]["accepts"], serde_json::json!([]));
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            assert!(!shared.has_renderer("some_future_event"));
+        }
+
+        /// A malformed `accepts` is refused, fail closed, on both
+        /// dispatchers, and leaves no declaration behind.
+        #[tokio::test]
+        async fn a_malformed_accepts_is_refused_and_counts_nothing() {
+            let shared = Arc::new(shared());
+            for bad in [
+                serde_json::json!({ "accepts": "reengage_due" }),
+                serde_json::json!({ "accepts": [1] }),
+                serde_json::json!({ "accepts": ["reengage_due", null] }),
+            ] {
+                let mut c = connect(&shared);
+                let resp = subscribe(&mut c, Some(bad.clone())).await;
+                assert_eq!(resp["error"]["code"], ERR_BAD_PARAMS);
+                assert_eq!(resp["error"]["message"], ERR_SUBSCRIBE_ACCEPTS_INVALID);
+                assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+
+                let req = Request {
+                    id: 7,
+                    method: "subscribe".into(),
+                    params: bad,
+                };
+                let sync = handle_request(&shared, &req);
+                assert_eq!(sync.error.unwrap().message, ERR_SUBSCRIBE_ACCEPTS_INVALID);
+            }
+        }
+
+        #[test]
+        fn opt_in_events_are_exactly_reengage_due() {
+            assert_eq!(OPT_IN_EVENTS, &[EVENT_REENGAGE_DUE]);
+            assert!(event_is_opt_in(EVENT_REENGAGE_DUE));
+            assert!(!event_is_opt_in(EVENT_QUEUE_CHANGED));
+            assert!(!event_is_opt_in(EVENT_DIGEST_DUE));
+        }
     }
 }
