@@ -73660,8 +73660,22 @@ async fn update_trace_gate_decision_dedup_cluster_touches_only_cluster_columns()
 fn fixture_gate_worker_artifact_store_with_decryptor(
     artifact_root: &Path,
 ) -> (ConfiguredTraceArtifactStore, Arc<dyn KmsKeyWrapper>, String) {
-    let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
     let key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    fixture_gate_worker_artifact_store_with_key(artifact_root, &key)
+}
+
+/// `fixture_gate_worker_artifact_store_with_decryptor` with a given master
+/// key instead of a generated one, so two processes can read each other's
+/// objects: `pipeline.py compare` passes one random key per command
+/// (`TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX`), as `pipeline.py run` does
+/// for `test_artifact_store_with_key`. The key never appears in a panic
+/// message.
+fn fixture_gate_worker_artifact_store_with_key(
+    artifact_root: &Path,
+    master_key_hex: &str,
+) -> (ConfiguredTraceArtifactStore, Arc<dyn KmsKeyWrapper>, String) {
+    let object_store = TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string();
+    let key = master_key_hex.to_string();
     let crypto = SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture crypto");
     let kek_crypto =
         SecretsCrypto::new(SecretString::from(key.clone())).expect("fixture kek crypto");
