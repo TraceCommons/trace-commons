@@ -871,6 +871,46 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(runner.state.signedOutOfEnrolment)
     }
 
+    /// An enrollment recorded with no invite (an earlier run joined through
+    /// near.ai or a passkey, or the daemon was enrolled already: the demo's
+    /// pre-seeded config) once read "Joined Unknown · Unknown" on the invite
+    /// card. It joined no invite the shell knows of, so the card shows its
+    /// invite field, closed, and no joined line. A real joined invite still
+    /// reads Joined, with its field gone.
+    func test_anEnrolmentWithNoInviteShowsTheFieldAndNoJoinedLine() throws {
+        let copy = try coreCopy()
+        let resumed = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
+        XCTAssertEqual(resumed.enrolledInvite, "")
+        XCTAssertFalse(JoinScreenLayout.joinedInvite(resumed))
+        XCTAssertEqual(JoinScreenLayout.inviteLine(resumed, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(resumed))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(resumed), "no second invite over the enrollment")
+
+        var joined = resumed
+        joined.enrolledInvite = "invite:issuer.example"
+        joined.issuerHost = "issuer.example"
+        XCTAssertTrue(JoinScreenLayout.joinedInvite(joined))
+        guard case .joined(let line) = JoinScreenLayout.inviteLine(joined, lookup: nil, failure: nil, copy: copy.join)
+        else { return XCTFail("a joined invite reads Joined") }
+        XCTAssertTrue(line.contains("issuer.example"))
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(joined))
+
+        // A fresh Join shows the open field; a held passkey shows none.
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(FirstRunState()))
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(FirstRunState()))
+        var passkey = FirstRunState()
+        passkey.account = .passkey(name: "Mine")
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(passkey))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("if JoinScreenLayout.showsInviteField(runner.state) {"))
+        XCTAssertTrue(source.contains(".disabled(!editable)"))
+        let lookUp = try XCTUnwrap(source.range(of: "private func lookUp() {"))
+        XCTAssertTrue(
+            String(source[lookUp.upperBound...].prefix(120))
+                .contains("guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }"))
+    }
+
     /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, the
     /// no-sharing line sits in the same card as the invite and account
     /// cards, and an extra gap sets the cards apart from the body and the

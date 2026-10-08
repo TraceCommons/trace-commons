@@ -210,6 +210,24 @@ enum JoinScreenLayout {
         state.enrolledInvite == nil && !passkeyDone(state)
     }
 
+    /// The card shows its invite field unless an invite was joined or a
+    /// passkey holds the account: an enrollment recorded with no invite
+    /// shows the field, closed (`inviteIsEditable`), rather than a joined
+    /// line naming an invite nobody entered.
+    static func showsInviteField(_ state: FirstRunState) -> Bool {
+        inviteIsEditable(state) || (!joinedInvite(state) && !passkeyDone(state))
+    }
+
+    /// An invite this first run (or an earlier one) is known to have joined.
+    /// An enrollment recorded without one (`OnboardingNavigation.recordEnrolment`
+    /// writes an empty `enrolledInvite`: an earlier run joined through
+    /// near.ai or a passkey, or the daemon was already enrolled) joined no
+    /// invite the shell knows of, so the card never says "Joined" for it.
+    static func joinedInvite(_ state: FirstRunState) -> Bool {
+        guard let enrolled = state.enrolledInvite else { return false }
+        return !enrolled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     static func inviteLine(
         _ state: FirstRunState,
         lookup: DaemonData.InviteLookup?,
@@ -217,7 +235,7 @@ enum JoinScreenLayout {
         copy: FirstRunCopy.Join,
         refused: Bool = false
     ) -> JoinInviteLine {
-        if state.enrolledInvite != nil {
+        if joinedInvite(state) {
             return .joined(
                 FirstRunCopy.fill(
                     copy.inviteJoined,
@@ -470,13 +488,18 @@ struct JoinScreen: View {
     private var inviteCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if JoinScreenLayout.inviteIsEditable(runner.state) {
+                if JoinScreenLayout.showsInviteField(runner.state) {
+                    // The field as it always reads; closed while an
+                    // enrollment the daemon holds came with no invite, since
+                    // no second invite is joined over it.
+                    let editable = JoinScreenLayout.inviteIsEditable(runner.state)
                     HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
                         GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
                             .onSubmit(lookUp)
+                            .disabled(!editable)
                         Button(copy.join.lookUp, action: lookUp)
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(!JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
+                            .disabled(!editable || !JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
                     }
                 } else {
                     Text(copy.join.inviteEyebrow)
@@ -610,6 +633,7 @@ struct JoinScreen: View {
     }
 
     private func lookUp() {
+        guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }
         let looked = JoinScreenLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
         runner.failure = looked.failure
