@@ -31,15 +31,6 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertEqual(frame.eyebrow(for: .quick), frame.quickSetup)
         XCTAssertEqual(frame.eyebrow(for: .custom), frame.customSetup)
 
-        // The tier tag shows on Custom setup only (owner, 2026-10-08): Quick
-        // setup's pane has no bar. The pane's accessible name keeps the tier.
-        for tier in [FirstRunTier.quick, .custom] {
-            for step in FirstRunNavigation.steps(for: tier) {
-                XCTAssertEqual(
-                    FirstRunFrameLayout.showsTierTag(FirstRunState(tier: tier, step: step)), tier == .custom)
-            }
-        }
-
         // The current node is the state's step within its tier's list.
         for tier in [FirstRunTier.quick, .custom] {
             for (index, step) in FirstRunNavigation.steps(for: tier).enumerated() {
@@ -49,10 +40,10 @@ final class FirstRunFrameTests: XCTestCase {
 
         let source = try Self.source()
         XCTAssertTrue(source.contains("GlassPane"))
-        XCTAssertTrue(source.contains("copy.frame.eyebrow(for: state.tier)"))
+        // No tier tag on either setup (owner, 2026-10-08): the tier is only
+        // the pane's accessible name.
+        XCTAssertEqual(source.components(separatedBy: "copy.frame.eyebrow(for: state.tier)").count - 1, 1)
         XCTAssertTrue(source.contains(".accessibilityLabel(copy.frame.eyebrow(for: state.tier))"))
-        let tag = try XCTUnwrap(source.range(of: "if FirstRunFrameLayout.showsTierTag(state) {\n                    bar\n"))
-        XCTAssertLessThan(tag.lowerBound, try XCTUnwrap(source.range(of: "GlassStepProgress(")).lowerBound)
         XCTAssertTrue(source.contains("GlassStepProgress(labels: copy.frame.steps(for: state.tier)"))
     }
 
@@ -261,19 +252,15 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(body.contains(".accessibilityAddTraits(.isHeader)"), "FirstRunTitle must carry the header trait")
     }
 
-    /// Ron's review of #1235, items 10 to 12: the tier label on the right
-    /// of the bar, the 450pt pane, titles fixed while only the cards
+    /// Ron's review of #1235, items 10 to 12 (the tier tag since removed,
+    /// owner 2026-10-08): the 450pt pane, titles fixed while only the cards
     /// scroll, and an error notice in the body after the cards. Back is the
     /// frame's alone (owner, 2026-10-08): no screen draws one of its own.
     func test_theFrameMatchesRonsLayout() throws {
         let frame = try Self.source()
         XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
-        // The tier label sits on the right: a spacer, then the eyebrow.
-        let bar = try XCTUnwrap(frame.range(of: "private var bar: some View {"))
-        let barBody = String(frame[bar.upperBound...].prefix(400))
-        let spacer = try XCTUnwrap(barBody.range(of: "Spacer(minLength: 0)"))
-        let eyebrow = try XCTUnwrap(barBody.range(of: "copy.frame.eyebrow(for: state.tier)"))
-        XCTAssertLessThan(spacer.lowerBound, eyebrow.lowerBound)
+        // No tier tag on either setup (owner, 2026-10-08).
+        XCTAssertFalse(frame.contains("private var bar: some View {"))
         // The header is fixed above the one ScrollView; the notice follows
         // the cards inside it.
         let body = try XCTUnwrap(frame.range(of: "GlassPane {"))

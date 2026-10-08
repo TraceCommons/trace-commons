@@ -926,11 +926,12 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body.weight(.bold))"))
         XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
 
-        // The no-sharing card is the plain card every other Join card is.
+        // The no-sharing line is plain text below the last sign-in card,
+        // in no card (owner, 2026-10-08).
         XCTAssertFalse(source.contains("GlassCard(quiet: true)"))
         let noSharing = try XCTUnwrap(source.range(of: "Text(copy.join.noSharing)"))
         let before = String(source[..<noSharing.lowerBound].suffix(200))
-        XCTAssertTrue(before.hasSuffix("GlassCard {\n                "), before)
+        XCTAssertFalse(before.contains("GlassCard {"), before)
 
         // The extra gap, a spacing token, above the invite card and above
         // the no-sharing card, and nowhere else.

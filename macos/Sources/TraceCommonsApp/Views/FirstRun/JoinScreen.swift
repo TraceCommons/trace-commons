@@ -457,15 +457,14 @@ struct JoinScreen: View {
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // The same card as the invite and account cards (owner,
-            // 2026-10-08), set apart from them by the extra gap.
-            GlassCard {
-                Text(copy.join.noSharing)
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.top, JoinScreenLayout.extraGap)
+            // Plain text below the last sign-in card, in no card of its own
+            // (owner, 2026-10-08), set apart from the cards by the extra gap.
+            Text(copy.join.noSharing)
+                .glassType(GlassTokens.TypeScale.label)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, JoinScreenLayout.extraGap)
         }
     }
 
