@@ -673,7 +673,7 @@ impl SettingsView {
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&public);
 
-        // #1146's "Changes on this machine", the core's word for every shell.
+        // The core's "Change log" (owner ruling, 2026-10-08), for every shell.
         content.append(&style::section(
             trace_commons_contributor::preview_copy::monitor_screens_copy()
                 .shell

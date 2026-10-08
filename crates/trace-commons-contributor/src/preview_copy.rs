@@ -1303,7 +1303,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             pause_until_resumed: "Until resumed",
             start_at_login: "Start Trace Commons at login",
             projects_empty: "No projects seen yet. Sessions appear here after discovery.",
-            changes_heading: "Changes on this machine",
+            changes_heading: "Change log",
             tab_home: "Home",
             tab_inference: "Inference",
             tab_traces: "Traces",
@@ -1695,8 +1695,8 @@ mod tests {
         assert_eq!(nav.private_ai, "Private AI");
         assert_eq!(nav.compute, "Compute");
         assert_eq!(nav.log, "Change log");
-        // The section's own heading keeps its sentence.
-        assert_eq!(screens.shell.changes_heading, "Changes on this machine");
+        // The section's own heading matches its name (owner ruling, 2026-10-08).
+        assert_eq!(screens.shell.changes_heading, nav.log);
         for name in &names {
             assert!(!name.ends_with('.') && name.chars().count() <= 24, "{name}");
         }

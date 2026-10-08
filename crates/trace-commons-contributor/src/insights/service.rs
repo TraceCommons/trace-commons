@@ -296,7 +296,7 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("refreshed", "Saved insights refreshed. Source files were not read again."),
         ("deleted", "Saved insight deleted. The original file was not modified."),
         ("already_absent", "That saved insight is already absent."),
-        ("cancelled", "Screen updates cancelled. Refresh saved insights after pending work finishes."),
+        ("cancelled", "Screen updates cancelled. Choose Refresh after pending work finishes."),
         ("partial_notice", "Partial recognition: some source records are not classified."),
         ("choose_file", "Choose file"), ("analyze", "Analyze"),
         // Approved 2026-10-08 (button rule).

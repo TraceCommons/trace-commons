@@ -1818,7 +1818,7 @@ pub const FUNDING_REFRESH: &str = "Verify account";
 /// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str =
-    "Account destination not read. Verify current account to try again.";
+    "Account destination not read. Choose Verify account to try again.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
