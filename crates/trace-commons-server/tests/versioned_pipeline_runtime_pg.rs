@@ -26868,6 +26868,85 @@ async fn the_sweep_goes_on_after_one_failed_follow_up() {
     );
 }
 
+/// Merge review M4: a listed tenant with no pipeline run has nothing to
+/// recover, and since PR 5 each replica lists a tenant before its first
+/// activation. For such a tenant the recovery returns 0 from one read of
+/// `pipeline_runs` and does not read the tenant's revoked and withdrawn
+/// submissions. The store here connects as a login that may read
+/// `pipeline_runs` and none of `main`'s tables, so a read of
+/// `trace_submissions` or `trace_withdrawals` is `permission denied`: the
+/// same store gets that for a tenant that has a run.
+#[tokio::test]
+async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run() {
+    const RUNS_READER_LOGIN: &str = "trace_pipeline_runs_reader_test";
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("runtime_backend read the same variable");
+    let mut owner = owner_client().await;
+    owner
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RUNS_READER_LOGIN}') THEN
+                     CREATE ROLE {RUNS_READER_LOGIN} LOGIN;
+                 END IF;
+             END $$;
+             ALTER ROLE {RUNS_READER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
+             GRANT SELECT ON pipeline_runs TO {RUNS_READER_LOGIN};"
+        ))
+        .await
+        .expect("provision the login that reads only pipeline_runs");
+    let mut reader_url = reqwest::Url::parse(&url).expect("parse test URL");
+    reader_url
+        .set_username(RUNS_READER_LOGIN)
+        .expect("set the reader user");
+    let reader = PgPipelineStore::new(Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(reader_url.as_str(), 1))
+            .await
+            .expect("connect as the reader login"),
+    ));
+
+    // A legacy tenant: one revoked submission, no pipeline run.
+    let tenant = format!("recovery-no-run-{}", uuid::Uuid::new_v4());
+    let legacy = insert_submission_without_a_run(&owner_backend().await, &tenant).await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    assert_eq!(
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &legacy],
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(
+        reader
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .expect("no table of main's is read for a tenant with no pipeline run"),
+        0
+    );
+
+    // The same store reads the submissions of a tenant that has a run.
+    let with_run = format!("recovery-with-run-{}", uuid::Uuid::new_v4());
+    seed_run(&backend, &with_run, uuid::Uuid::new_v4()).await;
+    let refused = reader
+        .recover_lost_inoperable_follow_ups(&with_run, "pipeline_worker", 32)
+        .await
+        .expect_err("this login may not read the revoked and withdrawn submissions");
+    assert!(
+        matches!(
+            &refused,
+            DatabaseError::Postgres(error) if error.code()
+                == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+        ),
+        "{refused:?}"
+    );
+}
+
 /// Zaki review 3, Z3-L4: one release of parked runs of inoperable
 /// submissions takes at most its limit, in run id order; the next takes the
 /// rest.

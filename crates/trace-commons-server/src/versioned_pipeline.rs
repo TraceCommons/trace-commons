@@ -4282,7 +4282,8 @@ impl PgPipelineStore {
     /// the pass failed. The read probes every revoked or withdrawn
     /// submission of the tenant, recovered or not, so the worker runs it at
     /// a low cadence (`PIPELINE_WORKER_LOST_FOLLOW_UP_INTERVAL`), not on
-    /// every pass.
+    /// every pass. A tenant with no pipeline run is answered 0 before that
+    /// read.
     pub async fn recover_lost_inoperable_follow_ups(
         &self,
         tenant_id: &str,
@@ -4293,6 +4294,22 @@ impl PgPipelineStore {
         let lost = {
             let mut client = self.backend.trace_pool().get().await?;
             let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+            // Merge review M4: a listed tenant with no pipeline run (PR 5
+            // asks each replica to list a tenant before its first
+            // activation) has nothing to recover, and an export item needs
+            // a run too. One read by the runs' key, and none of the
+            // tenant's revoked and withdrawn submissions.
+            let has_pipeline_run: bool = tx
+                .query_one(
+                    "SELECT EXISTS (SELECT 1 FROM pipeline_runs WHERE tenant_id = $1)",
+                    &[&tenant_id],
+                )
+                .await?
+                .get(0);
+            if !has_pipeline_run {
+                tx.commit().await?;
+                return Ok(0);
+            }
             let rows = tx
                 .query(
                     // The owner's runtime lens: read from the two indexed

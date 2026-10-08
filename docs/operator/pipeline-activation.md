@@ -1815,7 +1815,8 @@ when a withdrawal row exists, `revoked` otherwise, actor
 pass. So a lost follow-up waits at most about a minute once a worker runs.
 The read checks every revoked or withdrawn submission of the tenant on each
 run, recovered or not, which is why it does not run on the 10-second
-invalidation step. One follow-up that fails is logged as
+invalidation step. A listed tenant that has no pipeline run is answered from
+one read of `pipeline_runs`; its submissions are not read. One follow-up that fails is logged as
 `pipeline_lost_follow_up_failed` (with the tenant's `tenant_storage_ref`
 and a hash of the submission id), does not stop the others of the pass,
 and is retried a minute later. A recovery that recovers nothing because
