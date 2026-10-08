@@ -551,6 +551,12 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
     let mut token_cleanup_tick = tokio::time::interval(std::time::Duration::from_secs(300));
     token_cleanup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut token_cleanup_tasks = tokio::task::JoinSet::new();
+    // The published estimate table's fetch schedule (OWNER DECISION E11).
+    // A local of this loop, so nothing that answers a request can reach it.
+    let mut table_schedule = crate::credit_estimate_table::EstimateTableSchedule::starting(
+        Utc::now(),
+        crate::credit_estimate_table::random_draw(),
+    );
     let mut sigterm = signal_stream();
     let shutdown_signal = Arc::clone(&shared.shutdown_signal);
 
@@ -639,6 +645,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                     if refresh_community(shared, now).await.is_err() {
                         tracing::warn!(pass = "community", "daemon pass failed");
                     }
+                    // On its own fixed schedule, not this tick's: most
+                    // ticks find it not due and return at once.
+                    refresh_estimate_table(shared, now, &mut table_schedule).await;
                 }
             }
             _ = &mut sigterm => {
@@ -1593,6 +1602,50 @@ fn find_session<'a>(
         }
     }
     None
+}
+
+/// Fetch the published local-credit-estimate table when its schedule says
+/// so (nudge value addendum, 4.6; OWNER DECISION E11).
+///
+/// Its inputs are the clock, the schedule and the configured ingest origin,
+/// nothing about the queue, a preview or a request, so when it runs says
+/// nothing about local activity. The request is unauthenticated. Without a
+/// config there is no origin to ask, and the table in force stays. An
+/// attempt moves the schedule whatever its outcome, so a failure is not
+/// retried sooner than a success would be. Nothing is logged: a failure
+/// leaves the table in force, which is the whole of its effect.
+async fn refresh_estimate_table(
+    shared: &ipc::DaemonShared,
+    now: chrono::DateTime<Utc>,
+    schedule: &mut crate::credit_estimate_table::EstimateTableSchedule,
+) {
+    use crate::credit_estimate_table::{EstimateTableClient, random_draw};
+    if !schedule.due(now) {
+        return;
+    }
+    schedule.attempted(now, random_draw());
+    let Ok(Some(cfg)) = shared.store.load_config() else {
+        return;
+    };
+    let Ok(origin) = crate::config::ingest_origin_url(&cfg.ingest_url, "/") else {
+        return;
+    };
+    let outcome = match EstimateTableClient::new(origin.as_str(), cfg.allowed_hosts.as_deref()) {
+        Ok(client) => client.fetch().await,
+        Err(refused) => Err(refused),
+    };
+    let changed = {
+        let mut slot = shared.estimate_table.lock().expect("estimate lock");
+        let before = slot.clone();
+        slot.apply_fetch(outcome, now);
+        // A refetch of the same table only renews its age; shells see no
+        // change in what they render.
+        before.table != slot.table || before.basis != slot.basis
+    };
+    if changed {
+        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -4149,6 +4202,118 @@ mod tests {
             .await
             .expect("a start after a failed start must not see stale lock contention");
         embedded.close();
+    }
+
+    /// A daemon whose config points ingest at `ingest`.
+    fn shared_with_ingest(dir: &std::path::Path, ingest: &str) -> Arc<ipc::DaemonShared> {
+        let store = crate::config::ConfigStore::open(dir.join("state")).unwrap();
+        cloud_credential_test_support::install(&store);
+        let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
+        store
+            .save_config(&crate::config::ContributorConfig {
+                inference_receipt_endpoint: None,
+                consent_scopes_chosen: Some(true),
+                witness_origin: None,
+                inference_receipt_check_attestation: false,
+                schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
+                issuer_url: ingest.to_string(),
+                ingest_url: ingest.to_string(),
+                audience: "trace-commons-upload".into(),
+                tenant_id: "tenant-abc".into(),
+                instance_id: "instance-1".into(),
+                user_subject: "alice".into(),
+                device_key_id: device.device_key_id,
+                consent_scopes: vec!["debugging_evaluation".into()],
+                pii_filter: None,
+                allowed_hosts: Some("127.0.0.1".into()),
+                display_handle: None,
+                public_bio: None,
+                public_since: None,
+                witness: None,
+            })
+            .unwrap();
+        Arc::new(ipc::DaemonShared::load(store).unwrap())
+    }
+
+    /// The scheduled fetch replaces the table when due and not before; a
+    /// server without the route keeps the table in force (OWNER DECISION
+    /// E11). Nothing about the queue is an input.
+    #[tokio::test]
+    async fn the_table_is_fetched_on_its_schedule_and_a_404_keeps_it() {
+        use crate::credit_estimate_table::{
+            ESTIMATE_TABLE_PATH, ESTIMATE_TABLE_REFRESH, EstimateTableSchedule,
+        };
+        use axum::routing::get;
+        let hits = Arc::new(AtomicUsize::new(0));
+        let serving = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let router = Router::new().route(
+            ESTIMATE_TABLE_PATH,
+            get({
+                let hits = Arc::clone(&hits);
+                let serving = Arc::clone(&serving);
+                move || {
+                    let hits = Arc::clone(&hits);
+                    let serving = Arc::clone(&serving);
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        if !serving.load(Ordering::SeqCst) {
+                            return StatusCode::NOT_FOUND.into_response();
+                        }
+                        let mut table =
+                            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+                        table.version = "t9".to_string();
+                        Json(table).into_response()
+                    }
+                }
+            }),
+        );
+        let ingest = TransientRetryHarness::spawn(router).await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let published = shared.estimate_table.lock().unwrap().clone();
+        assert_eq!(published.basis, ipc::ESTIMATE_BASIS_PUBLISHED);
+        assert_eq!(published.table.calibration_label(), "lef1.t9/cq3");
+
+        // Queue churn and many ticks in between do not bring it forward.
+        for minutes in [1, 30, 60 * 12, 60 * 23] {
+            refresh_estimate_table(
+                &shared,
+                start + chrono::Duration::minutes(minutes),
+                &mut schedule,
+            )
+            .await;
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        serving.store(false, Ordering::SeqCst);
+        let next = schedule.next_at();
+        assert!(next >= start + ESTIMATE_TABLE_REFRESH);
+        refresh_estimate_table(&shared, next, &mut schedule).await;
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert_eq!(*shared.estimate_table.lock().unwrap(), published);
+    }
+
+    /// Without a config there is no origin to ask: nothing is sent and the
+    /// built-in table stays.
+    #[tokio::test]
+    async fn without_a_config_the_table_is_not_fetched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::open(dir.path().join("state")).unwrap();
+        let shared = ipc::DaemonShared::load(store).unwrap();
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule =
+            crate::credit_estimate_table::EstimateTableSchedule::starting(start, 0.0);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(
+            *shared.estimate_table.lock().unwrap(),
+            ipc::EstimateTableSlot::built_in()
+        );
+        assert!(!schedule.due(start));
     }
 }
 

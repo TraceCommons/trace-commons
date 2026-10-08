@@ -1010,6 +1010,9 @@ pub struct EstimateTableSlot {
     pub table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
     /// [`ESTIMATE_BASIS_BUILT_IN`] or [`ESTIMATE_BASIS_PUBLISHED`].
     pub basis: &'static str,
+    /// When a fetched table was last accepted; `None` for the built-in one.
+    /// What [`Self::in_force`] ages against.
+    pub received_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl EstimateTableSlot {
@@ -1019,6 +1022,49 @@ impl EstimateTableSlot {
         Self {
             table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
             basis: ESTIMATE_BASIS_BUILT_IN,
+            received_at: None,
+        }
+    }
+
+    /// The table to render with at `now`: this one, unless it is a fetched
+    /// table older than `ESTIMATE_TABLE_MAX_AGE` (OWNER DECISION E11), or a
+    /// fetched one with no receipt time, in which case the built-in table.
+    /// Never a stale fetched table.
+    #[must_use]
+    pub fn in_force(self, now: chrono::DateTime<Utc>) -> Self {
+        if self.basis == ESTIMATE_BASIS_BUILT_IN {
+            return self;
+        }
+        let fresh = self.received_at.is_some_and(|received| {
+            now.signed_duration_since(received)
+                < crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE
+        });
+        if fresh { self } else { Self::built_in() }
+    }
+
+    /// Apply one scheduled fetch's outcome (see
+    /// [`crate::credit_estimate_table::TableFetchEffect`]): an accepted table
+    /// replaces this one, a refused one brings the built-in table back, and
+    /// anything else leaves this slot as it is.
+    pub fn apply_fetch(
+        &mut self,
+        outcome: Result<
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+            crate::credit_estimate_table::EstimateTableClientError,
+        >,
+        now: chrono::DateTime<Utc>,
+    ) {
+        use crate::credit_estimate_table::TableFetchEffect;
+        match (TableFetchEffect::of(&outcome), outcome) {
+            (TableFetchEffect::Replace, Ok(table)) => {
+                *self = Self {
+                    table,
+                    basis: ESTIMATE_BASIS_PUBLISHED,
+                    received_at: Some(now),
+                };
+            }
+            (TableFetchEffect::FallBack, _) => *self = Self::built_in(),
+            _ => {}
         }
     }
 }
@@ -2135,7 +2181,10 @@ impl DaemonShared {
         );
         // Credit estimate (nudge value addendum, 4.6): the table in force,
         // cloned out of its leaf lock before the policy and queue section.
-        let estimate_table = self.estimate_table.lock().expect("estimate lock").clone();
+        // The table in force at `now`: an expired fetched table reads as
+        // the built-in one (OWNER DECISION E11).
+        let slot = self.estimate_table.lock().expect("estimate lock").clone();
+        let estimate_table = slot.in_force(now);
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -3649,7 +3698,8 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     let mission_fit = super::mission_matching::pending_mission_fit(shared, Utc::now());
     // The estimate table in force, cloned out of its leaf lock before the
     // policy and queue locks below.
-    let estimate_table = shared.estimate_table.lock().expect("estimate lock").clone();
+    let slot = shared.estimate_table.lock().expect("estimate lock").clone();
+    let estimate_table = slot.in_force(Utc::now());
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -18760,6 +18810,105 @@ mod tests {
             );
         }
 
+        fn fetched_table() -> trace_commons_protocol::local_credit_estimate::LocalEstimateTable {
+            let mut table =
+                trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+            table.version = "t9".to_string();
+            table
+        }
+
+        /// An accepted fetch replaces the table in force and marks it
+        /// published; a refused one brings the built-in table back, never
+        /// the stale fetched one; a 404 or a network failure keeps what is
+        /// in force (OWNER DECISION E11).
+        #[test]
+        fn a_fetch_replaces_falls_back_or_keeps_the_table() {
+            use crate::credit_estimate_table::EstimateTableClientError as E;
+            let at = chrono::Utc::now();
+            let mut slot = EstimateTableSlot::built_in();
+            slot.apply_fetch(Ok(fetched_table()), at);
+            assert_eq!(slot.basis, ESTIMATE_BASIS_PUBLISHED);
+            assert_eq!(slot.table, fetched_table());
+            assert_eq!(slot.received_at, Some(at));
+
+            for kept in [
+                E::NotFound,
+                E::Unavailable,
+                E::HostNotAllowed,
+                E::EndpointInvalid,
+            ] {
+                let mut kept_slot = slot.clone();
+                kept_slot.apply_fetch(Err(kept), at + chrono::Duration::hours(24));
+                assert_eq!(kept_slot, slot, "{kept:?}");
+            }
+            for refused in [E::Refused, E::ResponseTooLarge] {
+                let mut fallen = slot.clone();
+                fallen.apply_fetch(Err(refused), at + chrono::Duration::hours(24));
+                assert_eq!(fallen, EstimateTableSlot::built_in(), "{refused:?}");
+            }
+        }
+
+        /// A fetched table older than `ESTIMATE_TABLE_MAX_AGE` is not in
+        /// force: the built-in table is, never the stale one. The built-in
+        /// table never expires.
+        #[test]
+        fn an_expired_fetched_table_falls_back_to_the_built_in_table() {
+            use crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE;
+            let at = chrono::Utc::now();
+            let mut slot = EstimateTableSlot::built_in();
+            slot.apply_fetch(Ok(fetched_table()), at);
+            let fresh = at + ESTIMATE_TABLE_MAX_AGE - chrono::Duration::seconds(1);
+            assert_eq!(slot.clone().in_force(fresh), slot);
+            let stale = at + ESTIMATE_TABLE_MAX_AGE;
+            assert_eq!(slot.clone().in_force(stale), EstimateTableSlot::built_in());
+            let built_in = EstimateTableSlot::built_in();
+            assert_eq!(
+                built_in.clone().in_force(at + chrono::Duration::days(3650)),
+                built_in
+            );
+            // A published slot with no receipt time is not trusted as fresh.
+            let undated = EstimateTableSlot {
+                basis: ESTIMATE_BASIS_PUBLISHED,
+                ..EstimateTableSlot::built_in()
+            };
+            assert_eq!(undated.in_force(at), EstimateTableSlot::built_in());
+        }
+
+        /// `list_pending` renders under the table in force, so an expired
+        /// fetched table shows the built-in band and basis.
+        #[test]
+        fn list_pending_renders_under_the_table_in_force() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let long_ago = Utc::now()
+                - crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE
+                - chrono::Duration::hours(1);
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), long_ago);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["credit_estimate"]["basis"], ESTIMATE_BASIS_BUILT_IN);
+            assert_eq!(rows[0]["credit_estimate"]["calibration"], "lef1.t1/cq3");
+            assert_eq!(
+                status_of(&s)["idle_sessions"]["credit_estimate"]["calibration"],
+                "lef1.t1/cq3"
+            );
+
+            // The same table received a moment ago is in force.
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), Utc::now());
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(
+                rows[0]["credit_estimate"]["basis"],
+                ESTIMATE_BASIS_PUBLISHED
+            );
+            assert_eq!(rows[0]["credit_estimate"]["calibration"], "lef1.t9/cq3");
+        }
+
         /// Once an entry is on its way or delivered, its figure is
         /// history's or nothing, never the estimate (section 4.7).
         #[test]
@@ -19284,6 +19433,7 @@ mod tests {
             *s.estimate_table.lock().unwrap() = EstimateTableSlot {
                 table,
                 basis: ESTIMATE_BASIS_PUBLISHED,
+                received_at: Some(Utc::now()),
             };
         }
 
