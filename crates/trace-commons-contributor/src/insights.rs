@@ -29,6 +29,7 @@ pub mod task_attribution;
 pub mod time_evidence;
 pub mod usage;
 pub mod usage_evidence;
+pub mod week_rollup;
 #[cfg(windows)]
 mod win_store_acl;
 
