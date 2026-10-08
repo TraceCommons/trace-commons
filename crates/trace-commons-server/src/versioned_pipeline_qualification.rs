@@ -2091,6 +2091,29 @@ mod tests {
         assert!(bad_blocker.validate().is_err());
     }
 
+    /// `scripts/operator/fixtures/pipeline-package-digests-vector.json` is
+    /// the cross-language vector for [`package_digests`]: `pipeline.py
+    /// promote` recomputes all three digests in Python from the same file
+    /// (`test_package_digests_match_the_rust_vector`). This test is what holds
+    /// that file to the Rust rule, so the Python side cannot pass against an
+    /// oracle of its own making. Two instruments pin the instrument order.
+    #[test]
+    fn the_cross_language_package_digest_vector_follows_the_rust_rule() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/operator/fixtures/pipeline-package-digests-vector.json");
+        let vector: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("vector file reads"))
+                .expect("vector file parses");
+        let package: BundlePackage =
+            serde_json::from_value(vector["package"].clone()).expect("vector package loads");
+        assert_eq!(package.manifest.instruments.len(), 2);
+        assert_eq!(package.manifest.bundle_id().unwrap(), package.bundle_id);
+        let digests = package_digests(&package).expect("vector digests compute");
+        assert_eq!(digests.package_hash, vector["package_hash"]);
+        assert_eq!(digests.configuration_digest, vector["configuration_digest"]);
+        assert_eq!(digests.dependency_digest, vector["dependency_digest"]);
+    }
+
     #[test]
     fn package_digests_follow_the_manifest() {
         let package = minimal_test_package();

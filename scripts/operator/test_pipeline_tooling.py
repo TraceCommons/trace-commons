@@ -4404,29 +4404,55 @@ _PROMOTE_FEATURES = ("--features", "near-ai-scorer,gcs-client,gcp-kms")
 _HEX40 = "0123456789abcdef0123456789abcdef01234567"
 
 
-def _fake_signed_package(name="production"):
-    """A signed package the way `pipeline.py package` writes one: the package
-    and a signature whose `package_hash` is the canonical hash of the
-    package. The signature bytes are not verified offline."""
-    package = {
-        "bundle_id": _fake_hash(f"{name}-bundle"),
-        "manifest": {
-            "admission": {"configuration_hash": _fake_hash(f"{name}-admission")},
-            "review": {"configuration_hash": _fake_hash(f"{name}-review")},
-            "score": {
-                "configuration_hash": _fake_hash(f"{name}-score"),
-                "data_artifact_hashes": [_fake_hash(f"{name}-embedder"), _fake_hash(f"{name}-scorer")],
-            },
-            "settle": {"configuration_hash": _fake_hash(f"{name}-settle")},
-        },
-        "artifacts": {},
+def _fake_policy(name, phase, data_artifact_hashes=()):
+    return {
+        "policy_id": f"trace_commons.{phase}.{name}",
+        "implementation_id": f"trace_commons.{phase}.{name}.v1",
+        "configuration_hash": _digest(f"{name}-{phase}".encode()),
+        "data_artifact_hashes": list(data_artifact_hashes),
+        "projection_ids": [],
     }
+
+
+def _rederive_bundle_id(package):
+    """Re-derives the bundle identifier after a test edits the manifest, so
+    the package stays valid and only its hash moves."""
+    package["bundle_id"] = _digest(promote._manifest_canonical_bytes(package["manifest"]))
+    return package
+
+
+def _fake_signed_package(name="production"):
+    """A signed package the way `pipeline.py package` writes one: a valid
+    `BundlePackage` (artifact bytes that hash to their keys, a bundle
+    identifier derived from the manifest) and a signature whose
+    `package_hash` is `promote.bundle_package_hash` of it. That function is
+    pinned to the Rust rule by `test_package_digests_match_the_rust_vector`,
+    whose vector a Rust test holds to `BundlePackage::package_hash`, so using
+    it here is not an oracle of the tool's own making. The signature bytes
+    are not verified offline."""
+    data = {f"{name}-{phase}".encode() for phase in ("admission", "review", "score", "settle")}
+    data |= {f"{name}-embedder".encode(), f"{name}-scorer".encode()}
+    score_data = [_digest(f"{name}-scorer".encode()), _digest(f"{name}-embedder".encode())]
+    package = _rederive_bundle_id({
+        "bundle_id": None,
+        "manifest": {
+            "format_version": 2,
+            "admission": _fake_policy(name, "admission"),
+            "review": _fake_policy(name, "review"),
+            "score": _fake_policy(name, "score", score_data),
+            "settle": _fake_policy(name, "settle"),
+            "instruments": {
+                "storage_rebate": {"kind": "credit_account", "network": "pipeline-test", "contract": "storage-rebate", "decimals": 0},
+            },
+        },
+        "artifacts": {_digest(item): item.hex() for item in data},
+    })
     return {
         "package": package,
         "signature": {
             "algorithm": "Ed25519",
             "key_id": "production_package_key",
-            "package_hash": _digest(results.canonical(package)),
+            "package_hash": promote.bundle_package_hash(package),
             "signature_base64url": "A" * 86,
         },
     }
@@ -4649,6 +4675,38 @@ class PromoteListTests(unittest.TestCase):
         )
         self.assertEqual(frozenset(promote.mechanics_check_ids()) & frozenset(promote.production_check_ids()), frozenset())
 
+    def test_package_digests_match_the_rust_vector(self):
+        """`fixtures/pipeline-package-digests-vector.json` is written by Rust
+        and held to `package_digests` in `versioned_pipeline_qualification.rs`
+        by `the_cross_language_package_digest_vector_follows_the_rust_rule`.
+        The package hash is the hash of `BundlePackage::canonical_bytes`, a
+        binary encoding, not of the package's JSON."""
+        vector = json.loads((Path(__file__).resolve().parent / "fixtures" / "pipeline-package-digests-vector.json").read_text())
+        signed = {"package": vector["package"], "signature": {"package_hash": vector["package_hash"]}}
+        self.assertEqual(
+            promote.package_digests(signed),
+            (vector["package_hash"], vector["configuration_digest"], vector["dependency_digest"]),
+        )
+        self.assertEqual(promote.bundle_package_hash(vector["package"]), vector["package_hash"])
+
+        # Where Rust's `canonical_bytes` errors, Python refuses; it never
+        # produces a hash.
+        def edited(edit):
+            package = json.loads(json.dumps(vector["package"]))
+            edit(package)
+            return package
+
+        for edit in (
+            lambda p: p["manifest"].update(format_version=1),
+            lambda p: p["manifest"]["score"]["projection_ids"].append("pipeline-test-projection-v1"),
+            lambda p: p.update(bundle_id=_fake_hash("another bundle")),
+            lambda p: p["artifacts"].popitem(),
+            lambda p: p["artifacts"].update({k: v + "00" for k, v in list(p["artifacts"].items())[:1]}),
+        ):
+            with self.assertRaises(errors.ToolingError) as ctx:
+                promote.bundle_package_hash(edited(edit))
+            self.assertEqual(str(ctx.exception), "promote_package_invalid")
+
     def test_package_digests_follow_the_rust_rule(self):
         signed = _fake_signed_package()
         self.assertEqual(promote.package_digests(signed), _package_triple(signed))
@@ -4710,13 +4768,24 @@ class PromoteTests(_PromoteCase):
         )
         self.assertEqual(json.loads((self._runs_dir() / run_id / promote.PACKAGE_FILE).read_text()), self.signed)
 
-        # A package whose hash does not recompute is refused.
+        # A valid package whose hash is not the signed one is refused.
+        tampered = _fake_signed_package()
+        tampered["package"]["manifest"]["score"]["policy_id"] = "trace_commons.score.edited"
+        _rederive_bundle_id(tampered["package"])
+        self.package_path.write_text(json.dumps(tampered))
+        code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), "PipelineFailure: promote_package_hash_mismatch")
+
+        # A package that does not validate (an edited configuration hash no
+        # longer names an artifact, and the bundle identifier no longer
+        # derives) is refused before any hash is compared.
         tampered = _fake_signed_package()
         tampered["package"]["manifest"]["score"]["configuration_hash"] = _fake_hash("edited")
         self.package_path.write_text(json.dumps(tampered))
         code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])
         self.assertEqual(code, 1)
-        self.assertEqual(self._failure(), "PipelineFailure: promote_package_hash_mismatch")
+        self.assertEqual(self._failure().splitlines()[-1], "PipelineFailure: promote_package_invalid")
 
     def test_init_prints_the_run_id_and_revision_and_no_path(self):
         code = self._main(["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)])

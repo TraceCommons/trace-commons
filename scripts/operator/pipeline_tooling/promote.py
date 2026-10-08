@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shutil
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -143,15 +144,143 @@ def mechanics_check_ids():
 # ---------------------------------------------------------------------------
 
 
+_BUNDLE_MANIFEST_FORMAT_VERSION = 2
+_ARTIFACT_HEX = re.compile(r"(?:[0-9a-f]{2})*\Z")
+
+
+def _encode_len(output, length):
+    """`encode_len` in `trace-commons-gate-api/src/pipeline.rs`: every length
+    and count is a big-endian `u64`."""
+    output += struct.pack(">Q", length)
+
+
+def _encode_string(output, value):
+    """`encode_string`: the UTF-8 byte length, then the bytes."""
+    require(isinstance(value, str), "promote_package_invalid")
+    data = value.encode()
+    _encode_len(output, len(data))
+    output += data
+
+
+def _encode_list(output, values):
+    """`encode_list`: sorted, and a duplicate entry is refused, never
+    dropped. Python orders `str` by code point, which is the byte order of
+    their UTF-8 encodings, so this sorts as Rust's `String` does."""
+    require(isinstance(values, list) and all(isinstance(value, str) for value in values), "promote_package_invalid")
+    values = sorted(values)
+    require(all(a != b for a, b in zip(values, values[1:])), "promote_package_invalid")
+    _encode_len(output, len(values))
+    for value in values:
+        _encode_string(output, value)
+
+
+def _manifest_canonical_bytes(manifest):
+    """`BundleManifest::canonical_bytes`: the domain separator, the format
+    version as a big-endian `u32`, the four policies in phase order, then the
+    pinned instruments in identifier order, each ending in its `decimals` as
+    one raw byte. The descriptor checks that `encode_instrument` also applies
+    are left to the server, which verifies the package when it arrives."""
+    require(isinstance(manifest, dict), "promote_package_invalid")
+    version = manifest.get("format_version")
+    require(
+        isinstance(version, int) and not isinstance(version, bool) and version == _BUNDLE_MANIFEST_FORMAT_VERSION,
+        "promote_package_invalid",
+    )
+    output = bytearray(b"trace-commons-bundle-manifest\0")
+    output += struct.pack(">I", version)
+    for phase in _PHASES:
+        policy = manifest.get(phase)
+        require(isinstance(policy, dict), "promote_package_invalid")
+        try:
+            policy_id = policy["policy_id"]
+            implementation_id = policy["implementation_id"]
+            configuration_hash = policy["configuration_hash"]
+            data_artifact_hashes = policy["data_artifact_hashes"]
+            projection_ids = policy["projection_ids"]
+        except KeyError as error:
+            raise ToolingError("promote_package_invalid") from error
+        require(isinstance(policy_id, str) and policy_id and isinstance(implementation_id, str) and implementation_id, "promote_package_invalid")
+        _encode_string(output, policy_id)
+        _encode_string(output, implementation_id)
+        _encode_string(output, configuration_hash)
+        _encode_list(output, data_artifact_hashes)
+        _encode_list(output, projection_ids)
+    instruments = manifest.get("instruments")
+    require(isinstance(instruments, dict), "promote_package_invalid")
+    _encode_len(output, len(instruments))
+    for instrument_id in sorted(instruments):
+        descriptor = instruments[instrument_id]
+        require(isinstance(descriptor, dict), "promote_package_invalid")
+        try:
+            kind, network, contract, decimals = (descriptor[key] for key in ("kind", "network", "contract", "decimals"))
+        except KeyError as error:
+            raise ToolingError("promote_package_invalid") from error
+        require(
+            kind in ("nep141", "erc20", "credit_account")
+            and isinstance(decimals, int)
+            and not isinstance(decimals, bool)
+            and 0 <= decimals <= 255,
+            "promote_package_invalid",
+        )
+        _encode_string(output, instrument_id)
+        _encode_string(output, kind)
+        _encode_string(output, network)
+        _encode_string(output, contract)
+        output.append(decimals)
+    return bytes(output)
+
+
+def _referenced_artifacts(manifest):
+    """`BundleManifest::referenced_artifacts`: every configuration hash and
+    data-artifact hash of the four policies."""
+    referenced = set()
+    for phase in _PHASES:
+        policy = manifest[phase]
+        for value in (policy["configuration_hash"], *policy["data_artifact_hashes"]):
+            require(isinstance(value, str) and _HASH.fullmatch(value) is not None, "promote_package_invalid")
+            referenced.add(value)
+    return referenced
+
+
+def bundle_package_hash(package):
+    """`BundlePackage::package_hash` in `trace-commons-gate-api/src/pipeline.rs`:
+    the SHA-256 of `canonical_bytes`, a domain-separated binary encoding of
+    the bundle identifier, the manifest's canonical bytes and the sorted
+    artifact hashes. It is not a hash of the package's JSON. Like Rust it
+    validates first: the bundle identifier must be the manifest's, the
+    artifact set must be exactly the manifest's references, and each
+    artifact's bytes must hash to its key. Every refusal is
+    `promote_package_invalid`. `fixtures/pipeline-package-digests-vector.json`,
+    which a Rust test holds to the Rust rule, pins this."""
+    require(isinstance(package, dict), "promote_package_invalid")
+    bundle_id = package.get("bundle_id")
+    manifest = package.get("manifest")
+    artifacts = package.get("artifacts")
+    manifest_bytes = _manifest_canonical_bytes(manifest)
+    require(isinstance(bundle_id, str) and bundle_id == sha256_digest(manifest_bytes), "promote_package_invalid")
+    require(isinstance(artifacts, dict) and set(artifacts) == _referenced_artifacts(manifest), "promote_package_invalid")
+    for artifact_hash, artifact_hex in artifacts.items():
+        require(isinstance(artifact_hex, str) and _ARTIFACT_HEX.fullmatch(artifact_hex) is not None, "promote_package_invalid")
+        require(sha256_digest(bytes.fromhex(artifact_hex)) == artifact_hash, "promote_package_invalid")
+    output = bytearray(b"trace-commons-bundle-package\0")
+    _encode_string(output, bundle_id)
+    _encode_len(output, len(manifest_bytes))
+    output += manifest_bytes
+    _encode_len(output, len(artifacts))
+    for artifact_hash in sorted(artifacts):
+        _encode_string(output, artifact_hash)
+    return sha256_digest(bytes(output))
+
+
 def package_digests(signed):
     """`(package_hash, configuration_digest, dependency_digest)` of a signed
     package, by `package_digests` in `versioned_pipeline_qualification.rs`:
-    the canonical hash of the package (which must equal the signature's
-    `package_hash`), the canonical hash of the four phase configuration
-    hashes, and the canonical hash of the sorted Score data-artifact hashes.
-    The Ed25519 signature is not verified here (the standard library has no
-    Ed25519); the server verifies it against its package trust store when
-    the submission arrives."""
+    the package hash (`bundle_package_hash`, which must equal the
+    signature's `package_hash`), the canonical hash of the four phase
+    configuration hashes, and the canonical hash of the sorted Score
+    data-artifact hashes. The Ed25519 signature is not verified here (the
+    standard library has no Ed25519); the server verifies it against its
+    package trust store when the submission arrives."""
     try:
         package = signed["package"]
         signature = signed["signature"]
@@ -168,7 +297,7 @@ def package_digests(signed):
         and all(isinstance(value, str) and _HASH.fullmatch(value) for value in artifacts),
         "promote_package_invalid",
     )
-    require(sha256_digest(canonical(package)) == claimed, "promote_package_hash_mismatch")
+    require(bundle_package_hash(package) == claimed, "promote_package_hash_mismatch")
     return claimed, sha256_digest(canonical(configuration)), sha256_digest(canonical(artifacts))
 
 
