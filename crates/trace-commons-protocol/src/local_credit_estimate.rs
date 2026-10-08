@@ -248,8 +248,10 @@ impl LocalEstimateFeatures {
     }
 
     /// The transformed value of one weighted term, or `None` when the
-    /// feature behind it is unknown.
-    fn term_value(&self, term: EstimateTerm, table: &LocalEstimateTable) -> Option<f64> {
+    /// feature behind it is unknown. Public so a fit computes exactly the
+    /// values [`estimate_score`] weights.
+    #[must_use]
+    pub fn term_value(&self, term: EstimateTerm, table: &LocalEstimateTable) -> Option<f64> {
         match term {
             EstimateTerm::LnContentBytes => Some((self.content_bytes as f64).ln_1p()),
             EstimateTerm::Capped => Some(if self.capped(table) { 1.0 } else { 0.0 }),
@@ -678,6 +680,21 @@ pub struct LocalCreditEstimate {
     pub calibration: String,
 }
 
+/// The weighted sum the table's cut-offs are placed on, or `None` when a
+/// weighted feature is unknown or the sum is not finite. A zero weight is
+/// skipped, so an unknown feature behind it does not matter.
+#[must_use]
+pub fn estimate_score(features: &LocalEstimateFeatures, table: &LocalEstimateTable) -> Option<f64> {
+    let mut score = 0.0;
+    for weight in &table.weights {
+        if weight.weight == 0.0 {
+            continue;
+        }
+        score += weight.weight * features.term_value(weight.term, table)?;
+    }
+    score.is_finite().then_some(score)
+}
+
 /// The estimate for one session under one table, or `None` when it cannot be
 /// made honestly: features of another version, no content, a weighted feature
 /// that is unknown, or a band that would display as 0.
@@ -694,16 +711,7 @@ pub fn estimate(
         // One tier: no score is needed, and none is reported.
         (0, None)
     } else {
-        let mut score = 0.0;
-        for weight in &table.weights {
-            if weight.weight == 0.0 {
-                continue;
-            }
-            score += weight.weight * features.term_value(weight.term, table)?;
-        }
-        if !score.is_finite() {
-            return None;
-        }
+        let score = estimate_score(features, table)?;
         let index = table.cut_offs.iter().filter(|&&cut| score >= cut).count();
         (index, Some(*labels.get(index)?))
     };
@@ -1167,6 +1175,31 @@ mod tests {
         assert_eq!((mid.low, mid.high), (1.0, 2.5));
         assert_eq!(hi.tier, Some(EstimateTier::Higher));
         assert_eq!((hi.low, hi.high), (1.5, 3.5));
+    }
+
+    #[test]
+    fn estimate_score_is_the_weighted_sum_the_tiers_are_cut_on() {
+        let table = LocalEstimateTable::from_value(&three_tier_table_value()).unwrap();
+        let f = features_of(&[
+            (EstimateRole::User, Some("a"), None),
+            (EstimateRole::ToolResult, Some(&"a".repeat(200)), None),
+        ]);
+        let expected = (f.content_bytes as f64).ln_1p() + 0.5;
+        let score = estimate_score(&f, &table).unwrap();
+        assert!((score - expected).abs() < 1e-12, "{score} vs {expected}");
+        // The same per-term values the server fits against.
+        assert_eq!(
+            f.term_value(EstimateTerm::UserMessagesCapped, &table),
+            Some(1.0)
+        );
+        // A weighted term whose feature is unknown leaves no score, never 0.
+        let empty = features_of(&[]);
+        let mut shares = table.clone();
+        shares.weights = vec![EstimateWeight {
+            term: EstimateTerm::ToolResultShare,
+            weight: 1.0,
+        }];
+        assert_eq!(estimate_score(&empty, &shares), None);
     }
 
     #[test]
