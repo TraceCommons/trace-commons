@@ -6575,6 +6575,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs",
+ "flate2",
  "futures",
  "hex",
  "regex",
