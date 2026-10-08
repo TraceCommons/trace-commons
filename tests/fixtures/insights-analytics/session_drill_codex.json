@@ -1,0 +1,19 @@
+{
+  "type": "session_drill",
+  "session": {
+    "feed": "saved",
+    "session_ref": "7eaa545c58cb9081a266131b5d3b46b8e5c7c0b6f08f30b0f29dd622cbd66199",
+    "source": "codex",
+    "date": "2026-09-15",
+    "tz": 0,
+    "turns": null,
+    "tokens": 0,
+    "span_secs": 11,
+    "state": "known",
+    "reasons": [],
+    "long_context_threshold": 200000,
+    "series": null,
+    "series_unavailable": "not_recorded",
+    "markers": []
+  }
+}
