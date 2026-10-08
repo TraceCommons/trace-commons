@@ -14,7 +14,8 @@ namespace TraceCommons.Interop;
 /// in hand -- the preview sheet's permission rows. Onboarding and Settings
 /// read <c>ConsentOption.Title</c>, the same words from the daemon.
 /// No shell keeps its own table of them (owner ruling, 2026-10-06): a scope
-/// this build has no title for is null, and the caller does not name it.
+/// this build has no title for is null from <see cref="Title"/>, and
+/// <see cref="PermissionTitles(IEnumerable{string})"/> names it by its wire name.
 /// </remarks>
 public static class ConsentScopeTitles
 {
@@ -23,6 +24,27 @@ public static class ConsentScopeTitles
     /// <summary>The core's title for <paramref name="wireName"/>, or null.</summary>
     public static string? Title(string wireName) =>
         Titles.Value.TryGetValue(wireName, out string? title) ? title : null;
+
+    /// <summary>
+    /// One permission row per scope this upload asks for, named by the core's
+    /// title. A scope with no title, or every scope when the bundle could not
+    /// be read, shows its wire name, as GTK does: it is held, so it is never
+    /// hidden, and a list shorter than the grant would understate it.
+    /// </summary>
+    public static IReadOnlyList<string> PermissionTitles(IEnumerable<string> scopes) =>
+        PermissionTitles(scopes, Titles.Value);
+
+    internal static IReadOnlyList<string> PermissionTitles(
+        IEnumerable<string> scopes, IReadOnlyDictionary<string, string> titles)
+    {
+        var rows = new List<string>();
+        foreach (string scope in scopes)
+        {
+            rows.Add(titles.TryGetValue(scope, out string? title) ? title : scope);
+        }
+
+        return rows;
+    }
 
     private static IReadOnlyDictionary<string, string> Read()
     {

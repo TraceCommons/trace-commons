@@ -1153,14 +1153,11 @@ public sealed class PreviewSheetViewModel : INotifyPropertyChanged, IDisposable
         }
 
         // The core's title for each scope (the disclosure bundle's
-        // consent_scope_titles); a scope it has no title for is not named.
+        // consent_scope_titles), or its wire name: every held scope is shown.
         Permissions.Clear();
-        foreach (string scope in summary.ConsentScopes)
+        foreach (string title in ConsentScopeTitles.PermissionTitles(summary.ConsentScopes))
         {
-            if (ConsentScopeTitles.Title(scope) is { } title)
-            {
-                Permissions.Add(new PermissionRow(title));
-            }
+            Permissions.Add(new PermissionRow(title));
         }
 
         Raise(nameof(WouldSendText));
