@@ -43591,3 +43591,182 @@ async fn a_withheld_award_records_its_reason_on_the_gate_decision_row() {
         Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
     );
 }
+
+/// Gives the submission's gate decision rows the dedup values a sweep would
+/// have written, as the owner (the sweep's own role is the gate driver's).
+async fn stamp_dedup_columns(tenant_id: &str, submission_id: uuid::Uuid) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let stamped = tx
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = 42, dedup_cluster_id = $3,
+                    dedup_cluster_size = 2, dedup_signal_version = 'simhash_v1'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id, &uuid::Uuid::new_v4()],
+        )
+        .await
+        .expect("stamp the dedup columns");
+    assert_eq!(stamped, 1, "the submission has its one gate decision row");
+    tx.commit().await.unwrap();
+}
+
+/// The row with its dedup columns cleared and everything else as it was.
+fn without_dedup(row: &GateDecisionRow) -> GateDecisionRow {
+    GateDecisionRow {
+        dedup_simhash: None,
+        dedup_cluster_id: None,
+        dedup_cluster_size: None,
+        dedup_signal_version: None,
+        ..row.clone()
+    }
+}
+
+/// The drain report's gate decision clause for `withdrawal_completion_pending`
+/// (`versioned_pipeline_activation.rs`): a withdrawn submission whose gate
+/// decision row still holds a dedup value is pending.
+async fn dedup_values_left(tenant_id: &str, submission_id: uuid::Uuid) -> bool {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let left: bool = tx
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM trace_gate_decisions decision
+                             WHERE decision.tenant_id = $1
+                               AND decision.submission_id = $2
+                               AND (decision.dedup_cluster_id IS NOT NULL
+                                    OR decision.dedup_simhash IS NOT NULL))",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    left
+}
+
+/// A completed compatibility run whose gate decision row carries dedup
+/// values, and that row as stamped.
+async fn completed_run_with_dedup_values(
+    service: &PipelineService,
+    tenant: &str,
+) -> (PipelineRunRecord, GateDecisionRow) {
+    let run = submit_and_complete(service, tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    stamp_dedup_columns(tenant, run.submission_id).await;
+    let rows = gate_decision_rows(tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1);
+    assert!(dedup_values_left(tenant, run.submission_id).await);
+    (run, rows[0].clone())
+}
+
+/// Spec C-D6: the pipeline withdrawal clears the dedup columns of the
+/// submission's gate decision row, as `main`'s withdrawal does
+/// (`clear_trace_dedup_cluster_for_submission`), and nothing else: the row
+/// stays, so the drain report's `withdrawal_completion_pending` clause reads
+/// nothing left.
+#[tokio::test]
+async fn withdrawal_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-withdrawn-{}", uuid::Uuid::new_v4());
+    let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&stamped)],
+        "the row stays, with its dedup columns cleared"
+    );
+    assert!(!dedup_values_left(&tenant, run.submission_id).await);
+}
+
+/// Spec C-D6: the pipeline's follow-up of `main`'s revocation clears them
+/// too.
+#[tokio::test]
+async fn revocation_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-revoked-{}", uuid::Uuid::new_v4());
+    let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+    service
+        .store()
+        .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+        .await
+        .expect("the revocation follow-up runs");
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&stamped)]
+    );
+}
+
+/// Spec C-D6: the pipeline's half of `main`'s retention maintenance clears
+/// them, for an expiry and for a purge.
+#[tokio::test]
+async fn retention_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    for action in [
+        PipelineRetentionAction::Expired,
+        PipelineRetentionAction::Purged,
+    ] {
+        let tenant = format!("gate-row-retention-{}", uuid::Uuid::new_v4());
+        let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+        service
+            .store()
+            .follow_up_retention(&tenant, run.submission_id, action)
+            .await
+            .expect("the retention follow-up runs");
+        assert_eq!(
+            gate_decision_rows(&tenant, run.submission_id).await,
+            vec![without_dedup(&stamped)],
+            "{action:?}"
+        );
+    }
+}
+
+/// Spec C-D6: a withdrawal writes no value of its own into
+/// `credit_withheld_reason` (`main`'s only writer of that column is its gate
+/// path), so a withheld award's reason stays exactly as Settle wrote it.
+#[tokio::test]
+async fn withdrawal_leaves_credit_withheld_reason_as_legacy_does() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-withheld-withdrawn-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before[0].credit_withheld_reason.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+    withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&before[0])],
+        "the withdrawal changes nothing on the row but the dedup columns"
+    );
+}

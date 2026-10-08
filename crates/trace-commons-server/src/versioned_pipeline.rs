@@ -4599,6 +4599,7 @@ impl PgPipelineStore {
                 .await?;
             }
         }
+        clear_gate_decision_dedup_on_tx(&tx, tenant_id, &[submission_id]).await?;
         Self::end_runs_of_inoperable_submission_on_tx(&tx, tenant_id, &runs, action.reason_code())
             .await?;
         let run_ids = runs.iter().map(|run| run.run_id).collect::<Vec<_>>();
@@ -6841,6 +6842,38 @@ async fn invalidate_pipeline_exports_on_tx(
                    AND item.snapshot_id = snapshot.snapshot_id
                    AND item.submission_id = ANY($2)
             )",
+        &[&tenant_id, &submission_ids],
+    )
+    .await?;
+    clear_gate_decision_dedup_on_tx(tx, tenant_id, &submission_ids).await?;
+    Ok(())
+}
+
+/// Clears the dedup columns of the submissions' `trace_gate_decisions` rows
+/// on the caller's transaction (spec 2026-10-08, Slice C, C-D6): the same
+/// UPDATE as `main`'s `clear_trace_dedup_cluster_for_submission`, and
+/// nothing else. The row stays (account trust keeps the gate evaluation as
+/// history), and no withdrawal value is written into
+/// `credit_withheld_reason`, whose only `main` writer is the gate path.
+/// Idempotent.
+async fn clear_gate_decision_dedup_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_ids: &[Uuid],
+) -> Result<(), DatabaseError> {
+    if submission_ids.is_empty() {
+        return Ok(());
+    }
+    // The version stamp goes with the value it names (V57).
+    tx.execute(
+        "UPDATE trace_gate_decisions
+            SET dedup_simhash = NULL,
+                dedup_cluster_id = NULL,
+                dedup_cluster_size = NULL,
+                dedup_signal_version = NULL
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
+            AND (dedup_simhash IS NOT NULL OR dedup_cluster_id IS NOT NULL
+                 OR dedup_cluster_size IS NOT NULL OR dedup_signal_version IS NOT NULL)",
         &[&tenant_id, &submission_ids],
     )
     .await?;
