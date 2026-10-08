@@ -417,12 +417,19 @@ extension DaemonData {
         public let count: Int?
         /// When an in-app "Not now" lapses; present only while one is in force.
         public let cooldownUntil: Date?
+        /// The menu-bar icon state (upsell A3): `news`, `ready`, `none` or
+        /// `unknown`. Decoded only; `nil` from an older daemon draws nothing.
+        public let mark: String?
+        /// The kind labels that lit `mark`, highest precedence first.
+        public let markKinds: [String]?
 
         public enum CodingKeys: String, CodingKey {
             case state
             case lead
             case count
             case cooldownUntil = "cooldown_until"
+            case mark
+            case markKinds = "mark_kinds"
         }
     }
 

@@ -13,7 +13,9 @@
   "unpurposed_traces": 0,
   "nudge": {
     "state": "none",
-    "lead": null
+    "lead": null,
+    "mark": "none",
+    "mark_kinds": []
   },
   "next_digest_at": null,
   "health": {

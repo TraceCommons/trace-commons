@@ -33,6 +33,13 @@
 //! first: U1 is hidden while the arming offer is present, because "decide on
 //! these" beside "arm this folder" is two asks at once.
 //!
+//! **The menu-bar mark** ([`mark`]) is decided here too, from the same
+//! snapshots: `news` (a hollow ring below paused, only while nothing is
+//! owed) for verdict news that is unacknowledged and younger than
+//! [`NEWS_MARK_TTL`], and `ready` (a halo around the badge, only while
+//! something is owed) for idle-session candidates. It clears by fact, never
+//! because a panel or window was opened.
+//!
 //! **A clock that goes backwards can only suppress.** A "Not now" stamped
 //! after `now` reads as still inside its cooldown, as `policy::arming_suggestion`
 //! reads its own decline.
@@ -632,6 +639,142 @@ pub fn lead(
             cooldown_until: silenced_until,
             ..NudgeLead::quiet(NudgeState::None)
         },
+    }
+}
+
+/// The news mark ages out this long after the newest verdict in the
+/// unacknowledged news (`VerdictDelta::newest_at`). A later verdict re-arms
+/// it. DRAFT, owner decision 19.
+pub const NEWS_MARK_TTL: Duration = Duration::hours(72);
+
+/// Everything [`mark`] reads besides the ledger and the clock, as snapshots.
+/// The gates, the counts and the news are [`lead`]'s own inputs, so the
+/// mark and the lead can never read two different worlds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkInputs {
+    /// What `lead` reads. `suggestions_enabled` and `arming_offer_present`
+    /// govern the cards and the panel row, never the mark.
+    pub lead: LeadInputs,
+    /// `status.decisions_owed`, or `None` when it could not be computed.
+    pub decisions_owed: Option<usize>,
+    /// The `menu_bar_mark_enabled` setting: the mark's own switch, separate
+    /// from every notification switch.
+    pub menu_bar_mark_enabled: bool,
+    /// The `notify.idle_sessions` setting. Muting the idle-session kind
+    /// clears the halo too (spec section 4.1, "The halo").
+    pub notify_idle_sessions: bool,
+}
+
+/// The menu-bar icon state the daemon reports. Four-valued: `News` and
+/// `Ready` are the two lit states, and `Unknown` is never read as `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkState {
+    /// The daemon cannot say: it is unhealthy, an input could not be
+    /// computed, or (with nothing owed) the history poll is stale.
+    Unknown,
+    /// Nothing is lit.
+    None,
+    /// The news mark: something new to look at, nothing to decide. Only
+    /// with `decisions_owed == 0`.
+    News,
+    /// The halo around the badge: some of the decisions owed are idle
+    /// sessions. Only with `decisions_owed > 0`.
+    Ready,
+}
+
+impl MarkState {
+    /// The wire label.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            MarkState::Unknown => "unknown",
+            MarkState::None => "none",
+            MarkState::News => "news",
+            MarkState::Ready => "ready",
+        }
+    }
+}
+
+/// What [`mark`] decided: the state and the kinds that lit it, highest
+/// precedence first (`attention::Kind::precedence`). `kinds` is empty
+/// exactly when nothing is lit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mark {
+    pub state: MarkState,
+    pub kinds: Vec<super::attention::Kind>,
+}
+
+impl Mark {
+    fn quiet(state: MarkState) -> Self {
+        Self {
+            state,
+            kinds: Vec::new(),
+        }
+    }
+
+    fn lit(state: MarkState, kind: super::attention::Kind) -> Self {
+        Self {
+            state,
+            kinds: vec![kind],
+        }
+    }
+}
+
+/// The menu-bar icon state. Pure: see the module doc.
+///
+/// - `ready` (the halo) when decisions are owed, every gate is open, U4 has
+///   at least one candidate, `notify.idle_sessions` is on and no in-app
+///   "Not now" silences U4.
+/// - `news` when nothing is owed, every gate is open, the history poll is
+///   fresh, and verdict news is waiting unacknowledged and younger than
+///   [`NEWS_MARK_TTL`]. Today U2 is the only mark kind; the weekly recap
+///   and Insights tips register later.
+///
+/// One needs `decisions_owed > 0` and the other `== 0`, so the two can
+/// never hold together. Nothing here reads whether a panel or window was
+/// opened: the news clears only when `nudge_opened {verdicts_landed}` takes
+/// `verdicts_pending`, or when it ages out.
+#[must_use]
+pub fn mark(
+    inputs: &MarkInputs,
+    ledger: &BTreeMap<String, NudgeLedger>,
+    now: DateTime<Utc>,
+) -> Mark {
+    use super::attention::Kind;
+    let gates = &inputs.lead;
+    if gates.paused || gates.consent_hold || !gates.enrolled || !inputs.menu_bar_mark_enabled {
+        return Mark::quiet(MarkState::None);
+    }
+    if !gates.healthy {
+        return Mark::quiet(MarkState::Unknown);
+    }
+    let Some(owed) = inputs.decisions_owed else {
+        return Mark::quiet(MarkState::Unknown);
+    };
+    if owed > 0 {
+        let ready = gates.idle_candidates > 0
+            && inputs.notify_idle_sessions
+            && shared_cooldown_until(gates.queue_ttl_days, ledger, now).is_none();
+        return if ready {
+            Mark::lit(MarkState::Ready, Kind::IdleSessions)
+        } else {
+            Mark::quiet(MarkState::None)
+        };
+    }
+    // U2 only from a fresh history poll, as in `lead`.
+    if !history_is_fresh(gates.last_history_poll_at, gates.history_poll_secs, now) {
+        return Mark::quiet(MarkState::Unknown);
+    }
+    // News stamped after now (the clock went backwards) is not lit: it can
+    // only suppress.
+    let news = gates.verdicts_pending.as_ref().is_some_and(|d| {
+        let age = now.signed_duration_since(d.newest_at);
+        d.total() > 0 && age >= Duration::zero() && age < NEWS_MARK_TTL
+    });
+    if news {
+        Mark::lit(MarkState::News, Kind::VerdictsLanded)
+    } else {
+        Mark::quiet(MarkState::None)
     }
 }
 
@@ -1589,6 +1732,330 @@ mod tests {
         assert!(prune_idle_announced(&mut announced, &pending));
         assert_eq!(announced, BTreeSet::from([b]));
         assert!(!prune_idle_announced(&mut announced, &pending), "no change");
+    }
+
+    // ---- A3: the news mark and the halo ----
+
+    /// Every gate open, nothing owed, the mark on, and fresh history with
+    /// no news yet.
+    fn mark_open(lead: LeadInputs) -> MarkInputs {
+        MarkInputs {
+            lead: LeadInputs {
+                unpurposed_traces: Some(0),
+                ..lead
+            },
+            decisions_owed: Some(0),
+            menu_bar_mark_enabled: true,
+            notify_idle_sessions: true,
+        }
+    }
+
+    fn news_inputs(at: DateTime<Utc>) -> MarkInputs {
+        mark_open(with_verdicts(delta(2, 1, 0, at)))
+    }
+
+    /// `idle` candidates, all of them owed.
+    fn ready_inputs(idle: usize) -> MarkInputs {
+        MarkInputs {
+            decisions_owed: Some(idle.max(1)),
+            ..mark_open(LeadInputs {
+                idle_candidates: idle,
+                ..open()
+            })
+        }
+    }
+
+    fn quiet_mark(state: MarkState) -> Mark {
+        Mark {
+            state,
+            kinds: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn verdicts_waiting_with_nothing_owed_light_the_news_mark() {
+        let got = mark(&news_inputs(now() - Duration::hours(1)), &empty(), now());
+        assert_eq!(
+            got,
+            Mark {
+                state: MarkState::News,
+                kinds: vec![super::super::attention::Kind::VerdictsLanded],
+            }
+        );
+        assert_eq!(got.state.label(), "news");
+    }
+
+    #[test]
+    fn nothing_waiting_is_none() {
+        let got = mark(&mark_open(open()), &empty(), now());
+        assert_eq!(got, quiet_mark(MarkState::None));
+        assert_eq!(MarkState::None.label(), "none");
+        assert_eq!(MarkState::Unknown.label(), "unknown");
+        assert_eq!(MarkState::Ready.label(), "ready");
+    }
+
+    /// News is impossible while any decision is owed: the badge takes the
+    /// slot. When the badge clears, unacknowledged news returns.
+    #[test]
+    fn news_is_impossible_while_decisions_are_owed() {
+        let at = now() - Duration::hours(1);
+        for owed in [1, 2, 99, 10_000] {
+            let inputs = MarkInputs {
+                decisions_owed: Some(owed),
+                ..news_inputs(at)
+            };
+            let got = mark(&inputs, &empty(), now());
+            assert_ne!(got.state, MarkState::News, "owed {owed}");
+        }
+        assert_eq!(
+            mark(&news_inputs(at), &empty(), now()).state,
+            MarkState::News,
+            "returns once the badge clears"
+        );
+    }
+
+    /// Paused, consent-held, signed out or the mark switched off: `none`.
+    /// Unhealthy, or an owed count that could not be computed: `unknown`.
+    /// Never `news`, never `ready`.
+    #[test]
+    fn a_closed_gate_lights_nothing() {
+        let at = now() - Duration::hours(1);
+        let closed: [(&str, fn(&mut MarkInputs), MarkState); 6] = [
+            ("paused", |m| m.lead.paused = true, MarkState::None),
+            (
+                "consent hold",
+                |m| m.lead.consent_hold = true,
+                MarkState::None,
+            ),
+            ("unenrolled", |m| m.lead.enrolled = false, MarkState::None),
+            (
+                "mark off",
+                |m| m.menu_bar_mark_enabled = false,
+                MarkState::None,
+            ),
+            ("unhealthy", |m| m.lead.healthy = false, MarkState::Unknown),
+            (
+                "owed unknown",
+                |m| m.decisions_owed = None,
+                MarkState::Unknown,
+            ),
+        ];
+        for (name, close, want) in closed {
+            for base in [news_inputs(at), ready_inputs(3)] {
+                let mut inputs = base;
+                close(&mut inputs);
+                assert_eq!(mark(&inputs, &empty(), now()), quiet_mark(want), "{name}");
+            }
+        }
+    }
+
+    /// Every combination of gates, owed counts, news, candidates, switches
+    /// and cooldowns: `news` only with nothing owed and every gate open,
+    /// `ready` only with something owed and every gate open, and so never
+    /// both. Each lit state names exactly its one kind.
+    #[test]
+    fn the_truth_table_keeps_news_and_ready_apart() {
+        use super::super::attention::Kind;
+        let at = now() - Duration::hours(1);
+        let bools = [false, true];
+        for paused in bools {
+            for consent_hold in bools {
+                for enrolled in bools {
+                    for healthy in bools {
+                        for mark_on in bools {
+                            for idle_on in bools {
+                                for owed in [None, Some(0), Some(1), Some(7)] {
+                                    for idle in [0, 1, 4] {
+                                        for news in [None, Some(delta(1, 0, 0, at))] {
+                                            for ledger in
+                                                [empty(), declined(now() - Duration::days(1))]
+                                            {
+                                                let inputs = MarkInputs {
+                                                    lead: LeadInputs {
+                                                        paused,
+                                                        consent_hold,
+                                                        enrolled,
+                                                        healthy,
+                                                        idle_candidates: idle,
+                                                        verdicts_pending: news.clone(),
+                                                        ..open()
+                                                    },
+                                                    decisions_owed: owed,
+                                                    menu_bar_mark_enabled: mark_on,
+                                                    notify_idle_sessions: idle_on,
+                                                };
+                                                let got = mark(&inputs, &ledger, now());
+                                                let gates = !paused
+                                                    && !consent_hold
+                                                    && enrolled
+                                                    && healthy
+                                                    && mark_on;
+                                                let ctx = format!("{inputs:?} {ledger:?}");
+                                                match got.state {
+                                                    MarkState::News => {
+                                                        assert!(gates, "{ctx}");
+                                                        assert_eq!(owed, Some(0), "{ctx}");
+                                                        assert!(news.is_some(), "{ctx}");
+                                                        assert_eq!(
+                                                            got.kinds,
+                                                            [Kind::VerdictsLanded],
+                                                            "{ctx}"
+                                                        );
+                                                    }
+                                                    MarkState::Ready => {
+                                                        assert!(gates && idle_on, "{ctx}");
+                                                        assert!(owed > Some(0), "{ctx}");
+                                                        assert!(idle > 0, "{ctx}");
+                                                        assert!(ledger.is_empty(), "{ctx}");
+                                                        assert_eq!(
+                                                            got.kinds,
+                                                            [Kind::IdleSessions],
+                                                            "{ctx}"
+                                                        );
+                                                    }
+                                                    MarkState::None | MarkState::Unknown => {
+                                                        assert!(got.kinds.is_empty(), "{ctx}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The news ages out [`NEWS_MARK_TTL`] after its newest verdict, and a
+    /// later verdict re-arms it.
+    #[test]
+    fn the_news_ages_out_and_a_later_verdict_rearms_it() {
+        let at = now() - NEWS_MARK_TTL;
+        assert_eq!(
+            mark(&news_inputs(at), &empty(), now()),
+            quiet_mark(MarkState::None),
+            "aged out at exactly the TTL"
+        );
+        let just_inside = now() - NEWS_MARK_TTL + Duration::seconds(1);
+        assert_eq!(
+            mark(&news_inputs(just_inside), &empty(), now()).state,
+            MarkState::News
+        );
+
+        let mut pending = delta(1, 0, 0, at);
+        pending.absorb(&delta(0, 1, 0, now() - Duration::minutes(5)));
+        let rearmed = mark_open(with_verdicts(pending));
+        assert_eq!(mark(&rearmed, &empty(), now()).state, MarkState::News);
+    }
+
+    /// The TTL is the owner's 72 hours (decision 19).
+    #[test]
+    fn the_news_mark_ttl_is_72_hours() {
+        assert_eq!(NEWS_MARK_TTL, Duration::hours(72));
+    }
+
+    /// Ageing out clears the mark, not the card: the news stays on the panel
+    /// row and in the ledger until its own action acknowledges it.
+    #[test]
+    fn ageing_out_leaves_the_lead_in_place() {
+        let inputs = news_inputs(now() - NEWS_MARK_TTL - Duration::hours(1));
+        assert_eq!(mark(&inputs, &empty(), now()).state, MarkState::None);
+        assert_eq!(
+            lead(&inputs.lead, &empty(), now()).lead,
+            Some(NudgeKind::VerdictsLanded)
+        );
+    }
+
+    /// Acknowledged news (`nudge_opened` takes `verdicts_pending`) lights
+    /// nothing; so does news stamped after now: the clock went backwards,
+    /// which can only suppress.
+    #[test]
+    fn acknowledged_or_future_news_lights_nothing() {
+        let acked = mark_open(open());
+        assert_eq!(acked.lead.verdicts_pending, None);
+        assert_eq!(mark(&acked, &empty(), now()), quiet_mark(MarkState::None));
+        let future = news_inputs(now() + Duration::minutes(1));
+        assert_eq!(mark(&future, &empty(), now()), quiet_mark(MarkState::None));
+    }
+
+    /// With nothing owed, a stale history poll is `unknown`: a stale cache
+    /// is never news, and "no news" from it is not known either. The halo
+    /// does not read history.
+    #[test]
+    fn stale_history_is_unknown_for_news_but_not_for_the_halo() {
+        for last in [None, Some(now() - Duration::days(1))] {
+            let mut news = news_inputs(now() - Duration::hours(1));
+            news.lead.last_history_poll_at = last;
+            assert_eq!(mark(&news, &empty(), now()), quiet_mark(MarkState::Unknown));
+            let mut ready = ready_inputs(2);
+            ready.lead.last_history_poll_at = last;
+            assert_eq!(mark(&ready, &empty(), now()).state, MarkState::Ready);
+        }
+    }
+
+    /// The mark has its own switch: the in-app suggestions switch and the
+    /// arming offer do not touch it.
+    #[test]
+    fn suggestions_and_the_arming_offer_do_not_govern_the_mark() {
+        let mut news = news_inputs(now() - Duration::hours(1));
+        news.lead.suggestions_enabled = false;
+        news.lead.arming_offer_present = true;
+        assert_eq!(mark(&news, &empty(), now()).state, MarkState::News);
+    }
+
+    #[test]
+    fn idle_candidates_under_a_lit_badge_draw_the_halo() {
+        assert_eq!(
+            mark(&ready_inputs(2), &empty(), now()),
+            Mark {
+                state: MarkState::Ready,
+                kinds: vec![super::super::attention::Kind::IdleSessions],
+            }
+        );
+    }
+
+    /// The halo clears when the candidate set empties, whatever else is
+    /// still owed.
+    #[test]
+    fn the_halo_clears_when_the_candidates_empty() {
+        let mut inputs = ready_inputs(3);
+        inputs.lead.idle_candidates = 0;
+        inputs.decisions_owed = Some(5);
+        assert_eq!(mark(&inputs, &empty(), now()), quiet_mark(MarkState::None));
+    }
+
+    /// Muting `notify.idle_sessions` clears the halo; the in-app "Not now"
+    /// does too, until it lapses.
+    #[test]
+    fn the_halo_obeys_its_mute_and_the_not_now() {
+        let mut muted = ready_inputs(2);
+        muted.notify_idle_sessions = false;
+        assert_eq!(mark(&muted, &empty(), now()), quiet_mark(MarkState::None));
+
+        let declined_at = now() - Duration::days(1);
+        for kind in [NudgeKind::IdleSessions, NudgeKind::ReviewBacklog] {
+            let ledger = BTreeMap::from([(
+                ledger_key(kind, None),
+                NudgeLedger {
+                    declined_at: Some(declined_at),
+                    ..NudgeLedger::default()
+                },
+            )]);
+            assert_eq!(
+                mark(&ready_inputs(2), &ledger, now()),
+                quiet_mark(MarkState::None),
+                "{kind:?}"
+            );
+            let lapsed = declined_at + decline_cooldown(14);
+            assert_eq!(
+                mark(&ready_inputs(2), &ledger, lapsed).state,
+                MarkState::Ready,
+                "{kind:?}"
+            );
+        }
     }
 
     /// The module is pure: no lock is ever taken in it, so the status
