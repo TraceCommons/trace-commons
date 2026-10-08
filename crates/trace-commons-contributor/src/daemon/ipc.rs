@@ -3091,9 +3091,21 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     }
                 }
             };
-            policy.decline_arming(&key, Utc::now());
+            let now = Utc::now();
+            let offered_before = policy.arming_suggestion(now).is_some();
+            policy.decline_arming(&key, now);
+            let offered_after = policy.arming_suggestion(now).is_some();
             match policy.save(&shared.store) {
-                Ok(()) => Response::ok(req.id, serde_json::json!({ "declined": true })),
+                Ok(()) => {
+                    drop(policy);
+                    // The arming offer hides U1 in `status.nudge`, so its
+                    // going away is a status change. An offer that moved to
+                    // another folder changes nothing there and stays silent.
+                    if offered_before != offered_after {
+                        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+                    }
+                    Response::ok(req.id, serde_json::json!({ "declined": true }))
+                }
                 Err(e) => Response::err(req.id, ERR_UNAVAILABLE, &e.to_string()),
             }
         }
@@ -17713,6 +17725,38 @@ mod tests {
                 .unwrap();
             assert!(offer.get("project_id").is_some(), "{offer}");
             assert_eq!(nudge_of(&s)["state"], "none");
+        }
+
+        /// Declining the arming offer un-hides U1, so `status.nudge` changes
+        /// and every shell must be told to redraw.
+        #[test]
+        fn declining_the_arming_offer_publishes_the_backlog_it_uncovers() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            {
+                let mut policy = s.policy.lock().unwrap();
+                for _ in 0..crate::daemon::policy::ARMING_SUGGESTION_THRESHOLD {
+                    policy.record_contribution(ASK);
+                }
+            }
+            let offer = handle_request(&s, &req("arming_suggestion", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(nudge_of(&s)["state"], "none");
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "decline_arming",
+                    serde_json::json!({"project_id": offer["project_id"]}),
+                ),
+            );
+            assert_eq!(r.result.unwrap()["declined"], true);
+            assert_eq!(nudge_of(&s)["lead"], "review_backlog");
+            assert!(
+                saw_status_changed(&mut rx),
+                "the uncovered lead is published"
+            );
         }
 
         #[test]
