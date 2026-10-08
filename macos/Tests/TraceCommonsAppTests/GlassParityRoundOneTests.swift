@@ -246,7 +246,32 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertNil(TracesGraphFooter.countable([], failure: .unreachable), "a stale page is counted as current")
         let window = try TracesParityTests.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
-            "history: TracesGraphFooter.countable(home.history, failure: home.failures[\"list_history\"]),"))
+            "history: TracesGraphFooter.readable(home.history, failure: home.failures[\"list_history\"]),"))
+        XCTAssertTrue(window.contains(
+            "complete: TracesGraphFooter.countable(home.history, failure: home.failures[\"list_history\"]) != nil,"))
         XCTAssertFalse(window.contains("history: home.history, sessions:"))
+    }
+
+    /// A capped page still draws its bars: the newest page covers the days
+    /// the graph shows, and only the legend's total turns to a dash. Drawing
+    /// the bars from the whole-page rule showed every shared bar as 0.
+    func test_aCappedHistoryPageStillDrawsTheSharedBars() throws {
+        let reply = try XCTUnwrap(SampleDaemonData.reply("list_history", in: .normalDay))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        let first = try XCTUnwrap((object["history"] as? [[String: Any]])?.first)
+        let capped = try (0..<HomeStore.historyLimit).map { index -> DaemonData.HistoryRow in
+            var row = first
+            row["status"] = "accepted"
+            row["submission_id"] = "row-\(index)"
+            row["session_hash"] = "sha256:row-\(index)"
+            return try DaemonDataDecoding.decoder().decode(
+                DaemonData.HistoryRow.self, from: JSONSerialization.data(withJSONObject: row))
+        }
+        XCTAssertNil(TracesGraphFooter.countable(capped, failure: nil), "a capped page is not a whole total")
+        let drawn = try XCTUnwrap(TracesGraphFooter.readable(capped, failure: nil))
+        XCTAssertEqual(TracesGraphModel.sharedTimes(drawn, tool: nil).count, capped.compactMap(\.submittedAt).count)
+        XCTAssertGreaterThan(TracesGraphModel.sharedTimes(drawn, tool: nil).count, 0, "the bars must not all be 0")
+        XCTAssertNil(TracesGraphFooter.readable(capped, failure: .unreachable), "a stale page is drawn as current")
+        XCTAssertNil(TracesGraphFooter.readable(nil, failure: nil))
     }
 }

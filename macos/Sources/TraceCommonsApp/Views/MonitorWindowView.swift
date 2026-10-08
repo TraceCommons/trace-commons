@@ -216,7 +216,8 @@ struct MonitorWindowView: View {
                 // sliding up from the pane's bottom edge as it opens.
                 if Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) == .traces && showsGraph {
                     TracesGraphFooter(
-                        history: TracesGraphFooter.countable(home.history, failure: home.failures["list_history"]),
+                        history: TracesGraphFooter.readable(home.history, failure: home.failures["list_history"]),
+                        complete: TracesGraphFooter.countable(home.history, failure: home.failures["list_history"]) != nil,
                         sessions: traces.tree.allSessions, tool: selectedTool,
                         focus: $mapFocus, onFocus: focusMap)
                         .padding(.horizontal, GlassTokens.Space.panePadding)
