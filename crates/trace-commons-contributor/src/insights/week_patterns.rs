@@ -339,7 +339,7 @@ pub fn week_patterns(
         .unwrap_or_default();
     // Most re-read first; ties keep first-seen order. The letter stays the
     // file's position.
-    reread_files.sort_by(|a, b| b.reads.cmp(&a.reads));
+    reread_files.sort_by_key(|row| std::cmp::Reverse(row.reads));
     reread_files.truncate(MAX_REREAD_ROWS);
     let rollup = &this.rollup;
     WeekPatterns {
