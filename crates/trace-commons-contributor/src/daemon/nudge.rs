@@ -88,6 +88,12 @@ pub const IDLE_REPEAT_MARGIN_DAYS: i64 = 2;
 /// decision 26.
 pub const IDLE_MIN_TTL_DAYS: i64 = 4;
 
+/// U4: the idle threshold is at most the queue TTL divided by this, so a
+/// short TTL still leaves room to announce before expiry
+/// (`idle_days_eff = min(IDLE_DAYS, ttl / IDLE_TTL_DIVISOR)`). DRAFT, owner
+/// decision 26.
+pub const IDLE_TTL_DIVISOR: i64 = 4;
+
 /// U4's effective threshold and repeat interval for one queue TTL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdleWindow {
@@ -116,7 +122,7 @@ impl IdleWindow {
 /// U4's window for `queue_ttl_days`, or `None` when the kind is off (a TTL
 /// below [`IDLE_MIN_TTL_DAYS`]):
 ///
-/// - `idle_days_eff = min(IDLE_DAYS, max(1, ttl / 4))`
+/// - `idle_days_eff = min(IDLE_DAYS, max(1, ttl / IDLE_TTL_DIVISOR))`
 /// - `idle_repeat_days_eff = min(IDLE_REPEAT_DAYS, max(1, ttl - idle_days_eff - IDLE_REPEAT_MARGIN_DAYS))`
 ///
 /// so `idle_days_eff + idle_repeat_days_eff + 1 < ttl` always holds, and a
@@ -126,7 +132,7 @@ pub fn idle_window(queue_ttl_days: i64) -> Option<IdleWindow> {
     if queue_ttl_days < IDLE_MIN_TTL_DAYS {
         return None;
     }
-    let idle_days = IDLE_DAYS.min((queue_ttl_days / 4).max(1));
+    let idle_days = IDLE_DAYS.min((queue_ttl_days / IDLE_TTL_DIVISOR).max(1));
     let repeat_days =
         IDLE_REPEAT_DAYS.min((queue_ttl_days - idle_days - IDLE_REPEAT_MARGIN_DAYS).max(1));
     Some(IdleWindow {
