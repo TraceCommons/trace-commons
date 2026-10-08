@@ -18303,6 +18303,7 @@ async fn checked_compatibility_service_over_adapter(
         .with_embedder(embedder)
         .with_authority(authority)
         .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
         .with_novelty_utility_checks(issuing_checks())
         .build()
         .expect("build pipeline service"),
@@ -28573,6 +28574,7 @@ fn counting_compatibility_service(
         .with_embedder(embedder)
         .with_authority(allow_all_authority())
         .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
         .with_novelty_utility_checks(issuing_checks())
         .with_lease_config(lease_config)
         .build()
