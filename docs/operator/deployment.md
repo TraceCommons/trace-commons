@@ -865,6 +865,73 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_attempt_ar
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_attempt_artifacts', 'ciphertext_sha256', 'UPDATE');
 ```
 
+### V109: pipeline follow-ups
+
+V109 adds no table and changes no grant. It marks the payout of each leg
+that V94-era code seeded `pending` as `disabled`, adds four
+checks on the export and assessment tables, and indexes two foreign keys on
+their referencing side ([pipeline-activation.md](pipeline-activation.md)
+describes each). For the first of these it lifts forced row security on
+`pipeline_run_settlements` for one statement and forces it again, inside the
+migration's transaction.
+
+The ingest migration runner applies each migration in one transaction. To
+apply V109 by hand (the second route above), use one transaction too:
+
+```sh
+psql --single-transaction -v ON_ERROR_STOP=1 -f migrations/V109__versioned_pipeline_followups.sql
+```
+
+This command applies the file and records nothing. Then record version 109,
+with the name `versioned_pipeline_followups`, in `_trace_commons_migrations`,
+as that route says; if it is not recorded, the next boot with the migrator
+URL applies V109 again and stops at the `ADD CONSTRAINT` on
+`pipeline_review_assessments`.
+
+Without `--single-transaction`, a failure after the first statement leaves
+`pipeline_run_settlements` without forced row security, and a second run of
+the file stops at a check or an index that the first run added.
+
+V109 does not need V110 to V114, and they do not need V109. A database that
+already has them (it ran a build of `main` from before V109) gets V109 after
+them, at the next boot with the migrator URL or by hand; the result is the
+same in both orders.
+
+Each statement locks its table until the commit. That costs nothing while
+the pipeline tables are empty, which they are until a tenant's uploads go to
+the pipeline. An activation sends them there. So does a process started with
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` (the test-only rule of
+[pipeline-activation.md](pipeline-activation.md)), and so did a build with a
+pipeline runtime from before the routing row, which routed by its receipts
+list alone. On a database that has pipeline rows, the build that still runs
+waits for these locks in its Settle, payout, review assessment, export and
+invalidation statements until V109 commits: the time of one read of each of
+the five tables (`pipeline_run_settlements`, `pipeline_export_snapshots`,
+`pipeline_export_snapshot_items`, `pipeline_review_assessments`,
+`pipeline_index_invalidations`). A row that fails one of the four checks
+makes V109 roll back; the routes write no such row.
+
+A wait is not the only result. V109 locks `pipeline_export_snapshots` before
+`pipeline_export_snapshot_items`. A withdrawal, and a revocation or
+withdrawal follow-up (a route, retention maintenance, or the pipeline
+worker), locks the items before the snapshots. One of these that runs at the
+same time can deadlock with V109, and PostgreSQL then stops one of the two.
+If it stops V109, nothing was applied: start that boot, or the `psql`
+command, again. If it stops the other one, that request or pass fails and
+is tried again. To prevent the deadlock, stop the ingest processes of the
+running build before you apply V109.
+
+A test or lab database that kept the rows of the #1143 runtime suite fails
+the new requester check (those fixtures hold a requester such as
+`exporter_sha256:exporttest`), and V109 rolls back. Drop that database and
+create it again.
+
+Check afterwards:
+
+```sql
+SELECT relforcerowsecurity FROM pg_class WHERE relname = 'pipeline_run_settlements';
+```
+
 ### V110 to V113: activation, policy interventions, the activation gate, and the rebuild fence
 
 V110 adds `pipeline_tenant_routing` (one row for each tenant: its routing state),

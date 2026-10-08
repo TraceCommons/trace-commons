@@ -41,6 +41,14 @@ impl StaticPipelineAuthorityProvider {
         }
     }
 
+    /// A test double: every tenant gets `fallback`. It is in the library,
+    /// not behind `#[cfg(test)]`, because the integration tests and the
+    /// ingest binary's tests link the library built without `cfg(test)`.
+    /// A `StaticPipelineAuthorityProvider` is never production-qualified
+    /// (`production_qualified` keeps the trait's `false`), so the
+    /// qualification gate refuses a runtime that routes or drains a tenant
+    /// through it (`each_pipeline_test_double_fails_the_qualification_gate`
+    /// in the ingest binary's tests).
     #[doc(hidden)]
     pub fn test_only(fallback: SubmissionAuthority) -> Self {
         Self {

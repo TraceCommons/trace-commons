@@ -77,9 +77,15 @@ impl GcsObjectClient for InMemoryGcsObjectClient {
 
     fn get_object(&self, key: &str) -> anyhow::Result<GcsObjectFetch> {
         let live = self.live.lock().unwrap();
-        let (body, metadata) = live
-            .get(key)
-            .ok_or_else(|| anyhow::anyhow!("GcsGetFailed: not found"))?;
+        // ZA-2: a missing key is the bucket answering that the object is not
+        // there, which the production client's 404 also reports this way.
+        let (body, metadata) = live.get(key).ok_or_else(|| {
+            anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: not found".to_string(),
+                ),
+            )
+        })?;
         Ok(GcsObjectFetch {
             body: body.clone(),
             metadata: metadata.clone(),
@@ -236,16 +242,32 @@ impl<C: GcsObjectClient> RemoteTraceArtifactProvider for GcsRemoteTraceArtifactP
     ) -> anyhow::Result<RemoteTraceArtifactRecord> {
         validate_file_remote_object_ref(object_ref)?;
         let key = self.object_key(object_ref);
-        let fetch = self
-            .client
-            .get_object(&key)
-            .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
-        let record: GcsRecord = serde_json::from_slice(&fetch.body)
-            .map_err(|err| anyhow::anyhow!("GcsGetFailed: parse record: {err}"))?;
-        anyhow::ensure!(
-            record.object_ref == *object_ref,
-            "GcsGetFailed: remote trace artifact object ref mismatch"
-        );
+        // ZA-2: the client types a missing object (a 404) as an integrity
+        // failure; keep that type, so the pipeline charges it. Any other
+        // fetch failure stays untyped: transport, uncharged.
+        let fetch = self.client.get_object(&key).map_err(|err| {
+            if crate::trace_artifact_store::is_trace_artifact_integrity_error(&err) {
+                err
+            } else {
+                anyhow::anyhow!("GcsGetFailed: {err}")
+            }
+        })?;
+        // A record that does not parse or names another object is an
+        // integrity failure too.
+        let record: GcsRecord = serde_json::from_slice(&fetch.body).map_err(|err| {
+            anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(format!(
+                    "GcsGetFailed: parse record: {err}"
+                )),
+            )
+        })?;
+        if record.object_ref != *object_ref {
+            return Err(anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: remote trace artifact object ref mismatch".to_string(),
+                ),
+            ));
+        }
         Ok(RemoteTraceArtifactRecord {
             object_ref: record.object_ref,
             artifact: record.artifact,
@@ -424,6 +446,27 @@ pub mod prod_client {
         }
     }
 
+    /// ZA-2: a 404 on a fetch means the bucket answered and the object is
+    /// not there, so it is typed as an integrity failure, which the pipeline
+    /// charges. A media download's 404 may carry a body that is not the JSON
+    /// error, which the client reports as an HTTP-client error with the
+    /// status; that is the same answer. Every other error (credentials,
+    /// network, 429, 5xx) stays untyped: transport, uncharged.
+    fn get_failure(err: GcsError) -> anyhow::Error {
+        let not_found = is_not_found(&err)
+            || matches!(&err, GcsError::HttpClient(http)
+                if http.status().map(|status| status.as_u16()) == Some(404));
+        if not_found {
+            anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(format!(
+                    "GcsGetFailed: {err}"
+                )),
+            )
+        } else {
+            anyhow::anyhow!("GcsGetFailed: {err}")
+        }
+    }
+
     impl GcsObjectClient for ProdGcsObjectClient {
         fn put_object(
             &self,
@@ -456,10 +499,9 @@ pub mod prod_client {
                 object: key.to_string(),
                 ..Default::default()
             };
-            let object = run_blocking(self.client.get_object(&get_req))
-                .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
+            let object = run_blocking(self.client.get_object(&get_req)).map_err(get_failure)?;
             let body = run_blocking(self.client.download_object(&get_req, &Range::default()))
-                .map_err(|err| anyhow::anyhow!("GcsGetFailed: {err}"))?;
+                .map_err(get_failure)?;
             let metadata: BTreeMap<String, String> =
                 object.metadata.unwrap_or_default().into_iter().collect();
             Ok(GcsObjectFetch {
@@ -523,6 +565,36 @@ pub mod prod_client {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn a_fetch_404_is_an_integrity_failure_and_other_errors_are_not() {
+            use google_cloud_storage::http::error::ErrorResponse;
+            let response = |code| {
+                GcsError::Response(ErrorResponse {
+                    code,
+                    errors: Vec::new(),
+                    message: "status".to_string(),
+                })
+            };
+            assert!(
+                crate::trace_artifact_store::is_trace_artifact_integrity_error(&get_failure(
+                    response(404)
+                ))
+            );
+            for code in [401, 403, 429, 500, 503] {
+                assert!(
+                    !crate::trace_artifact_store::is_trace_artifact_integrity_error(&get_failure(
+                        response(code)
+                    )),
+                    "{code} is transport"
+                );
+            }
+            assert!(
+                !crate::trace_artifact_store::is_trace_artifact_integrity_error(&get_failure(
+                    GcsError::InvalidRangeHeader("bytes".to_string())
+                ))
+            );
+        }
 
         #[tokio::test]
         async fn try_new_without_credentials_returns_init_error() {
