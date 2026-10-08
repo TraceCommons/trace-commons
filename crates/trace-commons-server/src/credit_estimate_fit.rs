@@ -628,10 +628,12 @@ fn solve(mut a: Vec<Vec<f64>>) -> Option<Vec<f64>> {
             return None;
         }
         a.swap(col, pivot);
-        for row in (col + 1)..m {
-            let factor = a[row][col] / a[col][col];
-            for c in col..=m {
-                a[row][c] -= factor * a[col][c];
+        let (upper, lower) = a.split_at_mut(col + 1);
+        let pivot_row = &upper[col];
+        for row in lower.iter_mut() {
+            let factor = row[col] / pivot_row[col];
+            for (cell, pivot_cell) in row.iter_mut().zip(pivot_row).skip(col) {
+                *cell -= factor * pivot_cell;
             }
         }
     }

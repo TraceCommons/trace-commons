@@ -1819,7 +1819,7 @@ mod enclave_gate_service_tests {
                 .map(|(event_type, content, tool)| TraceContributionEvent {
                     event_id: Uuid::new_v4(),
                     parent_event_id: None,
-                    event_type: event_type.clone(),
+                    event_type: *event_type,
                     timestamp: now,
                     redacted_content: Some((*content).to_string()),
                     structured_payload: serde_json::Value::Null,
