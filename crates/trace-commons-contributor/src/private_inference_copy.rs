@@ -1798,7 +1798,7 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 ///
 /// After Ron's #1146 heading (`private-ai-balance-panel.tsx`, "NEAR AI
 /// usage"), but the figure under it is what remains, not what was used.
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "What is left
+/// Approved 2026-10-07: it was "What is left
 /// in your Private AI account", then #1146's "NEAR AI usage".
 pub const BALANCE_TITLE: &str = "NEAR AI balance";
 pub const FUNDING_TITLE: &str = "Cloud billing";
@@ -1814,8 +1814,7 @@ pub const FUNDING_MANAGE: &str = "Manage billing";
 /// #1146's "Verify current account".
 pub const FUNDING_REFRESH: &str = "Verify current account";
 /// #1146's "Account destination not read.", then the remedy, by the
-/// [`FUNDING_REFRESH`] control's name. DRAFT, NEEDS APPROVAL (#1273
-/// review, 2026-10-07): it was "The billing destination could not be
+/// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
 /// verified. Refresh account to try again."
 pub const FUNDING_UNAVAILABLE: &str =
     "Account destination not read. Verify current account to try again.";

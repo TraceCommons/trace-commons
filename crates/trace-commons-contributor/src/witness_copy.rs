@@ -49,8 +49,7 @@ pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
 );
 
 /// How the pin list is written, in Ron's #1146 words, then why more than
-/// one is pinned: an upgrade changes the measurement. DRAFT, NEEDS APPROVAL
-/// (#1273 review, 2026-10-07): #1146's two lines dropped the upgrade
+/// one is pinned: an upgrade changes the measurement. Approved 2026-10-07: #1146's two lines dropped the upgrade
 /// explanation, which was "More than one measurement can be pinned. An
 /// upgrade to the witness changes its measurement, so the new one is added
 /// here before the change happens; a client that holds only the old one
@@ -83,7 +82,7 @@ pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[("operator_label", &["l
 
 /// Actions (#1146).
 pub const WITNESS_CONFIGURE: &str = "Save witness";
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Stop using a
+/// Approved 2026-10-07: it was "Stop using a
 /// witness".
 pub const WITNESS_CLEAR: &str = "Return to local redaction";
 
@@ -117,14 +116,14 @@ pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
 pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): they were "Include
+/// Approved 2026-10-07: they were "Include
 /// token probabilities" and "Stop including token probabilities".
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
 pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
 /// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow token
 /// review".
 pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Not now".
+/// Approved 2026-10-07: it was "Not now".
 pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
 pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
 pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
@@ -152,14 +151,14 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "receipt was verified. A supported desktop app asks separately before sending a ",
     "session for witness review. This permission alone does not make it ready to send."
 );
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): they were "Review
+/// Approved 2026-10-07: they were "Review
 /// permission" and "Stop including inference bodies".
 pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
 pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
 /// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow sending
 /// captured bodies".
 pub const WITNESS_INFERENCE_CONFIRM: &str = "Enable";
-/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Not now".
+/// Approved 2026-10-07: it was "Not now".
 pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
 
 /// The confirmation over either privacy option's disclosure (#1146

@@ -283,7 +283,7 @@ pub struct MonitorTreeCopy {
     pub folder_mark: &'static str,
     /// Under the bucket of sessions whose folder could not be resolved (#1146
     /// `projects-panel.tsx`), in the tree, the folder inspector and Settings.
-    /// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): #1146's line, with
+    /// Approved 2026-10-07: #1146's line, with
     /// "You'll always be asked" restored from the approved note it replaced.
     pub unresolved_bucket_note: &'static str,
 }
@@ -454,14 +454,12 @@ pub struct MonitorSafeguardsCopy {
     /// `routingLabel`), by `routing.state`; anything else is `routing_unknown`.
     pub routing_not_declared: &'static str,
     /// Declared, and nothing recorded yet. Names the destination, never
-    /// the mechanism (`routing_copy`'s sweep). DRAFT, NEEDS APPROVAL
-    /// (reworded, 2026-10-07).
+    /// the mechanism (`routing_copy`'s sweep). Approved 2026-10-07.
     pub routing_awaiting_rows: &'static str,
-    /// Declared, and records are arriving. DRAFT, NEEDS APPROVAL
-    /// (reworded, 2026-10-07).
+    /// Declared, and records are arriving. Approved 2026-10-07.
     pub routing_rows_seen: &'static str,
     /// Declared, and the file needed to read the record cannot be read.
-    /// DRAFT, NEEDS APPROVAL (reworded, 2026-10-07).
+    /// Approved 2026-10-07.
     pub routing_token_unreadable: &'static str,
     pub routing_unknown: &'static str,
 }

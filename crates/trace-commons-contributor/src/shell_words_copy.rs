@@ -28,10 +28,10 @@
 //!   never claims an answer from the server. A profile change that did not
 //!   happen says so first.
 //!
-//! Sentences marked "DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07)" or
-//! "DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07)" are consent or
-//! disclosure wording changed for parity, or for accuracy after the #1273
-//! review, and not yet approved.
+//! Consent and disclosure wording changed for #1146 parity, or for accuracy
+//! after the #1273 review, is marked "Approved 2026-10-07" once the owner
+//! approved it; a sentence still marked "DRAFT, NEEDS APPROVAL" is not yet
+//! approved.
 
 use std::collections::BTreeMap;
 
@@ -81,8 +81,7 @@ pub struct WithdrawalWords {
     /// The confirmation's title (#1146 `withdrawal-control.tsx`). Approved
     /// 2026-10-07 with the parity set; it was "Withdraw this trace?".
     pub confirm_title: &'static str,
-    /// The confirmation's description (#1146). DRAFT, NEEDS APPROVAL (#1273
-    /// review, 2026-10-07): new; there was none.
+    /// The confirmation's description (#1146). Approved 2026-10-07: new; there was none.
     pub confirm_description: &'static str,
     /// The confirmation's way back.
     pub keep: &'static str,
@@ -419,7 +418,7 @@ pub struct SettingsWords {
     pub consent_heading: &'static str,
     pub connected: &'static str,
     pub not_connected: &'static str,
-    /// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Sessions
+    /// Approved 2026-10-07: it was "Sessions
     /// are being queued, but nothing can be sent."
     pub queued_nothing_sent: &'static str,
     pub extra_scan_configured: &'static str,
@@ -451,8 +450,7 @@ pub struct SettingsWords {
     /// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite).
     pub applies_from_now: &'static str,
     pub always_included: &'static str,
-    /// The optional scopes' heading. DRAFT, NEEDS APPROVAL (#1273 review,
-    /// 2026-10-07): it was "Optional \u{2014} each one lets your traces do
+    /// The optional scopes' heading. Approved 2026-10-07: it was "Optional \u{2014} each one lets your traces do
     /// more".
     pub optional_data_use: &'static str,
     pub credit: &'static str,
