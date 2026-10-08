@@ -1,0 +1,31 @@
+{
+  "schema": "trace_commons.pipeline_hf_corpus_pin.v1",
+  "repository": "jedisct1/security-audits",
+  "revision": "6d527ff0081eec6704c2a4f00e1ef8d308ae7366",
+  "split": "train",
+  "translator": "swival",
+  "bootstrap_count": 4,
+  "holdout_count": 6,
+  "min_words": 1,
+  "max_words": 20000,
+  "expected_instrument_count": 1,
+  "with_events": true,
+  "source_digest": "sha256:e5049bac574d907ba1a443f80bedb0033b8ae50711b99e64b24974ce4830a0c7",
+  "configuration_digest": "sha256:33b31562fb13a539fc5f62b8514efd1715f6b0f8fe8e7c4a324cab76948fd898",
+  "order_digest": "sha256:66939d7873797b6411e1e100954312856a3a7fa73ceffde7dc3f1cdfa5859a3f",
+  "bootstrap_corpus_digest": "sha256:479a669d45d71415c6a69335875aa9c591b0927e5e21e01bdfbf14e90eff32d0",
+  "holdout_corpus_digest": "sha256:c2114026a315ba0ec9bcfd307976cf6172c45dbbc7d07f0532c648080904ba21",
+  "local_jsonl_dir": "crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl",
+  "session_names": [
+    "s01.jsonl",
+    "s02.jsonl",
+    "s03.jsonl",
+    "s04.jsonl",
+    "s05.jsonl",
+    "s06.jsonl",
+    "s07.jsonl",
+    "s08.jsonl",
+    "s09.jsonl",
+    "s10.jsonl"
+  ]
+}
