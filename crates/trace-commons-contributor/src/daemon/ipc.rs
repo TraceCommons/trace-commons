@@ -972,6 +972,12 @@ pub struct DaemonShared {
     /// is the durable recovery source; these queues are bounded and local to
     /// the daemon process.
     pub(crate) skill_loop: Mutex<super::skill_loop::SkillLoopState>,
+    /// The contribution-mission catalogue behind `list_pending`'s
+    /// `mission_fit`. In memory only and `None` until something writes it,
+    /// which in production nothing does until Z7/Z8's server catalogue
+    /// exists; see [`super::mission_matching::MissionCatalogueSlot`]. A leaf
+    /// lock: never held while any other lock here is taken.
+    pub(crate) mission_catalogue: Mutex<Option<super::mission_matching::MissionCatalogueSlot>>,
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -1166,6 +1172,7 @@ impl DaemonShared {
             harness_plans: super::harness::PlanStore::default(),
             native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
+            mission_catalogue: Mutex::new(None),
         })
     }
 
@@ -2004,6 +2011,16 @@ impl DaemonShared {
         // takes the state lock, and both feed the nudge gates as well.
         let paused = self.is_paused(now);
         let logged_in = self.logged_in();
+        // Mission fit (nudge value addendum, 1.3): the live catalogue, the
+        // read gates and the cwd-cache facts, read before the policy and
+        // queue section below, each under its own lock. `CacheOnly`:
+        // `status` never looks at a folder (OWNER DECISION V4). `None` --
+        // no live catalogue -- leaves both `mission_fit` fields absent.
+        let mission_join = super::mission_matching::MissionJoin::read(
+            self,
+            now,
+            super::mission_matching::Probe::CacheOnly,
+        );
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -2014,6 +2031,14 @@ impl DaemonShared {
         // Same guards as `decisions_owed`, and the same function
         // `list_projects` reports, so the two answers always agree.
         let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
+        // How many of `subjects` fit at least one matched mission: a count,
+        // or `None` while no catalogue is live. Never a mission id.
+        let fitting = |subjects: &[&super::queue::QueueEntry]| -> Option<usize> {
+            mission_join
+                .as_ref()
+                .map(|join| subjects.iter().filter(|e| join.fit(&policy, e) > 0).count())
+        };
+        let backlog_mission_fit = fitting(&super::queue::unpurposed_entries(&queue, &policy));
         // Policy only, under the guard already held: whether the arming
         // offer would be drawn right now, which hides the backlog nudge.
         let arming_offer_present = policy.arming_suggestion(now).is_some();
@@ -2022,16 +2047,18 @@ impl DaemonShared {
         // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
         // the idle window needs.
         let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
-        let (idle_sessions, idle_candidate_count) = match idle_window {
+        let (idle_sessions, idle_candidate_count, idle_mission_fit) = match idle_window {
             Some(window) => {
                 let candidates =
                     super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+                let mission_fit = fitting(&candidates);
                 (
-                    Some(idle_sessions_value(&candidates, window)),
+                    Some(idle_sessions_value(&candidates, window, mission_fit)),
                     candidates.len(),
+                    mission_fit,
                 )
             }
-            None => (None, 0),
+            None => (None, 0, None),
         };
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
@@ -2064,10 +2091,23 @@ impl DaemonShared {
             menu_bar_mark_enabled: nudge_snapshot.menu_bar_mark_enabled,
             notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
         };
-        let nudge = nudge_value(
-            &super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now),
+        let lead = super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now);
+        let mut nudge = nudge_value(
+            &lead,
             &super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now),
         );
+        // Additive (nudge value addendum, 1.3). Read after the lead is
+        // chosen and never fed into it (OWNER DECISION V5): the count over
+        // the leading kind's own subjects, present only while that kind is
+        // idle sessions or the review backlog and a catalogue is live.
+        let lead_mission_fit = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => idle_mission_fit,
+            Some(super::nudge::NudgeKind::ReviewBacklog) => backlog_mission_fit,
+            _ => None,
+        };
+        if let Some(fit) = lead_mission_fit {
+            nudge["mission_fit"] = serde_json::Value::from(fit);
+        }
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": logged_in,
@@ -3466,6 +3506,12 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    // How many matched contribution missions each pending entry fits, worked
+    // out before any lock below is taken: it reads the history file and
+    // may look at folder roots, neither of which belongs under the queue
+    // lock. `None` -- no live catalogue -- leaves every row without the
+    // field, which reads as unknown, never as zero.
+    let mission_fit = super::mission_matching::pending_mission_fit(shared, Utc::now());
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -3524,7 +3570,16 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     let entries: Vec<serde_json::Value> = selected
         .into_iter()
         .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
-        .map(|e| entry_value(e, admission_evidence))
+        .map(|e| {
+            // Inserted after `entry_value` returns, so its signature and its
+            // other callers stay as they are: every other rendering of an
+            // entry omits the field, which reads as unknown.
+            let mut value = entry_value(e, admission_evidence);
+            if let Some(fit) = mission_fit.as_ref().and_then(|fits| fits.get(&e.entry_id)) {
+                value["mission_fit"] = serde_json::json!(fit);
+            }
+            value
+        })
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
 }
@@ -5012,16 +5067,24 @@ pub(crate) struct NudgeSnapshot {
 fn idle_sessions_value(
     candidates: &[&super::queue::QueueEntry],
     window: super::nudge::IdleWindow,
+    mission_fit: Option<usize>,
 ) -> serde_json::Value {
     let tools: std::collections::BTreeSet<&'static str> = candidates
         .iter()
         .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
         .collect();
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "count": candidates.len(),
         "tools": tools,
         "threshold_days": window.idle_days,
-    })
+    });
+    // Additive (nudge value addendum, 1.3): how many candidates fit at
+    // least one matched mission. Absent, never 0, while no catalogue is
+    // live (OWNER DECISION V1).
+    if let Some(fit) = mission_fit {
+        value["mission_fit"] = serde_json::Value::from(fit);
+    }
+    value
 }
 
 /// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
@@ -18236,6 +18299,179 @@ mod tests {
             let status = status_of(&s);
             assert_eq!(status["nudge"]["state"], "none", "{status}");
             assert_eq!(status["idle_sessions"]["count"], 1);
+        }
+
+        // ---- mission fit on status (nudge value addendum, section 1.3) ----
+
+        /// Claude Code on and Codex off, and every waiting entry recorded in
+        /// the cwd cache under its own adapter, so matching reads the same
+        /// sessions the queue holds.
+        fn see_every_pending_entry(s: &DaemonShared) {
+            {
+                let mut settings = s.settings.lock().unwrap();
+                settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                    path: std::path::PathBuf::from("/tmp/nudge-claude-root"),
+                });
+                settings.codex_source = Some(crate::daemon::settings::SourceDeclaration::Off);
+            }
+            let seen: Vec<(String, String, String)> = s
+                .queue
+                .lock()
+                .unwrap()
+                .pending()
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.path.to_string_lossy().to_string(),
+                        e.source.clone(),
+                        e.project_key.clone(),
+                    )
+                })
+                .collect();
+            let mut state = s.state.lock().unwrap();
+            for (path, source, project_key) in seen {
+                state.cwd_cache.insert(
+                    path,
+                    crate::daemon::state::CwdCacheEntry {
+                        size_bytes: 1,
+                        modified_at: Utc::now(),
+                        cwd: Some(project_key.clone()),
+                        project_key: Some(project_key),
+                        tool: Some(source.clone()),
+                        adapter: Some(source),
+                    },
+                );
+            }
+        }
+
+        fn receive_missions(s: &DaemonShared, missions: serde_json::Value) {
+            crate::daemon::mission_matching::receive_catalogue(
+                &s.mission_catalogue,
+                &serde_json::json!({"schema_version": 1, "missions": missions}),
+                Utc::now(),
+            )
+            .unwrap();
+        }
+
+        fn claude_mission() -> serde_json::Value {
+            serde_json::json!([{"mission_id": "claude", "criteria": {"tools": ["claude-code"]}}])
+        }
+
+        /// `list_pending {filter: idle_sessions}` rows whose `mission_fit`
+        /// is above zero.
+        fn idle_rows_fitting(s: &DaemonShared) -> usize {
+            let r = handle_request(
+                s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "idle_sessions"}),
+                ),
+            );
+            r.result.expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["mission_fit"].as_u64().is_some_and(|n| n > 0))
+                .count()
+        }
+
+        /// No live catalogue: neither `idle_sessions` nor `nudge` names a
+        /// `mission_fit`, absent rather than 0 (OWNER DECISION V1).
+        #[test]
+        fn status_mission_fit_is_absent_without_a_live_catalogue() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert!(status["idle_sessions"].get("mission_fit").is_none());
+            assert!(status["nudge"].get("mission_fit").is_none());
+        }
+
+        /// A live catalogue with no missions is a known zero on both.
+        #[test]
+        fn status_mission_fit_is_zero_for_a_live_empty_catalogue() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(&s, serde_json::json!([]));
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["mission_fit"], 0, "{status}");
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["mission_fit"], 0);
+        }
+
+        /// `status.idle_sessions.mission_fit` counts exactly the idle-filter
+        /// rows `list_pending` gives a `mission_fit` above zero, and the
+        /// leading idle nudge carries the same count. A Codex session (its
+        /// adapter off) is idle but fits nothing.
+        #[test]
+        fn status_idle_mission_fit_matches_the_idle_filter_rows() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 6);
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 7);
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let rows = idle_rows_fitting(&s);
+            assert_eq!(rows, 2);
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["count"], 3, "{status}");
+            assert_eq!(status["idle_sessions"]["mission_fit"], rows);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["mission_fit"], rows);
+            assert!(!status.to_string().contains("\"claude\""), "{status}");
+        }
+
+        /// A leading backlog nudge counts its own subjects: the previewed
+        /// Ask me entries `unpurposed_traces` counts.
+        #[test]
+        fn status_nudge_mission_fit_counts_the_backlog_when_it_leads() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            // A pending entry that is not previewed: outside the backlog.
+            seed_entry(&s, ASK);
+            see_every_pending_entry(&s);
+            receive_missions(&s, serde_json::json!([{"mission_id": "any"}]));
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "review_backlog", "{status}");
+            assert_eq!(status["nudge"]["mission_fit"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        /// Gates close the lead, so `nudge` carries no `mission_fit`; the
+        /// idle fact, like its count, is still reported.
+        #[test]
+        fn a_paused_daemon_reports_idle_mission_fit_but_no_nudge_fit() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["mission_fit"], 1);
+            assert!(status["nudge"].get("mission_fit").is_none());
+        }
+
+        /// OWNER DECISION V4: `status` never looks at a folder. Until
+        /// `list_pending` has, an idle session in a Rust folder fits no
+        /// language mission; afterwards the cached answer is used.
+        #[test]
+        fn status_reads_only_the_folder_languages_list_pending_cached() {
+            let s = live();
+            let work = tempfile::tempdir().unwrap();
+            std::fs::write(work.path().join("Cargo.toml"), "").unwrap();
+            let folder = work.path().to_str().unwrap().to_string();
+            seed_idle(&s, &folder, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(
+                &s,
+                serde_json::json!([{"mission_id": "rust", "criteria": {"languages": ["rust"]}}]),
+            );
+            assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 0);
+            assert_eq!(idle_rows_fitting(&s), 1);
+            assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 1);
         }
 
         /// `nudge_decline {idle_sessions}` is the in-app "Not now": it

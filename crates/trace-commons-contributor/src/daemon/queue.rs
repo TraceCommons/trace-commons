@@ -2539,12 +2539,19 @@ pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubC
 /// decision owed, so this is never larger than the badge. Keep the two
 /// contracts distinct.
 pub fn unpurposed_traces(queue: &Queue, policy: &ProjectPolicy) -> usize {
+    unpurposed_entries(queue, policy).len()
+}
+
+/// The entries [`unpurposed_traces`] counts: nudge U1's subjects, for
+/// `status.nudge.mission_fit` while the backlog leads. One rule, so the
+/// count and its subjects cannot drift.
+pub fn unpurposed_entries<'q>(queue: &'q Queue, policy: &ProjectPolicy) -> Vec<&'q QueueEntry> {
     queue
         .pending()
         .into_iter()
         .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
         .filter(|e| e.previewed_envelope_digest.is_some())
-        .count()
+        .collect()
 }
 
 /// Nudge U4: the waiting sessions nobody has written to for

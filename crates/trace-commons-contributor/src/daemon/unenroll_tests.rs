@@ -146,6 +146,23 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
     assert!(!crate::daemon::audit::load(&s.store).unwrap().is_empty());
 }
 
+/// The contribution-mission catalogue slot is this enrollment's: unenroll
+/// empties it, so a next account's `list_pending` starts unknown.
+#[test]
+fn unenroll_empties_the_mission_catalogue_slot() {
+    let s = shared();
+    enroll_fixture(&s);
+    crate::daemon::mission_matching::receive_catalogue(
+        &s.mission_catalogue,
+        &json!({"schema_version": 1, "missions": []}),
+        Utc::now(),
+    )
+    .unwrap();
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+    unenroll(&s).unwrap();
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+}
+
 /// Nudge S3: account B never inherits account A's suggestion ledger. Every
 /// nudge stamp goes, in memory and on disk; the suggestions switch is a
 /// setting about this Mac and stays.

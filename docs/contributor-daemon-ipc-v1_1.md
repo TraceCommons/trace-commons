@@ -189,6 +189,17 @@ old behaviour, because no application has shipped against `v1` yet. See
   `menu_bar_mark_enabled` and `notify.idle_sessions`, and clears the news
   only through `nudge_opened {kind: "verdicts_landed"}` or by ageing out. See
   ["The menu-bar mark"](#the-menu-bar-mark-statusnudgemark).
+- **Mission fit (nudge value addendum, section 1).** Three additive counts:
+  `list_pending`'s entries gain `mission_fit`, `status.idle_sessions` gains
+  `mission_fit`, and `status.nudge` gains `mission_fit` while `idle_sessions`
+  or `review_backlog` leads. Each is how many of the daemon's live
+  contribution-mission catalogue's matched missions a session fits (per
+  entry), or how many sessions fit at least one (on `status`). **Absent,
+  never 0, while the daemon holds no live catalogue** -- which today is
+  always, since nothing writes it until Z7/Z8's server catalogue exists.
+  Counts only: no mission id, title or criterion. No new method and no new
+  event; `nudge::lead` reads none of it. See
+  ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -570,7 +581,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional); `filter` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. The two parameters combine. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
+| `list_pending` | `project_id` (optional); `filter` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. The two parameters combine. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -1038,6 +1049,10 @@ same guards, so a card's Review shows the set its sentence named.
 The count can grow with nothing but time passing: no event is published when
 a session crosses the threshold. A shell reads it with the rest of `status`.
 
+`mission_fit` (additive, present only while a mission catalogue is live): how
+many of the counted sessions fit at least one matched contribution mission.
+See ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
+
 #### `status.nudge`
 
 Added in `trace_commons.daemon.v1_1` as an additive field (nudge S3). Which
@@ -1067,6 +1082,12 @@ folder label, an id or a title.
   `unpurposed_traces`; for `verdicts_landed` it is `accepted + held +
   final`. It is for the card's sentence, never a badge number, and it never
   moves `decisions_owed`.
+- `mission_fit` (additive) is present only when `lead` is `idle_sessions` or
+  `review_backlog` **and** a mission catalogue is live: how many of that
+  kind's own subjects (the sessions `count` counts) fit at least one matched
+  contribution mission. Read after the lead is chosen, never an input to it
+  (OWNER DECISION V5). See
+  ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
 - `accepted`, `held`, `final` and `since` are present exactly when `lead` is
   `verdicts_landed`: how many submissions newly reached `accepted`, newly
   reached `quarantined` (held for privacy review; reported beside accepted
@@ -2789,6 +2810,46 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### Mission fit (`list_pending.mission_fit` and `status`)
+
+Nudge value addendum, section 1. How many contribution missions a waiting
+session would count toward, so a card can say which sessions matter. Three
+additive fields, all counts:
+
+| Field | Present when | Value |
+|---|---|---|
+| `list_pending` entry `mission_fit` | a catalogue is live | how many matched missions this entry fits; `0` is a real answer |
+| `status.idle_sessions.mission_fit` | `idle_sessions` is present and a catalogue is live | how many idle candidates fit at least one matched mission |
+| `status.nudge.mission_fit` | `nudge.lead` is `idle_sessions` or `review_backlog` and a catalogue is live | the same count over the leading kind's subjects |
+
+**Absent means unknown, never zero.** A live catalogue with no missions gives
+`0`, a known zero. No other rendering of an entry (`list_kept`, history)
+carries the field.
+
+**The catalogue.** The daemon holds at most one, in memory only: never
+persisted, emptied by `unenroll` and by a restart. It is live for 24 hours
+after it arrives (OWNER DECISION V2), after which it reads as absent. A
+catalogue the daemon refuses empties the slot rather than leaving an older
+one in force. **Nothing writes it today**: its writer is the fetch of Z7/Z8's
+server catalogue. `mission_matches` neither reads nor writes it -- its
+catalogue stays a parameter and matching still changes nothing (M2).
+
+**What fits.** An entry is read through the same M1/M2 rule
+`mission_matches` applies: adapter on, folder not Never, session neither kept
+nor withdrawn; an entry that rule drops fits nothing. It fits a mission when
+it meets the mission's criteria **and** the mission is matched over the
+sessions the daemon has seen (so a mission whose `min_sessions` is unmet is
+fitted by nothing, OWNER DECISION V3).
+
+**Languages.** Folder roots are looked at only by `list_pending`, with no
+lock held, the first time it meets a folder while the catalogue asks about
+languages; the answer is cached with the catalogue and dropped when the
+catalogue is replaced. `status` reads only that cache: a folder not yet
+looked at fits no language criterion (OWNER DECISION V4).
+
+Counts only: no mission id, title or criterion reaches `status`,
+`list_pending`, a log line, an audit row or a notification.
 
 ### `mission_matches`
 

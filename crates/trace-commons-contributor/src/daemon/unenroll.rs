@@ -194,6 +194,9 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
             tracing::warn!("could not persist the daemon state after unenroll");
         }
     }
+    // The contribution-mission catalogue came with this enrollment: a next
+    // account's `mission_fit` starts unknown. A leaf lock, taken alone.
+    super::mission_matching::clear_catalogue(&shared.mission_catalogue);
     shared.account_admission.forget_enrollment();
     if let Ok(mut ceremonies) = shared.native_identity.lock() {
         ceremonies.clear();
