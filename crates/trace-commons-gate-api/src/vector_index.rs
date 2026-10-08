@@ -199,6 +199,41 @@ pub trait VectorIndex: Send + Sync {
     }
 }
 
+/// Shares one index between holders. Forwards all five methods, the two
+/// defaulted ones (`snapshot`, `flush`) included: without the overrides an
+/// `Arc` would report no shard and never persist its corpus.
+impl<T: VectorIndex + ?Sized> VectorIndex for std::sync::Arc<T> {
+    fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+        (**self).snapshot(tenant_storage_ref)
+    }
+
+    fn insert(
+        &self,
+        entry_id: Uuid,
+        tenant_storage_ref: &str,
+        embedding: &[f32],
+    ) -> anyhow::Result<()> {
+        (**self).insert(entry_id, tenant_storage_ref, embedding)
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &str,
+        embedding: &[f32],
+        k: usize,
+    ) -> anyhow::Result<Vec<NearestNeighbor>> {
+        (**self).nearest(tenant_storage_ref, embedding, k)
+    }
+
+    fn delete(&self, tenant_storage_ref: &str, entry_id: Uuid) -> anyhow::Result<bool> {
+        (**self).delete(tenant_storage_ref, entry_id)
+    }
+
+    fn flush(&self) -> anyhow::Result<()> {
+        (**self).flush()
+    }
+}
+
 #[cfg(test)]
 mod pipeline_index_tests {
     use super::*;
@@ -252,5 +287,89 @@ mod pipeline_index_tests {
         value.chunk = 1;
         changes.push(value);
         assert!(changes.iter().all(|changed| changed.entry_id() != base));
+    }
+
+    /// Records which methods were called, and answers every defaulted method
+    /// with a value the default could not produce.
+    #[derive(Default)]
+    struct CountingIndex {
+        flushed: std::sync::atomic::AtomicUsize,
+        inserted: std::sync::atomic::AtomicUsize,
+        deleted: std::sync::atomic::AtomicUsize,
+    }
+
+    impl VectorIndex for CountingIndex {
+        fn snapshot(&self, _tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
+            Some(VectorIndexSnapshot {
+                snapshot_id: Uuid::from_u128(7),
+                cardinality: 3,
+            })
+        }
+
+        fn insert(
+            &self,
+            _entry_id: Uuid,
+            _tenant_storage_ref: &str,
+            _embedding: &[f32],
+        ) -> anyhow::Result<()> {
+            self.inserted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn nearest(
+            &self,
+            _tenant_storage_ref: &str,
+            _embedding: &[f32],
+            k: usize,
+        ) -> anyhow::Result<Vec<NearestNeighbor>> {
+            Ok(vec![
+                NearestNeighbor {
+                    entry_id: Uuid::from_u128(9),
+                    similarity: 0.5,
+                };
+                k
+            ])
+        }
+
+        fn delete(&self, _tenant_storage_ref: &str, _entry_id: Uuid) -> anyhow::Result<bool> {
+            self.deleted
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(true)
+        }
+
+        fn flush(&self) -> anyhow::Result<()> {
+            self.flushed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// An `Arc` (sized or `dyn`) forwards all five methods, including the
+    /// two the trait defaults (`snapshot`, `flush`): a shared index must
+    /// neither stop describing its shard nor stop persisting its corpus.
+    #[test]
+    fn arc_forwarding_keeps_index_snapshot_and_flush() {
+        fn exercise<V: VectorIndex + ?Sized>(index: &V) -> Option<VectorIndexSnapshot> {
+            index.insert(Uuid::nil(), "t", &[1.0]).unwrap();
+            assert_eq!(index.nearest("t", &[1.0], 2).unwrap().len(), 2);
+            assert!(index.delete("t", Uuid::nil()).unwrap());
+            index.flush().unwrap();
+            index.snapshot("t")
+        }
+        let sized = std::sync::Arc::new(CountingIndex::default());
+        let shared: std::sync::Arc<dyn VectorIndex> = sized.clone();
+        let expected = Some(VectorIndexSnapshot {
+            snapshot_id: Uuid::from_u128(7),
+            cardinality: 3,
+        });
+        assert_eq!(exercise(&sized), expected);
+        assert_eq!(exercise(&shared), expected);
+        let load = |counter: &std::sync::atomic::AtomicUsize| {
+            counter.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!(load(&sized.flushed), 2, "flush is forwarded");
+        assert_eq!(load(&sized.inserted), 2);
+        assert_eq!(load(&sized.deleted), 2);
     }
 }
