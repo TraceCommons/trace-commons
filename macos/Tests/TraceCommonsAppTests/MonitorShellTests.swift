@@ -246,9 +246,10 @@ final class MonitorShellTests: XCTestCase {
                       "traces.lastContributedFolder?.projectId", "traces.submittingFolder"] {
             XCTAssertTrue(demand.contains(input), "the demand does not read \(input)")
         }
-        // The offers are drawn above the tree only, so they open no inspector.
-        for input in ["model.showsPrivateInferenceOffer", "model.armingOffer"] {
-            XCTAssertFalse(demand.contains(input), "the demand reads \(input)")
+        // The offers open the inspector only where it draws them
+        // (`offerKeys`, off the Traces tab).
+        for input in ["model.showsPrivateInferenceOffer", "model.armingOffer?.projectId"] {
+            XCTAssertTrue(demand.contains(input), "the offer demand does not read \(input)")
         }
     }
 

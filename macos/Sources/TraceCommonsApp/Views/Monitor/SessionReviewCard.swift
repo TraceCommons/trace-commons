@@ -492,16 +492,24 @@ struct SessionReviewCard: View {
         return words.contribute
     }
 
-    /// Contribute's gate for `entry`, on the preview asked for it: the
-    /// store's gate, and every word the review must show in front of it --
-    /// the outcome table, the redaction summary, and a surviving secret's
-    /// line when one survived.
+    /// Contribute's gate for `entry`, on the preview asked for it: a core
+    /// that answers, the store's gate, and every word the review must show
+    /// in front of it -- the outcome table, the redaction summary, and a
+    /// surviving secret's line when one survived.
     private func armed(_ entry: DaemonData.QueueEntry) -> Bool {
         let summary = slot.summary(for: entry.entryId)
-        return TracesStore.contributeArmed(
+        return Self.coreAnswering(store.phase) && TracesStore.contributeArmed(
             enrolled: summary?.enrolled, consent: consent,
             eligibility: TracesStore.eligibility(entry), calls: TracesStore.eligibilityCalls)
             && Self.reviewShown(summary, outcome: outcome)
+    }
+
+    /// Whether the core answered the Traces store's last read. A card left
+    /// up over a core that stopped answering (Home and History keep the
+    /// Traces selection's card) is not armed: its banner says why.
+    static func coreAnswering(_ phase: TracesStore.Phase) -> Bool {
+        if case .failed = phase { return false }
+        return true
     }
 
     /// Whether everything the card must say before Contribute could be

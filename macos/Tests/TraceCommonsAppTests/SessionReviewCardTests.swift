@@ -166,6 +166,20 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertEqual(store.lastContributed?.entryId, "e1")
     }
 
+    /// A card left up over a core that stopped answering (its banner says
+    /// so) is not armed: Contribute is drawn disabled and a press sends
+    /// nothing, whichever tab the card is on.
+    func test_aCoreThatStoppedAnsweringDisarmsContribute() throws {
+        XCTAssertFalse(SessionReviewCard.coreAnswering(.failed(.unreachable)))
+        XCTAssertFalse(SessionReviewCard.coreAnswering(.failed(.undecodable(method: "list_pending"))))
+        XCTAssertTrue(SessionReviewCard.coreAnswering(.loaded))
+        let card = try Self.text(Self.card)
+        let armed = try XCTUnwrap(card.range(of: "private func armed(_ entry: DaemonData.QueueEntry) -> Bool {"))
+        let end = try XCTUnwrap(card.range(of: "\n    }\n", range: armed.upperBound..<card.endIndex))
+        XCTAssertTrue(card[armed.upperBound..<end.lowerBound].contains("Self.coreAnswering(store.phase)"),
+                      "Contribute is armed over a core that is down")
+    }
+
     /// Native's Keep stays on the card, and its Undo stays in the prompts.
     func test_keepAndUndoKeepRemain() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))

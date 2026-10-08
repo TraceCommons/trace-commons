@@ -763,7 +763,9 @@ final class HistoryParityTests: XCTestCase {
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
         XCTAssertTrue(Self.flat(code).contains(
-            "case .home, .traces: if tab == .home, let row = HistorySelection.opened(selectedHistory, "
+            "case .home, .traces: VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { "
+                + "if Self.promptsInInspector(tab) { InspectorPromptsHeader(traces: traces) } "
+                + "if tab == .home, let row = HistorySelection.opened(selectedHistory, "
                 + "onHistory: homePage == .history, in: home.history) { HistoryInspectorPane(row: row) } "
                 + "else { TracesInspectorHost(traces: traces, home: home, selection: selection) }"))
         XCTAssertTrue(Self.flat(window).contains(

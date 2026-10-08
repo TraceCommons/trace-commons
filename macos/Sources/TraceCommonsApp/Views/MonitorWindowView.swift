@@ -255,22 +255,34 @@ struct MonitorWindowView: View {
                     Color.clear
                 } else {
                     switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
-                    // The prompts and the health banners are drawn above the
-                    // Traces tree, not here (owner, 2026-10-07: offers, undo
-                    // and health above the tree). Inference keeps its own
-                    // inspector; Home, Traces and History host the
-                    // selection's inspector.
+                    // On Traces the prompts and the health banners are drawn
+                    // above the tree, not here (owner, 2026-10-07: offers,
+                    // undo and health above the tree). Every other tab draws
+                    // them at the top of the inspector, as Ron's shell
+                    // mounts `WaitingPrompts`: Home and History still offer
+                    // the Traces selection's Contribute. Inference keeps its
+                    // own inspector under them; Home, Traces and History
+                    // host the selection's inspector.
                     case .inference:
-                        PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                            InspectorPrompts(store: traces)
+                            PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
+                        }
                     case .home, .traces:
-                        // An opened History row is the inspector's selection
-                        // while History is shown; otherwise the Traces
-                        // selection's card, as Ron mounts `WaitingPage`.
-                        if tab == .home,
-                           let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
-                            HistoryInspectorPane(row: row)
-                        } else {
-                            TracesInspectorHost(traces: traces, home: home, selection: selection)
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                            if Self.promptsInInspector(tab) {
+                                InspectorPromptsHeader(traces: traces)
+                            }
+                            // An opened History row is the inspector's
+                            // selection while History is shown; otherwise the
+                            // Traces selection's card, as Ron mounts
+                            // `WaitingPage`.
+                            if tab == .home,
+                               let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
+                                HistoryInspectorPane(row: row)
+                            } else {
+                                TracesInspectorHost(traces: traces, home: home, selection: selection)
+                            }
                         }
                     }
                 }
@@ -315,7 +327,7 @@ struct MonitorWindowView: View {
         // Ron's `useInspectorDemand`: a key that was not there before (an
         // undo, a selected session, a folder's Submit all in flight)
         // opens the inspector, so none runs out of sight. A key going away
-        // closes nothing. The offers are drawn above the tree, not here.
+        // closes nothing. Beside the tree the offers are no demand.
         .onChange(of: demandKeys) { _, current in
             if InspectorDemand.opens(previous: lastDemand, current: current) { showsInspector = true }
             lastDemand = current
@@ -394,10 +406,21 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
-    /// What the inspector must show right now (`InspectorDemand`).
+    /// Whether the inspector draws the prompts (and, beside the host, the
+    /// health banners): on every tab but Traces, which draws them above its
+    /// tree. Home and History still offer the Traces selection's
+    /// Contribute, so its Undo and the core's health must be there too.
+    static func promptsInInspector(_ tab: Tab) -> Bool { tab != .traces }
+
+    /// What the inspector must show right now (`InspectorDemand`); the
+    /// offers only where the inspector draws them.
     private var demandKeys: Set<String> {
         InspectorDemand.keys(model: model, traces: traces, selection: selection)
+            .union(Self.promptsInInspector(shownTab) ? InspectorDemand.offerKeys(model: model) : [])
     }
+
+    /// The tab on screen (`shownTab(_:requiresOnboarding:)`).
+    private var shownTab: Tab { Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) }
 
     /// The selection's tool: what the graph counts and the binoculars
     /// focus the map on. The tree has no tool level, so it is a session's

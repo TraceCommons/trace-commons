@@ -6,9 +6,10 @@ import TCShellCore
 /// The inspector on Home, Traces and History (Ron's #1146 `WaitingPage`):
 /// the selection's inspector, and nothing above it. The health banners and
 /// the prompts (the undos, the offers, the first-contribution note) are
-/// drawn above the Traces tree instead, an accepted difference from #1146
-/// (owner, 2026-10-07): `TracesTreeView` hosts both, so none of them
-/// depends on the inspector being shown.
+/// drawn above the Traces tree on Traces, an accepted difference from #1146
+/// (owner, 2026-10-07), and above this host by the window on Home and
+/// History (`MonitorWindowView.promptsInInspector`), so the card's
+/// Contribute is never offered without its Undo or the core's health.
 ///
 /// The selection is read only through `TracesStore.selectedSession`, so a
 /// session that has gone (uploaded, expired, dismissed elsewhere) is the
@@ -61,6 +62,28 @@ struct TracesInspectorHost: View {
         SummaryInspector(
             traces: traces, home: home, awaitingDecision: model.awaitingDecision,
             queueAnswered: model.queueAnswered, outcomeCounts: model.outcomeCounts)
+    }
+}
+
+/// The top of the inspector on Home and History, above the host
+/// (`MonitorWindowView.promptsInInspector`): the core's health banners,
+/// then the prompts, as on Traces they head the tree. Those tabs still
+/// offer the Traces selection's Contribute, so its Undo, the offers and a
+/// core that is down are said beside it.
+struct InspectorPromptsHeader: View {
+    @EnvironmentObject private var model: AppModel
+    let traces: TracesStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            // Why approved sessions are not moving, or that the core is not
+            // answering, first: an unread status is never drawn as healthy.
+            ForEach(TracesHealth.banners(
+                phase: traces.phase, status: traces.status, words: traces.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
+            ) { GlassHealthBanner(banner: $0) }
+            InspectorPrompts(store: traces)
+        }
     }
 }
 
@@ -136,9 +159,8 @@ struct InspectorSection<Content: View>: View {
 /// the shell's keys (`InspectorDemand.keys(approvalUndo:...)`: an undo, a
 /// folder's Submit all in flight) and two of the port's. A key that was not
 /// there before opens the inspector, and a key going away closes nothing.
-/// The offers are no demand: they are drawn above the tree and in no
-/// inspector, so on Home, History or Inference opening it for one would
-/// only grow the window.
+/// The offers (`offerKeys`) are a demand only off the Traces tab, where the
+/// inspector draws the prompts; beside the tree they are already shown.
 extension InspectorDemand {
     @MainActor
     static func keys(model: AppModel, traces: TracesStore, selection: MonitorSelection?) -> Set<String> {
@@ -155,6 +177,18 @@ extension InspectorDemand {
         if let entry = traces.selectedSession(selection) {
             keys.insert("review:\(entry.entryId)")
         }
+        return keys
+    }
+
+    /// The offers' keys (Ron's `offer:` demands), which the window adds
+    /// only where the inspector draws the prompts
+    /// (`MonitorWindowView.promptsInInspector`): beside the Traces tree an
+    /// offer is already on screen.
+    @MainActor
+    static func offerKeys(model: AppModel) -> Set<String> {
+        var keys: Set<String> = []
+        if model.showsPrivateInferenceOffer { keys.insert("offer:private-ai") }
+        if let project = model.armingOffer?.projectId { keys.insert("offer:arming:" + project) }
         return keys
     }
 

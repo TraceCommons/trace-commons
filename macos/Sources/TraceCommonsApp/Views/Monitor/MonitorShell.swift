@@ -39,9 +39,10 @@ enum MonitorShellWords {
 /// The inspector starts closed in a narrow window, but the things a person
 /// must not miss open it when they appear (#1146 `useInspectorDemand`): an
 /// undo window, a folder's Submit all and a review just opened. The core's
-/// offers are not demands here: they are drawn above the Traces tree and in
-/// no inspector (owner, 2026-10-07), so opening the inspector for one would
-/// only grow the window beside a pane that does not show it.
+/// offers are not demands here: they are drawn above the Traces tree on
+/// Traces (owner, 2026-10-07), and the port adds them
+/// (`InspectorDemand.offerKeys`) only on the tabs whose inspector draws
+/// them.
 enum InspectorDemand {
     /// One key per thing asking for the inspector right now.
     static func keys(

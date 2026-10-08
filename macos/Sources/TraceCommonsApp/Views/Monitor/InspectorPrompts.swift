@@ -9,11 +9,11 @@ import TCShellCore
 /// Ron's `UndoBar` shape, and Undo keep), the arming offer, the Private AI
 /// offer and the first-contribution note. Ron's #1146 mounts these as
 /// `WaitingPrompts` at the top of the inspector; offers, undo and health
-/// above the tree is an accepted difference (owner, 2026-10-07), so none of
-/// them depends on the inspector being shown.
-///
-/// The inspector still opens when one of these appears (`InspectorDemand`),
-/// in addition to them showing here. Every sentence is the core's or
+/// above the tree is an accepted difference (owner, 2026-10-07), so on
+/// Traces none of them depends on the inspector being shown. Off Traces the
+/// window draws them at the top of the inspector, as Ron's shell does
+/// (`MonitorWindowView.promptsInInspector`), and an undo or offer appearing
+/// there opens it (`InspectorDemand`). Every sentence is the core's or
 /// `QueueLegacyWords`'.
 struct InspectorPrompts: View {
     @EnvironmentObject private var model: AppModel

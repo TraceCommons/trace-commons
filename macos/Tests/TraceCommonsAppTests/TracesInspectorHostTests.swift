@@ -29,7 +29,8 @@ final class TracesInspectorHostTests: XCTestCase {
     /// Review Focus 4, with offers, undo and health above the tree (owner,
     /// 2026-10-07): the host draws only the selection's inspector, so
     /// selecting a session can never hide a held queue, a core that is down,
-    /// an undo or an offer, which all sit above the tree.
+    /// an undo or an offer, which sit above the tree on Traces and above the
+    /// host elsewhere (`InspectorPromptsHeader`).
     func test_theHostDrawsOnlyTheSelection() throws {
         let body = try Self.hostBody()
         for gone in ["TracesHealth.banners(", "GlassHealthBanner(", "InspectorPrompts("] {
@@ -48,9 +49,59 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertFalse(hostSource.contains("case .session(let entryID)"), "never an entry picked by the raw selection")
     }
 
+    /// Review Focus 4, off the Traces tab: Home and History still offer a
+    /// session's Contribute and Keep (the kept Traces selection's card), so
+    /// the health banners and the prompts are drawn above it there, outside
+    /// the choice of what the inspector shows. Selecting a session on
+    /// Traces and switching to Home never hides an undo, an offer or a core
+    /// that is down. On Traces they are above the tree, not repeated here.
+    func test_healthBannersStayVisibleWithASessionSelected() throws {
+        XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces), "Traces draws them above the tree")
+        XCTAssertTrue(MonitorWindowView.promptsInInspector(.home))
+        XCTAssertTrue(MonitorWindowView.promptsInInspector(.inference))
+        let (_, arms) = try Self.inspectorArms()
+        let host = try XCTUnwrap(arms.first { $0.hasPrefix(".home, .traces:") })
+        let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(tab) {"))
+        let header = try XCTUnwrap(host.range(of: "InspectorPromptsHeader(traces: traces)"))
+        let history = try XCTUnwrap(host.range(of: "HistoryInspectorPane(row: row)"))
+        let selection = try XCTUnwrap(host.range(of: "TracesInspectorHost(traces: traces, home: home, selection: selection)"))
+        XCTAssertLessThan(guarded.lowerBound, header.lowerBound, "the banners are drawn on Traces twice")
+        XCTAssertLessThan(header.lowerBound, history.lowerBound, "an opened History row hides the prompts")
+        XCTAssertLessThan(header.lowerBound, selection.lowerBound, "the selection's card hides the prompts")
+        XCTAssertEqual(host.components(separatedBy: "InspectorPromptsHeader(").count - 1, 1)
+
+        // The header: the banners, then the prompts.
+        let source = try Self.text("Views/Monitor/TracesInspectorHost.swift")
+        let start = try XCTUnwrap(source.range(of: "struct InspectorPromptsHeader: View"))
+        let end = try XCTUnwrap(source.range(of: "\n}\n", range: start.upperBound..<source.endIndex))
+        let body = String(source[start.upperBound..<end.lowerBound])
+        let banners = try XCTUnwrap(body.range(of: "TracesHealth.banners("))
+        let prompts = try XCTUnwrap(body.range(of: "InspectorPrompts(store: traces)"))
+        XCTAssertLessThan(banners.lowerBound, prompts.lowerBound, "the banners come first")
+        XCTAssertTrue(body.contains("GlassHealthBanner(banner: $0)"))
+        XCTAssertTrue(body.contains("coreDown: TracesHealth.coreDownLine"))
+        XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
+                      "the queue-full banner names the configured limit")
+    }
+
+    /// Every arm of the window's inspector switch draws the prompts where
+    /// it is not beside the Traces tree: Inference above its own inspector
+    /// (Ron's shell mounts `WaitingPrompts` there), Home and History above
+    /// the host. So any tab that offers Contribute also offers its Undo,
+    /// and the Private AI offer is on Inference.
+    func test_everyInspectorArmDrawsThePrompts() throws {
+        let (_, arms) = try Self.inspectorArms()
+        XCTAssertEqual(arms.count, 2)
+        let inference = try XCTUnwrap(arms.first { $0.hasPrefix(".inference:") })
+        XCTAssertEqual(inference.components(separatedBy: "InspectorPrompts(store: traces)").count - 1, 1,
+                       "Inference skips the prompts")
+        let host = try XCTUnwrap(arms.first { $0.hasPrefix(".home, .traces:") })
+        XCTAssertTrue(host.contains("InspectorPromptsHeader(traces: traces)"), "Home and History skip the prompts")
+    }
+
     /// V5 and V6 of the #1146 delta: the undos, the offers and the
     /// first-contribution note are drawn above the Traces tree, under the
-    /// health banners, and in no inspector. R-LAYOUT-1: with a tree, they
+    /// health banners, and in the inspector only off the Traces tab. R-LAYOUT-1: with a tree, they
     /// sit on a shelf above it that is capped at a share of the pane and
     /// scrolls inside itself, so however tall they are the tree keeps rows
     /// on screen and nothing is pushed out of the window; no branch draws
@@ -87,11 +138,11 @@ final class TracesInspectorHostTests: XCTestCase {
                        "the prompts are drawn above the tree's scroll again")
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
                       "the queue-full banner names the configured limit")
-        let (pane, _) = try Self.inspectorArms()
-        XCTAssertFalse(pane.contains("InspectorPrompts("), "an inspector arm still draws the prompts")
-        XCTAssertFalse(pane.contains("TracesHealth.banners("), "an inspector arm still draws the banners")
+        // The inspector draws them only where the tree is not shown: once
+        // above Inference's own inspector, once under the Traces guard.
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 0)
+        XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 1)
+        XCTAssertEqual(window.components(separatedBy: "InspectorPromptsHeader(").count - 1, 1)
     }
 
     /// R-LAYOUT-1, round 2: the prompts shelf never takes more than its
@@ -180,14 +231,16 @@ final class TracesInspectorHostTests: XCTestCase {
         return (pane, Array(arms))
     }
 
-    /// Inference keeps `PrivateAIInspectorView`; Home, Traces and History
-    /// get the host. Neither arm draws the prompts: they are above the tree.
+    /// Inference keeps `PrivateAIInspectorView`, under the prompts, as
+    /// Ron's shell mounts `WaitingPrompts` above `InferenceInspector`; Home,
+    /// Traces and History get the host.
     func test_inferenceKeepsItsOwnInspector() throws {
         let (pane, arms) = try Self.inspectorArms()
         let inference = try XCTUnwrap(arms.first { $0.hasPrefix(".inference:") })
-        XCTAssertTrue(inference.contains("PrivateAIInspectorView(store: inference"))
-        XCTAssertFalse(inference.contains("InspectorPrompts("), "the prompts are above the tree")
-        XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are above the tree")
+        let prompts = try XCTUnwrap(inference.range(of: "InspectorPrompts(store: traces)"))
+        let own = try XCTUnwrap(inference.range(of: "PrivateAIInspectorView(store: inference"))
+        XCTAssertLessThan(prompts.lowerBound, own.lowerBound, "the prompts sit above Inference's own inspector")
+        XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are the Traces inspector's")
         XCTAssertFalse(inference.contains("TracesInspectorHost("))
         XCTAssertFalse(pane.contains("SessionReviewCard("), "the session card is the host's to draw")
         XCTAssertFalse(pane.contains("HomeSummaryInspector("), "Home's summary is the host's to draw")
@@ -233,10 +286,10 @@ final class TracesInspectorHostTests: XCTestCase {
             "showsInspector = seed.showsInspector || InspectorDemand.opensOnAppear(keys: demandKeys)"))
     }
 
-    /// A selected session and a folder's Submit all in flight each open the
-    /// inspector when they appear. The arming and Private AI offers do not:
-    /// they are drawn above the Traces tree and in no inspector, so on Home,
-    /// History or Inference opening it would only grow the window.
+    /// Every one of Ron's demand keys is a demand: a selected session, a
+    /// folder's Submit all in flight, and, wherever the inspector draws the
+    /// prompts (every tab but Traces, where they are above the tree), the
+    /// arming offer and the Private AI offer.
     func test_everyDemandKeyOpensTheInspector() async throws {
         let model = AppModel()
         // A resolved session selection.
@@ -254,8 +307,10 @@ final class TracesInspectorHostTests: XCTestCase {
         // The arming offer.
         model.setArmingOfferForTesting(ArmingOffer(projectId: "p1", projectLabel: "api", contributedCount: 3))
         let arming = InspectorDemand.keys(model: model, traces: traces, selection: nil)
-        XCTAssertFalse(arming.contains { $0.hasPrefix("offer:") })
-        XCTAssertFalse(InspectorDemand.opens(previous: none, current: arming))
+        XCTAssertFalse(arming.contains { $0.hasPrefix("offer:") }, "an offer beside the tree opens the inspector")
+        let armingOffer = InspectorDemand.offerKeys(model: model)
+        XCTAssertTrue(armingOffer.contains("offer:arming:p1"))
+        XCTAssertTrue(InspectorDemand.opens(previous: none, current: arming.union(armingOffer)))
 
         // The Private AI offer, while it is unanswered and off.
         let offerModel = AppModel()
@@ -267,8 +322,14 @@ final class TracesInspectorHostTests: XCTestCase {
         offerModel.setDaemonSettingsForTesting(try DaemonClient(daemon: FrameDaemon(frame)).settings())
         XCTAssertTrue(offerModel.showsPrivateInferenceOffer)
         let offered = InspectorDemand.keys(model: offerModel, traces: traces, selection: nil)
-        XCTAssertFalse(offered.contains { $0.hasPrefix("offer:") })
-        XCTAssertFalse(InspectorDemand.opens(previous: before, current: offered))
+            .union(InspectorDemand.offerKeys(model: offerModel))
+        XCTAssertTrue(offered.contains("offer:private-ai"))
+        XCTAssertTrue(InspectorDemand.opens(previous: before, current: offered))
+
+        // The window adds the offers only where the inspector draws them.
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains(
+            ".union(Self.promptsInInspector(shownTab) ? InspectorDemand.offerKeys(model: model) : [])"))
     }
 
     /// A folder's Submit all is a demand while it is in flight, and not
