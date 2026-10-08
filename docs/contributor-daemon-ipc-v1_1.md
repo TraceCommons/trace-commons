@@ -2891,7 +2891,7 @@ anything is sent. The daemon cannot compute the score itself -- that needs
 the scoring model and the commons' index -- so it reads a band from a
 calibration table, using content-free numbers it records about each session
 when the session is queued (byte counts by role, how many prompts, how many
-distinct tools, a sampled byte entropy; version `lef1`). Those numbers stay
+distinct tools, a sampled byte entropy and deflate ratio; version `lef1`). Those numbers stay
 in the local queue file and never reach the wire, a log line, an audit row,
 history or a notification.
 

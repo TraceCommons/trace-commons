@@ -71,12 +71,13 @@ pub const ESTIMATE_BAND_HIGH_QUANTILE: f64 = 0.90;
 pub const ESTIMATE_FIT_CALIBRATION_VERSION: i32 = 3;
 
 /// The terms a fit may weight, in a fixed order.
-pub const ESTIMATE_FIT_TERMS: [EstimateTerm; 7] = [
+pub const ESTIMATE_FIT_TERMS: [EstimateTerm; 8] = [
     EstimateTerm::LnContentBytes,
     EstimateTerm::Capped,
     EstimateTerm::ToolResultShare,
     EstimateTerm::AgentProseShare,
     EstimateTerm::ByteEntropy,
+    EstimateTerm::DeflateRatio,
     EstimateTerm::UserMessagesCapped,
     EstimateTerm::LnDistinctTools,
 ];

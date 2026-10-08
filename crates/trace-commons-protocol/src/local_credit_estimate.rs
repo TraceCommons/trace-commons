@@ -23,12 +23,16 @@
 //!   from its parsed transcript; the server feeds it from a stored envelope
 //!   through [`LocalEstimateFeatures::from_envelope`]. Both go through the same
 //!   [`LocalEstimateAccumulator::accumulate`].
-//! - **Bounded cost.** The entropy pass reads at most
+//! - **Bounded cost.** The entropy and deflate pass reads at most
 //!   `ESTIMATE_SAMPLE_WINDOWS * ESTIMATE_SAMPLE_WINDOW_BYTES` bytes whatever
 //!   the session's size.
 //! - **No content.** Features are counts and ratios only.
 
 use std::collections::BTreeSet;
+use std::io::Write;
+
+use flate2::Compression;
+use flate2::write::DeflateEncoder;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,11 +58,16 @@ pub const ESTIMATE_SAMPLE_WINDOWS: usize = 16;
 /// Bytes per window in the strided entropy sample.
 ///
 /// OWNER DECISION (spec section 4.2, serving E5 and E15). With
-/// [`ESTIMATE_SAMPLE_WINDOWS`] this bounds the entropy pass at 256 KiB.
+/// [`ESTIMATE_SAMPLE_WINDOWS`] this bounds the sample pass at 256 KiB.
 pub const ESTIMATE_SAMPLE_WINDOW_BYTES: usize = 16 * 1024;
 
-/// The most bytes the entropy pass reads, whatever the session's size.
+/// The most bytes the sample pass reads, whatever the session's size.
 pub const ESTIMATE_SAMPLE_BYTES: usize = ESTIMATE_SAMPLE_WINDOWS * ESTIMATE_SAMPLE_WINDOW_BYTES;
+
+/// Deflate level for the deflate ratio. Part of the `lef1` definition: a
+/// ratio is only comparable to one taken at the same level, so changing this
+/// changes the features version.
+pub const ESTIMATE_DEFLATE_LEVEL: u32 = 6;
 
 /// Displayed bands are rounded outward to this step: `low` floored, `high`
 /// ceiled. Never a single number.
@@ -201,6 +210,18 @@ pub struct LocalEstimateFeatures {
     /// sample. `None` when there is no content to measure, never 0 for that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_entropy_milli: Option<u32>,
+    /// Raw-deflate size of the strided sample over its length, times 1000,
+    /// at [`ESTIMATE_DEFLATE_LEVEL`]. Lower means more repetition: pasted
+    /// logs, repeated tool output, boilerplate. Order-0 entropy sees only how
+    /// often each byte occurs and cannot tell those from varied text.
+    ///
+    /// The windows are compressed as one stream, and deflate looks back at
+    /// most 32 KiB, so this sees repetition within a window and its
+    /// neighbour, not across the whole session. On very short content
+    /// deflate's framing outweighs the content and this exceeds 1000.
+    /// `None` when there is no content to measure, never 0 for that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deflate_ratio_milli: Option<u32>,
 }
 
 impl LocalEstimateFeatures {
@@ -258,6 +279,7 @@ impl LocalEstimateFeatures {
             EstimateTerm::ToolResultShare => self.tool_result_share(),
             EstimateTerm::AgentProseShare => self.agent_prose_share(),
             EstimateTerm::ByteEntropy => self.byte_entropy_milli.map(|m| f64::from(m) / 1000.0),
+            EstimateTerm::DeflateRatio => self.deflate_ratio_milli.map(|m| f64::from(m) / 1000.0),
             EstimateTerm::UserMessagesCapped => Some(f64::from(
                 self.user_messages.min(ESTIMATE_USER_MESSAGES_CAP),
             )),
@@ -268,7 +290,7 @@ impl LocalEstimateFeatures {
 
 /// Collects a session's events, then computes [`LocalEstimateFeatures`].
 ///
-/// Two phases because the strided entropy sample needs the total length before
+/// Two phases because the strided sample needs the total length before
 /// it can place its windows: [`Self::accumulate`] borrows each event's text
 /// and sums byte counts; [`Self::finish`] places the windows.
 #[derive(Debug, Default)]
@@ -325,7 +347,7 @@ impl<'a> LocalEstimateAccumulator<'a> {
     #[must_use]
     pub fn finish(self) -> LocalEstimateFeatures {
         let total: usize = self.segments.iter().map(|s| s.len()).sum();
-        let (histogram, read) = sample_histogram(&self.segments, total);
+        let sample = sample_stats(&self.segments, total);
         LocalEstimateFeatures {
             version: LOCAL_ESTIMATE_FEATURES_VERSION.to_string(),
             content_bytes: self.content_bytes,
@@ -333,7 +355,8 @@ impl<'a> LocalEstimateAccumulator<'a> {
             agent_prose_bytes: self.agent_prose_bytes,
             user_messages: self.user_messages,
             distinct_tools: u32::try_from(self.tools.len()).unwrap_or(u32::MAX),
-            byte_entropy_milli: entropy_milli(&histogram, read),
+            byte_entropy_milli: entropy_milli(&sample.histogram, sample.read),
+            deflate_ratio_milli: deflate_ratio_milli(sample.deflated, sample.read),
         }
     }
 }
@@ -342,57 +365,106 @@ fn share(part: u64, whole: u64) -> Option<f64> {
     (whole > 0).then(|| part as f64 / whole as f64)
 }
 
-/// Order-0 byte histogram over the endpoint-inclusive strided sample of the
-/// concatenation of `segments` (whose lengths sum to `total`), and how many
-/// bytes it read.
+/// What one pass over the strided sample measures.
+struct SampleStats {
+    /// Order-0 byte histogram of the sample.
+    histogram: [u64; 256],
+    /// Bytes in the sample.
+    read: usize,
+    /// Raw-deflate size of the sample, compressed as one stream.
+    deflated: u64,
+}
+
+/// One pass over the endpoint-inclusive strided sample of the concatenation
+/// of `segments` (whose lengths sum to `total`).
 ///
 /// Up to [`ESTIMATE_SAMPLE_BYTES`] everything is read. Beyond it,
 /// [`ESTIMATE_SAMPLE_WINDOWS`] windows of [`ESTIMATE_SAMPLE_WINDOW_BYTES`] are
 /// placed evenly from the first byte to the last, so the opening and the end
 /// are both in the sample and the windows never overlap.
-fn sample_histogram(segments: &[&str], total: usize) -> ([u64; 256], usize) {
+fn sample_stats(segments: &[&str], total: usize) -> SampleStats {
     let mut histogram = [0u64; 256];
+    let mut read = 0usize;
+    let mut encoder = DeflateEncoder::new(
+        ByteCounter::default(),
+        Compression::new(ESTIMATE_DEFLATE_LEVEL),
+    );
+    let mut take = |bytes: &[u8]| {
+        for &byte in bytes {
+            histogram[usize::from(byte)] += 1;
+        }
+        read += bytes.len();
+        encoder
+            .write_all(bytes)
+            .expect("writing to a byte counter cannot fail");
+    };
+
     if total <= ESTIMATE_SAMPLE_BYTES {
-        let mut read = 0;
         for segment in segments {
-            for &byte in segment.as_bytes() {
-                histogram[usize::from(byte)] += 1;
-            }
-            read += segment.len();
+            take(segment.as_bytes());
         }
-        return (histogram, read);
-    }
+    } else {
+        // Start offset of each segment in the concatenation.
+        let mut starts = Vec::with_capacity(segments.len());
+        let mut offset = 0usize;
+        for segment in segments {
+            starts.push(offset);
+            offset += segment.len();
+        }
 
-    // Start offset of each segment in the concatenation.
-    let mut starts = Vec::with_capacity(segments.len());
-    let mut offset = 0usize;
-    for segment in segments {
-        starts.push(offset);
-        offset += segment.len();
-    }
-
-    let span = (total - ESTIMATE_SAMPLE_WINDOW_BYTES) as u128;
-    let steps = (ESTIMATE_SAMPLE_WINDOWS - 1) as u128;
-    let mut read = 0;
-    for window in 0..ESTIMATE_SAMPLE_WINDOWS {
-        let from = (window as u128 * span / steps) as usize;
-        let to = from + ESTIMATE_SAMPLE_WINDOW_BYTES;
-        // The last segment starting at or before `from`.
-        let mut index = starts.partition_point(|&start| start <= from) - 1;
-        let mut position = from;
-        while position < to && index < segments.len() {
-            let bytes = segments[index].as_bytes();
-            let local_from = position - starts[index];
-            let local_to = (to - starts[index]).min(bytes.len());
-            for &byte in &bytes[local_from..local_to] {
-                histogram[usize::from(byte)] += 1;
+        let span = (total - ESTIMATE_SAMPLE_WINDOW_BYTES) as u128;
+        let steps = (ESTIMATE_SAMPLE_WINDOWS - 1) as u128;
+        for window in 0..ESTIMATE_SAMPLE_WINDOWS {
+            let from = (window as u128 * span / steps) as usize;
+            let to = from + ESTIMATE_SAMPLE_WINDOW_BYTES;
+            // The last segment starting at or before `from`.
+            let mut index = starts.partition_point(|&start| start <= from) - 1;
+            let mut position = from;
+            while position < to && index < segments.len() {
+                let bytes = segments[index].as_bytes();
+                let local_from = position - starts[index];
+                let local_to = (to - starts[index]).min(bytes.len());
+                take(&bytes[local_from..local_to]);
+                position = starts[index] + local_to;
+                index += 1;
             }
-            read += local_to - local_from;
-            position = starts[index] + local_to;
-            index += 1;
         }
     }
-    (histogram, read)
+
+    let deflated = encoder
+        .finish()
+        .expect("writing to a byte counter cannot fail")
+        .0;
+    SampleStats {
+        histogram,
+        read,
+        deflated,
+    }
+}
+
+/// A sink that keeps only how many bytes were written to it, so the deflate
+/// pass holds no copy of the compressed sample.
+#[derive(Default)]
+struct ByteCounter(u64);
+
+impl Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Deflated size over sample size, times 1000. `None` with nothing read.
+fn deflate_ratio_milli(deflated: u64, read: usize) -> Option<u32> {
+    if read == 0 {
+        return None;
+    }
+    let milli = (deflated as f64 * 1000.0 / read as f64).round();
+    Some(u32::try_from(milli as u64).unwrap_or(u32::MAX))
 }
 
 /// Order-0 entropy in bits per byte, times 1000. `None` with nothing read.
@@ -427,6 +499,8 @@ pub enum EstimateTerm {
     AgentProseShare,
     /// Byte entropy in bits per byte.
     ByteEntropy,
+    /// Deflated sample size over sample size.
+    DeflateRatio,
     /// `min(user_messages, ESTIMATE_USER_MESSAGES_CAP)`.
     UserMessagesCapped,
     /// `ln(1 + distinct_tools)`.
@@ -1006,7 +1080,11 @@ mod tests {
     fn entropy_sample_reads_everything_under_the_bound() {
         let a = "x".repeat(1000);
         let b = "y".repeat(500);
-        let (hist, read) = sample_histogram(&[a.as_str(), b.as_str()], 1500);
+        let SampleStats {
+            histogram: hist,
+            read,
+            ..
+        } = sample_stats(&[a.as_str(), b.as_str()], 1500);
         assert_eq!(read, 1500);
         assert_eq!(hist[usize::from(b'x')], 1000);
         assert_eq!(hist[usize::from(b'y')], 500);
@@ -1022,7 +1100,11 @@ mod tests {
         let big = String::from_utf8(big).expect("ascii");
         // Split across segments so windows straddle a boundary.
         let (left, right) = big.split_at(big.len() / 3 + 7);
-        let (hist, read) = sample_histogram(&[left, right], big.len());
+        let SampleStats {
+            histogram: hist,
+            read,
+            ..
+        } = sample_stats(&[left, right], big.len());
         assert_eq!(read, ESTIMATE_SAMPLE_BYTES);
         assert_eq!(hist.iter().sum::<u64>(), ESTIMATE_SAMPLE_BYTES as u64);
         assert_eq!(
@@ -1046,9 +1128,108 @@ mod tests {
         let mut bytes = vec![b'a'; total];
         bytes[0] = b'b';
         let s = String::from_utf8(bytes).expect("ascii");
-        let (hist, read) = sample_histogram(&[s.as_str()], total);
+        let SampleStats {
+            histogram: hist,
+            read,
+            ..
+        } = sample_stats(&[s.as_str()], total);
         assert_eq!(read, ESTIMATE_SAMPLE_BYTES);
         assert_eq!(hist[usize::from(b'b')], 1);
+    }
+
+    /// The bytes of `text` in a fixed pseudo-random order: the same byte
+    /// histogram, none of the repetition.
+    fn shuffled(text: &str) -> String {
+        let mut bytes = text.as_bytes().to_vec();
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        for i in (1..bytes.len()).rev() {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let j = ((state >> 33) % (i as u64 + 1)) as usize;
+            bytes.swap(i, j);
+        }
+        String::from_utf8(bytes).expect("ascii in, ascii out")
+    }
+
+    fn repeated_build_log() -> String {
+        "cargo build\nerror[E0308]: mismatched types in src/main.rs\n".repeat(400)
+    }
+
+    #[test]
+    fn empty_content_has_unknown_deflate_ratio() {
+        let f = features_of(&[(EstimateRole::User, None, None)]);
+        assert_eq!(f.deflate_ratio_milli, None);
+    }
+
+    #[test]
+    fn deflate_ratio_sees_repetition_that_byte_entropy_cannot() {
+        let repetitive = repeated_build_log();
+        let varied = shuffled(&repetitive);
+        let r = features_of(&[(EstimateRole::ToolResult, Some(&repetitive), None)]);
+        let v = features_of(&[(EstimateRole::ToolResult, Some(&varied), None)]);
+        assert_eq!(
+            r.byte_entropy_milli, v.byte_entropy_milli,
+            "same bytes, same order-0 entropy"
+        );
+        let (r, v) = (
+            r.deflate_ratio_milli.expect("content"),
+            v.deflate_ratio_milli.expect("content"),
+        );
+        assert!(r < 100, "a repeated log deflates hard, got {r}");
+        assert!(v > 500, "the same bytes shuffled barely deflate, got {v}");
+    }
+
+    #[test]
+    fn deflate_ratio_reads_only_the_sample_on_a_64_mib_input() {
+        let big = "a".repeat(64 * 1024 * 1024);
+        let (left, right) = big.split_at(big.len() / 3 + 7);
+        let f = features_of(&[
+            (EstimateRole::User, Some(left), None),
+            (EstimateRole::ToolResult, Some(right), None),
+        ]);
+        let ratio = f.deflate_ratio_milli.expect("content");
+        // Compressing the whole 64 MiB of one byte would give a ratio near
+        // 1/1000 and round to 1; the 256 KiB sample cannot get that low.
+        assert!(ratio >= 1, "got {ratio}");
+        assert!(
+            ratio < 50,
+            "a single repeated byte deflates hard, got {ratio}"
+        );
+    }
+
+    /// The daemon and the server must compute the same number for the same
+    /// bytes, and they only do if both compress with the same backend at
+    /// the same level. A feature elsewhere in the build that switches
+    /// flate2 to a zlib backend changes the compressed size and fails this
+    /// test, rather than silently skewing a fitted table. The sizes are
+    /// pinned exactly because the ratio is too coarse to show a few bytes.
+    /// Observed with flate2's pure-Rust backend at [`ESTIMATE_DEFLATE_LEVEL`].
+    #[test]
+    fn deflated_sizes_are_pinned_for_fixed_inputs() {
+        let repetitive = repeated_build_log();
+        let varied = shuffled(&repetitive);
+        let size = |text: &str| sample_stats(&[text], text.len()).deflated;
+        assert_eq!(size(&repetitive), 146);
+        assert_eq!(size(&varied), 14843);
+    }
+
+    #[test]
+    fn deflate_ratio_is_a_weighted_term() {
+        let table = LocalEstimateTable::built_in();
+        let mut f = some_features();
+        f.deflate_ratio_milli = Some(420);
+        assert_eq!(f.term_value(EstimateTerm::DeflateRatio, &table), Some(0.42));
+        f.deflate_ratio_milli = None;
+        assert_eq!(f.term_value(EstimateTerm::DeflateRatio, &table), None);
+
+        let mut value = three_tier_table_value();
+        value["weights"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"term": "deflate_ratio", "weight": -2.0}));
+        let table = LocalEstimateTable::from_value(&value).expect("deflate_ratio is a known term");
+        assert_eq!(estimate(&f, &table), None, "unknown weighted feature");
     }
 
     #[test]
