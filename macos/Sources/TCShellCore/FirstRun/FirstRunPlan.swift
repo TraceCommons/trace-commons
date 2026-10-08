@@ -98,9 +98,9 @@ public enum FirstRunPlan {
 
     /// Create passkey on Join: start the daemon watching nothing when it is
     /// not running, then open the sheets. Nothing when Join offers no
-    /// passkey (a held invite, a signed-in near.ai, an enrolment or a held
+    /// passkey (a held invite, a signed-in near.ai, an enrollment or a held
     /// passkey), as `JoinScreenLayout.showsPasskeyAction` decides; the daemon
-    /// refuses a passkey account over an enrolment (`account-already-enrolled`).
+    /// refuses a passkey account over an enrollment (`account-already-enrolled`).
     private static func passkeyOnJoin(_ state: FirstRunState) -> [FirstRunCall] {
         let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
         let held: Bool = {

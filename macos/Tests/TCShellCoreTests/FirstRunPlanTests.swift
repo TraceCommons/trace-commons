@@ -122,7 +122,7 @@ final class FirstRunPlanTests: XCTestCase {
 
     /// Wherever Join offers no passkey, Create passkey plans nothing: an
     /// invite held or enrolled (the daemon refuses a passkey account over an
-    /// enrolment), a signed-in near.ai, an enrolment, a held passkey.
+    /// enrollment), a signed-in near.ai, an enrollment, a held passkey.
     func test_createPasskeyOnJoinPlansNothingBesideAnotherAccount() {
         var withInvite = FirstRunState()
         withInvite.invite = "INVITE-1"
