@@ -334,6 +334,10 @@ extension DaemonData {
         /// the badge's exact count. `nil` is unknown (an older daemon, or
         /// a reply without it): draw "—", never a fallback number.
         public let decisionsOwed: Int?
+        /// Previewed Ask-me sessions nobody has decided: the same count
+        /// `list_projects` carries, from the same daemon function. Never a
+        /// badge number. `nil` is unknown (an older daemon): no upsell, never 0.
+        public let unpurposedTraces: Int?
         public let nextDigestAt: Date?
         public let health: Health?
         public let dailyBudget: DailyBudget?
@@ -375,6 +379,7 @@ extension DaemonData {
             case paused
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
+            case unpurposedTraces = "unpurposed_traces"
             case nextDigestAt = "next_digest_at"
             case health
             case dailyBudget = "daily_budget"

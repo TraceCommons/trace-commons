@@ -1121,7 +1121,7 @@ const HAND_WRITTEN_OVERRIDES: &[&str] = &[
 /// compares the rest, so the untouched fields are still held to the daemon.
 fn override_touched_keys(key: &str) -> Option<&'static [&'static str]> {
     match key {
-        "unknownCounts/status" => Some(&["decisions_owed", "_sample"]),
+        "unknownCounts/status" => Some(&["decisions_owed", "unpurposed_traces", "_sample"]),
         "normalDay/status" | "busyQueue/status" => Some(&[
             "private_inference_state",
             "routing",
@@ -1150,9 +1150,12 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // to send it or unreachable -- never a fact a temp store's real daemon
     // can exhibit, since `status_value` (`daemon::ipc`) always computes a
     // concrete count. Take the real recording for every other field and
-    // remove this one by hand.
+    // remove this one by hand. `unpurposed_traces` goes with it: a daemon
+    // too old to send the badge count is too old to send the upsell count,
+    // and an absent one must mean "no card", never 0.
     if let Some(Value::Object(status)) = all.get_mut("unknownCounts/status") {
         status.remove("decisions_owed");
+        status.remove("unpurposed_traces");
         status.insert(
             "_sample".into(),
             Value::String("absent on purpose: older daemon".into()),

@@ -2469,6 +2469,37 @@ pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubC
         .count()
 }
 
+/// K7's upsell count, "unpurposed traces": `Pending` entries in a folder
+/// whose mode resolves to `NotifyOnly` ("Ask me") that have been previewed
+/// at least once. One function so `status` and `list_projects` can never
+/// report two different numbers. Three conditions, all required:
+///
+/// - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
+///   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded` entry
+///   has already been decided, one way or another.
+/// - The project's mode resolves to `NotifyOnly`, never `AutoUpload`
+///   ("armed") or `Ignore` ("Never"). Armed is excluded on the project's
+///   resolved mode rather than the entry's own `approved_unattended` flag,
+///   because a gate-held armed session is `Pending` with nothing decided
+///   about it yet either; counting those would tell a contributor to go
+///   decide about a folder they already armed.
+/// - Previewed at least once (`previewed_envelope_digest.is_some()`) --
+///   "scrubbed", in the design's word. An entry nobody has opened a preview
+///   for has not been through the redaction pass this count is about.
+///
+/// This is not [`decisions_owed`]: the badge also counts unpreviewed and
+/// armed-but-human-held sessions. Every entry counted here is also a
+/// decision owed, so this is never larger than the badge. Keep the two
+/// contracts distinct.
+pub fn unpurposed_traces(queue: &Queue, policy: &ProjectPolicy) -> usize {
+    queue
+        .pending()
+        .into_iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| e.previewed_envelope_digest.is_some())
+        .count()
+}
+
 /// Whether one `Pending` entry is a decision owed to a person. See
 /// [`decisions_owed`] for each rule and why.
 fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> bool {

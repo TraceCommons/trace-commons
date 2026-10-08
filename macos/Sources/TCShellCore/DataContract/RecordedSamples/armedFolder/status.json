@@ -10,6 +10,7 @@
   "paused": false,
   "queue_depth": 3,
   "decisions_owed": 1,
+  "unpurposed_traces": 0,
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
