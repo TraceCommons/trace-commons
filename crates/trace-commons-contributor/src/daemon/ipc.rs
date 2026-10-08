@@ -12384,6 +12384,35 @@ mod tests {
         assert!(body.contains("secret-client-project"));
     }
 
+    /// U4a: when a session was last written is local-only, like `path`.
+    /// Every queue entry reaches the wire through `entry_value` -- the
+    /// `list_pending` rows, the `snapshot` event, the per-entry events -- so
+    /// pinning this shape pins them all. Only a count derived from the field
+    /// may ever leave the daemon.
+    #[test]
+    fn a_queue_entry_on_the_wire_carries_no_last_write() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: "2026-08-08T12:00:00Z".parse().unwrap(),
+            last_modified_at: Some("2001-02-03T04:05:06Z".parse().unwrap()),
+            ..Default::default()
+        };
+        for evidence in [None, Some(false), Some(true)] {
+            let body = serde_json::to_string(&entry_value(&e, evidence)).unwrap();
+            assert!(
+                !body.contains("last_modified_at") && !body.contains("2001-02-03"),
+                "the last write leaked to the wire: {body}"
+            );
+        }
+    }
+
     /// K9: `list_pending` carries the queued title, and says `null` rather
     /// than omitting the field for an entry that has none.
     #[test]
