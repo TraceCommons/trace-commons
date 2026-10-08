@@ -53,6 +53,25 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertEqual(shell.hideInspector, "Hide the inspector")
     }
 
+    /// Ron's #1146 Home and History structure words (glass parity): his
+    /// headings verbatim, a singular of its own, and his holes filled.
+    func testTheHomeAndHistoryWordsDecode() throws {
+        let words = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON())).homeHistory
+        XCTAssertEqual(words.draftsTag, "Drafts")
+        XCTAssertEqual(words.noMissionDrafts, "No mission drafts on this machine.")
+        XCTAssertEqual(words.sources(1), "1 source")
+        XCTAssertEqual(words.sources(3), "3 sources")
+        XCTAssertEqual(words.contributionHistory, "Contribution history")
+        XCTAssertEqual(words.records(1), "1 record")
+        XCTAssertEqual(words.records(2), "2 records")
+        XCTAssertEqual(words.held(1), "1 held for privacy review")
+        XCTAssertEqual(words.held(4), "4 held for privacy review")
+        XCTAssertEqual(words.status("In the commons"), "Status: In the commons")
+        XCTAssertEqual(words.credit("3.5"), "credit 3.5")
+        XCTAssertEqual(words.accepted(window: "Last 30 days"), "Accepted \u{00B7} Last 30 days")
+        XCTAssertEqual(words.filterLabel, "Filter history")
+    }
+
     /// Ron's safeguards panel labels (#1241).
     func testTheSafeguardsLabelsDecode() throws {
         let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))

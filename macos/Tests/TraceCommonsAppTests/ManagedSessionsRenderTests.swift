@@ -15,6 +15,9 @@ final class ManagedSessionsRenderTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { if ProcessInfo.processInfo.environment["TRACE_COMMONS_SCREENSHOT_DIR"] == nil { try? FileManager.default.removeItem(at: directory) } }
         try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 720, height: 480), to: directory.appendingPathComponent("managed-sessions.png"))
+        // The compact left pane (360pt with its 12pt padding), where the
+        // header buttons once broke per syllable (V1).
+        try render(ManagedSessionsSection().environmentObject(model), size: CGSize(width: 360, height: 480), to: directory.appendingPathComponent("managed-sessions-compact.png"))
         try render(ManagedAccountSheet(onClose: {}).environmentObject(model), size: CGSize(width: 520, height: 360), to: directory.appendingPathComponent("managed-add-account.png"))
         try render(ManagedLaunchSheet(onClose: {}).environmentObject(model), size: CGSize(width: 580, height: 300), to: directory.appendingPathComponent("managed-launch.png"))
         let account = try XCTUnwrap(model.managedSnapshot?.accounts.first)

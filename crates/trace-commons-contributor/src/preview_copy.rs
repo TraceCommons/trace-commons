@@ -210,7 +210,9 @@ pub struct MonitorTracesCopy {
 //   (`history_copy`, `routing_copy`). Since the owner's 2026-10-06 ruling
 //   (#1146's wording wins), Home's and History's #1146 lines -- his
 //   "credit pending" accessory, the filters, the empty states -- are
-//   [`MonitorShellCopy`].
+//   [`MonitorShellCopy`], and the words that carry his Home and History
+//   structure (headings, project groups, community and credit record) are
+//   [`MonitorHomeHistoryCopy`].
 // - No "Share automatically": the folder rule is Ask me / Automatic /
 //   Never, from `project_copy::FOLDER_MODE_LABELS`.
 
@@ -234,6 +236,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "uploads",
     "megabytes",
     "amount",
+    "days",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -270,6 +273,11 @@ pub struct MonitorTreeCopy {
     pub dismiss_session_keep: &'static str,
     pub dismissing: &'static str,
     pub dismiss_session_failed: &'static str,
+    /// A session row's sub line after its size (Ron's `SessionRow`): a
+    /// session whose subagent transcripts were dropped to fit, and one with
+    /// nothing else to say.
+    pub session_trimmed: &'static str,
+    pub session_waiting: &'static str,
 }
 
 /// Counted lines the tree, the inspectors and the summary share.
@@ -302,6 +310,12 @@ pub struct MonitorInspectorCopy {
     pub apply_outcome_one: &'static str,
     pub apply_outcome: &'static str,
     pub cancel: &'static str,
+    /// The folder inspector's Decisions card (`waiting-project-folder.tsx`):
+    /// what is waiting there, one and then counted, and Submit all with the
+    /// eligible count.
+    pub waiting_sessions_one: &'static str,
+    pub waiting_sessions: &'static str,
+    pub submit_all_eligible: &'static str,
 }
 
 /// The summary inspector (`waiting-page.tsx`'s `SummaryInspector` and
@@ -428,6 +442,20 @@ pub struct MonitorSafeguardsCopy {
     /// `witness_capacity` was reported but could not be read: never "none
     /// waiting".
     pub capacity_unreadable: &'static str,
+    /// The inference routing cell's short state label (#1146
+    /// `routingLabel`), by `routing.state`; anything else is `routing_unknown`.
+    pub routing_not_declared: &'static str,
+    /// Declared, and nothing recorded yet. Names the destination, never
+    /// the mechanism (`routing_copy`'s sweep). DRAFT, NEEDS APPROVAL
+    /// (reworded, 2026-10-07).
+    pub routing_awaiting_rows: &'static str,
+    /// Declared, and records are arriving. DRAFT, NEEDS APPROVAL
+    /// (reworded, 2026-10-07).
+    pub routing_rows_seen: &'static str,
+    /// Declared, and the file needed to read the record cannot be read.
+    /// DRAFT, NEEDS APPROVAL (reworded, 2026-10-07).
+    pub routing_token_unreadable: &'static str,
+    pub routing_unknown: &'static str,
 }
 
 /// History's refresh and account sign-in controls: the controls Ron's
@@ -508,6 +536,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             dismiss_session_keep: "Keep it",
             dismissing: "Dismissing\u{2026}",
             dismiss_session_failed: "Could not dismiss session.",
+            session_trimmed: "trimmed to fit",
+            session_waiting: "waiting",
         },
         counts: MonitorCountsCopy {
             sessions_waiting_one: "1 session waiting",
@@ -530,6 +560,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             apply_outcome_one: "Apply one outcome to 1 eligible session.",
             apply_outcome: "Apply one outcome to {count} eligible sessions.",
             cancel: "Cancel",
+            waiting_sessions_one: "1 waiting session",
+            waiting_sessions: "{count} waiting sessions",
+            submit_all_eligible: "Submit all eligible ({count})",
         },
         summary_panel: MonitorSummaryCopy {
             tools_watched: "{count} of {total} tools watched",
@@ -826,6 +859,114 @@ pub struct MonitorScreensCopy {
     /// 2026-10-06): the toolbar toggles, the graph's focus tips, Home's
     /// status lines and History's filters and empty states.
     pub shell: MonitorShellCopy,
+    /// Ron's #1146 Home and History structure (the glass parity pass,
+    /// 2026-10-07): Home's Missions card, History's headings, project
+    /// groups, rows, community panel and credit record.
+    pub home_history: MonitorHomeHistoryCopy,
+    /// The Traces graph footer's zoom, range and bar words (Ron's #1146
+    /// `TracesGraph`).
+    pub traces_graph: MonitorTracesGraphCopy,
+    /// The flow map's node cards and names (Ron's #1146 `FlowMap`).
+    pub flow_map: MonitorFlowMapCopy,
+    /// The Settings modal's section list and section rules (#1146
+    /// `features/settings/sections.ts`).
+    pub settings_nav: MonitorSettingsNavCopy,
+}
+
+/// Ron's #1146 words for the Traces graph footer (`traces-graph.tsx`,
+/// `traces-model.ts`): the zoom and jump controls, the range pill and each
+/// bar's text equivalent. Where Ron pluralised, the singular is its own
+/// line.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorTracesGraphCopy {
+    pub zoom_out: &'static str,
+    pub zoom_in: &'static str,
+    pub jump_to_now: &'static str,
+    /// The range pill at now: `{hours}` or `{days}` is the window's span.
+    pub last_hours: &'static str,
+    pub last_days: &'static str,
+    /// The range pill `{count}` whole windows back.
+    pub hours_back_one: &'static str,
+    pub hours_back: &'static str,
+    pub days_back_one: &'static str,
+    pub days_back: &'static str,
+    /// A bar's text equivalent: `{label}` is its day, `{count}` shared and
+    /// `{total}` kept.
+    pub bar: &'static str,
+}
+
+/// Ron's #1146 words for the flow map (`flow-map.tsx`): its accessible
+/// names, the node cards' sentences and the hint under a peeked card.
+/// Counted nouns are their own lines, singular apart, and fill `{label}`.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorFlowMapCopy {
+    /// The map's accessible name, and its zoom controls'.
+    pub map_label: &'static str,
+    pub zoom_label: &'static str,
+    /// Under a card shown by hovering, not pinned.
+    pub hint: &'static str,
+    pub sessions_one: &'static str,
+    pub sessions: &'static str,
+    pub traces_one: &'static str,
+    pub traces: &'static str,
+    pub folders_one: &'static str,
+    pub folders: &'static str,
+    pub tools_one: &'static str,
+    pub tools: &'static str,
+    /// This computer's card: `{label}` is the sessions waiting, `{count}`
+    /// those contributed. Approved 2026-10-07.
+    pub hub: &'static str,
+    /// The library's card: `{label}` is the traces contributed. Approved
+    /// 2026-10-07.
+    pub library: &'static str,
+    /// A tool's card title: `{label}` is its folders.
+    pub tool_title: &'static str,
+    /// A watched tool, then what waits for it. Approved 2026-10-07.
+    pub tool_watched: &'static str,
+    pub tool_waiting: &'static str,
+    pub tool_nothing_waiting: &'static str,
+    /// A tool that is off, and one the core has no declaration for. Approved
+    /// 2026-10-07.
+    pub tool_off: &'static str,
+    pub tool_unset: &'static str,
+    /// A folder's card: its rule, `{label}` the rule's name, and its
+    /// counts, `{label}` the sessions waiting.
+    pub folder_rule: &'static str,
+    pub folder_rule_unset: &'static str,
+    pub folder_counts: &'static str,
+    /// The Private AI destination's card and the line under its node:
+    /// `{label}` is the tools connected.
+    pub connected: &'static str,
+    pub connected_line: &'static str,
+    /// The Traces legend's last item: a tool that is not watched, drawn
+    /// dashed.
+    pub legend_not_watched: &'static str,
+    /// The Private AI destination's label: the credential the tools'
+    /// calls are answered with.
+    pub credential: &'static str,
+    /// Under the destination when the core lists no tool.
+    pub none_found: &'static str,
+}
+
+/// Ron's #1146 Settings section names (`features/settings/sections.ts`), in
+/// his order: the modal's section list, and the rule that opens each
+/// section in its body. Plain labels. A shell that draws a section #1146
+/// folds into another (notifications and updates, under startup) draws it
+/// under that section's name.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorSettingsNavCopy {
+    pub connection: &'static str,
+    pub startup: &'static str,
+    pub watching: &'static str,
+    pub uses: &'static str,
+    pub profile: &'static str,
+    pub folders: &'static str,
+    pub tools: &'static str,
+    pub private_ai: &'static str,
+    pub witness: &'static str,
+    pub projects: &'static str,
+    pub log: &'static str,
+    pub compute: &'static str,
 }
 
 /// Ron's #1146 words for the monitor's toolbar, the Traces graph's focus
@@ -848,6 +989,8 @@ pub struct MonitorShellCopy {
     pub focus_needs_selection: &'static str,
     pub focus_whole_map: &'static str,
     pub focus_tool: &'static str,
+    /// The breadcrumb's icon-only back button's name.
+    pub back_to_home: &'static str,
     /// Home's status card: watching N tools.
     pub watching_tools_one: &'static str,
     pub watching_tools: &'static str,
@@ -895,6 +1038,85 @@ pub struct MonitorShellCopy {
     pub tab_traces: &'static str,
     pub tabs_label: &'static str,
     pub map_views_label: &'static str,
+    /// Settings cards' two-level heads (#1146 `settings-page.tsx`,
+    /// `consent-settings-panel.tsx`, `platform-panel.tsx`): an eyebrow over
+    /// an h2, and the re-read link at the right. A shell uppercases the
+    /// eyebrows.
+    pub settings_refresh: &'static str,
+    pub consent_eyebrow: &'static str,
+    pub desktop_eyebrow: &'static str,
+    pub desktop_title: &'static str,
+    pub discovery_eyebrow: &'static str,
+    pub discovery_title: &'static str,
+    /// The Watching section's watcher card (#1146 `settings-page.tsx`):
+    /// its eyebrow and title, the chip for each state, and what pausing
+    /// does. The buttons are `pause_watcher` and `resume_watcher`.
+    pub watcher_eyebrow: &'static str,
+    pub watcher_title: &'static str,
+    pub watcher_watching: &'static str,
+    pub watcher_paused: &'static str,
+    /// Approved 2026-10-07: says what a pause
+    /// does and does not do to queued sessions and consent.
+    pub watcher_caption: &'static str,
+    /// The Connection card's chip (#1146 `connection-panel.tsx`): enrolled,
+    /// or queued here only.
+    pub connection_ready: &'static str,
+    pub connection_local_only: &'static str,
+}
+
+/// Ron's #1146 Home and History words that carry their structure
+/// (`home-view.tsx`, `history-page.tsx`, `history-row.tsx`,
+/// `community-panel.tsx`, `credit-record-panel.tsx`), verbatim. Numbers are
+/// `{name}` holes and a singular is its own line. Pending credit is never
+/// said bare: a shell shows it only beside the commons' statement of what it
+/// waits on (D6), so there is no per-row pending line here.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorHomeHistoryCopy {
+    /// Home's Missions card: the accessory tag, the empty line, and each
+    /// draft's source count.
+    pub drafts_tag: &'static str,
+    pub no_mission_drafts: &'static str,
+    pub sources_one: &'static str,
+    pub sources: &'static str,
+    /// Home's way into the commons mission catalogue, which #1146 has no
+    /// place for (its Missions card is the drafts).
+    pub mission_catalogue: &'static str,
+    /// History's page description, under the breadcrumb.
+    pub history_description: &'static str,
+    /// The contribution list card's eyebrow and heading.
+    pub submissions: &'static str,
+    pub contribution_history: &'static str,
+    /// While History is first read.
+    pub reading_history: &'static str,
+    /// The filter's accessible name.
+    pub filter_label: &'static str,
+    /// A project group's eyebrow and its record count.
+    pub project: &'static str,
+    pub records_one: &'static str,
+    pub records: &'static str,
+    /// A row's status line; `{label}` is History's status word.
+    pub status_line: &'static str,
+    /// A row's settled credit; `{amount}` is the figure.
+    pub row_credit: &'static str,
+    /// The privacy review card's heading, by count.
+    pub held_count_one: &'static str,
+    pub held_count: &'static str,
+    /// The community panel: its heading and its cells. `{label}` is the
+    /// commons' window label.
+    pub public_standing: &'static str,
+    pub novelty_credit: &'static str,
+    pub accepted_in_window: &'static str,
+    pub accept_rate: &'static str,
+    pub analytics_withheld: &'static str,
+    /// The credit record card: eyebrow, heading, the pending figure's
+    /// label, and the chip before the first sync.
+    pub credit_record: &'static str,
+    pub about_credit: &'static str,
+    /// Approved 2026-10-07, without #1146's "Today credit is a record"
+    /// sentence (owner ruling). What credit is.
+    pub about_credit_body: &'static str,
+    pub still_being_scored: &'static str,
+    pub not_synced: &'static str,
 }
 
 /// The one table of the monitor screens' words. See [`MonitorScreensCopy`].
@@ -949,7 +1171,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         recent_activity: "Recent activity",
         flagged: SECOND_LOOK_HEADING,
         manage_rules: "Manage rules…",
-        settings: "Trace Commons Settings…",
+        // #1146 tray word (`tray.rs`), with the ellipsis of a command that
+        // opens a window; the modal it opens is titled bare "Settings".
+        settings: "Settings\u{2026}",
         settings_title: "Settings",
         settings_subtitle: "What this machine watches, and what your traces are allowed to do.",
         settings_sections: "Settings sections",
@@ -991,6 +1215,11 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             held_by_limit: "{count} queued sessions held by limit",
             capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
                 but this build could not read how many or why.",
+            routing_not_declared: "Not declared",
+            routing_awaiting_rows: "Waiting for Private AI records",
+            routing_rows_seen: "Receiving Private AI records",
+            routing_token_unreadable: "Private AI records unreadable",
+            routing_unknown: "Unknown",
         },
         history_actions: MonitorHistoryActionsCopy {
             request_refresh: "Request server refresh",
@@ -1001,11 +1230,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             sign_in_to_withdraw: "Sign in to withdraw",
             waiting_for_sign_in: "Waiting for sign-in\u{2026}",
             complete_sign_in: "Complete sign-in in your browser. This may take up to five minutes.",
-            sign_in_inactive: "Sign-in finished, but this device is still signed out of your \
-                Trace Commons account. Sign in again to withdraw.",
-            sign_in_unverified: "Sign-in finished, but your account could not be checked. \
-                Sign in again before withdrawing.",
-            sign_in_failed: "Sign-in did not finish. Nothing was withdrawn; sign in again to withdraw.",
+            // #1146's sentences (`use-history-withdrawal.ts`); none names
+            // machinery, so the ban below holds them as it held native's.
+            sign_in_inactive: "Sign-in finished, but the account session is not active. \
+                Withdrawal remains unavailable.",
+            sign_in_unverified: "Sign-in finished, but account status could not be verified. \
+                Retry sign-in before withdrawing.",
+            sign_in_failed: "Sign-in did not finish. Withdrawal was not completed; try signing in again.",
         },
         shell: MonitorShellCopy {
             show_graph: "Show the graph",
@@ -1016,6 +1247,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             hide_inspector: "Hide the inspector",
             focus_needs_selection: "Select a tool, project or session first",
             focus_whole_map: "Back to the whole map",
+            back_to_home: "Back to Home",
             focus_tool: "Show {tool} in the map",
             watching_tools_one: "Watching 1 tool",
             watching_tools: "Watching {count} tools",
@@ -1045,7 +1277,107 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             tab_inference: "Inference",
             tab_traces: "Traces",
             tabs_label: "Monitor",
-            map_views_label: "Map",
+            map_views_label: "Map view",
+            settings_refresh: "Refresh",
+            consent_eyebrow: "Consent",
+            desktop_eyebrow: "Desktop",
+            desktop_title: "System integrations",
+            discovery_eyebrow: "Watcher",
+            discovery_title: "Session discovery",
+            watcher_eyebrow: "Daemon",
+            watcher_title: "Contribution watcher",
+            watcher_watching: "Watching",
+            watcher_paused: "Paused",
+            watcher_caption: "Pausing stops contribution processing. It does not delete queued sessions or change consent.",
+            connection_ready: "Ready",
+            connection_local_only: "Local only",
+        },
+        traces_graph: MonitorTracesGraphCopy {
+            zoom_out: "Zoom out",
+            zoom_in: "Zoom in",
+            jump_to_now: "Jump to now",
+            last_hours: "Last {hours} hours",
+            last_days: "Last {days} days",
+            hours_back_one: "{hours} hours, 1 window back",
+            hours_back: "{hours} hours, {count} windows back",
+            days_back_one: "{days} days, 1 window back",
+            days_back: "{days} days, {count} windows back",
+            bar: "{label}: {count} shared, {total} kept",
+        },
+        flow_map: MonitorFlowMapCopy {
+            map_label: "Flow map",
+            zoom_label: "Map zoom",
+            hint: "hover to peek \u{00b7} click to pin",
+            sessions_one: "1 session",
+            sessions: "{count} sessions",
+            traces_one: "1 trace",
+            traces: "{count} traces",
+            folders_one: "1 folder",
+            folders: "{count} folders",
+            tools_one: "1 tool",
+            tools: "{count} tools",
+            hub: "Sessions are recorded and scrubbed here. {label} waiting for you; \
+                {count} contributed.",
+            library: "{label} contributed from this machine. Folders set to contribute \
+                automatically send scrubbed sessions here; every other folder waits for you.",
+            tool_title: "{tool} \u{00b7} {label}",
+            tool_watched: "Watched: new sessions are recorded and scrubbed on this computer.",
+            tool_waiting: "{count} waiting for you.",
+            tool_nothing_waiting: "Nothing waiting.",
+            tool_off: "Not watched: nothing new is read from this tool.",
+            tool_unset: "No sessions folder set for this tool yet.",
+            folder_rule: "Rule: {label}.",
+            folder_rule_unset: "Rule: not set.",
+            folder_counts: "{label} waiting, {count} contributed.",
+            connected: "{label} connected.",
+            connected_line: "{label} connected",
+            legend_not_watched: "Tool not watched",
+            credential: "NEAR AI credential",
+            none_found: "No configured tools found.",
+        },
+        home_history: MonitorHomeHistoryCopy {
+            drafts_tag: "Drafts",
+            no_mission_drafts: "No mission drafts on this machine.",
+            sources_one: "1 source",
+            sources: "{count} sources",
+            mission_catalogue: "Mission catalogue",
+            history_description: "What you have contributed, and what is still being reviewed.",
+            submissions: "Submissions",
+            contribution_history: "Contribution history",
+            reading_history: "Reading local history\u{2026}",
+            filter_label: "Filter history",
+            project: "Project",
+            records_one: "1 record",
+            records: "{count} records",
+            status_line: "Status: {label}",
+            row_credit: "credit {amount}",
+            held_count_one: "1 held for privacy review",
+            held_count: "{count} held for privacy review",
+            public_standing: "Public standing",
+            novelty_credit: "Novelty credit",
+            accepted_in_window: "Accepted \u{00b7} {label}",
+            accept_rate: "Accept rate",
+            analytics_withheld: "Aggregate analytics withheld by policy.",
+            credit_record: "Credit record",
+            about_credit: "About credit.",
+            about_credit_body: "Contributions earn credit points, scored on novelty and information \
+                richness.",
+            still_being_scored: "Still being scored",
+            not_synced: "Not synced yet",
+        },
+        settings_nav: MonitorSettingsNavCopy {
+            connection: "Connection",
+            startup: "Startup & notifications",
+            watching: "Watching",
+            uses: "How traces may be used",
+            profile: "Public profile",
+            folders: "Watched folders",
+            tools: "Tools",
+            private_ai: "Private AI",
+            witness: "Redaction witness",
+            projects: "Projects",
+            log: "Changes on this machine",
+            compute: "Compute",
         },
     }
 }
@@ -1166,6 +1498,9 @@ mod tests {
             "/safeguards/",
             "/history_actions/",
             "/shell/",
+            "/traces_graph/",
+            "/flow_map/",
+            "/home_history/",
         ] {
             assert!(
                 words.iter().any(|(key, _)| key.starts_with(table)),
@@ -1179,6 +1514,16 @@ mod tests {
     fn rons_counted_lines_hold_their_numbers() {
         let traces = monitor_traces_copy();
         assert_eq!(traces.tree.submit_count, "Submit \u{00b7} {count}");
+        // `waiting-project-folder.tsx`'s Decisions card.
+        assert_eq!(
+            traces.inspector.submit_all_eligible,
+            "Submit all eligible ({count})"
+        );
+        assert_eq!(
+            traces.inspector.waiting_sessions,
+            "{count} waiting sessions"
+        );
+        assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting session");
         // `queue-status-panel.tsx`'s daily limit row and its held line.
         assert_eq!(
             monitor_screens_copy().safeguards.remaining,
@@ -1277,6 +1622,70 @@ mod tests {
         assert!(!shell.filter_withdrawn.contains("by you"));
     }
 
+    /// Ron's #1146 Home and History structure words, verbatim, with a
+    /// singular of its own wherever he pluralised, and no bare pending
+    /// credit (D6).
+    #[test]
+    fn the_home_and_history_words_are_rons() {
+        let copy = monitor_screens_copy().home_history;
+        for (key, word) in words_of(&copy) {
+            assert!(!word.is_empty(), "{key} is empty");
+            assert!(
+                !word.to_lowercase().contains("pending"),
+                "{key} says pending credit bare: {word}"
+            );
+        }
+        assert_eq!(copy.drafts_tag, "Drafts");
+        assert_eq!(copy.contribution_history, "Contribution history");
+        assert_eq!(copy.status_line, "Status: {label}");
+        assert_eq!(copy.row_credit, "credit {amount}");
+        assert!(copy.sources.contains("{count}") && !copy.sources_one.contains('{'));
+        assert!(copy.records.contains("{count}") && !copy.records_one.contains('{'));
+        assert!(copy.held_count.contains("{count}") && !copy.held_count_one.contains('{'));
+        assert!(copy.accepted_in_window.contains("{label}"));
+        // The card dropped #1146's "Today credit is a record" sentence (owner
+        // ruling, 2026-10-07); `credit_not_currency` still sits beside every
+        // credit figure.
+        assert!(!copy.about_credit_body.contains("currency"));
+        assert!(copy.about_credit_body.contains("credit points"));
+    }
+
+    /// The Settings modal's section names are #1146's twelve, verbatim and
+    /// in his order, each short enough for the list's 180pt column, and the
+    /// change log's matches the heading the shell already reads.
+    #[test]
+    fn the_settings_section_names_are_rons() {
+        let screens = monitor_screens_copy();
+        let nav = &screens.settings_nav;
+        let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
+        assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
+        assert_eq!(nav.startup, "Startup & notifications");
+        assert_eq!(nav.uses, "How traces may be used");
+        assert_eq!(nav.profile, "Public profile");
+        assert_eq!(nav.private_ai, "Private AI");
+        assert_eq!(nav.compute, "Compute");
+        assert_eq!(nav.log, screens.shell.changes_heading);
+        for name in &names {
+            assert!(!name.ends_with('.') && name.chars().count() <= 24, "{name}");
+        }
+    }
+
+    /// The monitor tables do not name the mechanism, as the routing
+    /// surface does not (`routing_copy`'s forbidden-word sweep): the
+    /// safeguards grid's routing labels once said "proxy" while the
+    /// routing card declined it.
+    #[test]
+    fn the_monitor_tables_never_say_proxy() {
+        let mut words = words_of(&monitor_traces_copy());
+        words.extend(words_of(&monitor_screens_copy()));
+        for (key, word) in &words {
+            assert!(
+                !word.to_lowercase().contains("proxy"),
+                "{key} says proxy: {word}"
+            );
+        }
+    }
+
     /// Every `{...}` in the monitor tables is one [`MONITOR_PLACEHOLDERS`]
     /// lists, and every one listed is used, so a shell knows each hole it
     /// fills.
@@ -1305,6 +1714,40 @@ mod tests {
                 "{{{name}}} is documented but no string carries it"
             );
         }
+    }
+
+    /// Ron's #1146 graph footer and flow map words, verbatim, with his
+    /// numbers as holes and a singular of its own wherever he pluralised.
+    #[test]
+    fn the_graph_and_map_words_are_rons() {
+        let screens = monitor_screens_copy();
+        let graph = &screens.traces_graph;
+        assert_eq!(graph.zoom_out, "Zoom out");
+        assert_eq!(graph.jump_to_now, "Jump to now");
+        assert_eq!(graph.last_days, "Last {days} days");
+        assert!(!graph.days_back_one.contains("{count}"));
+        assert!(graph.days_back.contains("{count}") && graph.days_back.contains("{days}"));
+        assert!(!graph.hours_back_one.contains("{count}"));
+        assert!(graph.hours_back.contains("{count}") && graph.hours_back.contains("{hours}"));
+        assert_eq!(graph.bar, "{label}: {count} shared, {total} kept");
+        let map = &screens.flow_map;
+        for (key, word) in words_of(map) {
+            assert!(!word.trim().is_empty(), "{key} is empty");
+        }
+        for one in [
+            map.sessions_one,
+            map.traces_one,
+            map.folders_one,
+            map.tools_one,
+        ] {
+            assert!(!one.contains('{'), "{one}");
+        }
+        assert!(map.hub.contains("{label}") && map.hub.contains("{count}"));
+        assert!(map.library.starts_with("{label} contributed"));
+        assert!(map.tool_title.contains("{tool}"));
+        // The rule's names are the core's folder mode names, filled in.
+        assert!(map.folder_rule.contains("{label}"));
+        assert!(!map.folder_rule_unset.contains('{'));
     }
 
     #[test]

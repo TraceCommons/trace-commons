@@ -14,13 +14,22 @@ import TCShellCore
 /// disclosure bundle's folder mode names) (`ShellWordingTests`).
 struct TracesTreeView: View {
     let store: TracesStore
+    /// The queue's configured limit, which the queue-full banner names,
+    /// and the prompts drawn above the tree.
+    @EnvironmentObject private var model: AppModel
     /// The folder or session selected; nil for none.
     @Binding var selection: MonitorSelection?
     /// A session's Review pill: select it and show the inspector its review
     /// lives in, so Review is never a press that does nothing visible.
     var onReview: (String) -> Void = { _ in }
 
-    @State private var collapsed: Set<String> = []
+    /// The folders opened: every folder starts collapsed (#1146
+    /// `traces-workspace.tsx`, `expanded = []`), and one opens when a
+    /// session in it is selected from elsewhere (#1146 `reveal`).
+    @State private var expanded: Set<String> = []
+    /// The selection last revealed, so a folder the person closes over a
+    /// selected session stays closed until the selection moves.
+    @State private var revealed: MonitorSelection?
     /// A mode change waiting on the core's confirmation: arming always,
     /// ignoring when the folder has sessions waiting. It carries the core's
     /// words for that folder, decoded when the change was asked for.
@@ -78,62 +87,40 @@ struct TracesTreeView: View {
                 // the set asked for was not one.
                 GlassChip("\(words.sample) · \(sample)", status: store.sampleUnknown ? .ask : .off)
             }
-            if let notice = store.folderNotice {
-                GlassNotice(tone: .ask) { Text(notice) }
-            }
-            // A core that does not answer, or a read it refused, is said
-            // beside the tree too, so the pane never reads as current over a
-            // last good tree with the inspector hidden. The safeguards and
-            // the prompts are the inspector's (`TracesInspectorHost`).
-            if case .failed(let error) = store.phase, let line = store.words?.line(for: error) {
-                GlassNotice(tone: .outside, title: line) { EmptyView() }
-            }
             if store.phase == .loading && isEmpty {
-                GlassSpinner(standalone: true).frame(maxWidth: .infinity)
-            } else if isEmpty && store.phase == .loaded {
-                VStack(spacing: GlassTokens.Space.s2) {
-                    Image(systemName: "tray")
-                        .glassGlyph(22)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .accessibilityLabel(MonitorWindowView.Tab.traces.title)
-                    Text(QueueLegacyWords.nothingWaiting)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(QueueLegacyWords.nothingWaitingDetail)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity)
-                .padding(.top, GlassTokens.Space.s10)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(spacing: 2) {
-                            ForEach(store.tree.folders) { folderRows($0) }
-                        }
-                    }
-                    // The keyboard moves the selection; keep it on screen.
-                    .onChange(of: selection) { _, selected in
-                        guard let id = selected.map(Self.rowID) else { return }
-                        withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
-                            proxy.scrollTo(id)
-                        }
-                        spoken = id
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        prompts
+                        // #1146: "Reading local queue…", not a spinner.
+                        Text(store.words?.tree.readingQueue ?? "")
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .padding(GlassTokens.Space.s6)
                     }
                 }
                 .scrollIndicators(.never)
-                // Full Keyboard Access: focus the tree, then the arrow keys
-                // move the selection through the folders and sessions as drawn.
-                .focusable()
-                .onMoveCommand(perform: move)
-                // Return opens the selected session's review, so the pill
-                // need not be its own tab stop on every row.
-                .onKeyPress(.return) {
-                    guard case .session(let entryID) = selection else { return .ignored }
-                    onReview(entryID)
-                    return .handled
+            } else if isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                        prompts
+                        if store.phase == .loaded { emptyTree }
+                    }
+                }
+                .scrollIndicators(.never)
+            } else {
+                // The prompts sit above the tree on a shelf of their own,
+                // never taller than `promptsShare` of the pane and scrolling
+                // inside it past that: however many show, they never push
+                // the graph footer or the panes beside it out of the window,
+                // and the tree below them always keeps rows on screen
+                // (R-LAYOUT-1, round 2).
+                GeometryReader { pane in
+                    VStack(spacing: 0) {
+                        PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {
+                            prompts
+                        }
+                        tree
+                    }
                 }
             }
         }
@@ -143,6 +130,53 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
+    }
+
+    /// The most of the Traces pane the prompts shelf may take; the rest is
+    /// always the tree.
+    static let promptsShare: CGFloat = 0.45
+
+    /// The shelf's ceiling for a pane of this height.
+    static func promptsCap(paneHeight: CGFloat) -> CGFloat {
+        max(0, paneHeight * promptsShare)
+    }
+
+    /// The folders and sessions, in their own scroll.
+    private var tree: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(store.tree.folders) { folderRows($0) }
+                }
+            }
+            // The keyboard moves the selection; keep it on screen,
+            // opening a session's folder if it was closed.
+            .onChange(of: selection, initial: true) { _, selected in
+                reveal(selected)
+                guard let id = selected.map(Self.rowID) else { return }
+                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) {
+                    proxy.scrollTo(id)
+                }
+                spoken = id
+            }
+        }
+        .scrollIndicators(.never)
+        // A restored selection whose session arrives with a later
+        // read is revealed then.
+        .onChange(of: store.tree) { _, _ in reveal(selection) }
+        // #1146's tree name.
+        .accessibilityLabel(store.words?.tree.treeLabel ?? "")
+        // Full Keyboard Access: focus the tree, then the arrow keys
+        // move the selection through the folders and sessions as drawn.
+        .focusable()
+        .onMoveCommand(perform: move)
+        // Return opens the selected session's review, so the pill
+        // need not be its own tab stop on every row.
+        .onKeyPress(.return) {
+            guard case .session(let entryID) = selection else { return .ignored }
+            onReview(entryID)
+            return .handled
+        }
     }
 
     /// A mode change's confirmation, in the core's words for that folder.
@@ -223,17 +257,33 @@ struct TracesTreeView: View {
     // MARK: Keyboard
 
     /// The selectable rows in drawing order, folders and sessions both,
-    /// skipping what a collapsed folder hides. A collapsed folder keeps its
-    /// own row.
-    static func visibleRows(in tree: TracesTree, collapsed: Set<String>) -> [MonitorSelection] {
+    /// skipping what a closed folder hides. A closed folder keeps its own
+    /// row; only the folders in `expanded` show their sessions.
+    static func visibleRows(in tree: TracesTree, expanded: Set<String>) -> [MonitorSelection] {
         var rows: [MonitorSelection] = []
         for folder in tree.folders {
             rows.append(.folder(projectID: folder.id))
-            if !collapsed.contains(folder.id) {
+            if expanded.contains(folder.id) {
                 rows += folder.sessions.map { .session(entryID: $0.entryId) }
             }
         }
         return rows
+    }
+
+    /// The open folders once `selected` is shown: a session's folder opens
+    /// so the session is drawn (#1146 `reveal`); a folder, or nothing,
+    /// changes nothing.
+    static func revealing(_ selected: MonitorSelection?, in tree: TracesTree, expanded: Set<String>) -> Set<String> {
+        guard case .session(let entryID) = selected, let folder = folder(of: entryID, in: tree) else { return expanded }
+        return expanded.union([folder])
+    }
+
+    private func reveal(_ selected: MonitorSelection?) {
+        guard selected != revealed else { return }
+        // Wait for a session the tree does not hold yet.
+        if case .session(let entryID) = selected, Self.folder(of: entryID, in: store.tree) == nil { return }
+        expanded = Self.revealing(selected, in: store.tree, expanded: expanded)
+        revealed = selected
     }
 
     /// One step up or down from the current row; the top row when nothing
@@ -253,7 +303,7 @@ struct TracesTreeView: View {
     private func move(_ direction: MoveCommandDirection) {
         switch direction {
         case .down, .up:
-            let rows = Self.visibleRows(in: store.tree, collapsed: collapsed)
+            let rows = Self.visibleRows(in: store.tree, expanded: expanded)
             if let next = Self.moved(from: selection, down: direction == .down, through: rows), next != selection {
                 selection = next
             }
@@ -269,9 +319,9 @@ struct TracesTreeView: View {
     private func disclose(_ selected: MonitorSelection, open: Bool) {
         guard let folder = TracesTreeView.folder(of: selected, in: store.tree) else { return }
         if open {
-            collapsed.remove(folder)
+            expanded.insert(folder)
         } else {
-            collapsed.insert(folder)
+            expanded.remove(folder)
         }
     }
 
@@ -294,12 +344,58 @@ struct TracesTreeView: View {
         tree.folders.first { $0.sessions.contains { $0.entryId == entryId } }?.id
     }
 
+    /// The folder notice, health banners and `InspectorPrompts`, drawn as
+    /// the first rows of the tree's scroll, never above it: a tall offer or
+    /// the first-contribution note scrolls away with the tree instead of
+    /// pushing it, the graph footer and the panes beside it out of the
+    /// window (R-LAYOUT-1).
+    @ViewBuilder
+    private var prompts: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            if let notice = store.folderNotice {
+                GlassNotice(tone: .ask) { Text(notice) }
+            }
+            // Offers, undo and health above the tree (owner, 2026-10-07: an
+            // accepted difference from #1146, which puts them in the
+            // inspector), in the tree's scroll. Why approved sessions are not moving, or that the
+            // core is not answering, first: the pane never reads as current
+            // over a last good tree, and an unread status is never drawn as
+            // healthy. Then the undos, the offers and the first-contribution
+            // note (`InspectorPrompts`).
+            ForEach(TracesHealth.banners(
+                phase: store.phase, status: store.status, words: store.words, coreDown: TracesHealth.coreDownLine,
+                maxQueueEntries: model.daemonSettings?.maxQueueEntries)
+            ) { GlassHealthBanner(banner: $0) }
+            InspectorPrompts(store: store)
+        }
+    }
+
+    /// No folder, nothing waiting.
+    private var emptyTree: some View {
+        VStack(spacing: GlassTokens.Space.s2) {
+            Image(systemName: "tray")
+                .glassGlyph(22)
+                .foregroundStyle(GlassColor.textTertiary)
+                .accessibilityLabel(MonitorWindowView.Tab.traces.title)
+            Text(QueueLegacyWords.nothingWaiting)
+                .glassType(GlassTokens.TypeScale.bodyStrong)
+                .foregroundStyle(GlassColor.textPrimary)
+            Text(QueueLegacyWords.nothingWaitingDetail)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.top, GlassTokens.Space.s10)
+    }
+
     private var isEmpty: Bool { store.tree.folders.isEmpty }
 
-    private func isOpen(_ id: String) -> Bool { !collapsed.contains(id) }
+    private func isOpen(_ id: String) -> Bool { expanded.contains(id) }
 
     private func toggle(_ id: String) {
-        if collapsed.contains(id) { collapsed.remove(id) } else { collapsed.insert(id) }
+        if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) }
     }
 
     /// The core's line for a write it refused on this row, if one is held.
@@ -326,21 +422,20 @@ struct TracesTreeView: View {
                 ForEach(lines, id: \.self) { line in
                     Text(line)
                         .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
+                        // #1146: tertiary, as a row's own sub line.
+                        .foregroundStyle(GlassColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, Self.indent(depth))
-            .padding(.trailing, 6)
+            // #1146 `px-14`: 56 in from both sides.
+            .padding(.horizontal, Self.noteInset)
             .padding(.bottom, GlassTokens.Space.s2)
         }
     }
 
-    /// Where a row's content starts, for the lines and menus under it.
-    private static func indent(_ depth: GlassListRow.Depth) -> CGFloat {
-        8 + 16 + GlassTokens.Space.s4 + CGFloat(depth.rawValue) * 18
-    }
+    /// #1146's inset for the lines under a folder row (`px-14`).
+    static let noteInset: CGFloat = 56
 
     @ViewBuilder
     private func folderRows(_ folder: TracesTree.FolderNode) -> some View {
@@ -385,40 +480,45 @@ struct TracesTreeView: View {
         )
         .help(submits ? Self.submitHelp(offer.withheldLine, words: words) : "")
         .disabled(store.writing.contains(folder.id))
-        .id(Self.rowID(.folder(projectID: folder.id)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
-        if ignorable, folderMenu == folder.id, let label = words?.tree.ignoreFolder {
-            GlassMenu(onDismiss: { folderMenu = nil }) {
-                GlassMenuItem(label) {
+        // The row menu floats over the rows below it (#1146 `RowMenuPill`).
+        .overlay(alignment: .topTrailing) {
+            if ignorable, folderMenu == folder.id, let label = words?.tree.ignoreFolder {
+                TracesRowMenuPill(label, onDismiss: { folderMenu = nil }) {
                     folderMenu = nil
                     request(folder, .ignore)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, Self.indent(.folder))
-            .padding(.bottom, GlassTokens.Space.s2)
         }
-        // The withheld line is drawn once: the tab's notice may already say it.
+        .zIndex(folderMenu == folder.id ? 1 : 0)
+        .id(Self.rowID(.folder(projectID: folder.id)))
+        .accessibilityFocused($spoken, equals: Self.rowID(.folder(projectID: folder.id)))
+        // The withheld line is drawn once: the tab's notice may already say
+        // it. #1146 puts the count Submit sends before it.
         let withheld: [String] = ignored
-            ? [] : offer.withheldLine.flatMap { $0 == store.folderNotice ? nil : [$0] } ?? []
+            ? [] : offer.withheldLine.flatMap {
+                $0 == store.folderNotice ? nil : [Self.withheldNote($0, eligible: offer.count, words: words)]
+            } ?? []
         notes(folderNotes(folder) + withheld, depth: .folder)
         if isOpen(folder.id) {
-            ForEach(folder.sessions) { sessionRow($0) }
+            // #1146: a session under an ignored folder is drawn off too.
+            ForEach(folder.sessions) { sessionRow($0, off: ignored) }
         }
     }
 
     @ViewBuilder
-    private func sessionRow(_ entry: DaemonData.QueueEntry) -> some View {
+    private func sessionRow(_ entry: DaemonData.QueueEntry, off: Bool) -> some View {
         let words = store.words
         let selected = selection == .session(entryID: entry.entryId)
         GlassListRow(
             depth: .session,
             tile: Self.sessionTile(entry),
             title: Self.when(entry),
-            sub: Self.sub(
-                entry, held: words?.held, ineligible: store.ineligibleLine(entry), tool: Self.toolName(entry)),
-            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil),
+            sub: Self.sub(entry, held: words?.held, ineligible: store.ineligibleLine(entry),
+                          attestation: store.attestationLine(entry), words: words),
+            flag: Self.flag(entry, ineligible: store.ineligibleLine(entry) != nil,
+                            attestation: TracesStore.attestationTone(entry)),
             selected: selected,
+            off: off,
             // D10 default: a session's pill opens its review. Focus roves:
             // only the selected row's pill is a tab stop; Return opens it.
             submitTitle: selected ? words?.tree.reviewing : words?.review,
@@ -430,19 +530,20 @@ struct TracesTreeView: View {
             onMenu: { sessionMenu = sessionMenu == entry.entryId ? nil : entry.entryId }
         )
         .help(words?.tree.reviewTip ?? "")
-        .id(Self.rowID(.session(entryID: entry.entryId)))
-        .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
-        if sessionMenu == entry.entryId, let label = words?.tree.dismissSession {
-            GlassMenu(onDismiss: { sessionMenu = nil }) {
-                GlassMenuItem(label) {
+        // The tool's name for VoiceOver: the tile shows it, the sub line
+        // (#1146's size and state) does not.
+        .accessibilityHint(Self.toolName(entry) ?? "")
+        .overlay(alignment: .topTrailing) {
+            if sessionMenu == entry.entryId, let label = words?.tree.dismissSession {
+                TracesRowMenuPill(label, onDismiss: { sessionMenu = nil }) {
                     sessionMenu = nil
                     dismissing = entry
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, Self.indent(.session))
-            .padding(.bottom, GlassTokens.Space.s2)
         }
+        .zIndex(sessionMenu == entry.entryId ? 1 : 0)
+        .id(Self.rowID(.session(entryID: entry.entryId)))
+        .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
     }
 
     /// Ron's Dismiss-session confirmation, raised over the whole window: the
@@ -453,12 +554,13 @@ struct TracesTreeView: View {
     private func dismissModal(_ entry: DaemonData.QueueEntry) -> some View {
         if let words = store.words {
             let busy = store.acting.contains(entry.entryId)
-            let keep = { dismissing = nil }
+            // #1146 ignores a close while dismissing: Keep, Escape and a
+            // scrim click wait for the answer, so a refusal is never lost.
+            let keep = { if !store.acting.contains(entry.entryId) { dismissing = nil } }
             GlassModal(
                 title: words.tree.dismissSessionTitle, subtitle: Self.dismissBody(entry, words: words),
-                width: .narrow,
                 actions: [
-                    .cancel(words.tree.dismissSessionKeep, action: keep),
+                    GlassModalAction(words.tree.dismissSessionKeep, role: .cancel, isEnabled: !busy, action: keep),
                     .destructive(busy ? words.tree.dismissing : words.dismissAction, isEnabled: !busy) {
                         Task {
                             await store.perform(.dismiss, on: entry.entryId)
@@ -532,15 +634,25 @@ struct TracesTreeView: View {
     /// The Dismiss confirmation's body: the core's sentence with the
     /// session's time and size filled in.
     static func dismissBody(_ entry: DaemonData.QueueEntry, words: MonitorTracesCopy) -> String {
-        let size = entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) } ?? "—"
+        let size = entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) } ?? "—"
         return FirstRunCopy.fill(words.tree.dismissSessionBody, ["when": when(entry), "size": size])
     }
 
-    /// When the session started, or when it was queued if the daemon did not
-    /// record a start.
-    static func when(_ entry: DaemonData.QueueEntry) -> String {
-        guard let date = entry.startedAt ?? entry.discoveredAt else { return "—" }
-        return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    /// A session's title, as #1146's `sessionWhen`: the short weekday and
+    /// time it was found ("Mon 3:04 PM"), or when it started if the daemon
+    /// did not record that.
+    static func when(_ entry: DaemonData.QueueEntry, timeZone: TimeZone = .current) -> String {
+        guard let date = entry.discoveredAt ?? entry.startedAt else { return "—" }
+        var style = Date.FormatStyle.dateTime.weekday(.abbreviated).hour().minute()
+        style.timeZone = timeZone
+        return date.formatted(style)
+    }
+
+    /// The line under a folder with sessions Submit leaves behind (#1146
+    /// `FolderBranch`): how many it sends, then the core's line for the rest.
+    static func withheldNote(_ withheld: String, eligible: Int, words: MonitorTracesCopy?) -> String {
+        guard let words else { return withheld }
+        return FirstRunCopy.fill(words.tree.eligibleCount, ["count": String(eligible)]) + " \u{00B7} " + withheld
     }
 
     /// Length and size, each only when the daemon reported it.
@@ -550,7 +662,7 @@ struct TracesTreeView: View {
             parts.append(Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes], width: .abbreviated)))
         }
         if let bytes = entry.sizeBytes {
-            parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+            parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .memory))
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -561,19 +673,77 @@ struct TracesTreeView: View {
         entry.heldForSecondLook || entry.heldByManualScrubCheck || entry.returnedFromKeep
     }
 
-    /// Amber when held, or when the core says the session cannot go as it
-    /// stands.
-    static func flag(_ entry: DaemonData.QueueEntry, ineligible: Bool = false) -> GlassListRow.Flag? {
-        isHeld(entry) || ineligible ? .ask : nil
+    /// Amber when held, when the core says the session cannot go as it
+    /// stands, or when its attestation asks for attention or was refused;
+    /// green for a clear attestation (#1146 `SessionRow`), and nothing for
+    /// any other tone, so a mark this build cannot read is never green.
+    static func flag(
+        _ entry: DaemonData.QueueEntry, ineligible: Bool = false, attestation: PrivateInferenceTone? = nil
+    ) -> GlassListRow.Flag? {
+        if isHeld(entry) || ineligible { return .ask }
+        switch attestation {
+        case .attention, .refused: return .ask
+        case .clear: return .on
+        default: return nil
+        }
     }
 
-    /// A session's sub-line: its tool's name first, since a folder holds
-    /// several tools' sessions. The amber is never the only signal: a held
-    /// session says the core's word for it, and one that cannot be
-    /// contributed says the core's sentence, before its measures.
-    static func sub(_ entry: DaemonData.QueueEntry, held: String?, ineligible: String?, tool: String? = nil) -> String? {
-        let parts = [tool, isHeld(entry) ? held : nil, ineligible, measures(entry)].compactMap { $0 }
+    /// A session's sub-line, as #1146's `SessionRow`: its size, then its
+    /// state. The amber is never the only signal: a held session says the
+    /// core's word for it, and one that cannot be contributed says the
+    /// core's sentence. Otherwise #1146's order: trimmed to fit when
+    /// subagent transcripts were dropped, then the core's attestation
+    /// sentence, then waiting when that sentence is unavailable. The tool
+    /// is the row's tile (and its accessibility hint).
+    static func sub(
+        _ entry: DaemonData.QueueEntry, held: String?, ineligible: String?, attestation: String? = nil,
+        words: MonitorTracesCopy?
+    ) -> String? {
+        let state: String?
+        if isHeld(entry), let held {
+            state = held
+        } else if let ineligible {
+            state = ineligible
+        } else if (entry.subagentsDropped ?? 0) > 0 {
+            state = words?.tree.sessionTrimmed
+        } else if let attestation, !attestation.isEmpty {
+            state = attestation
+        } else {
+            state = words?.tree.sessionWaiting
+        }
+        let parts = [size(entry), state].compactMap { $0 }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// The session's size, when the daemon reported it.
+    static func size(_ entry: DaemonData.QueueEntry) -> String? {
+        entry.sizeBytes.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .memory) }
+    }
+}
+
+/// A content-sized shelf over the Traces tree: as tall as what it holds up
+/// to `cap`, then scrolling inside itself. With nothing in it, it takes no
+/// room and adds no gap.
+struct PromptsShelf<Content: View>: View {
+    let cap: CGFloat
+    @ViewBuilder let content: () -> Content
+    @State private var height: CGFloat = 0
+
+    var body: some View {
+        ScrollView {
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .onGeometryChange(for: CGFloat.self, of: \.size.height) { height = $0 }
+        }
+        .scrollIndicators(.automatic)
+        .scrollBounceBehavior(.basedOnSize)
+        .frame(height: Self.shelfHeight(content: height, cap: cap))
+        .padding(.bottom, height > 0.5 ? GlassTokens.Space.cardGap : 0)
+    }
+
+    /// The shelf's height for content this tall under this ceiling.
+    static func shelfHeight(content: CGFloat, cap: CGFloat) -> CGFloat {
+        min(max(0, content), max(0, cap))
     }
 }
 
@@ -618,6 +788,49 @@ struct PreviewSlot: Equatable {
 enum QueueEntryBridge {
     static func legacyEntry(for entryId: String, in awaiting: [QueueEntry]) -> QueueEntry? {
         awaiting.first { $0.entryID == entryId }
+    }
+}
+
+/// A tree row's menu, as #1146's `RowMenuPill`: one glass pill, a ⊘ glyph
+/// and the core's label, floating under the row's kebab (38 down, 6 in from
+/// the right) over the rows below it, never pushing them down. Escape
+/// closes it, as the menus do.
+struct TracesRowMenuPill: View {
+    private let label: String
+    private let onDismiss: () -> Void
+    private let action: () -> Void
+    @State private var hovering = false
+
+    /// Where it sits under the row (#1146 `top-[38px] right-1.5`).
+    static let offset = CGSize(width: -6, height: 38)
+
+    init(_ label: String, onDismiss: @escaping () -> Void, action: @escaping () -> Void) {
+        self.label = label
+        self.onDismiss = onDismiss
+        self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: GlassTokens.Space.s3) {
+                Image(systemName: "nosign")
+                    .glassGlyph(11, weight: .semibold)
+                    .accessibilityHidden(true)
+                Text(label)
+                    .glassType(GlassTokens.TypeScale.label)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(GlassColor.textPrimary)
+            .padding(.horizontal, GlassTokens.Space.s6)
+            .frame(height: GlassTokens.Size.control)
+            .glassHover(GlassTokens.Color.controlHover, in: Capsule())
+            .glassSurface(.menu, radius: GlassTokens.Radius.pill, floating: true)
+            .fixedSize()
+        }
+        .buttonStyle(GlassPressStyle())
+        .onExitCommand(perform: onDismiss)
+        .accessibilityAddTraits(.isButton)
+        .offset(Self.offset)
     }
 }
 

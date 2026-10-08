@@ -6,6 +6,9 @@ import TCShellCore
 /// The Uses screen's decisions, apart from the view so they can be tested.
 /// Every string is the core's; these only choose and fill placeholders.
 enum UsesScreenLayout {
+    /// A check row's caption inset: the 15pt box and the gap after it.
+    static let checkCaptionIndent: CGFloat = 15 + GlassTokens.Space.s4
+
     /// The optional group's checkbox: every optional use on, some, or none.
     enum Group: Equatable {
         case all
@@ -164,7 +167,7 @@ enum UsesScreenLayout {
         // line, never the refused grant's "Setup finished".
         case .completeFailed: return uses.completeFailed
         // Leaving the roots' failures, which never stop Start.
-        case .startFailed, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
+        case .startFailed, .passkeyUnavailable, .settingsFailed, .inviteDead, .lookupUnavailable, .enrollFailed, .signInFailed,
             .nearAIEnrollFailed:
             return nil
         }
@@ -320,15 +323,20 @@ struct UsesScreen: View {
                                 .glassType(GlassTokens.TypeScale.mono)
                                 .foregroundStyle(GlassTokens.Color.statusOnText.color)
                         }
-                        caption(required.description)
+                        checkCaption(required.description)
                     }
                 }
                 if !optional.isEmpty {
                     HStack(spacing: GlassTokens.Space.s4) {
+                        // #1030: "All optional uses" is the box's name, not
+                        // a visible label; the expander says the rest.
                         Toggle(sources: optional.map { scope($0.name) }, isOn: \.self) {
                             Text(copy.uses.allOptional)
+                                .frame(width: 0, height: 0)
+                                .clipped()
                         }
                         .toggleStyle(GlassCheckboxStyle())
+                        .accessibilityLabel(copy.uses.allOptional)
                         GlassExpander(
                             UsesScreenLayout.optionalSummary(copy.uses, scopes: runner.state.scopes, optional: optional),
                             isOpen: $optionalOpen)
@@ -354,7 +362,7 @@ struct UsesScreen: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
             Toggle(option.title, isOn: scope(option.name))
                 .toggleStyle(GlassCheckboxStyle())
-            caption(option.description)
+            checkCaption(option.description)
         }
     }
 
@@ -381,7 +389,7 @@ struct UsesScreen: View {
                     Text(copy.uses.sharing)
                         .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
-                    caption(
+                    cardBody(
                         UsesScreenLayout.sharingLine(
                             copy.uses, path: UsesScreenLayout.effectiveSharing(runner.state), grant: grant,
                             isLoading: !grantRead))
@@ -406,16 +414,17 @@ struct UsesScreen: View {
     private var privateAICard: some View {
         GlassCard {
             HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                // #1030 `ftux-gap-2` between the paragraphs.
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     if let privateAI {
                         Text(privateAI.destination)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                             .foregroundStyle(GlassColor.textPrimary)
-                        caption(privateAI.offerWhat)
-                        caption(privateAI.offerExposure)
-                        caption(privateAI.offerNoRepoint)
+                        cardBody(privateAI.offerWhat)
+                        cardBody(privateAI.offerExposure)
+                        cardBody(privateAI.offerNoRepoint)
                     } else {
-                        caption(copy.privateAi.unavailable)
+                        cardBody(copy.privateAi.unavailable)
                     }
                 }
                 Spacer(minLength: 0)
@@ -463,6 +472,21 @@ struct UsesScreen: View {
         Text(text)
             .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassColor.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A check row's caption, under the label rather than the box (#1030
+    /// `tc-check-row`: the box beside a span holding both).
+    private func checkCaption(_ text: String) -> some View {
+        caption(text).padding(.leading, UsesScreenLayout.checkCaptionIndent)
+    }
+
+    /// The Sharing and Private AI cards' words (#1030 `tc-label` in
+    /// secondary ink), not the tertiary caption.
+    private func cardBody(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+            .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }

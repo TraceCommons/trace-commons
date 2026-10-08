@@ -170,8 +170,11 @@ pub const SETTINGS_TOGGLE: &str = "Answer model calls on this computer";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
-pub const SETTINGS_APPLIES_AT_ONCE: &str =
-    "Changes here apply straight away, and the line below says what happened.";
+/// The switch's caption, in Ron's #1146 words (`private-ai-connection-panel.tsx`).
+/// Approved 2026-10-07: it was "Changes here
+/// apply straight away, and the line below says what happened."
+pub const SETTINGS_APPLIES_AT_ONCE: &str = "Turning this on starts a local listener for configured \
+     tools. It does not publish traces. Credential enrollment remains separate.";
 
 /// `off`.
 pub const STATE_OFF: &str = "Off. This app is not answering model calls.";
@@ -742,6 +745,35 @@ pub struct PrivateInferenceCopy {
     /// [`BALANCE_NO_REMAINING`]. The sentence a `null` remaining figure gets
     /// INSTEAD of `$0.00`.
     pub balance_no_remaining: &'static str,
+    /// The Private AI page's panel chrome, after #1146: [`PANEL_REFRESH`],
+    /// the three eyebrows and the balance panel's re-read link.
+    pub panel_refresh: &'static str,
+    pub panel_tools_eyebrow: &'static str,
+    pub panel_connection_eyebrow: &'static str,
+    pub panel_balance_eyebrow: &'static str,
+    pub panel_balance_refresh: &'static str,
+    /// The page's two stat tiles and the runtime tile's words, chosen by
+    /// [`runtime_word`].
+    pub stat_inference_access: &'static str,
+    pub stat_runtime: &'static str,
+    pub runtime_on: &'static str,
+    pub runtime_off: &'static str,
+    pub runtime_stopping: &'static str,
+    pub runtime_elsewhere: &'static str,
+    pub runtime_not_running: &'static str,
+    pub runtime_unknown: &'static str,
+    /// The Inference inspector: its sub-line ([`INSPECTOR_TOOLS_CONNECTED`],
+    /// a template), its two legend cells and its three row labels.
+    pub inspector_tools_connected: &'static str,
+    pub inspector_connected: &'static str,
+    pub inspector_not_connected: &'static str,
+    pub inspector_status: &'static str,
+    pub inspector_credential: &'static str,
+    pub inspector_connected_tools: &'static str,
+    pub inspector_none: &'static str,
+    /// The caption beside a tool row's action.
+    pub harness_caption_connected: &'static str,
+    pub harness_caption_not_connected: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -1763,13 +1795,24 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// this surface where that is the honest noun: everything else here is about
 /// what this machine holds, and a balance is not. It is a fact about an
 /// account that other computers, and a browser, spend from too.
-pub const BALANCE_TITLE: &str = "What is left in your Private AI account";
+///
+/// Ron's #1146 heading (`private-ai-balance-panel.tsx`); it was "What is
+/// left in your Private AI account".
+pub const BALANCE_TITLE: &str = "NEAR AI usage";
 pub const FUNDING_TITLE: &str = "Cloud billing";
-pub const FUNDING_WHAT: &str = "Choose a payment method or staking option in Cloud. Your browser may ask you to sign in again.";
+/// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
+/// machinery word, rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it
+/// was "Choose a payment method or staking option in Cloud. Your browser
+/// may ask you to sign in again."
+pub const FUNDING_WHAT: &str = "The billing link opens only after your account and connection \
+     are verified. This app never chooses who pays.";
+/// Kept over #1146's "Manage credits" (owner ruling): the offer surface
+/// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";
-pub const FUNDING_REFRESH: &str = "Refresh account";
-pub const FUNDING_UNAVAILABLE: &str =
-    "The billing destination could not be verified. Refresh account to try again.";
+/// #1146's "Verify current account".
+pub const FUNDING_REFRESH: &str = "Verify current account";
+/// #1146's "Account destination not read."
+pub const FUNDING_UNAVAILABLE: &str = "Account destination not read.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
@@ -1790,7 +1833,7 @@ pub fn funding_message(
             "The connected Cloud organization is unavailable. Sign in to Private AI again.".into()
         }
         FundingReport::Changed => {
-            "The Private AI connection changed. Refresh account to check its destination.".into()
+            "Funding destination changed. Verify current account and try again.".into()
         }
         FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
     }
@@ -1803,6 +1846,10 @@ pub fn funding_message(
 /// total; this one exists because a total invites being read as a
 /// per-machine figure. Both failures are somebody planning around a number
 /// that means something else.
+///
+/// Not #1146's caption ("Account balance requires retained session
+/// authority. ..."): it drops the figure's scope, which
+/// `the_balance_row_carries_its_own_words` holds this sentence to.
 pub const BALANCE_WHAT: &str = "This is the whole account, not just this computer. Calls answered \
      anywhere you are signed in are already in these figures.";
 
@@ -2088,6 +2135,79 @@ pub fn balance_action(label: &str) -> CredentialAction {
     }
 }
 
+// The Private AI page's panel chrome and the Inference inspector's labels,
+// after #1146's `private-ai-page.tsx` and `inference-inspector.tsx`. Plain
+// labels: none of them describes what turning anything on exposes, so none
+// needs a consent review.
+
+/// The link at the right of a Private AI panel's header that re-reads it.
+pub const PANEL_REFRESH: &str = "Refresh";
+/// The eyebrow over the tools panel ([`HARNESSES_TITLE`] is its heading).
+pub const PANEL_TOOLS_EYEBROW: &str = "Local tools";
+/// The eyebrow over the connection panel ([`SETTINGS_TITLE`] is its heading).
+pub const PANEL_CONNECTION_EYEBROW: &str = "Connection";
+/// The eyebrow over the balance panel ([`BALANCE_TITLE`] is its heading).
+pub const PANEL_BALANCE_EYEBROW: &str = "Account balance";
+/// The balance panel's own re-read link.
+pub const PANEL_BALANCE_REFRESH: &str = "Refresh balance";
+/// The stat tile whose value is the credential's state line.
+pub const STAT_INFERENCE_ACCESS: &str = "Inference access";
+/// The stat tile whose value is one of the `RUNTIME_*` words.
+pub const STAT_RUNTIME: &str = "Runtime";
+/// The runtime tile for a listener that is running, whatever it can reach.
+/// The state line beside the switch says what that is worth.
+pub const RUNTIME_ON: &str = "On";
+/// `off`.
+pub const RUNTIME_OFF: &str = "Off";
+/// `stopping`.
+pub const RUNTIME_STOPPING: &str = "Stopping";
+/// `running_elsewhere`: the setup is held by another program, not this app.
+pub const RUNTIME_ELSEWHERE: &str = "In use by another app";
+/// `port_in_use`, `start_failed`, `crashed`: asked for, and not running.
+pub const RUNTIME_NOT_RUNNING: &str = "Not running";
+/// Unreported, or a label this build does not know. Never "Off".
+pub const RUNTIME_UNKNOWN: &str = "Unknown";
+/// The Inference inspector's sub-line under its title. `{connected}` and
+/// `{total}` are counts from the tools list.
+pub const INSPECTOR_TOOLS_CONNECTED: &str = "{connected} of {total} tools connected";
+/// The inspector's legend cell for connected tools.
+pub const INSPECTOR_CONNECTED: &str = "connected";
+/// The inspector's legend cell for listed tools that are not connected.
+pub const INSPECTOR_NOT_CONNECTED: &str = "not connected";
+/// The inspector row whose value is the listener's state line.
+pub const INSPECTOR_STATUS: &str = "Status";
+/// The inspector row whose value is the credential's state line.
+pub const INSPECTOR_CREDENTIAL: &str = "Credential";
+/// The inspector row whose value is the connected tools' names.
+pub const INSPECTOR_CONNECTED_TOOLS: &str = "Connected tools";
+/// That row when the list was read and no tool is connected.
+pub const INSPECTOR_NONE: &str = "None";
+/// The caption beside a tool row's action when its settings name this
+/// computer. A settings fact, never a claim that the tool is answering.
+pub const HARNESS_CAPTION_CONNECTED: &str = "Connected to local destination";
+/// The caption beside a tool row's action otherwise.
+pub const HARNESS_CAPTION_NOT_CONNECTED: &str = "Not connected";
+
+/// The runtime tile's word for one `private_inference_state` label.
+///
+/// Every running label is "On" -- the sentence beside the switch says what
+/// that reaches -- and an unreported or unfamiliar label is "Unknown", never
+/// "Off": a state nobody has words for must not read as a stopped one.
+#[must_use]
+pub fn runtime_word(label: &str) -> &'static str {
+    match label {
+        LABEL_OFF => RUNTIME_OFF,
+        LABEL_STOPPING => RUNTIME_STOPPING,
+        LABEL_RUNNING
+        | LABEL_RUNNING_NO_BACKENDS
+        | LABEL_RUNNING_ANSWERED_ELSEWHERE
+        | LABEL_RUNNING_DESTINATION_UNKNOWN => RUNTIME_ON,
+        LABEL_RUNNING_ELSEWHERE => RUNTIME_ELSEWHERE,
+        LABEL_PORT_IN_USE | LABEL_START_FAILED | LABEL_CRASHED => RUNTIME_NOT_RUNNING,
+        _ => RUNTIME_UNKNOWN,
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -2241,6 +2361,28 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         balance_unknown: BALANCE_UNKNOWN,
         balance_unreported: BALANCE_UNREPORTED,
         balance_no_remaining: BALANCE_NO_REMAINING,
+        panel_refresh: PANEL_REFRESH,
+        panel_tools_eyebrow: PANEL_TOOLS_EYEBROW,
+        panel_connection_eyebrow: PANEL_CONNECTION_EYEBROW,
+        panel_balance_eyebrow: PANEL_BALANCE_EYEBROW,
+        panel_balance_refresh: PANEL_BALANCE_REFRESH,
+        stat_inference_access: STAT_INFERENCE_ACCESS,
+        stat_runtime: STAT_RUNTIME,
+        runtime_on: RUNTIME_ON,
+        runtime_off: RUNTIME_OFF,
+        runtime_stopping: RUNTIME_STOPPING,
+        runtime_elsewhere: RUNTIME_ELSEWHERE,
+        runtime_not_running: RUNTIME_NOT_RUNNING,
+        runtime_unknown: RUNTIME_UNKNOWN,
+        inspector_tools_connected: INSPECTOR_TOOLS_CONNECTED,
+        inspector_connected: INSPECTOR_CONNECTED,
+        inspector_not_connected: INSPECTOR_NOT_CONNECTED,
+        inspector_status: INSPECTOR_STATUS,
+        inspector_credential: INSPECTOR_CREDENTIAL,
+        inspector_connected_tools: INSPECTOR_CONNECTED_TOOLS,
+        inspector_none: INSPECTOR_NONE,
+        harness_caption_connected: HARNESS_CAPTION_CONNECTED,
+        harness_caption_not_connected: HARNESS_CAPTION_NOT_CONNECTED,
     }
 }
 
@@ -4508,7 +4650,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            149,
+            171,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -5012,6 +5154,25 @@ mod tests {
 #[cfg(test)]
 mod state_table_tests {
     use super::*;
+
+    /// The runtime tile names every reported label, reads only a stopped
+    /// listener as "Off", and never reads a working tone as anything but
+    /// "On". An unreported or unfamiliar label is "Unknown", never "Off".
+    #[test]
+    fn the_runtime_word_never_reads_an_unknown_state_as_off() {
+        for label in STATE_LABELS {
+            let word = runtime_word(label);
+            assert_ne!(word, RUNTIME_UNKNOWN, "{label}");
+            assert_eq!(word == RUNTIME_OFF, label == LABEL_OFF, "{label}");
+            if state_tone(label).reads_as_working() {
+                assert_eq!(word, RUNTIME_ON, "{label}");
+            }
+        }
+        assert_eq!(runtime_word(""), RUNTIME_UNKNOWN);
+        assert_eq!(runtime_word("a_state_from_a_later_daemon"), RUNTIME_UNKNOWN);
+        assert_eq!(runtime_word(LABEL_PORT_IN_USE), RUNTIME_NOT_RUNNING);
+        assert_eq!(runtime_word(LABEL_RUNNING_ELSEWHERE), RUNTIME_ELSEWHERE);
+    }
 
     /// Every label a daemon can report is in the table, once, with its own
     /// sentence: none falls through to the unknown or unreported line.

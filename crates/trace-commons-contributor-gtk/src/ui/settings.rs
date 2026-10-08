@@ -268,7 +268,13 @@ impl SettingsView {
         state_card.append(&connection);
         let connection_checks = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         state_card.append(&connection_checks);
-        let pause_button = gtk::Button::with_label("Pause");
+        // #1146's "Pause watcher" / "Resume watcher", from the core's
+        // shell table (`preview_copy::MonitorShellCopy`).
+        let pause_button = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .pause_watcher,
+        );
         pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
@@ -667,7 +673,12 @@ impl SettingsView {
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&public);
 
-        content.append(&style::section("What has been changed on this machine"));
+        // #1146's "Changes on this machine", the core's word for every shell.
+        content.append(&style::section(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .changes_heading,
+        ));
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         content.append(&audit);
 
@@ -1034,9 +1045,12 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     app.settings
         .connection
         .set_text(&format!("{connection}\n{connected}"));
-    app.settings
-        .pause_button
-        .set_label(if status.paused { "Resume" } else { "Pause" });
+    let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
+    app.settings.pause_button.set_label(if status.paused {
+        shell.resume_watcher
+    } else {
+        shell.pause_watcher
+    });
 
     // §5.4 draws only the connected chip. The other half of the same fact
     // has to be visible too, and §7.3 will not let it be a colour on its

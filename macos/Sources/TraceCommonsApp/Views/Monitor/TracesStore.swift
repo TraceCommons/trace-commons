@@ -20,9 +20,9 @@ final class TracesStore {
     private(set) var phase: Phase = .loading
     private(set) var tree = TracesTree(tools: [], unplaced: [])
     /// Whether the tree draws folders set to ignore (the View menu's "Show
-    /// ignored folders"; hidden by default, as #1146). Changing it redraws
+    /// ignored folders"; shown by default, as #1146). Changing it redraws
     /// the tree from the last read, without asking the core again.
-    var showsIgnored = false {
+    var showsIgnored = true {
         didSet {
             guard showsIgnored != oldValue, let read = lastRead else { return }
             tree = TracesTree.build(
@@ -108,6 +108,12 @@ final class TracesStore {
     struct Contributed: Equatable {
         let entryId: String
         let toast: SubmitToast
+        /// The session's folder name, for #1146's "{label} approved"; nil
+        /// when the tree no longer lists the session.
+        var label: String? = nil
+        /// When the core took it, on this machine's clock: the card counts
+        /// up from here (the accepted count-up, never a countdown).
+        var at = Date()
     }
 
     /// The last contribution, until it is undone or another is made.
@@ -118,6 +124,8 @@ final class TracesStore {
     struct ContributedFolder: Equatable {
         let projectId: String
         let toast: SubmitToast
+        var label: String? = nil
+        var at = Date()
     }
 
     private(set) var lastContributedFolder: ContributedFolder?
@@ -268,13 +276,32 @@ final class TracesStore {
     /// the copy would not decode.
     func attestationValue(_ entry: DaemonData.QueueEntry) -> String? {
         guard let copy = inferenceCopy else { return nil }
-        let mark = AttestationMark(
-            mark: entry.attestation ?? "",
-            reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
+        let mark = Self.attestationMark(entry)
         return [
             AttestationSurface.markLine(mark, copy: copy, calls: Self.attestationCalls),
             AttestationSurface.reasonLine(mark, calls: Self.attestationCalls),
         ].compactMap { $0 }.joined(separator: " ")
+    }
+
+    /// A queue entry's attestation mark, as the shared table reads it.
+    static func attestationMark(_ entry: DaemonData.QueueEntry) -> AttestationMark {
+        AttestationMark(
+            mark: entry.attestation ?? "",
+            reason: (entry.attestationReason?.isEmpty ?? true) ? nil : entry.attestationReason)
+    }
+
+    /// The session row's attestation sentence (#1146's
+    /// `attestation_copy.state_line`): the core's sentence for the mark,
+    /// without its reason. Nil only when the copy would not decode.
+    func attestationLine(_ entry: DaemonData.QueueEntry) -> String? {
+        guard let copy = inferenceCopy else { return nil }
+        return AttestationSurface.markLine(Self.attestationMark(entry), copy: copy, calls: Self.attestationCalls)
+    }
+
+    /// The tone the core gives a session's attestation mark. A mark this
+    /// build cannot read is `.neutral`, never `.clear`.
+    static func attestationTone(_ entry: DaemonData.QueueEntry) -> PrivateInferenceTone {
+        AttestationSurface.tone(attestationMark(entry), calls: attestationCalls)
     }
 
     /// The tools the core reads from their usual folder while unset, from
@@ -440,7 +467,9 @@ final class TracesStore {
                 // `notApproved` and is said as a refusal, never as success.
                 let response = try await client.approve(entryId: entryId, verdict: verdict, correction: correction)
                 guard mine == attachment else { return }
-                lastContributed = Contributed(entryId: entryId, toast: response.toast)
+                lastContributed = Contributed(
+                    entryId: entryId, toast: response.toast,
+                    label: tree.allSessions.first { $0.entryId == entryId }?.projectLabel)
                 // One undo slot: a single-session contribute ends the folder's undo.
                 lastContributedFolder = nil
                 // A newer decision ends the older Keep's undo.
@@ -668,7 +697,7 @@ final class TracesStore {
         do {
             let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
             guard mine == attachment else { return }
-            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast)
+            lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast, label: folder.label)
             lastContributed = nil
             folderNotice = Self.eligibilityCalls
                 .withheldLine(Int64(clamping: response.excludedIneligible ?? 0))

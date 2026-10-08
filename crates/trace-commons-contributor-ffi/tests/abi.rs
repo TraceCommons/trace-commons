@@ -5848,6 +5848,26 @@ fn the_monitor_screens_copy_crosses_the_abi() {
     );
 }
 
+#[test]
+fn the_shell_words_copy_crosses_the_abi() {
+    use trace_commons_contributor::shell_words_copy::shell_words_copy;
+    use trace_commons_contributor_ffi::tc_shell_words_copy_json;
+    let value = json_owned(tc_shell_words_copy_json());
+    assert_eq!(value, serde_json::to_value(shell_words_copy()).unwrap());
+    assert_eq!(
+        value
+            .pointer("/withdrawal/confirm_title")
+            .and_then(|v| v.as_str()),
+        Some("Confirm withdrawal")
+    );
+    assert!(
+        value
+            .pointer("/withdrawal/commons_distributed")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s.contains("cannot be recalled"))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // K5 (#1173): the disclosure bundle and the Flow 1 decisions cross the ABI
 // as the core takes them.

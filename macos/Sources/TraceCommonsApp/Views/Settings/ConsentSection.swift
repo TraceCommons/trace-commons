@@ -55,7 +55,12 @@ struct ConsentSection: View {
         // `grants_data_use`, never a name. Kept apart from the real ones.
         let credit = model.consentScopes.filter { !$0.alwaysOn && !$0.grantsDataUse }
 
-        GlassEyebrowCard(SettingsLegacyWords.consentHeading) {
+        // #1146: CONSENT over the question as the h2, and Refresh.
+        GlassEyebrowCard(SettingsLegacyWords.consentEyebrow, title: SettingsLegacyWords.consentHeading) {
+            Button(SettingsLegacyWords.refresh, action: model.refreshStatus)
+                .buttonStyle(GlassButtonStyle(.link))
+                .fixedSize()
+        } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 caption(SettingsLegacyWords.appliesFromNow)
                 // Until the daemon answers, the rows below are disabled and
@@ -87,10 +92,15 @@ struct ConsentSection: View {
     @ViewBuilder
     private func group(_ title: String, _ scopes: [ConsentScope], granted: Set<String>) -> some View {
         if !scopes.isEmpty {
+            // #1146 spaces the groups apart and rules each option off.
             Text(title)
                 .glassType(GlassTokens.TypeScale.eyebrow)
                 .foregroundStyle(GlassColor.textSecondary)
-            ForEach(scopes) { scope in
+                .padding(.top, GlassTokens.Space.s4)
+            ForEach(Array(scopes.enumerated()), id: \.element.id) { index, scope in
+                if index > 0 {
+                    GlassHairline(GlassColor.hairline)
+                }
                 row(scope, granted: granted)
             }
         }

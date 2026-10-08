@@ -30,8 +30,10 @@ struct GlassSettingsContent: View {
             case .compute: EmptyView()
             }
         }
-        .padding(GlassTokens.Space.panePadding)
-        .frame(maxWidth: 560, alignment: .leading)
+        // The modal body's insets (#1146 `px-5`), under the section's rule;
+        // the cards fill the body, as #1146's `.tc-page` has no max width.
+        .padding(.horizontal, GlassTokens.Space.s9)
+        .padding(.vertical, GlassTokens.Space.s6)
         .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }

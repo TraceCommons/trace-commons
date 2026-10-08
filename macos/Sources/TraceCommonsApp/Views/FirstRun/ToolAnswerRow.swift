@@ -14,6 +14,13 @@ enum ToolAnswer: Hashable {
 /// Every write goes through `FirstRunState.answer(_:_:)`, which keeps one
 /// answer per kind.
 enum ToolAnswerRowLayout {
+    /// A path under the home folder as `~/...` (#1030's tool row); any
+    /// other path as it is.
+    static func homeRelative(_ path: String, home: String = NSHomeDirectory()) -> String {
+        guard !home.isEmpty, path == home || path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
+    }
+
     /// Whether the row asks at all. A tool not on this Mac is not asked
     /// (spec rule 1, the owner's reversal in Ron's review of #1235); a
     /// missing one the state already watches -- a restored state -- still
@@ -112,11 +119,13 @@ struct ToolAnswerRow: View {
                         Text(candidate.source.displayName)
                             .glassType(GlassTokens.TypeScale.bodyStrong)
                             .foregroundStyle(GlassColor.textPrimary)
-                        Text(ToolAnswerRowLayout.shownPath(in: state, for: candidate))
+                        // #1030 `ftux-ellipsis`: the path home-relative,
+                        // cut at its end; the meta never cut (`ftux-nowrap`).
+                        Text(ToolAnswerRowLayout.homeRelative(ToolAnswerRowLayout.shownPath(in: state, for: candidate)))
                             .glassType(GlassTokens.TypeScale.mono)
                             .foregroundStyle(GlassColor.textTertiary)
                             .lineLimit(1)
-                            .truncationMode(.middle)
+                            .truncationMode(.tail)
                             .help(ToolAnswerRowLayout.shownPath(in: state, for: candidate))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -124,6 +133,7 @@ struct ToolAnswerRow: View {
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textTertiary)
                         .lineLimit(1)
+                        .fixedSize()
                 }
                 HStack(spacing: GlassTokens.Space.s4) {
                     if ToolAnswerRowLayout.asks(candidate, in: state) {

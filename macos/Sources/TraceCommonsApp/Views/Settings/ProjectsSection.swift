@@ -29,6 +29,9 @@ enum ProjectModeChoices {
 struct ProjectsSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var armingCandidate: ProjectRow?
+    /// A Never with sessions waiting, asked first in the core's words
+    /// (#1146 `ProjectModeField`: "Ignore {project}?").
+    @State private var ignoreCandidate: ProjectRow?
 
     private static let modeCopy = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
 
@@ -82,12 +85,13 @@ struct ProjectsSection: View {
         )) {
             if let project = armingCandidate, let copy = armingCopy(project) {
                 // Not `.destructive`: arming destroys nothing and is
-                // reversible from this same picker.
+                // reversible from this same picker. Ron's #1146 heading,
+                // line and buttons; the body is the arming disclosure.
                 GlassConfirmation(
-                    title: copy.question, message: copy.body,
+                    title: copy.settingsQuestion, subtitle: copy.settingsDescription, message: copy.body,
                     actions: [
-                        .cancel(copy.decline) { armingCandidate = nil },
-                        GlassModalAction(copy.confirm, isDefault: true) {
+                        .cancel(copy.settingsDecline) { armingCandidate = nil },
+                        GlassModalAction(copy.settingsConfirm, isDefault: true) {
                             model.setProjectMode(project, mode: .autoUpload)
                             armingCandidate = nil
                         },
@@ -95,6 +99,46 @@ struct ProjectsSection: View {
                     onCancel: { armingCandidate = nil })
             }
         }
+        .glassModal(isPresented: Binding(
+            get: { ignoreCandidate.flatMap(Self.ignoreCopy) != nil },
+            set: { if !$0 { ignoreCandidate = nil } }
+        )) {
+            if let project = ignoreCandidate, let copy = Self.ignoreCopy(project) {
+                GlassConfirmation(
+                    title: copy.title, message: copy.body,
+                    actions: [
+                        .cancel(copy.keep) { ignoreCandidate = nil },
+                        .destructive(copy.button) {
+                            model.setProjectMode(project, mode: .ignore)
+                            ignoreCandidate = nil
+                        },
+                    ],
+                    onCancel: { ignoreCandidate = nil })
+            }
+        }
+    }
+
+    /// What choosing a mode in Settings does, as the Traces tree decides
+    /// it: arming always asks; Never asks when sessions are waiting, with
+    /// their count, and is not made without the core's words for it; every
+    /// other change is a direct call.
+    enum Change: Equatable {
+        case noop, apply, arm, ignore, unavailable
+    }
+
+    static func change(_ project: ProjectRow, to wanted: ProjectMode) -> Change {
+        guard wanted != project.mode else { return .noop }
+        if wanted == .autoUpload { return .arm }
+        if wanted == .ignore, (project.pendingCount ?? 0) > 0 {
+            return ignoreCopy(project) == nil ? .unavailable : .ignore
+        }
+        return .apply
+    }
+
+    /// The core's Ignore confirmation for this project and its waiting count.
+    static func ignoreCopy(_ project: ProjectRow) -> ProjectIgnoreCopy? {
+        ProjectIgnoreCopy.decode(fromJSON: TCCoreCopy.projectIgnoreCopyJSON(
+            project: project.displayLabel, pending: project.pendingCount ?? 0))
     }
 
     private func row(_ project: ProjectRow) -> some View {
@@ -111,13 +155,14 @@ struct ProjectsSection: View {
                         selection: Binding<ProjectMode?>(
                             get: { project.mode },
                             set: { wanted in
-                                guard let wanted, wanted != project.mode else { return }
+                                guard let wanted else { return }
                                 // Arming is a grant, so it is never silent;
-                                // everything else is a direct call.
-                                if wanted == .autoUpload {
-                                    armingCandidate = project
-                                } else {
-                                    model.setProjectMode(project, mode: wanted)
+                                // a Never that clears waiting sessions asks.
+                                switch Self.change(project, to: wanted) {
+                                case .noop, .unavailable: return
+                                case .arm: armingCandidate = project
+                                case .ignore: ignoreCandidate = project
+                                case .apply: model.setProjectMode(project, mode: wanted)
                                 }
                             }),
                         options: ProjectModeChoices.options(for: project.offerableModes, copy: copy),

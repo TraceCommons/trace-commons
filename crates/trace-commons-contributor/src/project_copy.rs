@@ -47,8 +47,25 @@ pub fn arming_offer_question(project_label: &str) -> String {
     format!("Contribute from {project_label} automatically?")
 }
 
-pub const ARMING_OFFER_CONFIRM: &str = "Turn on automatic contributing";
+/// "Enable" (owner ruling, 2026-10-07; was "Turn on automatic contributing").
+pub const ARMING_OFFER_CONFIRM: &str = "Enable";
 pub const ARMING_OFFER_DECLINE: &str = "Not now";
+
+/// Settings' confirmation before a project's mode is set to Automatic, in
+/// Ron's #1146 words (`project-mode-field.tsx`); its body is
+/// [`ARMING_BODY`], and the mode names stay [`FOLDER_MODE_LABELS`]'.
+/// Approved 2026-10-07, with the buttons "Ask" / "Enable" (owner ruling).
+/// The heading and both buttons were the offer's ("Contribute from {project} automatically?",
+/// "Not now", "Turn on automatic contributing").
+pub fn settings_arming_question(project_label: &str) -> String {
+    format!("Enable automatic contribution for {project_label}?")
+}
+/// Approved 2026-10-07.
+pub const SETTINGS_ARMING_DESCRIPTION: &str = "Confirm project-wide automatic contribution.";
+/// Approved 2026-10-07.
+pub const SETTINGS_ARMING_DECLINE: &str = "Ask";
+/// Approved 2026-10-07.
+pub const SETTINGS_ARMING_CONFIRM: &str = "Enable";
 /// The confirmation shown before a project is armed **from now**, which is
 /// what `set_project_mode` `auto_upload` does by default (K5): new sessions
 /// go without asking, and sessions already on this Mac keep waiting for the
@@ -184,6 +201,12 @@ pub struct ArmingOfferCopy {
     pub body: &'static str,
     pub body_with_backlog: &'static str,
     pub customize: CustomizeCopy,
+    /// Settings' confirmation before a mode is set to Automatic (#1146):
+    /// see [`settings_arming_question`].
+    pub settings_question: String,
+    pub settings_description: &'static str,
+    pub settings_decline: &'static str,
+    pub settings_confirm: &'static str,
 }
 
 /// The arming words for `project_label`, contributed from `count` times.
@@ -197,6 +220,10 @@ pub fn arming_offer_copy(project_label: &str, count: u32) -> ArmingOfferCopy {
         body: ARMING_BODY,
         body_with_backlog: ARMING_BODY_WITH_BACKLOG,
         customize: customize_copy(),
+        settings_question: settings_arming_question(project_label),
+        settings_description: SETTINGS_ARMING_DESCRIPTION,
+        settings_decline: SETTINGS_ARMING_DECLINE,
+        settings_confirm: SETTINGS_ARMING_CONFIRM,
     }
 }
 
@@ -511,6 +538,35 @@ pub fn contribution_override_refusal_line(label: &str) -> &'static str {
     match label {
         "arming-terms-unavailable" => CONTRIBUTION_OVERRIDE_REFUSED_NO_TERMS,
         _ => CONTRIBUTION_OVERRIDE_REFUSED,
+    }
+}
+
+#[cfg(test)]
+mod settings_arming_copy_tests {
+    use super::*;
+
+    /// Settings' confirmation before Automatic is #1146's, names the
+    /// project, keeps the arming disclosure as its body, and names no mode
+    /// in words of its own.
+    #[test]
+    fn the_settings_arming_confirmation_is_rons_over_the_arming_body() {
+        let copy = arming_offer_copy("api", 0);
+        assert_eq!(
+            copy.settings_question,
+            "Enable automatic contribution for api?"
+        );
+        assert_eq!(copy.body, ARMING_BODY);
+        for text in [
+            copy.settings_question.as_str(),
+            copy.settings_description,
+            copy.settings_decline,
+            copy.settings_confirm,
+        ] {
+            assert!(!text.is_empty());
+            for banned in ["Ask me first", "Contribute automatically", "Never offer"] {
+                assert!(!text.contains(banned), "{text:?} renames a mode");
+            }
+        }
     }
 }
 

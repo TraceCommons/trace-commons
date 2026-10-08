@@ -18,7 +18,7 @@ final class FormControlTests: XCTestCase {
 
     /// The prompt is tertiary text, which clears 4.5:1 on the pane.
     func test_thePromptClearsTextContrast() {
-        XCTAssertEqual(GlassTextField.promptInk, GlassTokens.Color.textTertiary)
+        XCTAssertEqual(GlassTextField.promptInk, GlassTokens.Color.placeholder)
     }
 
     /// A secure field and a plain one lay out alike.

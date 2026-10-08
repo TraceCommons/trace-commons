@@ -155,6 +155,54 @@ final class FirstRunRunnerTests: XCTestCase {
         return state
     }
 
+    /// Create passkey on Join starts the daemon watching nothing and asks for
+    /// the sheets there: the step stays on Join, and what the daemon holds is
+    /// recorded so Folders sends only what differs.
+    func test_createPasskeyOnJoinStartsTheDaemonAndOpensTheSheetsOnJoin() async throws {
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        await runner.openPasskeyOnJoin()
+        let json = try XCTUnwrap(FirstRunPlan.watchNothingSettingsJSON)
+        XCTAssertEqual(daemon.log, [.startDaemon(settingsJSON: json)])
+        XCTAssertEqual(runner.state.step, .join)
+        XCTAssertTrue(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.startedSettingsJSON, json)
+        XCTAssertTrue(runner.passkeyDue)
+        XCTAssertEqual(runner.passkeyStart, .choose)
+        XCTAssertNil(runner.failure)
+        XCTAssertEqual(runner.state.account, .none, "nothing is chosen for later")
+    }
+
+    /// A start that fails opens nothing and says so on Join in the passkey's
+    /// words, never the watcher's: no folder has been answered. Pressed
+    /// again, it retries and takes its own failure back.
+    func test_aFailedPasskeyStartOnJoinOpensNothing() async {
+        let daemon = RecordingFirstRunDaemon()
+        daemon.failing = { if case .startDaemon = $0 { return true }; return false }
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        await runner.openPasskeyOnJoin()
+        XCTAssertEqual(runner.failure, .passkeyUnavailable)
+        XCTAssertFalse(runner.passkeyDue)
+        XCTAssertFalse(runner.state.daemonStarted)
+        XCTAssertEqual(runner.state.step, .join)
+
+        daemon.failing = { _ in false }
+        await runner.openPasskeyOnJoin()
+        XCTAssertNil(runner.failure)
+        XCTAssertTrue(runner.passkeyDue)
+    }
+
+    /// Create passkey takes back only its own failure: a refused invite's
+    /// line stays on Join.
+    func test_createPasskeyOnJoinKeepsARefusedInvitesLine() async {
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(), daemon: daemon)
+        runner.failure = .inviteDead(label: "invite-invalid")
+        await runner.openPasskeyOnJoin()
+        XCTAssertEqual(runner.failure, .inviteDead(label: "invite-invalid"))
+        XCTAssertTrue(runner.passkeyDue)
+    }
+
     func test_aFailedStartKeepsTheInviteAndJoinsNothing() async {
         let daemon = RecordingFirstRunDaemon()
         daemon.failing = { if case .startDaemon = $0 { return true }; return false }

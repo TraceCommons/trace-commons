@@ -5,10 +5,11 @@ import TCShellCore
 
 // The pieces the inspector's prompts draw (`InspectorPrompts`): the two
 // consent offers, the first-contribution note, why sessions stopped
-// waiting, and a refused action in the core's words. They were the offers
-// bar above the Traces tree; Ron's #1146 puts them at the top of the
-// inspector, which opens itself when one appears (`InspectorDemand`).
-// Every sentence is the core's or `QueueLegacyWords`'.
+// waiting, and a refused action in the core's words. Ron's #1146 puts them
+// at the top of the inspector; on macOS they stay above the Traces tree
+// (owner, 2026-10-07, an accepted difference), and the inspector still
+// opens beside them when one appears (`InspectorDemand`). Every sentence is
+// the core's or `QueueLegacyWords`'.
 
 /// The core's words for a refused action on `entryId`, if there is one.
 /// The prompts and the session card both say a refusal through this.
@@ -18,7 +19,7 @@ struct TracesRefusal: View {
 
     var body: some View {
         if let refused = store.actionError, refused.entryId == entryId, let line = store.message(for: refused.error) {
-            GlassNotice(tone: .outside, title: line) { EmptyView() }
+            GlassAlert(line)
         }
     }
 }
@@ -107,31 +108,47 @@ struct NotOfferedGlassDisclosure: View {
 
 /// The offer to answer model calls on this computer, in the core's words
 /// only. Declining comes first and neither answer is the primary action:
-/// this question opens a listener anything on the machine can use.
+/// this question opens a listener anything on the machine can use. (#1146
+/// puts Turn it on first as its primary; that order is a consent change
+/// left to the owner, so the card keeps it.)
+///
+/// #1146's `PrivateInferenceOffer` head and body: the destination as a
+/// mono accent eyebrow, the title as an h2, then the four paragraphs drawn
+/// alike, 8 apart.
 struct PrivateAIOfferGlassCard: View {
     let copy: PrivateInferenceCopy
     let onAccept: () -> Void
     let onDecline: () -> Void
 
+    /// #1146's destination eyebrow: mono 10, extra bold, uppercase, tracked
+    /// .16em.
+    static let destinationType = GlassTypeStyle(
+        textStyle: .caption2, size: 10, weight: .heavy, lineHeight: 10, tracking: 1.6,
+        design: .monospaced, uppercase: true, tabular: false)
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(copy.destination)
+                    .glassType(Self.destinationType)
+                    .foregroundStyle(GlassColor.accentText)
+                    .padding(.bottom, GlassTokens.Space.s3)
                 Text(copy.offerTitle)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
-                // What it does, what it exposes, then what it does not do.
-                Group {
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityAddTraits(.isHeader)
+                // What it does, what it exposes, what it does not do, and
+                // that it is asked once: four paragraphs drawn alike.
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     Text(copy.offerWhat)
                     Text(copy.offerExposure)
                     Text(copy.offerNoRepoint)
+                    Text(copy.offerAskedOnce)
                 }
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
-                Text(copy.offerAskedOnce)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.offerDecline, action: onDecline)
                         .buttonStyle(GlassButtonStyle(.glass))

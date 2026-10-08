@@ -416,6 +416,20 @@ final class JoinScreenTests: XCTestCase {
 
     /// One held account leaves the other card with neither its inviting line
     /// nor its action, which could never be taken over that account.
+    /// #1030's `ftux-row--between`: the account card's text takes the row
+    /// and its action keeps its own width. A text column with layout
+    /// priority over an action that is not fixed squeezed Create passkey
+    /// and Sign in to empty capsules and stretched the cards.
+    func test_anAccountCardsActionKeepsItsWidth() throws {
+        let source = try Self.source()
+        let card = try XCTUnwrap(source.range(of: "private func accountCard<Action: View>("))
+        let body = String(source[card.lowerBound...].prefix(1800))
+        XCTAssertFalse(body.contains(".layoutPriority("), "the text column outranks the action again")
+        XCTAssertTrue(body.contains("action()\n                        .fixedSize()"), "the action can be squeezed")
+        XCTAssertTrue(body.contains("GlassStatusLabel(done, status: .on)\n                        .fixedSize()"),
+                      "the done label can be squeezed")
+    }
+
     func test_aHeldAccountQuietsTheOtherCard() throws {
         let copy = try coreCopy()
         let start = FirstRunState(daemonStarted: true)
@@ -500,6 +514,42 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(source.contains("JoinScreenLayout.passkeyOpensNow("))
         XCTAssertTrue(source.contains("runner.requestPasskey()"))
         XCTAssertFalse(source.contains("firstRunPasskeySheets("), "the first-run host mounts the sheets")
+    }
+
+    /// The sheets open over Join, as in #1030: before the daemon runs,
+    /// Create passkey starts it (watching nothing) and opens them, rather
+    /// than recording a choice the Folders or Tools commit acts on. A start
+    /// that failed reads the core's own line under the card.
+    func test_createPasskeyBeforeTheDaemonRunsStartsItOnJoin() throws {
+        let copy = try coreCopy()
+        let fresh = FirstRunState()
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(fresh, hasPasskeyAccount: false))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(fresh, hasPasskeyAccount: false))
+
+        let running = FirstRunState(daemonStarted: true)
+        XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: true), "it opens at once")
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: false),
+            "the account follows the start; the request waits for it")
+
+        // Nothing to start where Join offers no passkey, nor for a choice
+        // an earlier build recorded, whose button undoes it.
+        var withInvite = FirstRunState()
+        withInvite.invite = "INVITE-1"
+        let signedIn = FirstRunState(account: .nearAI, signedIn: true)
+        for state in [
+            withInvite, signedIn, FirstRunState(account: .enrolled), FirstRunState(account: .passkey(name: "Mac")),
+            FirstRunState(account: .passkeyChosen),
+        ] {
+            XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(state, hasPasskeyAccount: false), "\(state.account)")
+        }
+
+        XCTAssertEqual(JoinScreenLayout.passkeyFailureLine(.passkeyUnavailable, copy: copy.join), copy.join.passkeyUnavailable)
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(.startFailed, copy: copy.join))
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(nil, copy: copy.join))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("runner.openPasskeyOnJoin()"))
+        XCTAssertTrue(source.contains("JoinScreenLayout.passkeyFailureLine(runner.failure"))
     }
 
     /// The sheets' outcome lowers the request whatever it was, so a closed
@@ -614,7 +664,7 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(JoinScreenLayout.footerTitle(FirstRunState(), copy: copy), copy.join.skip)
 
         let source = try Self.source()
-        XCTAssertTrue(source.contains("isEnabled: JoinScreenLayout.canForward(runner.state)"))
+        XCTAssertTrue(source.contains("isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state)"))
     }
 
     /// The passkey sheets' outcomes as Join records them. A passkey known

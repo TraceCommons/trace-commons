@@ -13,19 +13,21 @@ struct ConnectionSection: View {
     }
 
     private var connection: some View {
-        GlassEyebrowCard(SettingsWords.connection) {
+        GlassEyebrowCard(SettingsWords.connection, title: connectionTitle) {
+            if model.statusRead == .answered {
+                GlassChip(glass: model.status.loggedIn ? SettingsLegacyWords.connectionReady
+                                                       : SettingsLegacyWords.connectionLocalOnly,
+                          muted: !model.status.loggedIn)
+            }
+        } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                // Before the first answer the status is a placeholder, and
-                // "Not connected" would be an answer nothing gave.
                 if model.statusRead != .answered {
                     SettingsReadNotice(model.statusRead, retry: model.refreshStatus)
-                } else if model.status.loggedIn {
-                    GlassStatusLabel(SettingsLegacyWords.connected, status: .on)
-                } else {
-                    GlassStatusLabel(SettingsLegacyWords.notConnected, status: .ask)
+                } else if !model.status.loggedIn {
                     Text(SettingsLegacyWords.queuedNothingSent)
                         .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if model.daemonSettings == nil {
                     // One indicator for the card while neither has answered.
@@ -37,11 +39,21 @@ struct ConnectionSection: View {
                     sourceLine(TCSourceChecks.codex, settings.routingSourceModes.codex)
                     sourceLine(TCSourceChecks.gemini, settings.routingSourceModes.gemini)
                     sourceLine(TCSourceChecks.cline, settings.routingSourceModes.cline)
+                    // #1146 lists OpenCode too; its sentence is the core's.
+                    sourceLine(TCSourceChecks.opencode, settings.opencodeSourceMode ?? "unset")
                     SettingsStateRow(title: SettingsLegacyWords.extraScanConfigured,
                                      isOn: settings.nearAIConfigured)
                 }
             }
         }
+    }
+
+    /// #1146's head: CONNECTION over Connected or Not connected, with the
+    /// Ready or Local only chip. Before the core's first answer there is no
+    /// title and no chip: "Not connected" would be an answer nothing gave.
+    private var connectionTitle: String? {
+        guard model.statusRead == .answered else { return nil }
+        return model.status.loggedIn ? SettingsLegacyWords.connected : SettingsLegacyWords.notConnected
     }
 
     /// The core's sentence for one source's MODE (it words watch and off

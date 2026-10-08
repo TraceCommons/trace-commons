@@ -243,17 +243,37 @@ final class SessionPublicationTests: XCTestCase {
 
     /// K3 (#1173): a status this build does not know is confirmed with the
     /// core's prompt, the one the other shells show, weighted as the gravest,
-    /// and with no heading or credit line of this shell's own beside it.
+    /// under #1146's dialog title, with no credit line of its own beside it.
     func testAnUnknownStatusIsConfirmedWithTheCorePrompt() throws {
         let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: .init(status: "future_state")))
         let prompt = try XCTUnwrap(TCCoreCopy.withdrawalConfirmationPrompt())
         XCTAssertEqual(confirmation.bodies, [prompt])
         XCTAssertEqual(confirmation.gravest, 0)
-        XCTAssertNil(confirmation.question)
+        XCTAssertEqual(confirmation.question, "Confirm withdrawal")
         XCTAssertNil(confirmation.ambiguity)
         XCTAssertNil(confirmation.credit)
         XCTAssertTrue(prompt.contains("cannot be recalled"), prompt)
         XCTAssertTrue(prompt.contains(WithdrawalCopy.creditNote), prompt)
+        XCTAssertEqual(WithdrawalCopyCheck.failures(), [])
+    }
+
+    /// #1146 parity (2026-10-07): the withdrawal words are the core's, under
+    /// Ron's labels, and the tiers keep their meaning.
+    func testWithdrawalWordsAreTheCoresUnderRonsLabels() throws {
+        for stage in [WithdrawalCopy.Stage.notInTheCommons, .inTheCommons, .unknown] {
+            let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: stage))
+            XCTAssertEqual(confirmation.question, "Confirm withdrawal")
+            XCTAssertEqual(confirmation.description, "Review what withdrawal changes before continuing.")
+            XCTAssertEqual(confirmation.confirmLabel, "Withdraw")
+            XCTAssertEqual(confirmation.busyLabel, "Withdrawing\u{2026}")
+        }
+        XCTAssertEqual(WithdrawalCopy.resultHeading, "Withdrawn by you")
+        XCTAssertEqual(WithdrawalCopy.tryAgain, "Try again")
+        XCTAssertTrue(WithdrawalCopy.resultSentence(.commonsDistributed).contains("cannot be recalled"))
+        XCTAssertTrue(WithdrawalCopy.resultSentence(nil).contains("cannot be recalled"))
+        XCTAssertEqual(WithdrawalCopy.failureSentence(label: "not-found"), WithdrawalCopy.notFound)
+        // The daemon's label is for logs, never echoed.
+        XCTAssertFalse(WithdrawalCopy.failureSentence(label: "withdraw-failed").contains("withdraw-failed"))
         XCTAssertEqual(WithdrawalCopyCheck.failures(), [])
     }
 

@@ -50,7 +50,7 @@ struct FirstRunWindowView: View {
                 // to its step would let run past the window's bottom edge (a
                 // Uses step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
-                .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                .padding(.vertical, GlassTokens.Space.paneGap * 3)
             } else if model.requiresOnboarding {
                 // The legacy startup notice left with the legacy window
                 // (R15); this says the startup as the Inference tab does: a

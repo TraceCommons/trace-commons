@@ -247,6 +247,31 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     /// The sentence a `null` remaining figure gets INSTEAD of `$0.00`. An
     /// unreported figure is not a spent-out account.
     public let balanceNoRemaining: String
+    /// The Private AI page's panel chrome, stat tiles and runtime words, and
+    /// the Inference inspector's labels (#1146). `inspectorToolsConnected`
+    /// is a template over `{connected}` and `{total}`.
+    public let panelRefresh: String
+    public let panelToolsEyebrow: String
+    public let panelConnectionEyebrow: String
+    public let panelBalanceEyebrow: String
+    public let panelBalanceRefresh: String
+    public let statInferenceAccess: String
+    public let statRuntime: String
+    public let runtimeOn: String
+    public let runtimeOff: String
+    public let runtimeStopping: String
+    public let runtimeElsewhere: String
+    public let runtimeNotRunning: String
+    public let runtimeUnknown: String
+    public let inspectorToolsConnected: String
+    public let inspectorConnected: String
+    public let inspectorNotConnected: String
+    public let inspectorStatus: String
+    public let inspectorCredential: String
+    public let inspectorConnectedTools: String
+    public let inspectorNone: String
+    public let harnessCaptionConnected: String
+    public let harnessCaptionNotConnected: String
 
     /// `CaseIterable` so a test on the far side can compare the exported
     /// field set against the declared one in BOTH directions -- a field the
@@ -402,6 +427,28 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case balanceUnknown = "balance_unknown"
         case balanceUnreported = "balance_unreported"
         case balanceNoRemaining = "balance_no_remaining"
+        case panelRefresh = "panel_refresh"
+        case panelToolsEyebrow = "panel_tools_eyebrow"
+        case panelConnectionEyebrow = "panel_connection_eyebrow"
+        case panelBalanceEyebrow = "panel_balance_eyebrow"
+        case panelBalanceRefresh = "panel_balance_refresh"
+        case statInferenceAccess = "stat_inference_access"
+        case statRuntime = "stat_runtime"
+        case runtimeOn = "runtime_on"
+        case runtimeOff = "runtime_off"
+        case runtimeStopping = "runtime_stopping"
+        case runtimeElsewhere = "runtime_elsewhere"
+        case runtimeNotRunning = "runtime_not_running"
+        case runtimeUnknown = "runtime_unknown"
+        case inspectorToolsConnected = "inspector_tools_connected"
+        case inspectorConnected = "inspector_connected"
+        case inspectorNotConnected = "inspector_not_connected"
+        case inspectorStatus = "inspector_status"
+        case inspectorCredential = "inspector_credential"
+        case inspectorConnectedTools = "inspector_connected_tools"
+        case inspectorNone = "inspector_none"
+        case harnessCaptionConnected = "harness_caption_connected"
+        case harnessCaptionNotConnected = "harness_caption_not_connected"
     }
 
     /// All or nothing, for the reason on the type.

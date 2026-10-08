@@ -43,6 +43,8 @@
 //!   sessions on this Mac, and the card says they wait there; and
 //!   `not_listed`, how many older sessions a folder has beyond the newest
 //!   500 the picker lists.
+//! - Join adds `passkey_unavailable` for a Create passkey whose daemon start
+//!   failed, so the sheets could not open over Join.
 //! - Join adds `invite_or_passkey`: a new passkey creates an account of its
 //!   own, so it is not combined with an invite. near.ai needs no invite
 //!   (owner, Ron's review of #1235), so there is no line asking for one.
@@ -140,6 +142,10 @@ pub struct JoinCopy {
     /// Create passkey chosen but not yet created: the passkey sheets open
     /// once the daemon starts, after Folders or Tools. Approved 2026-10-06.
     pub passkey_chosen: &'static str,
+    /// Create passkey on Join starts the daemon so the sheets open there,
+    /// over Join (#1030), and it did not start: no account was made and
+    /// nothing is watched. Approved 2026-10-07 (owner rewrite).
+    pub passkey_unavailable: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
     pub near_ai_sign_in: &'static str,
@@ -421,6 +427,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             passkey_create: "Create passkey",
             passkey_done: "Done",
             passkey_chosen: "You'll create your passkey once watching starts.",
+            passkey_unavailable: "Couldn't start passkey setup, so no account was made. Try again, or skip and just watch.",
             near_ai_eyebrow: "Sign in with near.ai",
             near_ai_text: "Use the login you already have. Credits land in that account.",
             near_ai_sign_in: "Sign in",
@@ -823,6 +830,19 @@ mod tests {
             crate::onboarding_copy::WATCHER_START_FAILED
         );
         assert!(copy.folders.settings_failed.contains("Continue"));
+    }
+
+    /// Create passkey that could not start the daemon says so on Join, and
+    /// never reads as the watcher's line: no folder answer exists yet.
+    #[test]
+    fn a_passkey_that_could_not_start_has_its_own_line() {
+        let join = first_run_copy().join;
+        assert_ne!(
+            join.passkey_unavailable,
+            crate::onboarding_copy::WATCHER_START_FAILED
+        );
+        assert!(!join.passkey_unavailable.contains("folder"));
+        assert!(join.passkey_unavailable.contains("skip and just watch"));
     }
 
     /// A new passkey creates an account of its own, so Join says why it is

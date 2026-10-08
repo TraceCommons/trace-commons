@@ -163,6 +163,9 @@ public struct MonitorTreeCopy: MonitorWordTable {
     public let dismissSessionKeep: String
     public let dismissing: String
     public let dismissSessionFailed: String
+    /// A session row's sub line after its size: dropped to fit, or waiting.
+    public let sessionTrimmed: String
+    public let sessionWaiting: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case treeLabel = "tree_label"
@@ -184,6 +187,8 @@ public struct MonitorTreeCopy: MonitorWordTable {
         case dismissSessionKeep = "dismiss_session_keep"
         case dismissing
         case dismissSessionFailed = "dismiss_session_failed"
+        case sessionTrimmed = "session_trimmed"
+        case sessionWaiting = "session_waiting"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
@@ -224,6 +229,11 @@ public struct MonitorInspectorCopy: MonitorWordTable {
     public let applyOutcomeOne: String
     public let applyOutcome: String
     public let cancel: String
+    /// The folder inspector's Decisions card: what is waiting there, and
+    /// Submit all with its eligible count.
+    public let waitingSessionsOne: String
+    public let waitingSessions: String
+    public let submitAllEligible: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case decisions
@@ -238,6 +248,9 @@ public struct MonitorInspectorCopy: MonitorWordTable {
         case applyOutcomeOne = "apply_outcome_one"
         case applyOutcome = "apply_outcome"
         case cancel
+        case waitingSessionsOne = "waiting_sessions_one"
+        case waitingSessions = "waiting_sessions"
+        case submitAllEligible = "submit_all_eligible"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
@@ -436,6 +449,11 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
     public let heldByLimitOne: String
     public let heldByLimit: String
     public let capacityUnreadable: String
+    public let routingNotDeclared: String
+    public let routingAwaitingRows: String
+    public let routingRowsSeen: String
+    public let routingTokenUnreadable: String
+    public let routingUnknown: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case eyebrow
@@ -449,6 +467,23 @@ public struct MonitorSafeguardsCopy: MonitorWordTable {
         case heldByLimitOne = "held_by_limit_one"
         case heldByLimit = "held_by_limit"
         case capacityUnreadable = "capacity_unreadable"
+        case routingNotDeclared = "routing_not_declared"
+        case routingAwaitingRows = "routing_awaiting_rows"
+        case routingRowsSeen = "routing_rows_seen"
+        case routingTokenUnreadable = "routing_token_unreadable"
+        case routingUnknown = "routing_unknown"
+    }
+
+    /// The routing cell's short label for `routing.state` (#1146
+    /// `routingLabel`): a state this build does not know is Unknown.
+    public func routingLabel(_ state: String?) -> String {
+        switch state {
+        case "not_declared": routingNotDeclared
+        case "awaiting_rows": routingAwaitingRows
+        case "rows_seen": routingRowsSeen
+        case "token_unreadable": routingTokenUnreadable
+        default: routingUnknown
+        }
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
@@ -501,6 +536,7 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let focusNeedsSelection: String
     public let focusWholeMap: String
     public let focusTool: String
+    public let backToHome: String
     public let watchingToolsOne: String
     public let watchingTools: String
     public let waitingForYouOne: String
@@ -530,6 +566,20 @@ public struct MonitorShellCopy: MonitorWordTable {
     public let tabTraces: String
     public let tabsLabel: String
     public let mapViewsLabel: String
+    public let settingsRefresh: String
+    public let consentEyebrow: String
+    public let desktopEyebrow: String
+    public let desktopTitle: String
+    public let discoveryEyebrow: String
+    public let discoveryTitle: String
+    public let watcherEyebrow: String
+    public let watcherTitle: String
+    public let watcherWatching: String
+    public let watcherPaused: String
+    /// Approved 2026-10-07.
+    public let watcherCaption: String
+    public let connectionReady: String
+    public let connectionLocalOnly: String
 
     enum CodingKeys: String, CodingKey, CaseIterable {
         case showGraph = "show_graph"
@@ -541,6 +591,7 @@ public struct MonitorShellCopy: MonitorWordTable {
         case focusNeedsSelection = "focus_needs_selection"
         case focusWholeMap = "focus_whole_map"
         case focusTool = "focus_tool"
+        case backToHome = "back_to_home"
         case watchingToolsOne = "watching_tools_one"
         case watchingTools = "watching_tools"
         case waitingForYouOne = "waiting_for_you_one"
@@ -570,6 +621,19 @@ public struct MonitorShellCopy: MonitorWordTable {
         case tabTraces = "tab_traces"
         case tabsLabel = "tabs_label"
         case mapViewsLabel = "map_views_label"
+        case settingsRefresh = "settings_refresh"
+        case consentEyebrow = "consent_eyebrow"
+        case desktopEyebrow = "desktop_eyebrow"
+        case desktopTitle = "desktop_title"
+        case discoveryEyebrow = "discovery_eyebrow"
+        case discoveryTitle = "discovery_title"
+        case watcherEyebrow = "watcher_eyebrow"
+        case watcherTitle = "watcher_title"
+        case watcherWatching = "watcher_watching"
+        case watcherPaused = "watcher_paused"
+        case watcherCaption = "watcher_caption"
+        case connectionReady = "connection_ready"
+        case connectionLocalOnly = "connection_local_only"
     }
 
     public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
@@ -594,5 +658,101 @@ public struct MonitorShellCopy: MonitorWordTable {
     public func focusTip(tool: String?, focused: Bool) -> String {
         guard let tool else { return focusNeedsSelection }
         return focused ? focusWholeMap : focusTool.replacingOccurrences(of: "{tool}", with: tool)
+    }
+}
+
+/// Ron's #1146 Home and History structure words
+/// (`preview_copy::MonitorHomeHistoryCopy`): Home's Missions card,
+/// History's headings, project groups, rows, community panel and credit
+/// record. A singular is its own line; numbers are `{name}` holes.
+public struct MonitorHomeHistoryCopy: MonitorWordTable {
+    public let draftsTag: String
+    public let noMissionDrafts: String
+    public let sourcesOne: String
+    public let sources: String
+    public let missionCatalogue: String
+    public let historyDescription: String
+    public let submissions: String
+    public let contributionHistory: String
+    public let readingHistory: String
+    public let filterLabel: String
+    public let project: String
+    public let recordsOne: String
+    public let records: String
+    public let statusLine: String
+    public let rowCredit: String
+    public let heldCountOne: String
+    public let heldCount: String
+    public let publicStanding: String
+    public let noveltyCredit: String
+    public let acceptedInWindow: String
+    public let acceptRate: String
+    public let analyticsWithheld: String
+    public let creditRecord: String
+    public let aboutCredit: String
+    public let aboutCreditBody: String
+    public let stillBeingScored: String
+    public let notSynced: String
+
+    enum CodingKeys: String, CodingKey, CaseIterable {
+        case draftsTag = "drafts_tag"
+        case noMissionDrafts = "no_mission_drafts"
+        case sourcesOne = "sources_one"
+        case sources
+        case missionCatalogue = "mission_catalogue"
+        case historyDescription = "history_description"
+        case submissions
+        case contributionHistory = "contribution_history"
+        case readingHistory = "reading_history"
+        case filterLabel = "filter_label"
+        case project
+        case recordsOne = "records_one"
+        case records
+        case statusLine = "status_line"
+        case rowCredit = "row_credit"
+        case heldCountOne = "held_count_one"
+        case heldCount = "held_count"
+        case publicStanding = "public_standing"
+        case noveltyCredit = "novelty_credit"
+        case acceptedInWindow = "accepted_in_window"
+        case acceptRate = "accept_rate"
+        case analyticsWithheld = "analytics_withheld"
+        case creditRecord = "credit_record"
+        case aboutCredit = "about_credit"
+        case aboutCreditBody = "about_credit_body"
+        case stillBeingScored = "still_being_scored"
+        case notSynced = "not_synced"
+    }
+
+    public static var consumedFields: [String] { CodingKeys.allCases.map(\.rawValue) }
+
+    /// A draft's declared sources: the singular is its own line.
+    public func sources(_ count: Int) -> String {
+        count == 1 ? sourcesOne : sources.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// A project group's record count.
+    public func records(_ count: Int) -> String {
+        count == 1 ? recordsOne : records.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// The privacy review card's heading.
+    public func held(_ count: Int) -> String {
+        count == 1 ? heldCountOne : heldCount.replacingOccurrences(of: "{count}", with: String(count))
+    }
+
+    /// A row's status line, around History's status word.
+    public func status(_ label: String) -> String {
+        statusLine.replacingOccurrences(of: "{label}", with: label)
+    }
+
+    /// A row's settled credit, around its figure.
+    public func credit(_ amount: String) -> String {
+        rowCredit.replacingOccurrences(of: "{amount}", with: amount)
+    }
+
+    /// The community panel's accepted cell, around the commons' window.
+    public func accepted(window: String) -> String {
+        acceptedInWindow.replacingOccurrences(of: "{label}", with: window)
     }
 }

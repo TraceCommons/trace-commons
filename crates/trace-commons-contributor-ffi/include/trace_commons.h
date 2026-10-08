@@ -2466,6 +2466,13 @@ char*       tc_monitor_traces_copy_json(void);
  */
 char*       tc_monitor_screens_copy_json(void);
 
+/* The words the macOS shell used to write itself
+ * (shell_words_copy::shell_words_copy): withdrawal, the public profile, the
+ * queue's and History's legacy words, the scrubbing caveat and the Settings
+ * sections' sentences. NULL only on a caught panic.
+ */
+char*       tc_shell_words_copy_json(void);
+
 /* The grant screens' words for one disclosure the daemon chose and named
  * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects
  * row carries automatic_disclosure ("patterns_only" or "model_scrubbed"),

@@ -23,9 +23,12 @@ import TCShellCore
 ///
 /// The daemon is not running on a fresh install: the core refuses to start
 /// it until the session roots are declared, and Folders or Tools is where
-/// they are. So the invite pasted on Join is looked up and joined, and the
-/// account chosen there signed in or created, only once that commit has
-/// started the daemon (`CommitPoint.leaveRoots`).
+/// they are. So the invite pasted on Join is looked up and joined, and a
+/// near.ai chosen there signed in, only once that commit has started the
+/// daemon (`CommitPoint.leaveRoots`). Create passkey is the exception: its
+/// sheets open over Join (#1030), so it starts the daemon there with both
+/// roots declared `off`, which reads nothing until Folders or Tools answers
+/// (`CommitPoint.passkeyOnJoin`).
 ///
 /// ## Resuming
 ///
@@ -101,7 +104,7 @@ private struct FirstRunSteps: View {
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
     /// The account the passkey sheets complete with: the running daemon's.
-    /// Nil until it runs, which Join reads as "record the choice for later".
+    /// Nil until it runs, which Join reads as "start it, then open them".
     @State private var passkeyAccount: LivePasskeyAccount?
     @State private var passkeyClient: DaemonClient?
 

@@ -102,6 +102,33 @@ final class SettingsModalTests: XCTestCase {
         XCTAssertFalse(modal.contains("List(selection:"), "the list selects a view instead of scrolling")
     }
 
+    /// #1146's header and list (P26, P27): the title 15/700 at the modal's
+    /// header insets over the 0.5pt modal rule; the list's rows 12pt
+    /// secondary text with a faint hover, never the blue menu selection,
+    /// beside a 0.5pt rule; and each listed section opens with its name as
+    /// a section rule in the body.
+    func test_theHeaderAndListAreRons() throws {
+        let modal = try Self.text("Views/Monitor/SettingsModal.swift")
+        XCTAssertTrue(modal.contains(".glassType(GlassTokens.TypeScale.title.weight(.bold))"), "the title is not 15/700")
+        XCTAssertTrue(modal.contains(".padding(.top, GlassTokens.Space.s7)"))
+        XCTAssertTrue(modal.contains(".padding(.trailing, GlassTokens.Space.s8)"))
+        XCTAssertTrue(modal.contains(".padding(.bottom, GlassTokens.Space.s5)"))
+        XCTAssertEqual(SettingsModal.headerLeading, 18)
+        XCTAssertTrue(modal.contains("GlassHairline(GlassTokens.Color.rule.color)"))
+        XCTAssertTrue(modal.contains("GlassHairline(GlassColor.ink(Self.navRuleInk), axis: .vertical)"))
+        XCTAssertFalse(modal.contains("frame(height: 1)"), "a 1pt hairline is left")
+        XCTAssertTrue(modal.contains(".buttonStyle(GlassSectionNavRowStyle())"))
+        XCTAssertFalse(modal.contains("GlassMenuRowStyle"), "the list still uses the blue menu selection")
+        XCTAssertTrue(modal.contains("ForEach(Self.listed)"))
+        XCTAssertTrue(modal.contains("item.listRow(words?.settingsNav)"))
+        XCTAssertTrue(modal.contains("GlassSectionRule(name)"), "no section rule opens a section")
+        XCTAssertEqual(SettingsModal.navRuleInk, 0.1)
+        XCTAssertEqual(SettingsModal.bodyInset, 20)
+        XCTAssertEqual(GlassSectionNavRowStyle.hoverInk, 0.08)
+        XCTAssertEqual(GlassSectionNavRowStyle.radius, 8)
+        XCTAssertEqual(GlassTokens.Size.modalNavWidth, 180)
+    }
+
     /// Escape, the close button and a click on the scrim close it; while it
     /// is open the panes behind take no focus and no clicks.
     func test_escapeAndTheScrimClose() throws {

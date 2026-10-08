@@ -1,14 +1,12 @@
-// The legacy History screen's words, at the path the wording ratchet
-// (`ShellWordingTests`) records them under.
-//
-// The screen itself is gone (R15): History draws on glass from
-// `Views/Monitor/`, and those files author no sentence. What it still reads
-// of the old screen's is held here, verbatim, until the core exports it.
+// The legacy History screen's words. The screen itself is gone (R15):
+// History draws on glass from `Views/Monitor/`. What it still reads of the
+// old screen's is the core's now (#1146 parity, 2026-10-07).
 
-/// History's sentences the glass History draws, held once.
+/// History's sentences the glass History draws, read from the core's table
+/// (`shell_words_copy::history_words`, through `ShellWords`).
 enum HistoryLegacyWords {
-    static let withdrawalWordingDefect = "Do not trust the withdrawal wording on this screen."
-    static let typicalWait = "Typical wait: we don't have a reliable number yet."
+    static var withdrawalWordingDefect: String { WithdrawalCopy.wordingDefect }
+    static var typicalWait: String { ShellWords.table?.history.typicalWait ?? "" }
 }
 
 /// The server's explanation lines across every held record, distinct, in

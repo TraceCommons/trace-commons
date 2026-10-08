@@ -658,30 +658,37 @@ final class MonitorNavigationTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("MonitorWords.signedOut"))
         XCTAssertTrue(window.contains("""
-                        let gate = MonitorGate.of(
-                            startup: model.startup, onboardingKnown: model.onboardingKnown,
-                            requiresOnboarding: model.requiresOnboarding)
+            private var gate: MonitorGate {
+                MonitorGate.of(
+                    startup: model.startup, onboardingKnown: model.onboardingKnown,
+                    requiresOnboarding: model.requiresOnboarding)
+            }
+        """), "the gate is the core's startup and onboarding state")
+        XCTAssertTrue(window.contains("""
+                            ShellNotices()
+                            if gate != .awaiting {
+                                switch gate {
+                                case .down(let sentence):
+                                    StartupRefusedBanner(sentence: sentence)
+                                case .signedOut:
+                                    GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
+                                        Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
+                                    }
+                                case .awaiting, .open:
+                                    EmptyView()
+                                }
+                                GlassSegmentedTabs(
+                                    MonitorWords.table?.shell.tabsLabel ?? "",
+                                    selection: Binding(
+                                        get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
+                                        set: { tab = $0 }),
+                                    segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
+        """), "the strip must show the onboarding-filtered tabs, under the notices")
+        XCTAssertTrue(window.contains("""
                         if gate == .awaiting {
                             SettingsAwaiting()
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            switch gate {
-                            case .down(let sentence):
-                                StartupRefusedBanner(sentence: sentence)
-                            case .signedOut:
-                                GlassNotice(tone: .ask, title: MonitorWords.signedOut) {
-                                    Button(MonitorWindowView.openFirstRun) { OpenMonitor.request() }
-                                }
-                            case .awaiting, .open:
-                                EmptyView()
-                            }
-                            GlassSegmentedTabs(
-                                MonitorWords.table?.shell.tabsLabel ?? "",
-                                selection: Binding(
-                                    get: { MonitorWindowView.shownTab(tab, requiresOnboarding: model.requiresOnboarding) },
-                                    set: { tab = $0 }),
-                                segments: MonitorWindowView.Tab.shown(requiresOnboarding: model.requiresOnboarding).map { item in
-        """), "the strip must show the onboarding-filtered tabs, under the notices")
+        """), "before the core says, the pane waits")
         let pane = try XCTUnwrap(window.range(of: "private struct MonitorMainPane"))
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
         XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
@@ -691,7 +698,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 2)
         XCTAssertFalse(window.contains("switch tab {"), "a switch on the restored tab would draw Home or Traces during onboarding")
         XCTAssertTrue(window.contains("""
-                    GlassPane {
+                    GlassPane(insets: GlassPaneInsets.inspector) {
                         // An empty branch would leave the pane nothing to draw, and
                         // it would vanish while the layout still reserved its width.
                         // While onboarding is required only Inference is shown, so
@@ -725,7 +732,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertFalse(firstRun.contains("fixedSize("), "a vertical fixedSize grows the pane past the window")
         XCTAssertTrue(firstRun.contains("""
                         .frame(width: FirstRunProgress.paneWidth)
-                        .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                        .padding(.vertical, GlassTokens.Space.paneGap * 3)
         """), "the pane is bounded by the window, less the scene's margin")
     }
 
@@ -774,7 +781,7 @@ final class MonitorNavigationTests: XCTestCase {
     func test_theSettingsButtonOpensSettingsBeforeOnboarding() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         let button = """
-                            GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", systemImage: "gearshape", small: true, action: onSettings)
+                                GlassRoundButton(MonitorWords.table?.settingsTitle ?? "", icon: .glyph(.gear), action: onSettings)
         """
         XCTAssertTrue(window.contains(button))
         XCTAssertFalse(window.contains(button + "\n                        .disabled("), "the gear is dead before onboarding")
@@ -788,7 +795,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertTrue(modal.contains("""
                 case .down(let sentence):
                     StartupRefusedBanner(sentence: sentence)
-                        .padding(GlassTokens.Space.panePadding)
+                        .padding(.horizontal, Self.bodyInset)
         """), "a writing section says a refused daemon as a refusal (B1)")
     }
 

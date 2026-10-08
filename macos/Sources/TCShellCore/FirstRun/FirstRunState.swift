@@ -25,9 +25,11 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     case watchOnly
     /// Sign in with near.ai after the daemon starts.
     case nearAI
-    /// Create passkey chosen on Join. The sheets that create it complete
-    /// with the daemon, so they open once Folders or Tools started it
-    /// (`FirstRunCall.openPasskeySheets`); until then the choice is undoable.
+    /// Create passkey chosen on Join for later. Join no longer records it:
+    /// Create passkey starts the daemon and opens the sheets over Join
+    /// (`CommitPoint.passkeyOnJoin`). A state that holds it still opens them
+    /// once Folders or Tools started the daemon
+    /// (`FirstRunCall.openPasskeySheets`), and the choice is undoable.
     case passkeyChosen
     /// A passkey whose account Verify bound, or joined this Mac to (another
     /// Mac had bound it), which enrolled this Mac (`account_bind`), with the

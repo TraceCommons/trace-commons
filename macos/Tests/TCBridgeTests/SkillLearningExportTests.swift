@@ -26,7 +26,7 @@ final class SkillLearningExportTests: XCTestCase {
         )
         XCTAssertEqual(
             TCSkillLearning.errorLine(label: "a-later-daemon-label"),
-            "The skill workflow could not complete. Retry the current step."
+            "Skill workflow could not complete. Retry this step."
         )
     }
 

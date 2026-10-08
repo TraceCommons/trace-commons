@@ -98,6 +98,30 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertFalse(Self.words?.close.isEmpty ?? true, "the core names Close")
     }
 
+    /// Raised in a modal (#1146 `PreviewInspector`, P29), the preview has
+    /// one header: the modal's title, Ron's description as its subtitle,
+    /// and the close button. The sheet draws no title, rules or footer of
+    /// its own there; its body opens with the LOOK INSIDE eyebrow, and the
+    /// modal's footer is Close.
+    func test_inAModalThereIsOneHeaderWithAClose() throws {
+        let sheet = Self.code(try Self.sheet())
+        let modal = try Self.declaration("struct PreviewModal: View {", in: sheet)
+        for needle in [
+            "subtitle: PreviewSheet.modalSubtitle", "closeLabel: PreviewSheet.modalClose ?? \"\"",
+            "actions: PreviewSheet.modalClose.map { [.cancel($0, action: onClose)] } ?? []",
+        ] {
+            XCTAssertTrue(modal.contains(needle), "PreviewModal lacks \(needle)")
+        }
+        XCTAssertTrue(sheet.contains("if !inModal {\n                Divider().overlay(GlassColor.hairline)\n                footer"),
+                      "the sheet draws its own footer in a modal")
+        let header = try Self.declaration("private var header: some View {", in: sheet)
+        let eyebrow = try XCTUnwrap(header.range(of: "Text(words.eyebrow)"))
+        let title = try XCTUnwrap(header.range(of: "if !inModal {\n                    Text(words.title)"))
+        XCTAssertLessThan(eyebrow.lowerBound, title.lowerBound, "the eyebrow is drawn only outside a modal")
+        XCTAssertEqual(PreviewSheet.modalSubtitle, Self.words?.description)
+        XCTAssertEqual(PreviewSheet.modalClose, Self.words?.close)
+    }
+
     // MARK: - Witness review, up front
 
     /// Offered on every preview of a session that supports it -- not only
@@ -177,7 +201,7 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertTrue(content.contains("} else if summary != nil, let words, let document {"),
                       "the tabs are drawn only with the core's words and a body: \(content)")
         XCTAssertTrue(content.contains("} else if summary != nil {"), "a summary with no body is said: \(content)")
-        XCTAssertTrue(content.contains("SheetNotice(title: Self.cannotShow,"))
+        XCTAssertTrue(content.contains("SheetNotice(fills: !inModal, title: Self.cannotShow,"))
         XCTAssertFalse(content.contains("words?.title ?? tab.title(words)"))
     }
 
@@ -204,7 +228,7 @@ final class PreviewSheetTests: XCTestCase {
         XCTAssertFalse(content.contains("detail: \"\""), "an empty notice: \(content)")
         let loading = try Self.declaration("} else if loading {", in: content)
         XCTAssertTrue(loading.contains("if let words {"), "the loading line needs the table: \(loading)")
-        XCTAssertTrue(loading.contains("SheetNotice(title: Self.cannotShow, detail: cannotShowDetail)"),
+        XCTAssertTrue(loading.contains("SheetNotice(fills: !inModal, title: Self.cannotShow, detail: cannotShowDetail)"),
                       "and without it the cannot-show notice: \(loading)")
     }
 

@@ -8,6 +8,15 @@ import XCTest
 /// R13 of #1173: the menu-bar popover from the handoff, under its rules.
 @MainActor
 final class MenuBarGlassPanelTests: XCTestCase {
+    /// C19: the panel's corner is #1146's popover radius
+    /// (`--tc-radius-card`, 14), not a larger one of its own.
+    func test_thePanelHasThePopoverRadius() throws {
+        XCTAssertEqual(GlassTokens.Radius.menuPanel, GlassTokens.Radius.card)
+        XCTAssertEqual(GlassTokens.Radius.menuPanel, 14)
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("radius: GlassTokens.Radius.menuPanel"))
+    }
+
     // MARK: Mode roll-up
 
     /// One mode for every folder reads as that mode; any difference is

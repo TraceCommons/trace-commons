@@ -101,8 +101,8 @@ final class HistoryParityTests: XCTestCase {
             ".init(copy.consentPolicyVersion, detail.consentPolicyVersion, mono: true)",
             ".init(copy.redactionVersion, detail.redactionPipelineVersion, mono: true)",
             "GlassEyebrowCard(copy.nextAction)", "status: index == confirmation.gravest ? .outside : .off",
-            #"Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)"#,
-            ".buttonStyle(GlassButtonStyle(.primary))", "GlassWell {",
+            "Button(inFlight ? confirmation.busyLabel : confirmation.confirmLabel, action: onConfirm)",
+            ".buttonStyle(GlassButtonStyle(.destructive))", "GlassWell {",
         ] {
             XCTAssertTrue(source.contains(needle), "SessionContributionOverview.swift lacks \(needle)")
         }
@@ -128,7 +128,7 @@ final class HistoryParityTests: XCTestCase {
             "Button(copy.withdraw) { confirming = true } .buttonStyle(GlassButtonStyle(.glass)) .frame(minHeight: 44)",
             "} else if confirming { WithdrawalConfirmationView(",
             "onConfirm: { model.withdraw(record) }",
-            ".buttonStyle(GlassButtonStyle(.primary)) .frame(minHeight: 44) .disabled(inFlight)",
+            ".buttonStyle(GlassButtonStyle(.destructive)) .frame(minHeight: 44) .disabled(inFlight)",
             "GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off) "
                 + ".fontWeight(index == confirmation.gravest ? .semibold : nil)",
         ] {
@@ -334,25 +334,29 @@ final class HistoryParityTests: XCTestCase {
         let homeFlat = home.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         for needle in [
             // Never an empty title or sentence: only with the core's words.
-            "if (rollup?.quarantined ?? 0) > 0, let words = MonitorWords.table { "
-                + "GlassNotice(tone: .ask, title: words.heldForReview) {",
+            // Ron's PRIVACY REVIEW card, its count as the heading.
+            "if let quarantined = rollup?.quarantined, quarantined > 0, let words = MonitorWords.table { "
+                + "GlassEyebrowCard(words.shell.filterQuarantined) {",
+            "Text(words.homeHistory.held(quarantined))",
             "Text(words.heldExplanation)", "Text(HistoryLegacyWords.typicalWait)",
             // Every record the app holds, not the list's capped page.
             "ForEach(HeldExplanations.lines(in: model.history.filter { $0.status == \"quarantined\" }.map(\\.explanations)), "
                 + "id: \\.self)",
             "Text(WithdrawalCopy.noBulkAction)",
             // The daemon's view on every visit, on the always-present container.
-            ".scrollIndicators(.never) } .onAppear { model.clearHistoryRefresh() model.refreshHistory() model.refreshAccountSession() }",
+            ".scrollIndicators(.never) .onAppear { model.clearHistoryRefresh() model.refreshHistory() model.refreshAccountSession() }",
         ] {
             XCTAssertTrue(homeFlat.contains(needle), "HomeViews.swift lacks \(needle)")
         }
 
-        // The legacy screen is gone (R15); its file holds the table alone.
+        // The legacy screen is gone (R15); its words are the core's now
+        // (#1146 parity, 2026-10-07), and its file holds none.
         let legacy = try Self.text("Views/HistoryView.swift")
-        for sentence in ["Typical wait: we don't have a reliable number yet.",
-                         "Do not trust the withdrawal wording on this screen."] {
-            XCTAssertEqual(legacy.components(separatedBy: sentence).count - 1, 1, "\(sentence) is held once, in the table")
+        for sentence in ["Typical wait", "Do not trust the withdrawal wording"] {
+            XCTAssertFalse(legacy.contains(sentence), "\(sentence) is written in Swift")
         }
+        XCTAssertEqual(HistoryLegacyWords.typicalWait, "Typical wait: we don't have a reliable number yet.")
+        XCTAssertEqual(HistoryLegacyWords.withdrawalWordingDefect, "Do not trust the withdrawal wording on this screen.")
     }
 
     static let withdrawCall = "SessionWithdrawalAction(record: record, "
@@ -406,8 +410,12 @@ final class HistoryParityTests: XCTestCase {
         for needle in [
             "HistorySelection.record(for: row.submissionId, in: model.history)",
             "Button(MonitorWords.table?.shell.open ?? copy.viewSession, action: open)",
-            "case .withdraw: Button(copy.withdraw) { confirming = true }",
-            "WithdrawalConfirmationView( status: SessionDetailView.withdrawalStatus(record, detail: detail), "
+            "case .withdraw: Button(copy.withdraw) { confirming = true } "
+                + ".buttonStyle(GlassButtonStyle(.destructive, small: true))",
+            // HH-2: #1146's confirmation is a glass modal over the window.
+            ".glassModal(isPresented: Binding(",
+            "WithdrawalConfirmationModal( status: SessionDetailView.withdrawalStatus(record, "
+                + "detail: model.sessionDetails[record.submissionID]), "
                 + "keepLabel: copy.keepContribution, inFlight: model.withdrawing.contains(record.submissionID), "
                 + "onKeep: { confirming = false }, onConfirm: { model.withdraw(record) } )",
             "WithdrawalOutcomeView(result: result)",
@@ -459,7 +467,7 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertEqual(decide(accepted, nil, .withdrawn(nil)), .none)
         XCTAssertEqual(decide(accepted, try Self.detail("withdrawn"), .failed("withdraw-failed")), .none)
         let home = Self.flat(try Self.text("Views/Monitor/HomeViews.swift"))
-        XCTAssertTrue(home.contains("case .retry: if let record { Button(copy.withdraw) { model.withdraw(record) }"))
+        XCTAssertTrue(home.contains("case .retry: if let record { Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }"))
     }
 
     /// Ron's `HistoryRow`: wherever Withdraw would be offered and the
@@ -585,8 +593,8 @@ final class HistoryParityTests: XCTestCase {
         let home = Self.flat(try Self.text("Views/Monitor/HomeViews.swift"))
         for needle in [
             "if let words = MonitorWords.table?.historyActions {",
-            // Named: as a first trailing closure it would bind to `action`.
-            "GlassEyebrowCard(MonitorWords.history, accessory: { refresh }) { refreshOutcome list }",
+            // Ron's SUBMISSIONS card: its heading beside the refresh.
+            "submissionsHeader refreshOutcome list", "Spacer(minLength: 0) refresh }",
             "Button(model.historyRefresh == .requesting ? words.requesting : words.requestRefresh) "
                 + "{ Task { if await model.requestHistoryRefresh() { await store.load() } } }",
             "case .requested: Text(words.refreshRequested)", "case .failed: GlassStatusLabel(words.refreshFailed, status: .outside)",
@@ -656,72 +664,112 @@ final class HistoryParityTests: XCTestCase {
     }
 
     /// The record by period, which Home's summary inspector drew until Ron's
-    /// Summary replaced it (#1241 Task 4), lives in History's stat cards:
-    /// the week's and month's accepted counts and the withdrawn count, all
-    /// from the rollup (never a count of the loaded page), beside the
-    /// all-time and held counts already there.
+    /// Summary replaced it (#1241 Task 4), stays on History: the week's and
+    /// month's accepted counts and the withdrawn count, all from the rollup
+    /// (never a count of the loaded page). #1146's History has no place for
+    /// it, so it closes the page, and Ron's three stat cards are his.
     func test_theRecordByPeriodLivesInHistory() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
+        let period = try XCTUnwrap(home.range(of: "private struct HistoryPeriodCard: View"))
+        let periodEnd = try XCTUnwrap(home[period.upperBound...].range(of: "\n}\n"))
+        let card = Self.flat(String(home[period.lowerBound..<periodEnd.lowerBound]))
+        for needle in [
+            #"SummaryFacts.fresh(store.rollup, unless: store.failures["history_rollup"])"#,
+            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted))",
+            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted))",
+            ".init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack))",
+        ] {
+            XCTAssertTrue(card.contains(needle), "the record by period lacks \(needle)")
+        }
         let start = try XCTUnwrap(home.range(of: "private struct HistoryStats: View"))
         let end = try XCTUnwrap(home[start.upperBound...].range(of: "\n}\n"))
         let stats = Self.flat(String(home[start.lowerBound..<end.lowerBound]))
         for needle in [
-            ".init(MonitorWords.week, HomeFormat.count(rollup?.week?.accepted))",
-            ".init(MonitorWords.month, HomeFormat.count(rollup?.month?.accepted))",
-            ".init(MonitorWords.withdrawn, HomeFormat.count(rollup?.takenBack))",
-            "GlassLegendCell(MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted)",
-            "GlassLegendCell(MonitorWords.held, value: HomeFormat.count(rollup?.quarantined)",
+            "HomeStatTile(label: HomeFormat.creditPendingWord, value: HomeFormat.pendingFigure(rollup?.creditPending, credit: credit))",
+            "HomeStatTile(label: MonitorWords.contributed, value: HomeFormat.count(rollup?.allTime?.accepted))",
+            "HomeStatTile(label: MonitorWords.held, value: HomeFormat.count(rollup?.quarantined))",
         ] {
             XCTAssertTrue(stats.contains(needle), "History's stat cards lack \(needle)")
         }
+        XCTAssertFalse(stats.contains("GlassLegendCell("), "Ron's stat cards, not legend wells")
+        XCTAssertFalse(stats.contains("MonitorWords.week"), "the record by period is not among the stat cards")
         XCTAssertFalse(home.contains("struct HomeSummaryInspector"), "Ron's Summary replaced Home's")
     }
 
-    /// Opening a row draws its details in the left pane, below the list,
-    /// the credit record and the privacy review (Ron's `HistoryPage`), and
-    /// never in the inspector.
-    func test_theDetailOpensInTheLeftPane() throws {
+    /// Ron's `HistoryPage` order: the stat cards, community, the
+    /// contribution list, the credit record, the privacy review, and the
+    /// record by period last. The opened row's details are not on the page:
+    /// they are the inspector's.
+    func test_historyIsInRonsOrderAndTheDetailIsTheInspectors() throws {
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         let page = try XCTUnwrap(home.range(of: "private struct HistoryPage: View"))
         let tail = home[page.lowerBound...]
         let stats = try XCTUnwrap(tail.range(of: "HistoryStats(store: store)"))
         let community = try XCTUnwrap(tail.range(of: "HistoryCommunityCard(store: store)"))
-        let list = try XCTUnwrap(tail.range(of: "GlassEyebrowCard(MonitorWords.history"))
+        let list = try XCTUnwrap(tail.range(of: "submissionsHeader\n"))
         let credit = try XCTUnwrap(tail.range(of: "HistoryCreditCard(store: store)"))
-        let held = try XCTUnwrap(tail.range(of: "            held\n"))
-        let detail = try XCTUnwrap(tail.range(of: "HistoryDetailInspector(row: opened)"))
+        let held = try XCTUnwrap(tail.range(of: "                held\n"))
+        let period = try XCTUnwrap(tail.range(of: "HistoryPeriodCard(store: store)"))
         XCTAssertLessThan(stats.lowerBound, community.lowerBound)
         XCTAssertLessThan(community.lowerBound, list.lowerBound)
         XCTAssertLessThan(list.lowerBound, credit.lowerBound)
         XCTAssertLessThan(credit.lowerBound, held.lowerBound)
-        XCTAssertLessThan(held.lowerBound, detail.lowerBound, "the opened row's detail is below the list")
-        XCTAssertTrue(home.contains("proxy.scrollTo(HistoryList.detailAnchor, anchor: .top)"),
-                      "opening a row brings its detail into view")
-        // The detail nests in the page's scroll, not a scroll of its own.
+        XCTAssertLessThan(held.lowerBound, period.lowerBound)
+        XCTAssertFalse(home.contains("HistoryDetailInspector("), "the opened row is not drawn on History's page")
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        XCTAssertFalse(inspector.contains("ScrollView {"))
-
-        let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(Self.flat(window).contains("set: { selectedHistory = $0 }"),
-                      "opening a History row only selects it")
-        XCTAssertFalse(window.contains("selectedHistoryRow"))
+        XCTAssertTrue(Self.flat(inspector).contains(
+            "struct HistoryInspectorPane: View { let row: DaemonData.HistoryRow var body: some View { ScrollView { HistoryDetailInspector(row: row) }"))
+        // Ron's headings and project groups, in the core's words.
+        let flat = Self.flat(home)
+        for needle in [
+            "Text(words.historyDescription)", "Text(words?.submissions ?? MonitorWords.history)",
+            "Text(words.contributionHistory)", "Text(words.project)",
+            "Text(words?.records(group.count) ?? \"\\(group.count)\")", "Text(words.readingHistory)",
+            ".accessibilityLabel(words?.filterLabel ?? MonitorWords.history)",
+            "Text(words.status(word))", "Text(words.credit(figure))", "Text(HomeFormat.rowMeta(row))",
+        ] {
+            XCTAssertTrue(flat.contains(needle), "HomeViews.swift lacks \(needle)")
+        }
+        // The filter wraps; it is no longer a strip that scrolls sideways.
+        XCTAssertFalse(home.contains("ScrollView(.horizontal)"))
+        XCTAssertTrue(home.contains("HistoryFilterFlow(spacing: GlassTokens.Space.s2)"))
     }
 
-    /// Review Focus 5: on History the inspector keeps the Traces selection's
-    /// card (Ron mounts `WaitingPage` there too); History's detail is the
-    /// left pane's, and opening a row does not touch the inspector.
-    func test_theInspectorStaysOnTheTracesSelectionWhileOnHistory() throws {
+    /// Ron's inspector auto-open: opening a History row selects it and opens
+    /// the inspector, which shows the row while History is shown and the
+    /// Traces selection's card otherwise. Clearing it closes nothing.
+    func test_openingAHistoryRowOpensTheInspectorOnIt() throws {
+        var selected = ""
+        var shows = false
+        MonitorWindowView.openHistory("s1", selected: &selected, showsInspector: &shows)
+        XCTAssertEqual(selected, "s1")
+        XCTAssertTrue(shows, "opening a row opens the inspector")
+        MonitorWindowView.openHistory("", selected: &selected, showsInspector: &shows)
+        XCTAssertEqual(selected, "")
+        XCTAssertTrue(shows, "clearing the row closes nothing")
+        shows = false
+        MonitorWindowView.openHistory("", selected: &selected, showsInspector: &shows)
+        XCTAssertFalse(shows)
+
+        let rows = try Self.rows(["accepted", "submitted"])
+        XCTAssertEqual(HistorySelection.opened("s1", onHistory: true, in: rows)?.submissionId, "s1")
+        XCTAssertNil(HistorySelection.opened("s1", onHistory: false, in: rows), "only while History is shown")
+        XCTAssertNil(HistorySelection.opened("", onHistory: true, in: rows))
+        XCTAssertNil(HistorySelection.opened("gone", onHistory: true, in: rows), "a row no longer listed")
+        XCTAssertNil(HistorySelection.opened("s1", onHistory: true, in: nil))
+
         let window = try Self.text("Views/MonitorWindowView.swift")
         let code = window.split(separator: "\n")
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
         XCTAssertTrue(Self.flat(code).contains(
-            "case .home, .traces: TracesInspectorHost(traces: traces, home: home, selection: selection)"))
-        XCTAssertFalse(window.contains("historyRow:"), "the inspector is never handed a History row")
-        XCTAssertFalse(window.contains("selection: &selectedHistory"), "a History row is not a demand on the inspector")
-        let binding = try XCTUnwrap(window.range(of: "get: { selectedHistory }"))
-        let after = window[binding.upperBound...].prefix(120)
-        XCTAssertFalse(after.contains("showsInspector"))
+            "case .home, .traces: VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { "
+                + "if Self.promptsInInspector(tab) { InspectorPromptsHeader(traces: traces) } "
+                + "if tab == .home, let row = HistorySelection.opened(selectedHistory, "
+                + "onHistory: homePage == .history, in: home.history) { HistoryInspectorPane(row: row) } "
+                + "else { TracesInspectorHost(traces: traces, home: home, selection: selection) }"))
+        XCTAssertTrue(Self.flat(window).contains(
+            "set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }"))
     }
 }
 

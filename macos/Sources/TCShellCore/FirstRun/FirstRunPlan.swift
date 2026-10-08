@@ -61,6 +61,10 @@ public enum NearAILoginPoll: Equatable, Sendable {
 
 /// Where the first run commits answers to the daemon.
 public enum CommitPoint: Equatable, Sendable {
+    /// Create passkey on Join (#1030 `ftux-page.tsx`): the sheets open over
+    /// Join, so the daemon their ceremony completes with starts here when it
+    /// is not running yet. The step does not move.
+    case passkeyOnJoin
     /// Leaving Folders (Quick) or Tools (Custom): the daemon starts, then
     /// the invite deferred from Join is looked up and joined, and the
     /// account chosen there is signed in or created.
@@ -74,9 +78,39 @@ public enum CommitPoint: Equatable, Sendable {
 public enum FirstRunPlan {
     public static func calls(for state: FirstRunState, at commit: CommitPoint) -> [FirstRunCall] {
         switch commit {
+        case .passkeyOnJoin: return passkeyOnJoin(state)
         case .leaveRoots: return leaveRoots(state)
         case .start: return start(state)
         }
+    }
+
+    /// The declaration a daemon started on Join holds until Folders or Tools
+    /// answers: Claude Code and Codex both `off`, so the start gate
+    /// (`daemon::settings::roots_declared`) admits it and nothing is read.
+    /// An undeclared root would read the tool's conventional folder unasked,
+    /// so it is never started without one. Binding an account
+    /// (`nearai_onboarding::bind`) reads no source settings, so the passkey
+    /// ceremony completes against this daemon. The first run never reads
+    /// these `off`s back as answers: the next commit sends every row that
+    /// differs (`changedDeclarations`), and a resumed first run sends the
+    /// whole declaration again (`OnboardingNavigation.initialState`).
+    public static let watchNothingSettingsJSON: String? = SessionRoots(claude: .off, codex: .off).settingsJSON()
+
+    /// Create passkey on Join: start the daemon watching nothing when it is
+    /// not running, then open the sheets. Nothing when Join offers no
+    /// passkey (a held invite, a signed-in near.ai, an enrollment or a held
+    /// passkey), as `JoinScreenLayout.showsPasskeyAction` decides; the daemon
+    /// refuses a passkey account over an enrollment (`account-already-enrolled`).
+    private static func passkeyOnJoin(_ state: FirstRunState) -> [FirstRunCall] {
+        let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
+        let held: Bool = {
+            if case .passkey = state.account { return true }
+            return state.account == .enrolled
+        }()
+        guard !state.signedIn, !held, invite.isEmpty, state.enrolledInvite == nil else { return [] }
+        if state.daemonStarted { return [.openPasskeySheets] }
+        guard let json = watchNothingSettingsJSON else { return [] }
+        return [.startDaemon(settingsJSON: json), .openPasskeySheets]
     }
 
     private static func leaveRoots(_ state: FirstRunState) -> [FirstRunCall] {

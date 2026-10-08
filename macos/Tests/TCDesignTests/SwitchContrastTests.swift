@@ -2,45 +2,41 @@ import XCTest
 
 @testable import TCDesign
 
-/// Every switch's knob is told apart from its track when on: the knob, or
-/// the ring drawn inside it, clears the 3:1 glyph floor against the track.
-/// The knob is white on every track (owner decision, as #1146); on the
-/// bright watch green white is about 1.8:1, so the watch knob carries a
-/// `switchKnobEdge` ring, which over the white knob clears it.
+/// The switch knob is plain white on every track, the watch switch's
+/// too (owner ruling, 2026-10-07: white watch knob, as #1146 draws it).
+/// The standard and Settings knobs clear the 3:1 glyph floor against their
+/// track; the watch knob on the bright dark-appearance green is about
+/// 1.8:1, which the ruling accepts, and the earlier ring is gone.
 final class SwitchContrastTests: XCTestCase {
-    func test_everyKnobOrItsRingClearsTheGlyphFloorWhenOn() {
-        for kind in [GlassSwitchKind.standard, .settings, .watch] {
-            let track = GlassToggleStyle.onColor(kind)
-            let knob = GlassToggleStyle.knob(kind, isOn: true)
-            var best = Self.contrast(knob, track)
-            if let edge = GlassToggleStyle.knobEdge(kind, isOn: true) {
-                best = max(best, Self.contrast(ToolbarGlyphContrastTests.over(edge, knob), track))
-            }
-            XCTAssertGreaterThanOrEqual(best, 3, "\(kind): \(best)")
+    func test_theToggleKnobsClearTheGlyphFloorWhenOn() {
+        for kind in [GlassSwitchKind.standard, .settings] {
+            let ratio = Self.contrast(GlassToggleStyle.knob(kind, isOn: true), GlassToggleStyle.onColor(kind))
+            XCTAssertGreaterThanOrEqual(ratio, 3, "\(kind): \(ratio)")
         }
     }
 
-    /// The knob is white on every track.
+    /// The knob is white on every track, with nothing drawn around it.
     func test_theKnobIsWhiteOnEveryTrack() {
         for kind in [GlassSwitchKind.standard, .settings, .watch] {
             for isOn in [true, false] {
                 XCTAssertEqual(GlassToggleStyle.knob(kind, isOn: isOn), GlassTokens.Color.textOnAccent)
             }
         }
+        XCTAssertNil(GlassTokens.Color.all["switchKnobEdge"])
     }
 
-    /// Only the watch switch, on, needs the ring.
-    func test_onlyTheWatchKnobOnCarriesTheRing() {
-        XCTAssertEqual(GlassToggleStyle.knobEdge(.watch, isOn: true), GlassTokens.Color.switchKnobEdge)
-        XCTAssertNil(GlassToggleStyle.knobEdge(.watch, isOn: false))
-        XCTAssertNil(GlassToggleStyle.knobEdge(.standard, isOn: true))
-        XCTAssertNil(GlassToggleStyle.knobEdge(.settings, isOn: true))
-    }
-
-    /// The reason for the ring: white alone on the watch green would not
-    /// clear the floor.
-    func test_whiteOnTheWatchGreenWouldNot() {
+    /// The accepted cost of the ruling, recorded so a token change that
+    /// moves it is seen: white on the dark watch green is under 3:1.
+    func test_whiteOnTheDarkWatchGreenIsTheAcceptedException() {
         XCTAssertLessThan(Self.contrast(GlassTokens.Color.textOnAccent, GlassTokens.Color.watchOn), 3)
+    }
+
+    /// #1146's timings: a toggle slides in `--tc-dur` (220ms), the watch
+    /// switch in 150ms.
+    func test_switchDurationsFollowTheReference() {
+        XCTAssertEqual(GlassToggleStyle.duration(.standard), GlassTokens.Motion.standard)
+        XCTAssertEqual(GlassToggleStyle.duration(.settings), GlassTokens.Motion.standard)
+        XCTAssertEqual(GlassToggleStyle.duration(.watch), GlassTokens.Motion.fast)
     }
 
     static func contrast(_ a: GlassRGBA, _ b: GlassRGBA) -> Double {

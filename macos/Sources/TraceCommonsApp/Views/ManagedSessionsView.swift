@@ -59,8 +59,11 @@ struct ManagedSessionsSection: View {
     // MARK: Accounts
 
     private var accountsCard: some View {
+        // The header carries only the re-read link, as #1146's panels do;
+        // the two actions sit on their own row under the description, so
+        // no label is ever squeezed into breaking per syllable (V1).
         GlassEyebrowCard(model.managedText("accounts_title"), accessory: {
-            if let snapshot = model.managedSnapshot { headerActions(snapshot) }
+            if model.managedSnapshot != nil { refreshLink }
         }) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 Text(model.managedText("description"))
@@ -68,6 +71,7 @@ struct ManagedSessionsSection: View {
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let snapshot = model.managedSnapshot {
+                    accountActions(snapshot)
                     terminalLine(snapshot)
                     if !snapshot.accounts.isEmpty {
                         VStack(spacing: 0) {
@@ -83,24 +87,42 @@ struct ManagedSessionsSection: View {
                             .foregroundStyle(GlassColor.textTertiary)
                         Spacer(minLength: 0)
                         Button { model.refreshManagedSessions() } label: {
-                            Label(model.managedText("retry"), systemImage: "arrow.clockwise")
+                            Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
                         }
                         .buttonStyle(GlassButtonStyle(.glass, small: true))
+                        .fixedSize()
                     }
                 }
             }
         }
     }
 
-    private func headerActions(_ snapshot: ManagedSnapshot) -> some View {
-        HStack(spacing: GlassTokens.Space.s3) {
-            Button(model.managedText("refresh")) { model.refreshManagedSessions() }
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-            Button(model.managedText("add")) { adding = true }
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-            Button(model.managedText("launch")) { launching = true }
-                .buttonStyle(GlassButtonStyle(.primary, small: true))
-                .disabled(snapshot.accounts.isEmpty || !snapshot.capabilities.terminalLaunch)
+    private var refreshLink: some View {
+        Button { model.refreshManagedSessions() } label: {
+            Text(model.managedText("refresh")).lineLimit(1)
+        }
+        .buttonStyle(GlassButtonStyle(.link))
+        .fixedSize()
+        .disabled(model.managedBusy)
+    }
+
+    /// Add and Launch, each on one line at its own width: side by side when
+    /// they fit, stacked when the pane is too narrow, never wrapped.
+    private func accountActions(_ snapshot: ManagedSnapshot) -> some View {
+        let add = Button { adding = true } label: {
+            Text(model.managedText("add")).lineLimit(1)
+        }
+        .buttonStyle(GlassButtonStyle(.glass, small: true))
+        .fixedSize()
+        let launch = Button { launching = true } label: {
+            Text(model.managedText("launch")).lineLimit(1)
+        }
+        .buttonStyle(GlassButtonStyle(.primary, small: true))
+        .fixedSize()
+        .disabled(snapshot.accounts.isEmpty || !snapshot.capabilities.terminalLaunch)
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: GlassTokens.Space.s3) { add; launch }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { add; launch }
         }
         .disabled(model.managedBusy)
     }
@@ -232,6 +254,7 @@ struct ManagedSessionsSection: View {
                     model.managedAction("managed_session_dismiss", params: ["session_id": session.id])
                 }
                 .buttonStyle(GlassButtonStyle(.link))
+                .fixedSize()
                 .disabled(model.managedBusy)
             }
         }

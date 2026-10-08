@@ -33,6 +33,15 @@ enum PrivateInferenceIndicator {
         case .neutral: return .off
         }
     }
+
+    /// The Private AI dot (#1146 `flow-map.tsx` and `inference-inspector.tsx`):
+    /// on while the core's tone is clear, outside (red) for every other
+    /// tone, an unread one included. Drawn on the Inference tab, the map's
+    /// Private AI segment and the inspector's Status row, always beside or
+    /// behind the core's sentence for the same state.
+    static func dotStatus(_ tone: PrivateInferenceTone) -> GlassStatus {
+        tone.readsAsWorking ? .on : .outside
+    }
 }
 
 /// The Private AI switch, with the core's sentence on what turning it on
@@ -42,8 +51,11 @@ enum PrivateInferenceIndicator {
 /// and it is drawn from the core's tone -- never from `isOn`, which stays on
 /// over a listener that refused to start. `isOn` nil is a switch nobody
 /// could read: drawn off and disabled, never on. A write that was not
-/// confirmed is `refusal`, in the core's words, outside the expander so a
-/// collapsed card still shows it.
+/// confirmed is `refusal`, in the core's words, under the card.
+///
+/// #1146's `PrivateAiConnectionPanel`: one card, never collapsed. The
+/// title as an h2, what turning it on does and exposes, then the sign-in
+/// (`credential`, when the host hands it in), then the switch.
 struct PrivateAISwitchCard: View {
     let copy: PrivateInferenceCopy
     let isOn: Bool?
@@ -53,8 +65,12 @@ struct PrivateAISwitchCard: View {
     let refusal: String?
     let onSet: (Bool) -> Void
     let onDismiss: () -> Void
-
-    @State private var isOpen = false
+    /// Re-reads the connection. With it the card wears #1146's panel header
+    /// (the connection eyebrow over the title, and a re-read link).
+    var onRefresh: (() -> Void)?
+    /// The sign-in, drawn inside the card between the words and the switch,
+    /// as #1146 draws the credential in its connection panel.
+    var credential: AnyView?
 
     /// The state line and its dot, from the listener's report alone. It
     /// takes no switch: what was asked for never says what happened.
@@ -70,35 +86,48 @@ struct PrivateAISwitchCard: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             GlassCard {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-                    GlassExpander(copy.settingsTitle, isOpen: $isOpen)
+                    if let onRefresh {
+                        PrivateAIPanelHeader(
+                            eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,
+                            refresh: copy.panelRefresh, disabled: busy, onRefresh: onRefresh)
+                    } else {
+                        Text(copy.settingsTitle)
+                            .glassType(GlassTokens.TypeScale.title)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    }
                     GlassStatusLabel(label.line, status: label.status)
                         .fixedSize(horizontal: false, vertical: true)
-                    if isOpen {
-                        Text(copy.offerWhat)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        // The exposure paragraph in full, on the destination as well as
-                        // in the offer. A contributor who declined and came back months
-                        // later is making the same decision and is owed the same words.
-                        Text(copy.offerExposure)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
-                            .toggleStyle(GlassToggleStyle(.settings))
-                            .disabled(busy || isOn == nil)
-                        if let serving = PrivateInferenceSurface.servingLine(state, calls: calls) {
-                            Text(serving)
-                                .glassType(GlassTokens.TypeScale.caption)
-                                .foregroundStyle(GlassColor.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Text(copy.settingsAppliesAtOnce)
+                    Text(copy.offerWhat)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // The exposure paragraph in full, on the destination as well as
+                    // in the offer. A contributor who declined and came back months
+                    // later is making the same decision and is owed the same words.
+                    Text(copy.offerExposure)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let credential {
+                        GlassHairline(GlassColor.hairline)
+                        credential
+                    }
+                    GlassHairline(GlassColor.hairline)
+                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
+                        .toggleStyle(GlassToggleStyle(.settings))
+                        .disabled(busy || isOn == nil)
+                    if let serving = PrivateInferenceSurface.servingLine(state, calls: calls) {
+                        Text(serving)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    Text(copy.settingsAppliesAtOnce)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if let refusal {

@@ -86,12 +86,16 @@ final class InferenceParityTests: XCTestCase {
                        "isOn ?? false", "busy || isOn == nil", "GlassToggleStyle(.settings)",
                        "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
                        "GlassStatusLabel(label.line, status: label.status)",
-                       "GlassExpander(copy.settingsTitle, isOpen:",
+                       "eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,",
                        "GlassNotice(tone: .outside, title: refusal)",
                        "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)"] {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }
         XCTAssertFalse(source.contains("privateInferenceOn ? .on"), "the state must come from the tone, not the switch")
+        // P24: #1146's connection panel is never collapsed, so the
+        // exposure paragraph and the switch are always on screen.
+        XCTAssertFalse(source.contains("GlassExpander("), "the connection panel collapses again")
+        XCTAssertFalse(source.contains("if isOpen {"), "the exposure words hide behind a disclosure again")
         XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1,
                        "the card's one state label is the only status drawn")
         XCTAssertFalse(source.contains("static func palette("), "the TC palette left with the legacy queue")
@@ -189,8 +193,17 @@ final class InferenceParityTests: XCTestCase {
                        "Self.providerOptions(copy)", "copy.credentialWalletNotice", "model.startNearAiCredential(provider:",
                        "model.cancelNearAiCredential()", "model.forgetNearAiCredential()", "model.migrateNearAiCredential()",
                        "model.refreshNearAiCredential()", "pollInterval", "model.credentialBusy",
-                       "BalanceRow(copy: copy, credentialAction: action, run: run)", "FundingRow(copy: copy)"] {
+                       "actionButton(balanceAction)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
+        }
+        // The balance and funding are their own panels (#1146), never a
+        // second copy inside the credential card.
+        XCTAssertFalse(source.contains("BalanceRow("), "the balance is its own panel")
+        XCTAssertFalse(source.contains("FundingRow("), "the funding is its own panel")
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        for needle in ["PrivateAIBalanceCard(copy: copy)", "GlassCard { FundingRow(copy: copy) }", "BalanceRow(copy: copy)",
+                       "onRefresh: { model.refreshNearAiBalance() })"] {
+            XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
         for file in ["Views/CredentialSection.swift", "Views/BalanceRow.swift", "Views/FundingRow.swift", "Views/NearAiJoinView.swift"] {
             try LegacySymbols.assertClean(file)
@@ -215,7 +228,7 @@ final class InferenceParityTests: XCTestCase {
                            + "                .disabled(model.credentialBusy)",
                        // The poll sits on the card's always-present stack,
                        // never on a branch that may not be drawn.
-                       "            }\n        }\n        .task(id: action) {\n",
+                       "            actionButton(balanceAction)\n        }\n        .task(id: action) {\n",
                        "while action == .cancel, !Task.isCancelled {",
                        "try? await Task.sleep(for: Self.pollInterval)"] {
             XCTAssertTrue(source.contains(needle), "CredentialSection.swift lacks \(needle)")
@@ -224,11 +237,10 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("palette("), "the card reads the glass status, not the TC palette")
         let balance = try Self.text("Views/BalanceRow.swift")
         for needle in ["GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))",
-                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)", "Text(copy.balanceWhat)",
-                       "CredentialSurface.actionLabel(action, copy: copy)", "Button(label) { run(action) }",
-                       ".disabled(model.credentialBusy)"] {
+                       "BalanceSurface.showsFigures(status, calls: model.balanceCalls)", "Text(copy.balanceWhat)"] {
             XCTAssertTrue(balance.contains(needle), "BalanceRow.swift lacks \(needle)")
         }
+        XCTAssertFalse(balance.contains("Button("), "the balance's sign-in is the credential card's, never a second one")
         XCTAssertFalse(balance.contains("palette("), "the balance reads the glass status, not the TC palette")
         let funding = try Self.text("Views/FundingRow.swift")
         for needle in ["Text(status?.view.message ?? copy.fundingUnavailable)", "Text(copy.fundingWhat)",
@@ -256,11 +268,20 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertFalse(source.contains("wallet?.commons ?? \"\""), "an absent word must not draw an unlabelled field")
     }
 
-    /// The window's Inference dot and the card map the tone one way.
+    /// The window's Inference dot, the map's Private AI segment and the
+    /// inspector's Status row take #1146's rule: on while working, outside
+    /// (red) for every other tone, never grey.
     func test_theDotReadsTheIndicator() throws {
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
-            "return PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls))"))
+            "return PrivateInferenceIndicator.dotStatus(PrivateInferenceSurface.tone(state, calls: calls))"))
+        XCTAssertEqual(PrivateInferenceIndicator.dotStatus(.clear), .on)
+        for tone: PrivateInferenceTone in [.neutral, .held, .attention, .refused] {
+            XCTAssertEqual(PrivateInferenceIndicator.dotStatus(tone), .outside, "\(tone)")
+        }
+        let inspector = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(inspector.contains(
+            "status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))"))
     }
 
     /// No write without the preview, and a first connect asks the exposure
@@ -337,34 +358,38 @@ final class InferenceParityTests: XCTestCase {
         XCTAssertEqual(source.components(separatedBy: "GlassModalAction(").count - 1, 2, "the two answers that act")
     }
 
-    /// A row's state is the shared tone on a worded label, the only primary
-    /// is connect, the action carries the tool's name and waits on busy, and
-    /// the details open in place.
+    /// P24: #1146's tool row. Flat, ruled off by a hairline, no icon tile
+    /// and no inner card; the state in the core's words as plain text in
+    /// the left column; the settings file inline; Connect a neutral glass
+    /// button and Disconnect the outside one; the action carries the tool's
+    /// name and waits on busy.
     func test_aToolRowDrawsItsStateInWordsAndOneAction() throws {
         let source = try Self.text("Views/HarnessListView.swift")
-        for needle in ["GlassSectionRule(copy.harnessesTitle)",
-                       "GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(HarnessSurface.tone(state)))",
+        for needle in ["if titled {\n                GlassSectionRule(copy.harnessesTitle)",
+                       "Text(row.connected ? copy.harnessCaptionConnected : copy.harnessCaptionNotConnected)",
                        "Button(HarnessSurface.actionLabel(action, copy: copy)) {\n"
                            + "                model.beginHarnessAction(id: row.id, action: action)\n"
                            + "            }\n"
-                           + "            .buttonStyle(GlassButtonStyle(action == .connect ? .primary : .glass))\n"
+                           + "            .buttonStyle(GlassButtonStyle(action == .connect ? .glass : .destructive))\n"
                            + "            .accessibilityLabel(Text(row.name) + Text(verbatim: \": \") + Text(HarnessSurface.actionLabel(action, copy: copy)))\n"
                            + "            .disabled(model.harnessBusy)\n",
-                       "if let tool = HarnessToolArt.tool(harness: row.id) {\n"
-                           + "                GlassToolTile(.tool(tool))\n"
-                           + "            } else {\n"
-                           + "                Image(systemName: \"terminal\")\n"
-                           + "                    .glassGlyph(14)",
-                       "GlassExpander(copy.harnessPreviewTitle, isOpen: $settingsExpanded)\n"
-                           + "                if settingsExpanded {\n",
+                       ".padding(.vertical, 15)",
+                       ".overlay(alignment: .bottom) { GlassHairline(GlassColor.hairline) }",
                        "HarnessSurface.restartSentence(row, state: state, copy: copy)",
                        "HarnessSurface.lastCallSentence(row, calls: model.harnessCalls)",
-                       "HarnessSurface.rowSentence(\n                    row, copy: copy, calls: model.harnessCalls)",
+                       "HarnessSurface.rowSentence(\n                row, copy: copy, calls: model.harnessCalls)",
                        ".glassType(GlassTokens.TypeScale.mono)"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
+        let row = try XCTUnwrap(source.range(of: "private struct HarnessRowView"))
+        let rowEnd = try XCTUnwrap(source.range(of: "/// The change, before it is made."))
+        let rowBody = String(source[row.lowerBound..<rowEnd.lowerBound])
+        XCTAssertFalse(rowBody.contains("GlassCard("), "each tool is a nested card again")
+        XCTAssertFalse(rowBody.contains("GlassToolTile("), "the row carries an icon tile again")
+        XCTAssertFalse(rowBody.contains("GlassExpander("), "the settings file is behind an expander again")
+        XCTAssertFalse(rowBody.contains(".primary"), "Connect is a filled primary again")
         XCTAssertFalse(source.contains("palette("), "the row reads the glass status, not the TC palette")
-        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 1, "one worded state per row")
+        XCTAssertEqual(source.components(separatedBy: "GlassStatusLabel(").count - 1, 0, "the state is plain words, no dot")
         // One mapping: the artwork lives here and the map forwards to it.
         XCTAssertFalse(source.contains("FlowMapScene"), "the list must not read the flow map's copy of the art")
         let map = try Self.text("Views/Monitor/FlowMapScene.swift")
@@ -400,12 +425,121 @@ final class InferenceParityTests: XCTestCase {
             XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
         }
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
-        for needle in ["CredentialSection(copy: copy, prominent: true)", "HarnessListSection(copy: copy)",
+        for needle in ["credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+                       "HarnessListSection(copy: copy, titled: false)",
                        "PrivateAISwitchCard(", "store.setPrivateAI(on:", "copy.writeUnconfirmed", "model.refreshSettings()",
                        "store.privateAI?.on", "model.privateInferenceCopy"] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
         XCTAssertFalse(account.contains("applyPrivateInference("), "the glass switch writes through the data contract")
+    }
+
+    /// P24: #1146's Private AI page order. The subtitle and the Inference
+    /// access / Runtime pair lead, then the tools, the switch, sign-in,
+    /// balance and funding, and the ledger follows the page. The managed
+    /// cards (no #1146 panel, O3) sit before the "Change global settings"
+    /// heading, never under it: the heading says everything below it changes
+    /// standard sessions, and the managed cards do not.
+    func test_theMainPaneFollowsThePrivateAIPageOrder() throws {
+        let account = try Self.text("Views/Monitor/InferenceAccount.swift")
+        let order = ["Text(copy.subtitle)", "label: copy.statInferenceAccess,", "label: copy.statRuntime,",
+                     "ManagedSessionsSection()", "ManagedGlobalSettingsHeader()", "eyebrow: copy.panelToolsEyebrow, title: copy.harnessesTitle,",
+                     "HarnessListSection(copy: copy, titled: false)", "PrivateAISwitchCard(",
+                     "credential: AnyView(CredentialSection(copy: copy, prominent: true, titled: false)))",
+                     "PrivateAIBalanceCard(copy: copy)",
+                     "GlassCard { FundingRow(copy: copy) }"]
+        var cursor = account.startIndex
+        for needle in order {
+            let found = try XCTUnwrap(account.range(of: needle, range: cursor..<account.endIndex),
+                                      "InferenceAccount.swift lacks \(needle) after the one before it")
+            cursor = found.upperBound
+        }
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        let page = try XCTUnwrap(views.range(of: "InferenceAccountSection(store: store)"))
+        let ledger = try XCTUnwrap(views.range(of: "if let page = store.calls {"))
+        XCTAssertLessThan(page.lowerBound, ledger.lowerBound, "the ledger follows the page")
+        XCTAssertFalse(views.contains("ManagedSessionsSection()"), "the managed cards are drawn under the global heading")
+        XCTAssertEqual(account.components(separatedBy: "ManagedSessionsSection()").count - 1, 1)
+        XCTAssertFalse(views.contains("ManagedGlobalSettingsHeader()"), "the global heading sits over the tools it names")
+    }
+
+    /// The Runtime tile reads the listener's report, as the core's
+    /// `runtime_word` does: every running label is on, only `off` is off, and
+    /// an unreported or unfamiliar label is unknown, never off.
+    func test_theRuntimeTileNeverReadsAnUnknownStateAsOff() throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        func word(_ label: String?) -> String {
+            InferenceAccountSection.runtimeWord(label.map { .init(state: $0, port: nil) }, copy: copy)
+        }
+        XCTAssertEqual(word("off"), copy.runtimeOff)
+        for label in ["running", "running_no_backends", "running_answered_elsewhere", "running_destination_unknown"] {
+            XCTAssertEqual(word(label), copy.runtimeOn, label)
+        }
+        XCTAssertEqual(word("stopping"), copy.runtimeStopping)
+        XCTAssertEqual(word("running_elsewhere"), copy.runtimeElsewhere)
+        for label in ["port_in_use", "start_failed", "crashed"] {
+            XCTAssertEqual(word(label), copy.runtimeNotRunning, label)
+        }
+        for label in [nil, "", "a_state_from_a_later_daemon"] {
+            XCTAssertEqual(word(label), copy.runtimeUnknown, String(describing: label))
+        }
+        // Only a working tone may read as on.
+        for label in ["port_in_use", "start_failed", "crashed", "off", "stopping", "running_elsewhere", ""] {
+            XCTAssertNotEqual(word(label), copy.runtimeOn, label)
+        }
+    }
+
+    /// P25: the inspector's sub-line, its two legend cells and its rows
+    /// come from the core's words and the tools list; a list nobody could
+    /// read is a dash, never zero and never "None".
+    func test_theInspectorSummarisesTheToolsInTheCoresWords() async throws {
+        let copy = try XCTUnwrap(PrivateInferenceCopy.decode(fromJSON: TCPrivateInference.copyJSON() ?? ""))
+        let rows = try await SampleDaemonClient(.normalDay).harnessList().harnesses
+        let connected = rows.filter(\.connected)
+        XCTAssertFalse(rows.isEmpty)
+        XCTAssertEqual(PrivateAIInspectorView.subLine(rows, copy: copy),
+                       "\(connected.count) of \(rows.count) tools connected")
+        XCTAssertNil(PrivateAIInspectorView.subLine(nil, copy: copy))
+        XCTAssertEqual(PrivateAIInspectorView.counts(rows).connected, String(connected.count))
+        XCTAssertEqual(PrivateAIInspectorView.counts(rows).notConnected, String(rows.count - connected.count))
+        XCTAssertEqual(PrivateAIInspectorView.names(nil, copy: copy), "—")
+        XCTAssertEqual(PrivateAIInspectorView.names(rows.filter { !$0.connected }, copy: copy), copy.inspectorNone)
+        XCTAssertEqual(PrivateAIInspectorView.names(rows, copy: copy), connected.map(\.name).joined(separator: ", "))
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        for needle in ["GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)",
+                       "GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)",
+                       "InspectorFactRow(label: copy.inspectorStatus, value: state.line,",
+                       "label: copy.inspectorCredential,", "InspectorFactRow(label: copy.inspectorConnectedTools,",
+                       "PrivateAIBalanceCard(copy: copy)", ".glassType(GlassTokens.TypeScale.heading.weight(.bold))"] {
+            XCTAssertTrue(views.contains(needle), "InferenceViews.swift lacks \(needle)")
+        }
+        // P25: #1146's legend cell is a fixed 28pt pill on one line, so
+        // "not connected" never wraps and grows past its neighbour.
+        let containers = try String(
+            contentsOf: GlassSurfaceRulesTests.root.deletingLastPathComponent()
+                .appendingPathComponent("TCDesign/Components/Containers.swift"), encoding: .utf8)
+        let cell = try XCTUnwrap(containers.range(of: "public struct GlassLegendCell"))
+        let cellBody = String(containers[cell.lowerBound...].prefix(1800))
+        XCTAssertTrue(cellBody.contains(".frame(height: GlassTokens.Size.controlLarge)"), "the cell grows with its label")
+        XCTAssertFalse(cellBody.contains(".frame(minHeight: GlassTokens.Size.controlLarge)"))
+        XCTAssertTrue(cellBody.contains(".lineLimit(1)"), "the label may wrap")
+        XCTAssertEqual(GlassTokens.Size.controlLarge, 28)
+    }
+
+    /// V1: the managed accounts header holds only the re-read link; Add and
+    /// Launch sit on their own row at their own width, never wrapped.
+    func test_theManagedActionsNeverBreakPerSyllable() throws {
+        let source = try Self.text("Views/ManagedSessionsView.swift")
+        for needle in ["if model.managedSnapshot != nil { refreshLink }",
+                       "Text(model.managedText(\"add\")).lineLimit(1)",
+                       "Text(model.managedText(\"launch\")).lineLimit(1)",
+                       "return ViewThatFits(in: .horizontal) {",
+                       "accountActions(snapshot)"] {
+            XCTAssertTrue(source.contains(needle), "ManagedSessionsView.swift lacks \(needle)")
+        }
+        XCTAssertFalse(source.contains("headerActions("), "no three-button row in the card header")
+        XCTAssertEqual(source.components(separatedBy: ".fixedSize()\n").count - 1 >= 4, true,
+                       "every header and row action keeps its own width")
     }
 
     /// The glass switch is the legacy card on the store: drawn only under
@@ -415,10 +549,9 @@ final class InferenceParityTests: XCTestCase {
     func test_theGlassSwitchIsTheCardOnTheStore() throws {
         let account = try Self.text("Views/Monitor/InferenceAccount.swift")
         for needle in ["        if let copy = model.privateInferenceCopy {\n"
-                           + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"
-                           + "                GlassCard { CredentialSection(copy: copy, prominent: true) }\n"
-                           + "                GlassCard { HarnessListSection(copy: copy) }\n"
-                           + "                PrivateAISwitchCard(\n",
+                           + "            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n",
+                       "                PrivateAISwitchCard(\n",
+                       "onRefresh: { refreshConnection() },",
                        "isOn: store.privateAI?.on,\n",
                        "state: Self.surfaceState(store.privateAI?.state),\n",
                        "calls: model.privateInferenceCalls,\n",
@@ -426,7 +559,7 @@ final class InferenceParityTests: XCTestCase {
                        "refusal: store.privateAIRefusal,\n",
                        "await store.setPrivateAI(on: on, unconfirmed: copy.writeUnconfirmed)\n"
                            + "                            model.refreshSettings()\n",
-                       "onDismiss: { store.dismissPrivateAIRefusal() })"] {
+                       "onDismiss: { store.dismissPrivateAIRefusal() },"] {
             XCTAssertTrue(account.contains(needle), "InferenceAccount.swift lacks \(needle)")
         }
         XCTAssertFalse(account.contains("truncatingIfNeeded"), "a port out of range is unknown, never another port")
@@ -514,11 +647,11 @@ final class InferenceParityTests: XCTestCase {
                            + "                .fixedSize(horizontal: false, vertical: true)\n"
                            + "            Text(copy.offerNoRepoint)\n",
                        "if let path = row.configPath {\n"
-                           + "                            Label(path, systemImage: \"doc.text\")\n"
-                           + "                                .textSelection(.enabled)\n"
-                           + "                        }\n"
-                           + "                        Label(row.connectCommand, systemImage: \"terminal\")\n"
-                           + "                            .textSelection(.enabled)\n"] {
+                           + "                    Text(verbatim: path)\n"
+                           + "                        .textSelection(.enabled)\n"
+                           + "                }\n"
+                           + "                Text(verbatim: row.connectCommand)\n"
+                           + "                    .textSelection(.enabled)\n"] {
             XCTAssertTrue(source.contains(needle), "HarnessListView.swift lacks \(needle)")
         }
     }

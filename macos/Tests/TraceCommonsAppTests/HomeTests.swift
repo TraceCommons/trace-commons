@@ -179,8 +179,42 @@ final class HomeTests: XCTestCase {
         XCTAssertFalse(HomeFormat.meta(row, compact: true).contains(MonitorWords.withdrawn))
         let full = HomeFormat.meta(row, compact: false)
         XCTAssertTrue(full.hasPrefix(day))
-        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .file)), full)
+        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .memory)), full)
         XCTAssertTrue(full.contains(MonitorWords.withdrawn), full)
+    }
+
+    /// Ron's History row says its tool, then its day; the size, the
+    /// withdrawal and how it was approved are the opened row's.
+    func test_aHistoryRowSaysToolThenDay() throws {
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-03-14T15:00:00Z","source":"claude-code","uploaded_bytes":48213,"revoked_at":"2026-09-30T09:00:00Z"}"#.utf8))
+        let day = try XCTUnwrap(row.submittedAt).formatted(.dateTime.month(.abbreviated).day())
+        let meta = HomeFormat.rowMeta(row)
+        XCTAssertEqual(meta, InferenceTabView.toolName("claude-code") + " \u{00B7} " + day)
+        XCTAssertFalse(meta.contains(MonitorWords.withdrawn))
+        let bare = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(#"{"submission_id":"b"}"#.utf8))
+        XCTAssertEqual(HomeFormat.rowMeta(bare), "\u{2014}")
+    }
+
+    /// Ron's filter wraps onto a second line when the pane is too narrow
+    /// for all five, rather than scrolling the rest out of sight.
+    func test_theFilterWrapsOntoASecondLine() {
+        let sizes = Array(repeating: CGSize(width: 90, height: 24), count: 5)
+        let narrow = HistoryFilterFlow.lines(width: 300, sizes: sizes, spacing: 4)
+        XCTAssertEqual(narrow.map(\.items), [[0, 1, 2], [3, 4]])
+        XCTAssertEqual(narrow.first?.width, 278)
+        let wide = HistoryFilterFlow.lines(width: 1000, sizes: sizes, spacing: 4)
+        XCTAssertEqual(wide.map(\.items), [[0, 1, 2, 3, 4]])
+        // An item wider than the line still gets a line of its own.
+        let tight = HistoryFilterFlow.lines(width: 50, sizes: sizes, spacing: 4)
+        XCTAssertEqual(tight.count, 5)
+    }
+
+    /// The community's accept rate is a whole percentage, and a dash when
+    /// the commons did not say.
+    func test_theAcceptRateIsAPercentage() {
+        XCTAssertEqual(HomeFormat.rate(nil), "\u{2014}")
+        XCTAssertEqual(HomeFormat.rate(0.5), 0.5.formatted(.percent.precision(.fractionLength(0))))
     }
 
     /// A full page of History says how many of the total it shows, in the

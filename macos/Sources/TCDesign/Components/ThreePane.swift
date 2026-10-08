@@ -18,7 +18,8 @@ public extension EnvironmentValues {
 /// - Opening a pane grows the window to the right by that pane and its gap;
 ///   closing it shrinks the window by the same (`windowWidth(current:from:to:)`),
 ///   so no other pane moves or changes width.
-/// - 10pt window padding, 10pt gaps; a hidden pane reserves no space.
+/// - No window padding (#1146 `.tc-window--floating`), 10pt gaps; a hidden
+///   pane reserves no space.
 public struct GlassPaneLayout: Equatable, Sendable {
     public let main: CGFloat
     /// `nil` when the map is not drawn.
