@@ -4449,15 +4449,15 @@ def _comparison_side(**overrides):
     return side
 
 
-def _compared_fields(compared=10, unexplained=None):
-    """The count fields of a report that compared `compared` of its 10
-    traces. `unexplained` maps a compared field to its count; the pairs that
-    differ are the last pairs."""
+def _compared_fields(compared=10, unexplained=None, trace_count=10):
+    """The count fields of a report that compared `compared` of its
+    `trace_count` traces. `unexplained` maps a compared field to its count;
+    the pairs that differ are the last pairs."""
     unexplained = dict(unexplained or {})
     total = max(unexplained.values(), default=0)
     return {
         "compared_count": compared,
-        "partial": compared < 10,
+        "partial": compared < trace_count,
         "equal_count": compared - total,
         "unexplained_counts": unexplained,
         "unexplained_total": total,
@@ -4516,28 +4516,37 @@ def _write_compare_outputs(
     branch_gaps=(),
     emit=True,
     compared=None,
+    unexplained_list=None,
     result_overrides=None,
     evidence_overrides=None,
     **overrides,
 ):
     """What `pipeline_compare_run` leaves behind: the records file, the
     report, and, for a full run, one check result and its evidence (the
-    emitter does nothing without its three variables). `unexplained` maps a
+    emitter does nothing without its three variables). The pin digests and
+    the trace count are those of the export manifest. `unexplained` maps a
     compared field to its count. `compared` is the number of pairs before an
-    early stop (default: the limit, or all 10). `overrides` replaces report
-    fields. Returns the report."""
+    early stop (default: the limit, or each trace). `overrides` replaces
+    report fields, and `unexplained_list` the report's `unexplained` list.
+    Returns the report."""
     records = b'{"position":0,"side":"baseline"}\n{"position":0,"side":"candidate"}\n'
     Path(env["TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH"]).write_bytes(records)
+    manifest = json.loads(Path(env["TRACE_COMMONS_PIPELINE_COMPARE_MANIFEST_PATH"]).read_text())
+    trace_count = manifest["sample_count"]
     if compared is None:
-        compared = min(int(env.get("TRACE_COMMONS_PIPELINE_COMPARE_LIMIT", 10)), 10)
+        compared = min(int(env.get("TRACE_COMMONS_PIPELINE_COMPARE_LIMIT", trace_count)), trace_count)
     check_id = env["TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID"]
     fields = {
-        **_compared_fields(compared, unexplained),
+        "pin": {field: manifest[field] for field in _COMPARE_DIGEST_FIELDS},
+        "trace_count": trace_count,
+        **_compared_fields(compared, unexplained, trace_count),
         "skew": env.get("TRACE_COMMONS_PIPELINE_COMPARE_SKEW"),
         "branch_gaps": list(branch_gaps),
         "records_digest": _digest(records),
         **overrides,
     }
+    if unexplained_list is not None:
+        fields["unexplained"] = unexplained_list
     report = _comparison_report(check_id, **fields)
     report_bytes = results.canonical(report) + b"\n"
     Path(env["TRACE_COMMONS_PIPELINE_COMPARE_REPORT_PATH"]).write_bytes(report_bytes)
@@ -4608,6 +4617,11 @@ class ComparisonReportValidationTests(unittest.TestCase):
             first_unexplained_position=0,
         )
         comparison.validate_comparison_report(long_list)
+        # Each compared field name, `record_pair`, and each gap label is valid.
+        every_field = {field: 1 for field in (*_COMPARED_FIELD_NAMES, "record_pair")}
+        self.assertEqual(len(every_field), 23)
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(10, every_field)))
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, branch_gaps=list(_BRANCH_GAP_LABELS)))
 
         text = comparison.markdown(failed)
         self.assertTrue(text.startswith("# Pipeline comparison report\n"))
@@ -4723,6 +4737,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
             del target[field]
             return {section: value}
 
+        one = _compared_fields(10, {"admission": 1})
         malformed = (
             without("distribution", "refused"),
             without("floors", "novelty_floor_micros"),
@@ -4741,6 +4756,23 @@ class ComparisonReportValidationTests(unittest.TestCase):
             {"trace_count": "10"},
             {"first_unexplained_position": -1},
             {"extra_field": 1},
+            # Values that the harness can never write: a name outside the
+            # closed sets, a position outside the compared pairs, and counts
+            # that do not agree on "no unexplained trace".
+            {"branch_gaps": ["A1B2C3D4-0000-4000-8000-ABCDEFABCDEF"]},
+            {"branch_gaps": ["s04m.jsonl"]},
+            {"branch_gaps": ["member_true", "admission"]},
+            {**one, "unexplained_counts": {"tenant-a": 1}},
+            {**one, "unexplained_counts": {"admission": 1, "position": 1}},
+            {**one, "unexplained": [{**one["unexplained"][0], "fields": ["tenant_id"]}]},
+            {**one, "unexplained": [{**one["unexplained"][0], "fields": ["admission", "s04m.jsonl"]}]},
+            {"unexplained_counts": {"admission": 1}},
+            {**one, "unexplained_counts": {}},
+            {"first_unexplained_position": 7},
+            {**one, "first_unexplained_position": None},
+            {"alignment_lost_position": 99},
+            {"alignment_lost_position": 10},
+            {**_compared_fields(5), "alignment_lost_position": 5},
         )
         for overrides in malformed:
             with self.subTest(overrides=overrides):
@@ -4750,6 +4782,42 @@ class ComparisonReportValidationTests(unittest.TestCase):
         for value in ([], "report", 3, None):
             with self.subTest(value=value):
                 self._refused(value)
+
+
+# The compared field names of the Interfaces section, and the labels of the
+# gate branches with no evidence.
+_COMPARED_FIELD_NAMES = (
+    "receipt_code",
+    "terminal",
+    "privacy_risk",
+    "privacy_basis",
+    "admission",
+    "scored",
+    "quality_passed",
+    "novelty_passed",
+    "perplexity_micros",
+    "tail_fraction_micros",
+    "peak_perplexity_micros",
+    "novelty_score_micros",
+    "peak_novelty_micros",
+    "chunk_count",
+    "total_chunk_count",
+    "chunks_capped",
+    "index_cardinality",
+    "credit_quality_micros",
+    "credit_quality_version",
+    "member",
+    "member_chunks",
+    "credit_events",
+)
+_BRANCH_GAP_LABELS = (
+    "quality_passed_true",
+    "quality_passed_false",
+    "novelty_passed_true",
+    "novelty_passed_false",
+    "member_true",
+    "member_false",
+)
 
 
 def _compare_pin(**overrides):
@@ -4787,7 +4855,9 @@ class CompareExportTests(unittest.TestCase):
         shutil.rmtree(self.run.run_dir, ignore_errors=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def _export(self, pin, *, manifest=None, **options):
+    def _export(self, pin, *, manifest=None, manifest_text=None, **options):
+        """`manifest` replaces fields of the manifest. `manifest_text` is
+        written as the whole file; `_DROP` leaves no file."""
         pin_path = self.tmp / "pin.json"
         pin_path.write_text(json.dumps(pin))
         if manifest is None:
@@ -4804,7 +4874,8 @@ class CompareExportTests(unittest.TestCase):
             self.commands.append((step, list(command)))
             output_dir = Path(command[command.index("--output-dir") + 1])
             output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "source-manifest.json").write_text(json.dumps(written))
+            if manifest_text is not _DROP:
+                (output_dir / "source-manifest.json").write_text(manifest_text or json.dumps(written))
 
         with mock.patch.object(comparison, "run_child", fake_run_child):
             return comparison.export_compare_corpus(self.run, pin_path, {}, **options)
@@ -4909,6 +4980,13 @@ class CompareExportTests(unittest.TestCase):
                     self._export(_compare_pin(), name="corpus", manifest=manifest)
                 self.assertEqual(str(ctx.exception), label)
 
+    def test_an_export_without_a_manifest_object_gives_a_label(self):
+        for index, manifest_text in enumerate((_DROP, "{not json", "[]", '"manifest"', "null")):
+            with self.subTest(manifest_text=manifest_text):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._export(_compare_pin(), name=f"corpus{index}", manifest_text=manifest_text)
+                self.assertEqual(str(ctx.exception), "comparison_manifest_malformed")
+
 
 class CompareCommandTests(_CorpusRunCase):
     _SELF_TEST = {
@@ -4928,16 +5006,33 @@ class CompareCommandTests(_CorpusRunCase):
         super().setUp()
         self.local_pin = str(pipeline.COMPARE_LOCAL_PIN)
         self.local = self.tmp / "local"
+        # What the fake export writes: `sample_count` (default: the two
+        # counts of the pin), and the whole manifest file when a test sets
+        # `manifest_text` (`_DROP` leaves no file).
+        self.sample_count = None
+        self.manifest_text = None
 
     def _fake_export(self, run, pin_path, env, *, name, local_dir=None, release=False):
+        """The export: the two corpus files and a manifest with the digests
+        of the pin (a digest that the pin lacks gets a value)."""
         self.calls.append(("export", Path(pin_path), name, local_dir, release))
+        pin = json.loads(Path(pin_path).read_text())
+        sample_count = pin["bootstrap_count"] + pin["holdout_count"]
+        manifest = {
+            **{field: pin.get(field, _fake_hash(f"export-{field}")) for field in _COMPARE_DIGEST_FIELDS},
+            "source": {"with_events": True},
+            "sample_count": sample_count if self.sample_count is None else self.sample_count,
+            "contains_raw_trace_text": False,
+        }
         output_dir = run.run_dir / "compare" / name
         output_dir.mkdir(parents=True, exist_ok=True)
         paths = tuple(
             output_dir / file for file in ("bootstrap-compare.jsonl", "holdout-compare.jsonl", "source-manifest.json")
         )
-        for path in paths:
+        for path in paths[:2]:
             path.write_text("{}\n")
+        if self.manifest_text is not _DROP:
+            paths[2].write_text(self.manifest_text or json.dumps(manifest))
         return paths
 
     def _harness(self, default=None, **by_step):
@@ -4985,8 +5080,13 @@ class CompareCommandTests(_CorpusRunCase):
     def _exports(self):
         return [call for call in self.calls if call[0] == "export"]
 
-    def _report_path(self, check_id=_COMPARE_LOCAL, partial=False):
-        return self.local / f"pipeline-comparison-{check_id}{'-partial' if partial else ''}.json"
+    def _report_path(self, check_id=_COMPARE_LOCAL, partial=False, failed=False):
+        suffix = "-partial" if partial else "-failed" if failed else ""
+        return self.local / f"pipeline-comparison-{check_id}{suffix}.json"
+
+    def _local_files(self):
+        """The names of the files under `.local/`."""
+        return sorted(path.name for path in self.local.glob("*")) if self.local.is_dir() else []
 
     def test_compare_passes_only_the_expected_variables(self):
         code = self._corpus()
@@ -5069,11 +5169,21 @@ class CompareCommandTests(_CorpusRunCase):
         draft = self._write_pin(bootstrap_corpus_digest=_DROP, holdout_corpus_digest=_DROP)
         self.assertEqual(self._corpus(None, "--limit", "3", pin=draft), 0, self.stderr.getvalue())
         self.assertIn("partial=true", self.stdout.getvalue())
-        # A limit that does not make the run partial does not remove the rule.
+        # A limit that does not make the run partial does not remove the
+        # rule. The manifest has the trace count, so the run is refused
+        # before a database starts.
+        for limit in ("10", "11"):
+            with self.subTest(limit=limit):
+                self._again()
+                self.assertEqual(self._corpus(None, "--limit", limit, pin=draft), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_digest_missing")
+                self.assertEqual([call[0] for call in self.calls], ["export"], "no database and no harness")
+        # The same rule after a pass, from the report's own `partial`.
         self._again()
-        self.assertEqual(self._corpus(None, "--limit", "10", pin=draft), 1)
+        self.assertEqual(self._corpus(self._harness({"compared": 10}), "--limit", "3", pin=draft), 1)
         self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_digest_missing")
         self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertFalse(self._report_path().exists())
 
     def test_a_network_pin_uses_the_hf_check_id(self):
         pin = self._write_pin(local_jsonl_dir=_DROP, session_names=_DROP)
@@ -5113,13 +5223,29 @@ class CompareCommandTests(_CorpusRunCase):
         self.assertEqual(self._failure(), "PipelineFailure: comparison_has_unexplained_differences")
         self.assertEqual(
             self.stdout.getvalue().splitlines(),
-            [f"PipelineCompareReport: unexplained=2 alignment_lost=none report=pipeline-comparison-{_COMPARE_LOCAL}.json"],
+            [
+                "PipelineCompareReport: unexplained=2 alignment_lost=none partial=false "
+                f"report=pipeline-comparison-{_COMPARE_LOCAL}.json"
+            ],
         )
         report = json.loads(self._report_path().read_text())
         self.assertEqual(report["unexplained_total"], 2)
         self.assertEqual(report["unexplained_counts"], {"admission": 2})
         self.assertIn("`admission`: 2", self._report_path().with_suffix(".md").read_text())
         self.assertEqual(results.load_results(self.run), {})
+        # A driver error that ends the run after one difference: the label is
+        # the report's, and the line says that the run did not complete.
+        self._again()
+        cut_short = {"fail": True, "compared": 5, "unexplained": {"admission": 1}}
+        self.assertEqual(self._corpus(self._harness(cut_short)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_has_unexplained_differences")
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [
+                "PipelineCompareReport: unexplained=1 alignment_lost=none partial=true "
+                f"report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
+            ],
+        )
 
     def test_a_branch_gap_fails_with_its_label(self):
         gap = {"branch_gaps": ["novelty_passed_false"]}
@@ -5173,14 +5299,172 @@ class CompareCommandTests(_CorpusRunCase):
         """The check id comes from the pin: a report that names the other
         check id is not the report of this run."""
 
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                self._again()
+
+                def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                    other = {**env, "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID": "pipeline_comparison_hf"}
+                    _write_compare_outputs(other, emit=not fail)
+                    if fail:
+                        raise errors.StepFailed(step, 101, run.log_path(step))
+
+                self.assertEqual(self._corpus(harness), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_report_check_mismatch")
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertEqual(self._local_files(), [])
+
+    def test_the_report_must_be_the_report_of_this_run(self):
+        """The report's pin, trace count, and skew are those of the run, for
+        a harness that passes and for one that fails."""
+        pin = json.loads(pipeline.COMPARE_LOCAL_PIN.read_text())
+        pinned = {field: pin[field] for field in _COMPARE_DIGEST_FIELDS}
+        cases = [
+            ((), {"pin": {field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS}}, "comparison_report_pin_mismatch"),
+            ((), {"trace_count": 12, "compared": 12}, "comparison_report_trace_count_mismatch"),
+            # `--corpus` sets no skew: a report with one is not of this run.
+            (("--limit", "3"), {"skew": "baseline_quality_floor"}, "comparison_report_skew_mismatch"),
+            ((), {"compared": 3, "skew": "baseline_quality_floor"}, "comparison_report_skew_mismatch"),
+        ]
+        cases += [
+            ((), {"pin": {**pinned, field: _fake_hash(f"another-{field}")}}, "comparison_report_pin_mismatch")
+            for field in _COMPARE_DIGEST_FIELDS
+        ]
+        for extra, behavior, label in cases:
+            for fail in (False, True):
+                with self.subTest(label=label, behavior=sorted(behavior), fail=fail):
+                    self._again()
+                    self.assertEqual(self._corpus(self._harness({"fail": fail, **behavior}), *extra), 1)
+                    self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+                    self.assertEqual(self.stdout.getvalue(), "")
+                    self.assertEqual(self._local_files(), [])
+
+    def test_a_pass_compares_the_expected_number_of_traces(self):
+        cases = (
+            # With no limit, a pass compares each trace of the pin.
+            ((), {"compared": 3}),
+            ((), {"compared": 0}),
+            (("--limit", "3"), {"compared": 2}),
+            (("--limit", "3"), {"compared": 0}),
+            (("--limit", "3"), {"compared": 10}),
+            (("--limit", "20"), {"compared": 3}),
+        )
+        for extra, behavior in cases:
+            with self.subTest(extra=extra, behavior=behavior):
+                self._again()
+                self.assertEqual(self._corpus(self._harness(behavior), *extra), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_compared_count_mismatch")
+                self.assertEqual(self.stdout.getvalue(), "")
+                self.assertEqual(self._local_files(), [])
+        # A limit above the trace count gives a full run.
+        self._again()
+        self.assertEqual(self._corpus(None, "--limit", "20"), 0, self.stderr.getvalue())
+        self.assertIn("traces=10 equal=10 permitted=0 unexplained=0 partial=false", self.stdout.getvalue())
+        self.assertEqual(set(results.load_results(self.run)), {_COMPARE_LOCAL})
+
+    def test_the_results_of_a_run_are_exactly_its_own(self):
+        def with_result(check_id):
+            def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+                _write_compare_outputs(env)
+                _emit_check(env, check_id)
+
+            return harness
+
+        # A partial run has no check result.
+        self.assertEqual(self._corpus(with_result(_COMPARE_LOCAL), "--limit", "3"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_check_results_unexpected")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+        # A full run has the result of its check and no other.
+        self._again()
+        self.assertEqual(self._corpus(with_result("pipeline_comparison_hf")), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_check_results_unexpected")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+
+    def test_a_failed_step_with_a_report_of_a_pass_is_not_written_as_one(self):
+        """A harness that fails after a full report with no failure (the app
+        stop, the emitter): no check result exists for the report, so it
+        does not get the name of the full-run report."""
+        self.assertEqual(self._corpus(self._harness({"fail": True})), 101)
+        self.assertTrue(self._failure().startswith("PipelineFailure: step_failed:compare_run exit=101 log="))
+        name = f"pipeline-comparison-{_COMPARE_LOCAL}-failed"
+        self.assertEqual(
+            self.stdout.getvalue().splitlines(),
+            [f"PipelineCompareReport: unexplained=0 alignment_lost=none partial=false report={name}.json"],
+        )
+        self.assertEqual(self._local_files(), [f"{name}.json", f"{name}.md"])
+        self.assertEqual(
+            self._report_path(failed=True).read_bytes(), (self.run.run_dir / "compare_run-report.json").read_bytes()
+        )
+        # A partial report of a failed step keeps the name of a partial run.
+        self._again()
+        self.assertEqual(self._corpus(self._harness({"fail": True, "compared": 4})), 101)
+        self.assertIn("partial=true report=", self.stdout.getvalue())
+        self.assertTrue(self._report_path(partial=True).is_file())
+        self.assertFalse(self._report_path().exists())
+
+    def test_a_report_write_that_fails_keeps_the_failure_of_the_step(self):
+        for behavior, code, start in (
+            ({"fail": True}, 101, "PipelineFailure: step_failed:compare_run exit=101 log="),
+            ({"fail": True, "unexplained": {"admission": 2}}, 1, "PipelineFailure: comparison_has_unexplained_differences"),
+        ):
+            with self.subTest(behavior=behavior):
+                self._again()
+                with mock.patch.object(pipeline, "atomic_write", side_effect=OSError("no space")):
+                    self.assertEqual(self._corpus(self._harness(behavior)), code)
+                lines = [line for line in self.stderr.getvalue().splitlines() if line]
+                self.assertEqual(len(lines), 1, lines)
+                self.assertTrue(lines[0].startswith(start), lines[0])
+                self.assertEqual(self.stdout.getvalue(), "")
+
+    def test_a_full_pass_without_its_records_file_gives_a_label(self):
         def harness(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
-            _write_compare_outputs({**env, "TRACE_COMMONS_PIPELINE_COMPARE_CHECK_ID": "pipeline_comparison_hf"})
+            _write_compare_outputs(env)
+            Path(env["TRACE_COMMONS_PIPELINE_COMPARE_RECORDS_PATH"]).unlink()
 
         self.assertEqual(self._corpus(harness), 1)
-        self.assertEqual(self._failure(), "PipelineFailure: comparison_report_check_mismatch")
-        self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
-        self.assertFalse(self._report_path().exists())
-        self.assertFalse(self._report_path("pipeline_comparison_hf").exists())
+        self.assertEqual(self._failure(), "PipelineFailure: comparison_records_missing")
+        self.assertEqual(self.stdout.getvalue(), "")
+        self.assertEqual(self._local_files(), [])
+
+    def test_a_manifest_that_is_not_usable_gives_a_label(self):
+        usable = {
+            **{field: _fake_hash(field) for field in _COMPARE_DIGEST_FIELDS},
+            "source": {"with_events": True},
+            "sample_count": 10,
+            "contains_raw_trace_text": False,
+        }
+        texts = [_DROP, "{not json", "[]"]
+        texts += [json.dumps({key: value for key, value in usable.items() if key != field}) for field in ("sample_count", "order_digest")]
+        texts += [json.dumps({**usable, **changed}) for changed in ({"sample_count": "10"}, {"sample_count": -1}, {"sample_count": True}, {"source_digest": "digest"})]
+        for manifest_text in texts:
+            for argv in (["--corpus", self.local_pin], ["--self-test"]):
+                with self.subTest(manifest_text=manifest_text, argv=argv[0]):
+                    self._again()
+                    self.manifest_text = manifest_text
+                    self.assertEqual(self._compare(argv), 1)
+                    self.assertEqual(self._failure(), "PipelineFailure: comparison_manifest_malformed")
+                    self.assertEqual({call[0] for call in self.calls}, {"export"}, "no database and no harness")
+
+    def test_a_pin_file_that_cannot_be_read_gives_a_label(self):
+        missing = self.tmp / "no-such-pin.json"
+        not_json = self.tmp / "not-json.json"
+        not_json.write_text("{not json")
+        not_an_object = self.tmp / "list.json"
+        not_an_object.write_text("[]")
+        not_text = self.tmp / "bytes.json"
+        not_text.write_bytes(b"\xff\xfe\x00")
+        for pin_path in (missing, not_json, not_an_object, not_text, self.tmp):
+            with self.subTest(pin=pin_path.name):
+                self.assertEqual(self._corpus(pin=str(pin_path)), 1)
+                self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_unreadable")
+                self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # A JSON object that is not a pin keeps the label of `load_pin`.
+        other = self.tmp / "other.json"
+        other.write_text(json.dumps({"schema": corpus.CORPUS_SCHEMA}))
+        self.assertEqual(self._corpus(pin=str(other)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: unsupported_pin_schema")
 
     def test_a_report_with_a_skew_gets_no_check_result(self):
         self.assertEqual(self._corpus(self._harness({"skew": "baseline_quality_floor"})), 1)
@@ -5327,6 +5611,16 @@ class CompareCommandTests(_CorpusRunCase):
     def test_self_test_fails_when_an_expected_failure_passes(self):
         risk = self._SELF_TEST["compare_self_risk"]
         skew = self._SELF_TEST["compare_self_skew"]
+        three_entries = [
+            {"position": position, "trace_hash": _fake_hash(f"trace-{position}"), "fields": ["admission"]}
+            for position in (5, 6, 7)
+        ]
+
+        def refused(side):
+            sides = {"baseline": _comparison_side(), "candidate": _comparison_side()}
+            sides[side] = _comparison_side(admit=9, refused=1)
+            return sides
+
         cases = (
             ({"compare_self_risk": {}}, "compare_self_test_risk_passed"),
             ({"compare_self_skew": {}}, "compare_self_test_skew_passed"),
@@ -5336,6 +5630,33 @@ class CompareCommandTests(_CorpusRunCase):
             ({"compare_self_risk": {**risk, "unexplained": {"privacy_risk": 2}}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {"fail": True, "branch_gaps": ["member_true"]}}, "compare_self_test_risk_fields"),
             ({"compare_self_repeat": {"records_digest": _fake_hash("other-records")}}, "compare_self_test_not_deterministic"),
+            # The risk scenario has one exact result: the two declared risks
+            # as two `admission` differences, in a run that compares each
+            # trace and keeps the alignment. A run that stops at the first
+            # risk trace, or that finds one risk of the two, is another result.
+            (
+                {"compare_self_risk": {"fail": True, "compared": 3, "unexplained": {"admission": 1}, "alignment_lost_position": 2}},
+                "compare_self_test_risk_fields",
+            ),
+            ({"compare_self_risk": {**risk, "unexplained": {"admission": 1}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "unexplained": {"admission": 3}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "unexplained_counts": {"admission": 3}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "compared": 7}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "alignment_lost_position": 7}}, "compare_self_test_risk_fields"),
+            (
+                {"compare_self_risk": {**risk, "unexplained_total": 3, "equal_count": 5, "unexplained_list": three_entries}},
+                "compare_self_test_risk_fields",
+            ),
+            ({"compare_self_risk": {**risk, "distribution": refused("baseline")}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": refused("candidate")}}, "compare_self_test_risk_fields"),
+            # A scenario that must pass compares each trace of its pin.
+            ({"compare_self_pass": {"compared": 0}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_pass": {"compared": 9}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_repeat": {"compared": 0}}, "compare_self_test_pass_incomplete"),
+            # The report of the skew scenario names the skew. `_compare_once`
+            # examines this for each run, so its label comes first.
+            ({"compare_self_skew": {**skew, "skew": None}}, "comparison_report_skew_mismatch"),
+            ({"compare_self_pass": {"skew": "baseline_quality_floor"}}, "comparison_report_skew_mismatch"),
             # A scenario that must pass, with a report that names a failure.
             ({"compare_self_pass": {"unexplained": {"admission": 1}}}, "comparison_has_unexplained_differences"),
             ({"compare_self_repeat": {"branch_gaps": ["member_true"]}}, "comparison_gate_branch_not_exercised"),
@@ -5348,6 +5669,12 @@ class CompareCommandTests(_CorpusRunCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(self._failure(), f"PipelineFailure: {label}")
                 self.assertNotIn("PipelineCompareSelfTestOK", self.stdout.getvalue())
+        # A pin with no trace: a pass that compared nothing.
+        self._again()
+        self.sample_count = 0
+        self.assertEqual(self._compare(["--self-test"], self._harness(**self._SELF_TEST)), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: compare_self_test_pass_incomplete")
+        self.sample_count = None
         # A scenario that must pass and fails keeps its step failure, with
         # the scenario's name, and an expected failure that leaves no report
         # does too.
@@ -5393,7 +5720,7 @@ class CompareCommandTests(_CorpusRunCase):
         self.assertEqual(
             self.stdout.getvalue().splitlines(),
             [
-                "PipelineCompareReport: unexplained=1 alignment_lost=4 "
+                "PipelineCompareReport: unexplained=1 alignment_lost=4 partial=true "
                 f"report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
             ],
         )
@@ -5463,6 +5790,7 @@ class CompareCommandTests(_CorpusRunCase):
         self.assertEqual(self._corpus(), 1)
         self.assertEqual(self._failure(), "PipelineFailure: code_revision_changed")
         self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
+        self.assertEqual(self._local_files(), [], "a refused run leaves no report that reads as a pass")
 
 
 if __name__ == "__main__":

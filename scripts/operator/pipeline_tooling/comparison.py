@@ -79,6 +79,47 @@ _SIDE_COUNTS = (
     "chunks_capped",
 )
 _FLOORS = ("perplexity_floor_micros", "tail_fraction_floor_micros", "novelty_floor_micros")
+# The names that `unexplained_counts` and an `unexplained` entry can hold:
+# the compared fields of `versioned_pipeline_comparison.rs`, and
+# `record_pair` for two records that are not of one trace.
+_COMPARED_FIELDS = frozenset(
+    {
+        "receipt_code",
+        "terminal",
+        "privacy_risk",
+        "privacy_basis",
+        "admission",
+        "scored",
+        "quality_passed",
+        "novelty_passed",
+        "perplexity_micros",
+        "tail_fraction_micros",
+        "peak_perplexity_micros",
+        "novelty_score_micros",
+        "peak_novelty_micros",
+        "chunk_count",
+        "total_chunk_count",
+        "chunks_capped",
+        "index_cardinality",
+        "credit_quality_micros",
+        "credit_quality_version",
+        "member",
+        "member_chunks",
+        "credit_events",
+        "record_pair",
+    }
+)
+# The gate branches that `ComparisonSummary::branch_gaps` can name.
+_BRANCH_GAPS = frozenset(
+    {
+        "quality_passed_true",
+        "quality_passed_false",
+        "novelty_passed_true",
+        "novelty_passed_false",
+        "member_true",
+        "member_false",
+    }
+)
 _REPORT_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "records_digest")
 _REPORT_COUNTS = ("trace_count", "compared_count", "equal_count", "unexplained_total")
 _SKEWS = (None, "baseline_quality_floor")
@@ -127,7 +168,9 @@ def export_compare_corpus(run, pin_path, env, *, name, local_dir=None, release=F
 
     Each of the five digests that the pin has must equal the manifest's
     (`hf_<field>_mismatch`), the manifest must say that the export had
-    `--with-events`, and it must hold no raw trace text."""
+    `--with-events`, and it must hold no raw trace text. An export that
+    leaves no manifest, or one that is not a JSON object, is
+    `comparison_manifest_malformed`."""
     pin = load_pin(pin_path)
     session_names = pin.get("session_names") or []
     declared_risks = pin.get("declared_privacy_risk") or {}
@@ -183,7 +226,11 @@ def export_compare_corpus(run, pin_path, env, *, name, local_dir=None, release=F
     run_child(run, f"compare_export_{name}", command, env)
 
     manifest_path = output_dir / "source-manifest.json"
-    manifest = json.loads(manifest_path.read_text())
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+    except (OSError, ValueError) as error:
+        raise ToolingError("comparison_manifest_malformed") from error
+    require(isinstance(manifest, dict), "comparison_manifest_malformed")
     for field in PIN_DIGEST_FIELDS:
         expected = pin.get(field)
         if expected is not None:
@@ -211,7 +258,10 @@ def validate_comparison_report(report):
     verify, or whose counts do not agree is not. A report that lacks a
     field, has a field that the harness does not write, or holds a value of
     the wrong type fails with `comparison_report_malformed`, never a
-    traceback."""
+    traceback. So does a value that the harness can never write: a name
+    outside the compared fields or the gap labels, an alignment position
+    outside the compared pairs, or counts that do not agree on whether a
+    trace is unexplained."""
     try:
         _validate_comparison_report(report)
     except (KeyError, TypeError, AttributeError, IndexError) as error:
@@ -230,10 +280,13 @@ def _is_count_map(value):
     return isinstance(value, dict) and all(_is_count(count) for count in value.values())
 
 
-def _is_label_list(value):
-    """A list of texts. Each text of a report is a label already
-    (`safe_report_value`)."""
+def _is_text_list(value):
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_name_list(value, names):
+    """A list whose entries are all in the closed set `names`."""
+    return _is_text_list(value) and set(value) <= names
 
 
 def _validate_comparison_report(report):
@@ -253,7 +306,7 @@ def _validate_comparison_report(report):
     require(sha256_digest(canonical(unsigned)) == report["report_digest"], "report_digest_mismatch")
 
     require(isinstance(report["partial"], bool) and report["skew"] in _SKEWS, malformed)
-    require(_is_label_list(report["safe_blockers"]) and _is_label_list(report["branch_gaps"]), malformed)
+    require(_is_text_list(report["safe_blockers"]) and _is_name_list(report["branch_gaps"], _BRANCH_GAPS), malformed)
     floors = report["floors"]
     require(
         isinstance(floors, dict) and set(floors) == set(_FLOORS) and all(_is_count(floors[key]) for key in _FLOORS),
@@ -261,8 +314,17 @@ def _validate_comparison_report(report):
     )
     require(all(_is_count(report[field]) for field in _REPORT_COUNTS), malformed)
     require(_is_count_map(report["permitted_counts"]) and _is_count_map(report["unexplained_counts"]), malformed)
+    require(set(report["unexplained_counts"]) <= _COMPARED_FIELDS, malformed)
     for field in ("first_unexplained_position", "alignment_lost_position"):
         require(report[field] is None or _is_count(report[field]), malformed)
+    # The pair that lost the alignment is the last compared pair.
+    lost = report["alignment_lost_position"]
+    require(lost is None or lost < report["compared_count"], malformed)
+    # The total, the field counts, and the first position agree on whether
+    # a trace is unexplained.
+    none_unexplained = report["unexplained_total"] == 0
+    require((not report["unexplained_counts"]) is none_unexplained, malformed)
+    require((report["first_unexplained_position"] is None) is none_unexplained, malformed)
     distribution = report["distribution"]
     require(isinstance(distribution, dict) and set(distribution) == set(SIDES), malformed)
     for side in SIDES:
@@ -280,7 +342,7 @@ def _validate_comparison_report(report):
             and set(rule) == {"rule", "source", "fields"}
             and isinstance(rule["rule"], str)
             and isinstance(rule["source"], str)
-            and _is_label_list(rule["fields"]),
+            and _is_text_list(rule["fields"]),
             malformed,
         )
     unexplained = report["unexplained"]
@@ -291,7 +353,7 @@ def _validate_comparison_report(report):
             and set(entry) == {"position", "trace_hash", "fields"}
             and _is_count(entry["position"])
             and _is_hash(entry["trace_hash"])
-            and _is_label_list(entry["fields"])
+            and _is_name_list(entry["fields"], _COMPARED_FIELDS)
             and len(entry["fields"]) > 0,
             malformed,
         )
