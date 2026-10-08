@@ -58,5 +58,10 @@
   "contribution_override": null,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,
+  "idle_sessions": {
+    "count": 0,
+    "tools": [],
+    "threshold_days": 3
+  },
   "dev_dry_run": false
 }

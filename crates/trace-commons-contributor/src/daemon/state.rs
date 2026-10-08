@@ -14,7 +14,7 @@
 //!
 //! Paths appear in this file and never leave it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -206,6 +206,13 @@ pub struct DaemonState {
     /// `nudge_opened {kind: "verdicts_landed"}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdicts_acked_through: Option<DateTime<Utc>>,
+    /// Nudge U4: the idle candidates an announcement (folded into a digest
+    /// or standalone) has already named, by queue entry id (opaque), so the
+    /// next batch names only new ones and never one session at a time.
+    /// Pruned to entries still `Pending` (`nudge::prune_idle_announced`) and
+    /// cleared by `unenroll` (`clear_nudges`). Never a path.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub idle_announced: BTreeSet<uuid::Uuid>,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -240,6 +247,7 @@ impl DaemonState {
             verdict_marks_seeded: false,
             verdicts_pending: None,
             verdicts_acked_through: None,
+            idle_announced: BTreeSet::new(),
             last_written: LastWritten::default(),
         }
     }
@@ -278,8 +286,8 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Forget every in-app suggestion stamp and the verdict news with its
-    /// high-water mark: what `unenroll` calls so a next account inherits none
+    /// Forget every in-app suggestion stamp, the verdict news with its
+    /// high-water mark, and the idle-session batching set: what `unenroll` calls so a next account inherits none
     /// of this one's. The marks go back to unseeded, so the next account's
     /// first poll seeds silently and the history cache this Mac keeps never
     /// replays as its news. Returns whether anything was there to forget, so
@@ -290,12 +298,14 @@ impl DaemonState {
             || !self.verdict_marks.is_empty()
             || self.verdict_marks_seeded
             || self.verdicts_pending.is_some()
-            || self.verdicts_acked_through.is_some();
+            || self.verdicts_acked_through.is_some()
+            || !self.idle_announced.is_empty();
         self.nudges.clear();
         self.verdict_marks.clear();
         self.verdict_marks_seeded = false;
         self.verdicts_pending = None;
         self.verdicts_acked_through = None;
+        self.idle_announced.clear();
         had
     }
 
@@ -635,6 +645,8 @@ mod tests {
         assert!(!loaded.verdict_marks_seeded);
         assert_eq!(loaded.verdicts_pending, None);
         assert_eq!(loaded.verdicts_acked_through, None);
+        // Nudge U4: the idle batching set loads empty too.
+        assert!(loaded.idle_announced.is_empty());
         let written = serde_json::to_value(DaemonState::new()).unwrap();
         for key in [
             "nudges",
@@ -642,6 +654,7 @@ mod tests {
             "verdict_marks_seeded",
             "verdicts_pending",
             "verdicts_acked_through",
+            "idle_announced",
         ] {
             assert!(written.get(key).is_none(), "{key}: {written}");
         }
@@ -669,5 +682,24 @@ mod tests {
         assert!(loaded.clear_nudges(), "a non-empty ledger reports a change");
         assert!(loaded.nudges.is_empty());
         assert!(!loaded.clear_nudges(), "an empty one reports none");
+    }
+
+    /// Nudge U4: the idle batching set holds opaque entry ids only,
+    /// survives a restart, and `clear_nudges` (what `unenroll` calls)
+    /// empties it, so a next account never inherits this one's batches.
+    #[test]
+    fn idle_announced_round_trips_and_clears_on_unenroll() {
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let id = uuid::Uuid::from_u128(7);
+        state.idle_announced.insert(id);
+        state.save(&store).unwrap();
+        let body = std::fs::read_to_string(store.daemon_path(DAEMON_STATE_FILE)).unwrap();
+        assert!(body.contains(&id.to_string()), "{body}");
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded.idle_announced, state.idle_announced);
+        assert!(loaded.clear_nudges(), "a non-empty set reports a change");
+        assert!(loaded.idle_announced.is_empty());
+        assert!(!loaded.clear_nudges());
     }
 }

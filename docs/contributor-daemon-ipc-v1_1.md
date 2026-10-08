@@ -160,6 +160,14 @@ old behaviour, because no application has shipped against `v1` yet. See
   `nudge_opened {kind: "verdicts_landed"}` acknowledges them;
   `nudge_decline` refuses that kind with `nudge-kind-not-declinable`. See
   ["`status.nudge`"](#statusnudge) and ["Events"](#events).
+- **Nudge U4b (idle sessions).** `status` now carries `idle_sessions`
+  (`{count, tools, threshold_days}`, counts and tool display names only),
+  and `status.nudge` gains a third kind, `idle_sessions`, ahead of the other
+  two. `idle_sessions` and `review_backlog` share one "Not now". `list_pending`
+  takes an optional `filter: "idle_sessions"` that lists exactly the set
+  `status.idle_sessions.count` counts. No new event. See
+  ["`status.idle_sessions`"](#statusidle_sessions) and
+  ["`status.nudge`"](#statusnudge).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -541,7 +549,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
+| `list_pending` | `project_id` (optional); `filter` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. The two parameters combine. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -615,8 +623,8 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
-| `nudge_decline` | `kind` (**required**: a suggestion kind label with a "Not now", today only `review_backlog`; `verdicts_landed` is refused with `nudge-kind-not-declinable`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
-| `nudge_opened` | `kind` (**required**: `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_decline` | `kind` (**required**: a suggestion kind label with a "Not now", today `idle_sessions` or `review_backlog`, which share one; `verdicts_landed` is refused with `nudge-kind-not-declinable`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
@@ -642,6 +650,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "decisions_owed": 0,
   "unpurposed_traces": 0,
   "nudge": { "state": "none", "lead": null },
+  "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
   "daily_budget": {
@@ -675,7 +684,7 @@ contribution override" below.
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
 additive; see their sections below. `unpurposed_traces` is additive; see
 "`status.unpurposed_traces`" below. `nudge` is additive; see "`status.nudge`"
-below.
+below. `idle_sessions` is additive; see "`status.idle_sessions`" below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -954,6 +963,57 @@ can also move it without changing an already-pending entry. When one does, the d
 publishes `status_changed`, so a shell that refreshes status only on
 `queue_changed` does not keep the old badge.
 
+#### `status.idle_sessions`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (nudge U4). How
+many waiting sessions nobody has written to for days, which tools they came
+from, and how many days counts as idle:
+
+```json
+"idle_sessions": { "count": 3, "tools": ["Claude Code", "Codex"], "threshold_days": 3 }
+```
+
+An entry is counted when all of these hold: it is `Pending` (kept and
+dismissed sessions are not); its folder's mode resolves to `notify_only` (Ask
+me; Never and armed folders are not counted); it is not waiting because the
+person undid a Keep (`returned-from-keep`); it is not held for review (a
+`REASONS_NEEDING_A_PERSON` hold); and it has not been written to for at least
+`threshold_days`. "Written to" is the session file's last modification time,
+recorded on the queue entry when it is offered and replaced when the session
+grows and is offered again, so a session written to again starts its clock
+over. A re-offer that does not touch the file keeps it. For an entry queued
+before the daemon recorded that time, the time it was queued stands in, which
+can only make a session look less idle. A last write stamped after the
+current time (the clock went backwards) is not idle. Unlike
+`unpurposed_traces`, a preview is not required.
+
+- `threshold_days` is `min(3, max(1, queue_ttl_days / 4))` (DRAFT, owner
+  decision 26): 3 at the default `queue_ttl_days` of 14.
+- `tools` is the display names of the tools the counted sessions came from,
+  distinct and in alphabetical order, naming a session by the source it
+  declares (`declared_source`) before the adapter that stored it. A source
+  the daemon has no display name for (for example `trajectory`) is counted
+  but not named, never shown as its raw id. Empty when `count` is 0.
+- **Absent, never `null`, while the kind is off**: when `queue_ttl_days` is
+  below 4 there is no room to say anything before a session expires. A shell
+  draws nothing for it then, and nothing when a daemon predating the field
+  omits it.
+
+It is a fact, not a suggestion, and reported "invited or not" like
+`unpurposed_traces`: the gates (paused, consent hold, signed out, unhealthy,
+suggestions off) close `status.nudge`'s lead but leave this count as it is.
+Every entry it counts is also a decision owed, so it is never larger than
+`decisions_owed` and never moves it, and it is never drawn as a badge number.
+Counts and display names only: never an id, a path, a folder label, a title
+or a session's own age.
+
+`list_pending {filter: "idle_sessions"}` lists exactly the entries this
+counts, computed by the same function (`queue::idle_candidates`) under the
+same guards, so a card's Review shows the set its sentence named.
+
+The count can grow with nothing but time passing: no event is published when
+a session crosses the threshold. A shell reads it with the rest of `status`.
+
 #### `status.nudge`
 
 Added in `trace_commons.daemon.v1_1` as an additive field (nudge S3). Which
@@ -962,6 +1022,7 @@ menu-bar panel -- if any. Labels, one count and one time; never a path, a
 folder label, an id or a title.
 
 ```json
+"nudge": { "state": "armed", "lead": "idle_sessions", "count": 2 }
 "nudge": { "state": "armed", "lead": "review_backlog", "count": 6 }
 "nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 0, "since": "2026-10-07T09:30:00Z" }
 "nudge": { "state": "none", "lead": null }
@@ -974,10 +1035,11 @@ folder label, an id or a title.
   daemon predating it). `unknown` is never read as "nothing to suggest", and
   absent is never read as `none`.
 - `lead` is always present: a kind label when `state` is `armed`, `null`
-  otherwise. Today the kinds are `review_backlog` (U1) and, behind it,
-  `verdicts_landed` (U2). Later revisions add kinds ahead of them; a shell
-  that meets a `lead` it does not know draws nothing.
-- `count` is present only with a lead: for `review_backlog` it is
+  otherwise. Today the kinds are, highest first, `idle_sessions` (U4),
+  `review_backlog` (U1) and `verdicts_landed` (U2). A later revision may add
+  kinds; a shell that meets a `lead` it does not know draws nothing.
+- `count` is present only with a lead: for `idle_sessions` it is
+  `status.idle_sessions.count`; for `review_backlog` it is
   `unpurposed_traces`; for `verdicts_landed` it is `accepted + held +
   final`. It is for the card's sentence, never a badge number, and it never
   moves `decisions_owed`.
@@ -991,12 +1053,19 @@ folder label, an id or a title.
   that would otherwise lead and nothing else leads, and says when that
   lapses.
 
-**When `review_backlog` leads.** `unpurposed_traces` is at least 5 (DRAFT,
-owner decision 10), every gate below is open, the arming offer is absent, and
-no "Not now" is in force.
+**When `idle_sessions` leads.** `status.idle_sessions.count` is at least 1,
+every gate below is open, the arming offer is absent, and no "Not now" is in
+force. It leads ahead of `review_backlog` and `verdicts_landed` (arming offer
+> `idle_sessions` > `review_backlog` > `verdicts_landed`). It retires by fact,
+when nothing is idle any more: every counted session was decided, kept,
+dismissed, written to again, expired, or its folder was set to Never or armed.
 
-**When `verdicts_landed` leads.** `review_backlog` does not lead (below the
-threshold, or silenced by a "Not now"), every gate below is open, the arming
+**When `review_backlog` leads.** `idle_sessions` does not lead (nothing is
+idle), `unpurposed_traces` is at least 5 (DRAFT, owner decision 10), every
+gate below is open, the arming offer is absent, and no "Not now" is in force.
+
+**When `verdicts_landed` leads.** Neither `idle_sessions` nor
+`review_backlog` leads (nothing qualifies, or a "Not now" silences them), every gate below is open, the arming
 offer is absent, the history poll is fresh, and verdict news is waiting
 unacknowledged. The news is found by the daemon's own history poll
 (`refresh_history`), which diffs the history cache against a high-water mark
@@ -1010,13 +1079,14 @@ in force); `rejected` is not news. The first poll after an upgrade, or after
 reads as news. Unacknowledged news accumulates across polls. It has no
 "Not now": it is information, not an ask.
 
-**Stale history is `unknown`.** Once `review_backlog` does not lead, `state`
+**Stale history is `unknown`.** Once neither `idle_sessions` nor
+`review_backlog` leads, `state`
 is `unknown` (with no lead) when the last successful history poll is older
 than twice `history_poll_secs` (DRAFT, spec section 3), when no poll has
 succeeded yet, or when the last poll is stamped after the current time. A
 failed poll serves the cache as it was, so a stale cache is never news, and
-"no news" from it is not known either. `review_backlog` does not depend on
-history and still leads while history is stale.
+"no news" from it is not known either. `idle_sessions` and `review_backlog`
+do not depend on history and still lead while history is stale.
 
 **Gates, checked first.** `state` is `none`, with no lead and no count,
 whenever any of these holds: `paused`; `consent_hold` is non-null; not
@@ -1026,19 +1096,24 @@ is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
 true -- because its view may not be current. **Decisions owed come first:**
 while `arming_suggestion` would return an offer, `review_backlog` is hidden
 (`none`), because "decide on these" beside "arm this folder" is two asks at
-once.
+once. The arming offer hides `idle_sessions` too.
 
 **"Not now" (`nudge_decline {kind}`).** Silences that kind for 7 days (DRAFT,
 owner decision 10), capped at half of `queue_ttl_days`, so a declined
 suggestion always comes back while the sessions it is about are still queued.
+`idle_sessions` and `review_backlog` share one "Not now": both ask for
+decisions on the same waiting sessions, so a decline of either silences both
+(the later decline governs), and declining one never puts the other up in its
+place. `verdicts_landed`, which is not an ask, can still lead behind it.
 A "Not now" stamped after the current time (the clock went backwards) reads as
 still in force: it can only suppress. A notification's own "Not now" never
 calls this; it writes nothing.
 
 **`nudge_opened {kind}`.** Sent only from the suggestion's own action (the
 card's Review, the panel row's tap), never because a card or row was shown.
-It records when. For `review_backlog` it does not retire the suggestion:
-`review_backlog` retires by fact, when the count falls below the threshold.
+It records when. For `idle_sessions` and `review_backlog` it does not retire
+the suggestion: each retires by fact, `idle_sessions` when nothing is idle and
+`review_backlog` when the count falls below the threshold.
 For `verdicts_landed` it acknowledges the news: the waiting news is cleared
 and the daemon records that it was acknowledged through the latest poll that
 added to it, so a verdict found by a later poll is news again.
