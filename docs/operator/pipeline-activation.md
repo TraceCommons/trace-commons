@@ -1853,7 +1853,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   is written, and the payout stays `pending` under the label. A payout pass
   resolves the account again once per confirmation interval
   (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`), so the line
-  is paid within one interval after the contributor enrols or designates a
+  is paid within one interval after the contributor enrolls or designates a
   NEAR account. A principal with no account is paid
   with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
   principal to settled legs, as on `main`; they never stop a `NoveltyUtility`

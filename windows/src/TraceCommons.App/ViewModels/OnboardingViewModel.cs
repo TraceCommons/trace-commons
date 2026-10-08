@@ -15,7 +15,7 @@ namespace TraceCommons.App.ViewModels;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Until this existed the Windows app could not enrol anyone: there was no
+/// Until this existed the Windows app could not enroll anyone: there was no
 /// invite handling in it at all, so an app-only contributor had to install
 /// the CLI and run <c>login</c> there. None of it needed new protocol --
 /// every method called here was already in the daemon's pinned
@@ -34,7 +34,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 {
     private static readonly OnboardingCopy? SharedOnboardingCopy = OnboardingCopy.Load();
 
-    /// The shared payload, for the login-enrolment offer's own sentences.
+    /// The shared payload, for the login-enrollment offer's own sentences.
     /// Loaded once for the same reason the onboarding copy is: these are
     /// facts about the build, not about a running daemon.
     private static readonly PrivateInferenceCopy? SharedPrivateInferenceCopy =
@@ -218,7 +218,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             if (response.IsError)
             {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL.
                 string label = response.Error?.Message ?? string.Empty;

@@ -18,7 +18,7 @@ back into publishable text.
 
 ---
 
-## Contribute now waits for enrolment on macOS
+## Contribute now waits for enrollment on macOS
 
 On macOS, `Contribute` is now disabled until this device is enrolled.
 Previously it armed as soon as a preview loaded, while the daemon refused the
@@ -29,7 +29,7 @@ explains why:
 > identity and nothing here can be contributed.
 
 This brings macOS into line with Windows and GTK, which already required
-enrolment. An approval binds to the envelope a preview pinned, and a preview
+enrollment. An approval binds to the envelope a preview pinned, and a preview
 built without an enrollment pinned nothing — so the button that approves it
 should not have been pressable. Anyone using the macOS app unenrolled will
 notice the change immediately.

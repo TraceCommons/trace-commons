@@ -15428,8 +15428,8 @@ async fn submit_trace_handler(
         // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
         // keeps its pending credit intact for the eventual release to Accepted; the
         // consumer/Accepted gates enforce the hold purely off the stored status.
-        // No enrol row is written: the `awaiting_pii_backstop` status is the
-        // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+        // No enroll row is written: the `awaiting_pii_backstop` status is the
+        // enrollment (the driver enumeration tolerates an absent bookkeeping row).
         let held_without_a_witness = corpus_status_with_pii_backstop_hold(
             corpus_status,
             &envelope.consent,
@@ -63342,7 +63342,7 @@ fn status_for_risk(
 /// The driver was never the gap: `rescrub_envelope_prose_pii_with` already
 /// classifies every string leaf and object key of each `structured_payload`,
 /// and fails closed to High via `coverage_incomplete` when it cannot finish.
-/// Only enrolment ignored payloads.
+/// Only enrollment ignored payloads.
 ///
 /// Two things this deliberately does NOT do. It does not make tool payloads
 /// safe to turn on: a held trace is released by the driver to whatever
@@ -63363,10 +63363,10 @@ fn status_for_risk(
 /// carry -- so the backstop classifier is the only pass that reads it for PII
 /// at all. Nothing sets that flag yet, so this changes no behaviour today.
 ///
-/// The `awaiting_pii_backstop` status IS the enrolment: the driver's
+/// The `awaiting_pii_backstop` status IS the enrollment: the driver's
 /// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
 /// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
-/// bookkeeping row on first failure. No explicit enrol write is required here.
+/// bookkeeping row on first failure. No explicit enroll write is required here.
 ///
 /// Callers must pass consent that has already been through
 /// `reconcile_consent_declarations` (both call sites run

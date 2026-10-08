@@ -603,7 +603,7 @@ pub struct QueueEntry {
     /// card, an unenrolled build, or any build that pins nothing. Read back
     /// only while `previewed_envelope_digest` names the same digest
     /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
-    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// after an enrollment, a filter change, a revoked approval -- reads as
     /// not yet scrubbed with nothing to clear by hand.
     ///
     /// Counts and a digest, never content.
@@ -3821,7 +3821,7 @@ mod tests {
         assert!(q.record_scrub(id, "sha256:envelope", counts));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
 
-        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // Re-pinned to a new build (a filter change, a re-enrollment): the
         // old count no longer describes what would be sent.
         assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);

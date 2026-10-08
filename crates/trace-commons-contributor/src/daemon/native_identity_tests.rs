@@ -751,7 +751,7 @@ async fn unconfigured_logout_never_sends_retained_token_to_untrusted_origin() {
     );
 }
 
-/// An enrolment the commons refused because this Mac's near.ai login is not
+/// An enrollment the commons refused because this Mac's near.ai login is not
 /// the passkey account's reaches the shell under its own label, so the shell
 /// can word it; an unknown error never reaches it at all.
 #[test]
@@ -1135,8 +1135,8 @@ async fn a_sign_in_without_a_usable_label_keeps_the_known_name() {
     }
 }
 
-/// Late enrolment, part one (P-7 open, the daemon's first status reports an
-/// enrolment, then P-7's Sign in): the person picks a passkey for an account
+/// Late enrollment, part one (P-7 open, the daemon's first status reports an
+/// enrollment, then P-7's Sign in): the person picks a passkey for an account
 /// in ANOTHER tenant than the one this Mac is enrolled under. The login
 /// answer is refused before anything is kept: no session, no remembered
 /// record, and the other account's label is not learned. The only request
@@ -1185,7 +1185,7 @@ async fn a_late_enrolment_refuses_a_sign_in_to_another_tenant_and_keeps_nothing(
     );
 }
 
-/// A P-7 sign-in after a late enrolment: config saved for `tenant-a`, then a
+/// A P-7 sign-in after a late enrollment: config saved for `tenant-a`, then a
 /// login whose answer is `reply_tenant`'s with `binding_state`. Returns the
 /// requests the server saw and the account id signed in.
 async fn late_enrolment_sign_in(
@@ -1213,12 +1213,12 @@ async fn late_enrolment_sign_in(
     (response, seen, account_id)
 }
 
-/// Late enrolment, part two: the passkey is the enrolled account's own (its
-/// session is for the enrolment's tenant, and the account is `bound`). The
+/// Late enrollment, part two: the passkey is the enrolled account's own (its
+/// session is for the enrollment's tenant, and the account is `bound`). The
 /// sign-in is kept and named, and P-7's next step, Verify's `account_bind`,
-/// answers `already_enrolled` from local state alone: the enrolment this
+/// answers `already_enrolled` from local state alone: the enrollment this
 /// Mac already holds is this account's, so Verify can finish. No request is
-/// sent, and the enrolment is not written again.
+/// sent, and the enrollment is not written again.
 #[tokio::test]
 async fn a_late_enrolment_answers_already_enrolled_for_the_enrolled_accounts_sign_in() {
     let (_dir, shared) = shared();
@@ -1246,8 +1246,8 @@ async fn a_late_enrolment_answers_already_enrolled_for_the_enrolled_accounts_sig
     assert_eq!(passkey_state(&shared).await["signed_in_name"], "Home");
 }
 
-/// Late enrolment, the enrolment's tenant but an account no Mac has bound
-/// (`unbound`): this Mac's enrolment cannot be its, so the bind is refused
+/// Late enrollment, the enrollment's tenant but an account no Mac has bound
+/// (`unbound`): this Mac's enrollment cannot be its, so the bind is refused
 /// as before, with no request.
 #[tokio::test]
 async fn a_late_enrolment_refuses_to_bind_an_unbound_same_tenant_account() {
@@ -1259,8 +1259,8 @@ async fn a_late_enrolment_refuses_to_bind_an_unbound_same_tenant_account() {
     assert_eq!(bind.error.unwrap().message, "account-already-enrolled");
 }
 
-/// A session for another tenant than the enrolment's (held from before the
-/// enrolment, so `persist_session` never compared them) is refused as
+/// A session for another tenant than the enrollment's (held from before the
+/// enrollment, so `persist_session` never compared them) is refused as
 /// before, with no request; so is no session at all.
 #[tokio::test]
 async fn an_enrolled_mac_refuses_to_bind_another_tenants_session_or_none() {
@@ -1288,7 +1288,7 @@ async fn an_enrolled_mac_refuses_to_bind_another_tenants_session_or_none() {
     assert!(accepted.is_err(), "no request reached the server");
 }
 
-/// Late enrolment, part three: the enrolment lands while the system sheet
+/// Late enrollment, part three: the enrollment lands while the system sheet
 /// is up, after the ceremony began. The ceremony was pinned to the
 /// unenrolled lifecycle, so the completion is refused before any request.
 #[tokio::test]

@@ -465,7 +465,7 @@ pub async fn include_past_sessions(
         }
     }
     // Including approves, so it is refused whole, as `approve` is, under an
-    // enrolment whose scopes nobody chose: nothing is revived or queued.
+    // enrollment whose scopes nobody chose: nothing is revived or queued.
     if let Some(label) =
         crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
     {

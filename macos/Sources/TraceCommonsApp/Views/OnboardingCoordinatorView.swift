@@ -35,10 +35,10 @@ import TCShellCore
 /// A host starts the first run at `startAt` (Join, unless it names another
 /// step). What an earlier first run left on the daemon is recorded
 /// (`OnboardingNavigation.initialState`): a running daemon is not started
-/// again, and an enrolment is the account (`recordEnrolment`), so its
+/// again, and an enrollment is the account (`recordEnrolment`), so its
 /// invite is not joined again, Join reads Continue, and Automatic is
 /// offered. The daemon's first status can arrive after this view is up, so
-/// the enrolment is recorded then too. Start's marker (the tenant's, or
+/// the enrollment is recorded then too. Start's marker (the tenant's, or
 /// watching only's) is what tells "enrolled" from "set up".
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
@@ -158,8 +158,8 @@ private struct FirstRunSteps: View {
         }
     }
 
-    /// An enrolment the daemon reported after the runner was made. Not
-    /// during a commit: an enrol that commit runs records itself.
+    /// An enrollment the daemon reported after the runner was made. Not
+    /// during a commit: an enroll that commit runs records itself.
     private func recordEnrolment() {
         guard model.status.loggedIn, !runner.isCommitting else { return }
         let recorded = OnboardingNavigation.recordEnrolment(runner.state)

@@ -68,7 +68,7 @@ have their own specs. C changes how the app presents itself and how it can be
 reached; it changes nothing about what the daemon watches.
 
 Part 3 is not the onboarding port either. The screens, the copy, and the
-enrolment calls are settled in
+enrollment calls are settled in
 `2026-08-17-onboarding-parity-windows-linux.md`. C only makes macOS able to
 receive the link that opens them.
 
@@ -349,7 +349,7 @@ is about porting onboarding *to* Windows and Linux; this is macOS's own
 declaration missing, in `macos/scripts/info-plist.sh` — a file this slice is
 already editing for `LSUIElement` and `CFBundleIconFile`. And it is a hard
 blocker rather than a nicety: an invite link is one of the two ways a
-contributor can enrol, and on macOS it currently does nothing at all.
+contributor can enroll, and on macOS it currently does nothing at all.
 
 ### Parity: macOS is the outlier, again
 
@@ -412,7 +412,7 @@ query item's value as-is, so `tracecommons://enroll?invite=` yields `Some("")`
 and drives the Connect screen with an empty field and a resolve attempt.
 Match the other two.
 
-**A deep link must not enrol.** This is a deliberate product rule, stated in
+**A deep link must not enroll.** This is a deliberate product rule, stated in
 `crates/trace-commons-contributor-gtk/src/main.rs:61-65` — the invite is
 filled in and the button is left for a person to press, "because which
 commons to join is the decision that screen exists to ask" — and repeated at
@@ -442,7 +442,7 @@ Add to `macos/scripts/info-plist.sh`, alongside the existing keys:
 `crates/trace-commons-contributor/tests/release_pipeline.rs:56-59`, so the two
 stay legible together. `Viewer` and not `Editor`: the app displays what the
 URL names and asks a person to act, which is exactly the distinction the role
-draws, and it is the honest declaration given the no-auto-enrol rule above.
+draws, and it is the honest declaration given the no-auto-enroll rule above.
 
 ### Yes, it interacts with the activation-policy change
 
@@ -564,7 +564,7 @@ A correct result is all of:
 3. The invite field contains the decoded `https://issuer.example/onboard#CODE`
    — decoded, not the percent-encoded form.
 4. The issuer host is displayed, from `resolve()`.
-5. **No enrolment has occurred.** The button is un-pressed and
+5. **No enrollment has occurred.** The button is un-pressed and
    `status.logged_in` is unchanged. This is the product rule from
    `main.rs:61-65`, and it is the one a delivery-path change is most likely to
    break.
@@ -575,7 +575,7 @@ same screen.
 
 Two negative checks:
 
-- `tracecommons://enroll?invite=` opens nothing and enrols nothing, matching
+- `tracecommons://enroll?invite=` opens nothing and enrolls nothing, matching
   Rust and Windows once the empty-value divergence above is fixed.
 - The invite string appears in no log, no window title, and no crash report.
   Grep the new delegate code for the invite reaching anything other than the
@@ -705,7 +705,7 @@ Part 2, after B:
   and scheme-string assertions.
 - The deep-link gate in "### Manual verification, since there is no macOS CI"
   passes in full, including the which-bundle-handled-it check, both the
-  app-running and app-not-running paths, and the no-enrolment rule.
+  app-running and app-not-running paths, and the no-enrollment rule.
 
 ## Implementation notes, 2026-08-19
 
@@ -785,7 +785,7 @@ explicit path:
 All of it downstream of the window defect above:
 
 - That the invite field shows the *decoded* value, that the issuer host is
-  displayed, and that no enrolment occurs. The Connect screen is only
+  displayed, and that no enrollment occurs. The Connect screen is only
   reachable under `.running`, which is the state whose window will not open.
   The delivery half is proven; the consumption half is not.
 - The app-not-running deep-link path, for the same reason.

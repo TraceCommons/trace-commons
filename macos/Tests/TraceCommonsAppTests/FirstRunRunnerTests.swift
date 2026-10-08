@@ -89,6 +89,15 @@ final class RecordingFirstRunDaemon: FirstRunDaemon {
     func markComplete() async -> Bool { record(.markComplete) }
     func markWatchOnlyComplete() async -> Bool { record(.markWatchOnlyComplete) }
 
+    /// `unenroll` is not a plan call (`FirstRunCall`), so it is counted on
+    /// its own and leaves `log` as it was.
+    var unenrollCalls = 0
+    var unenrollSucceeds = true
+    func unenroll() async -> Bool {
+        unenrollCalls += 1
+        return unenrollSucceeds
+    }
+
     /// What each finished first run handed over, in order.
     var finished: [String?] = []
     func firstRunFinished(notice: String?) { finished.append(notice) }
@@ -308,7 +317,7 @@ final class FirstRunRunnerTests: XCTestCase {
         }
     }
 
-    /// The daemon's answer can arrive after Join changed (an enrolment the
+    /// The daemon's answer can arrive after Join changed (an enrollment the
     /// first status reported, or the person answering): the rule is checked
     /// again on the state as it is then.
     func test_welcomeBackIsRecheckedAfterTheDaemonAnswers() async {
@@ -341,15 +350,15 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.returningName, "Studio")
     }
 
-    /// Late enrolment (#1264 follow-up): P-7 is already open when the
-    /// daemon's first status reports an enrolment, so the account becomes
+    /// Late enrollment (#1264 follow-up): P-7 is already open when the
+    /// daemon's first status reports an enrollment, so the account becomes
     /// `.enrolled` under it; then P-7's Sign in.
     ///
     /// A passkey for another tenant's account: the daemon refuses the
     /// sign-in (`account-enrollment-mismatch`, nothing kept, nothing sent
     /// beyond the login itself; the daemon tests pin that). P-7 stays up with
     /// the refusal, no bind is asked for, and closing it leaves Join on the
-    /// enrolment it held.
+    /// enrollment it held.
     func test_aLateEnrolmentUnderWelcomeBackRefusesAnotherTenantsSignIn() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let runner = FirstRunRunner(
@@ -378,12 +387,12 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertTrue(runner.state.holdsEnrolment)
     }
 
-    /// Late enrolment, the enrolled account's own passkey: the daemon keeps
-    /// the sign-in (it checked the session's tenant against the enrolment),
+    /// Late enrollment, the enrolled account's own passkey: the daemon keeps
+    /// the sign-in (it checked the session's tenant against the enrollment),
     /// and Verify's bind answers `already_enrolled` from local state, with
-    /// no request: the enrolment this Mac holds is this account's. Verify
+    /// no request: the enrollment this Mac holds is this account's. Verify
     /// takes it as the join it would otherwise have made, ends `.signedIn`
-    /// named by `signed_in_name`, and Join keeps holding the enrolment.
+    /// named by `signed_in_name`, and Join keeps holding the enrollment.
     func test_aLateEnrolmentUnderWelcomeBackFinishesWithTheEnrolledAccountsPasskey() async throws {
         let copy = try XCTUnwrap(FirstRunCopy.decode(try XCTUnwrap(TCCoreCopy.firstRunCopyJSON())))
         let runner = FirstRunRunner(
@@ -438,9 +447,11 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertFalse(runner.passkeyDue)
         XCTAssertEqual(runner.state.account, AccountAnswer.none)
         XCTAssertEqual(runner.state.step, .uses, "a finished first run is not reopened")
+        await runner.pendingUnenroll?.value
+        XCTAssertEqual(daemon.unenrollCalls, 0, "a finished first run's enrollment is not dropped")
     }
 
-    /// A daemon-reported enrolment recorded over an invite still in Join's
+    /// A daemon-reported enrollment recorded over an invite still in Join's
     /// field: the commit asks the daemon about no invite, so a refusal it
     /// would give cannot send the person back to Join, and nothing is
     /// enrolled a second time.
@@ -461,12 +472,12 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     /// near.ai chosen with no invite to sign in to: the daemon's
-    /// `account_sign_in` needs an enrolment and refuses
+    /// `account_sign_in` needs an enrollment and refuses
     /// (`account-enrollment-required`). Join does not allow the pair
     /// (`JoinScreenLayout.canToggleNearAI`); should it reach the runner anyway,
     /// the step stays and says so with the core's sign-in line.
-    /// near.ai without an invite: the near.ai sign-in, then the enrolment
-    /// through it. The enrolment the daemon holds is what lets Uses offer
+    /// near.ai without an invite: the near.ai sign-in, then the enrollment
+    /// through it. The enrollment the daemon holds is what lets Uses offer
     /// Automatic and Start send scopes and the tenant's marker.
     func test_nearAIWithoutAnInviteSignsInAndEnrolls() async throws {
         var state = onFolders()
@@ -552,7 +563,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.state.step, .uses)
     }
 
-    /// A refused enrolment says why in the core's own line for its label
+    /// A refused enrollment says why in the core's own line for its label
     /// (`TCNearAiEnroll`), never the label, and the step stays.
     func test_aRefusedNearAIEnrolmentReadsTheCoresLine() async throws {
         var state = onFolders()
@@ -578,7 +589,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     /// The label the review names: provisioning refused on the server. The
-    /// line is the core's, or its enrol refusal when it has none.
+    /// line is the core's, or its enroll refusal when it has none.
     func test_aRefusedEndpointReturnsToJoin() async throws {
         var state = onFolders()
         state.invite = ""
@@ -598,7 +609,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     /// With an invite, a near.ai sign-in that did not go through returns to
-    /// Join too (owner, 2026-10-07): the invite, its enrolment and every
+    /// Join too (owner, 2026-10-07): the invite, its enrollment and every
     /// other answer are kept, only the near.ai choice is cleared, and Join
     /// says why in the core's sign-in line.
     func test_aFailedSignInWithAnInviteReturnsToJoin() async throws {
@@ -714,7 +725,7 @@ final class FirstRunRunnerTests: XCTestCase {
         XCTAssertEqual(runner.state.step, .uses)
     }
 
-    /// A sign-in that finishes as the cancel arrives still enrols nothing:
+    /// A sign-in that finishes as the cancel arrives still enrolls nothing:
     /// the person asked to stop.
     func test_aLoginFinishingAsTheCancelArrivesEnrollsNothing() async {
         let daemon = RecordingFirstRunDaemon()
@@ -904,7 +915,7 @@ final class FirstRunRunnerTests: XCTestCase {
     }
 
     /// Review Focus 5: Start finishes watching. No consent scopes are sent
-    /// (the daemon refuses them without an enrolment) and the watch-only
+    /// (the daemon refuses them without an enrollment) and the watch-only
     /// marker, not the tenant's, ends the run.
     func test_aWatchOnlyStartFinishes() async {
         let daemon = RecordingFirstRunDaemon()

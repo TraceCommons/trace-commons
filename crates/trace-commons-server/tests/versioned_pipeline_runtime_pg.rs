@@ -22382,7 +22382,7 @@ async fn a_held_payout_is_resolved_again_only_after_the_confirmation_interval() 
 
 /// Adds a NEAR identity for `account_id`, designated for payout when
 /// `designated`, through an owner connection (a fixture write, as `main`'s
-/// NEAR enrolment makes).
+/// NEAR enrollment makes).
 async fn add_near_identity(
     tenant_id: &str,
     account_id: uuid::Uuid,

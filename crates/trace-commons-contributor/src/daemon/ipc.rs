@@ -437,6 +437,7 @@ pub const METHODS: &[&str] = &[
     "skill_review",
     "status",
     "subscribe",
+    "unenroll",
     "withdraw",
     "withdraw_bulk",
     "unpublish_public_run",
@@ -1826,7 +1827,7 @@ impl DaemonShared {
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
             // Additive. `consent-scopes-not-chosen` while nothing may be sent
-            // under the enrolment because its scopes were saved by enrolment
+            // under the enrollment because its scopes were saved by enrollment
             // and never chosen; `null` otherwise. Label only. See
             // `config::consent_hold`.
             "consent_hold": crate::config::consent_hold(cfg.as_ref()),
@@ -2658,6 +2659,7 @@ const ASYNC_ONLY_METHODS: &[(&str, &str)] = &[
     ("probe_routing", "probe-routing-requires-async"),
     ("probe_routed_tools", "probe-routed-tools-requires-async"),
     ("enroll", "enroll-requires-async"),
+    ("unenroll", "unenroll-requires-async"),
     ("withdraw", "withdraw-requires-async"),
     ("withdraw_bulk", "withdraw-requires-async"),
     (
@@ -4879,6 +4881,7 @@ pub async fn handle_request_async(shared: &DaemonShared, req: &Request) -> Respo
         "probe_routing" => handle_probe_routing(req).await,
         "probe_routed_tools" => handle_probe_routed_tools(req).await,
         "enroll" => enroll::handle_enroll(shared, req).await,
+        "unenroll" => super::unenroll::handle_unenroll(shared, req).await,
         "withdraw" => super::withdraw::handle_withdraw(shared, req).await,
         "withdraw_bulk" => super::withdraw::handle_withdraw_bulk(shared, req).await,
         "commons_credit_summary" => {
@@ -5067,8 +5070,8 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // config records neither, which the uploader treats as
     // "unknown, re-ask" -- fail-closed.
     let cfg = shared.store.load_config().ok().flatten();
-    // An approval is a decision to send under the enrolment, and an
-    // enrolment whose scopes nobody chose sends nothing: refused, before
+    // An approval is a decision to send under the enrollment, and an
+    // enrollment whose scopes nobody chose sends nothing: refused, before
     // anything is approved or recorded, in every form (one entry, a
     // project, all).
     if let Some(label) = crate::config::consent_hold(cfg.as_ref()) {
@@ -5372,7 +5375,7 @@ pub(super) async fn approve_as_a_person(
     // A correction forces a rebuild even for an entry that was previewed:
     // the pinned artifact was built before the contributor had written
     // anything, so it carries neither the correction nor the
-    // `correction_included` declaration that enrols it for the PII backstop,
+    // `correction_included` declaration that enrolls it for the PII backstop,
     // and credential detection has never run over the text. Re-pinning here
     // is what makes the approval cover the bytes the correction is part of.
     // `correction` is only ever `Some` for a single `entry_id`, refused
@@ -6012,7 +6015,7 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
     // No enrollment is not a refusal. Preview does no network I/O and needs
     // neither the daemon's lock nor its running loop, so requiring a config
     // here was incidental -- and it forced anyone who wanted to *see* what
-    // would be sent to enrol first, which is the wrong way round. Without a
+    // would be sent to enroll first, which is the wrong way round. Without a
     // config the pipeline builds the same placeholder-identity,
     // deterministic-only envelope the CLI's unenrolled `--dry-run` builds,
     // and the response says so. See `preview::build_preview`.
@@ -6949,6 +6952,20 @@ fn pin_previewed_envelope(
     if queue.get(entry_id).map(|e| e.state) != Some(QueueState::Pending) {
         return;
     }
+    // Only an envelope stamped with the enrollment in force now. A preview
+    // built before an `unenroll` (or any identity change) and finishing
+    // after it would otherwise pin bytes naming the old tenant and account,
+    // and an approval under the next enrollment would send them verbatim.
+    // Read under the queue lock, which `unenroll` holds while it removes the
+    // config, so the two cannot interleave.
+    let cfg = shared.store.load_config().ok().flatten();
+    if !envelope_is_for_enrollment(
+        cfg.as_ref(),
+        envelope.contributor.tenant_scope_ref.as_deref(),
+        envelope.contributor.pseudonymous_contributor_id.as_deref(),
+    ) {
+        return;
+    }
     if super::approved_envelope::save(&shared.store, entry_id, envelope).is_err() {
         return;
     }
@@ -6965,6 +6982,24 @@ fn pin_previewed_envelope(
         // in-memory pin refers to.
         let _ = queue.save(&shared.store);
     }
+}
+
+/// Whether an envelope's identity stamp is the enrollment `cfg` describes:
+/// its tenant and its pseudonymous contributor id, as `envelope` stamps them.
+/// No enrollment matches nothing.
+fn envelope_is_for_enrollment(
+    cfg: Option<&crate::config::ContributorConfig>,
+    tenant_scope_ref: Option<&str>,
+    pseudonymous_contributor_id: Option<&str>,
+) -> bool {
+    let Some(cfg) = cfg else {
+        return false;
+    };
+    tenant_scope_ref == Some(cfg.tenant_id.as_str())
+        && pseudonymous_contributor_id
+            == Some(
+                trace_commons_protocol::onboarding::user_subject_hash(&cfg.user_subject).as_str(),
+            )
 }
 
 /// Settings as returned over IPC: the privacy-filter credential is reported
@@ -7739,13 +7774,13 @@ mod tests {
         let s = shared();
         let mut cfg = crate::commands::unenrolled_preview_config();
         // A contributor who chose their scopes: the one every send path
-        // serves. `unchosen_shared` is the enrolment nobody chose for.
+        // serves. `unchosen_shared` is the enrollment nobody chose for.
         cfg.consent_scopes_chosen = Some(true);
         s.store.save_config(&cfg).unwrap();
         s
     }
 
-    /// An enrolment whose consent scopes were saved by enrolment and never
+    /// An enrollment whose consent scopes were saved by enrollment and never
     /// chosen (`consent_scopes_chosen: Some(false)`).
     fn unchosen_shared() -> DaemonShared {
         let s = shared();
@@ -14677,10 +14712,39 @@ mod tests {
         );
     }
 
+    /// A preview pins only bytes stamped with the enrollment in force, so one
+    /// that finishes after an `unenroll` pins nothing.
+    #[test]
+    fn a_pin_needs_the_envelope_to_name_the_enrollment_in_force() {
+        let cfg = crate::commands::unenrolled_preview_config();
+        let subject = trace_commons_protocol::onboarding::user_subject_hash(&cfg.user_subject);
+        assert!(envelope_is_for_enrollment(
+            Some(&cfg),
+            Some(cfg.tenant_id.as_str()),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            None,
+            Some(cfg.tenant_id.as_str()),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            Some(&cfg),
+            Some("tenant-before"),
+            Some(subject.as_str())
+        ));
+        assert!(!envelope_is_for_enrollment(
+            Some(&cfg),
+            Some(cfg.tenant_id.as_str()),
+            Some("sha256:someone-else")
+        ));
+        assert!(!envelope_is_for_enrollment(Some(&cfg), None, None));
+    }
+
     #[test]
     fn every_async_only_method_is_advertised_and_refused_synchronously() {
         let s = shared();
-        assert_eq!(ASYNC_ONLY_METHODS.len(), 59);
+        assert_eq!(ASYNC_ONLY_METHODS.len(), 60);
         let mut seen = std::collections::BTreeSet::new();
         for &(method, label) in ASYNC_ONLY_METHODS {
             assert!(
@@ -15140,7 +15204,7 @@ mod tests {
             "pub async fn handle_request_async(shared",
         ));
         assert_eq!(sync.len(), 74, "synchronous dispatcher arms: {sync:?}");
-        assert_eq!(asy.len(), 66, "asynchronous dispatcher arms: {asy:?}");
+        assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
         let advertised: std::collections::BTreeSet<String> =
@@ -16388,7 +16452,7 @@ mod tests {
 
     // -- Sending needs chosen consent scopes -------------------------------
 
-    /// Under an enrolment whose scopes nobody chose, every way of sending is
+    /// Under an enrollment whose scopes nobody chose, every way of sending is
     /// refused with one fixed label, before anything is approved, armed or
     /// recorded: `approve` in all three forms, arming a folder, and an
     /// `auto_upload` contribution override. What only stops sends -- Ask me,
@@ -16489,7 +16553,7 @@ mod tests {
     }
 
     /// `status.consent_hold` names the hold, label only, so a shell can say
-    /// why nothing is sent; `null` with no enrolment, a choice, or a config
+    /// why nothing is sent; `null` with no enrollment, a choice, or a config
     /// that predates the record.
     #[test]
     fn status_names_the_consent_hold() {

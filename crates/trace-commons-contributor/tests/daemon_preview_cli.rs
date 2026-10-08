@@ -40,7 +40,7 @@ fn seed_config_dir() -> (tempfile::TempDir, uuid::Uuid) {
 }
 
 /// `enrolled: false` writes no `contributor.json` at all, which is the state
-/// a contributor is in before they have decided whether to enrol -- and the
+/// a contributor is in before they have decided whether to enroll -- and the
 /// state in which "what would you actually send?" is the most useful
 /// question they can ask.
 fn seed_config_dir_with(enrolled: bool) -> (tempfile::TempDir, uuid::Uuid) {

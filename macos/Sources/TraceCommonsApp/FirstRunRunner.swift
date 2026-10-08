@@ -55,6 +55,9 @@ protocol FirstRunDaemon: AnyObject {
     /// True only once the watch-only marker is actually written. It is keyed
     /// by the daemon's config directory, so without one this answers false.
     func markWatchOnlyComplete() async -> Bool
+    /// `unenroll`: true only once the daemon confirmed it dropped this
+    /// Mac's enrollment (or held none).
+    func unenroll() async -> Bool
     /// The first run is finished: the marker was just written. `notice` is
     /// the core's sentence for what the person must still be told (a
     /// refused grant), or nil. Called synchronously after the marker, before
@@ -83,7 +86,7 @@ enum FirstRunFailure: Equatable {
     case lookupUnavailable
     case enrollFailed
     case signInFailed
-    /// The near.ai enrolment without an invite was refused; the daemon's
+    /// The near.ai enrollment without an invite was refused; the daemon's
     /// label, for the core's line (`TCNearAiEnroll`).
     case nearAIEnrollFailed(label: String)
     case scopesFailed
@@ -147,6 +150,10 @@ final class FirstRunRunner: ObservableObject {
     /// for the retry that finishes on Ask me.
     @Published private(set) var refusedGrant: FirstRunFailure?
 
+    /// The `unenroll` a sign-out on Join started, while it runs. A commit
+    /// waits for it, so a new enrollment is never made and then dropped.
+    private(set) var pendingUnenroll: Task<Void, Never>?
+
     private let daemon: FirstRunDaemon
     /// The core's sentence for the refusal a finished first run carries
     /// (`UsesScreenLayout.finishedNotice`), from the host's copy.
@@ -166,7 +173,7 @@ final class FirstRunRunner: ObservableObject {
 
     /// Run the calls for `point`. Leaving the roots moves on to the next step
     /// only when every call succeeded; a dead invite, a near.ai sign-in that
-    /// did not succeed (with an invite or without), or a near.ai enrolment
+    /// did not succeed (with an invite or without), or a near.ai enrollment
     /// without one that was refused, goes back to Join; any other failure
     /// leaves the step where it is, and so does a cancelled browser wait. Start always ends in
     /// `markComplete` unless a call before the grant failed, and reports
@@ -177,6 +184,7 @@ final class FirstRunRunner: ObservableObject {
         guard !isCommitting else { return }
         isCommitting = true
         defer { isCommitting = false }
+        if let pending = pendingUnenroll { await pending.value }
         // Create passkey on Join takes back only its own failure: a refused
         // invite's line stays on Join beside it.
         if point != .passkeyOnJoin || failure == .passkeyUnavailable { failure = nil }
@@ -233,7 +241,7 @@ final class FirstRunRunner: ObservableObject {
             state.signedOutOfEnrolment = false
         case .signInNearAI:
             // With an invite too (owner, 2026-10-07): back to Join with the
-            // choice cleared and the invite and its enrolment kept.
+            // choice cleared and the invite and its enrollment kept.
             guard await daemon.signInNearAI() else {
                 state = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
                 return fail(.signInFailed)
@@ -338,7 +346,7 @@ final class FirstRunRunner: ObservableObject {
     /// asks the daemon which passkeys this Mac remembers and, if the rule
     /// holds, opens the sheets at Welcome back with the remembered name. The
     /// rule is checked again once the daemon answers, since Join (or an
-    /// enrolment the first status reported) can change meanwhile. Offered at
+    /// enrollment the first status reported) can change meanwhile. Offered at
     /// most once; its Sign in is the ordinary sign-in, and "Other sign-in
     /// options" closes it and leaves Join as it was.
     func offerWelcomeBack(from account: any PasskeyAccount) async {
@@ -372,6 +380,24 @@ final class FirstRunRunner: ObservableObject {
         if outcome == .signedOut, !completed { state.step = .join }
         passkeyOutcome = outcome
         passkeyDue = false
+        if outcome == .signedOut, !completed, state.signedOutOfEnrolment {
+            pendingUnenroll = Task { await self.unenrollAfterSignOut() }
+        }
+    }
+
+    /// A sign-out on Join left the daemon holding an enrollment
+    /// (`signedOutOfEnrolment`): ask it to unenroll, so the person can
+    /// choose any account, or watch only, again. Only a confirmed unenroll
+    /// clears the mark; a refusal, or a daemon without the call, leaves it
+    /// held, which fails closed as before. A finished first run's
+    /// enrollment is never dropped here.
+    private func unenrollAfterSignOut() async {
+        defer { pendingUnenroll = nil }
+        guard state.signedOutOfEnrolment else { return }
+        guard await daemon.unenroll() else { return }
+        // Something may have enrolled meanwhile; only the mark this
+        // sign-out set is cleared.
+        if state.signedOutOfEnrolment { state.signedOutOfEnrolment = false }
     }
 
     /// The marker is written. No suspension point separates this from the

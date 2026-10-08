@@ -88,6 +88,7 @@ pub(crate) mod test_paths;
 pub(crate) mod test_support;
 pub(crate) mod token_capture;
 mod token_cleanup;
+pub mod unenroll;
 pub mod unsure_spans;
 pub mod uploader;
 pub mod watcher;
@@ -306,7 +307,7 @@ pub fn dev_dry_run_store(real: ConfigStore) -> Result<ConfigStore> {
 }
 
 /// Open `dir` as the dry-run store. The first time, seed it with a copy of
-/// the real store's enrolment terms (`contributor.json`) and settings (the
+/// the real store's enrollment terms (`contributor.json`) and settings (the
 /// declared session roots among them), so the dry run reads the same
 /// sessions and builds the same envelopes. Nothing else is copied: no
 /// device key, account session, queue, policy or history.
@@ -929,7 +930,7 @@ async fn drain_approved(
         health.fail(health::LABEL_NOT_LOGGED_IN, now);
         return Ok(());
     };
-    // An enrolment whose scopes nobody chose sends nothing. Every approved
+    // An enrollment whose scopes nobody chose sends nothing. Every approved
     // entry is held exactly as it is -- approved before this hold existed,
     // by an older build, or by any path that reached it -- the way a Never
     // override holds them: no state change, no attempt, no label. Choosing
@@ -2680,7 +2681,7 @@ mod tests {
         );
     }
 
-    /// An entry approved before its enrolment's scopes were chosen -- by an
+    /// An entry approved before its enrollment's scopes were chosen -- by an
     /// older build, or before this hold existed -- is held exactly as it was,
     /// `Approved` with nothing sent, and the hold names itself only in
     /// `status.consent_hold`. Choosing the scopes releases it to the send
@@ -2798,7 +2799,7 @@ mod tests {
     }
 
     /// K2 (#1173): a dev dry run runs against its own store. It is seeded
-    /// with the real enrolment terms and settings, and nothing else, and a
+    /// with the real enrollment terms and settings, and nothing else, and a
     /// session that approves, dismisses, pauses, changes settings and
     /// drains leaves every byte of the real store as it was -- including an
     /// entry the contributor had already approved there.

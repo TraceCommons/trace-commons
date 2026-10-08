@@ -5,7 +5,7 @@
 //! `commands::enroll_core`, the same non-interactive enrollment
 //! implementation the CLI's `login` command drives after resolving its own
 //! interactive consent prompt. Neither shell hand-rolls a second copy of the
-//! network calls: a socket caller and a terminal caller enrol identically.
+//! network calls: a socket caller and a terminal caller enroll identically.
 //!
 //! Nothing here ever puts an invite link, a grant, a URL, or key material
 //! into a response or an error: only scope names, counts, and the
@@ -140,7 +140,7 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
         Err(_) => return Response::err(req.id, ERR_BAD_PARAMS, "scopes-invalid"),
     };
 
-    // Not a choice: scopes a shell passes with the enrolment are saved for
+    // Not a choice: scopes a shell passes with the enrollment are saved for
     // the person, and the choice is `set_consent_scopes` (R7).
     match enroll_core(&shared.store, grant, invite, None, consent_scopes, false).await {
         Ok(EnrollOutcome::AwaitingGrant { device_key_id }) => Response::ok(
@@ -831,7 +831,7 @@ mod tests {
 
     /// The CLI's `login` asks its own consent question (an explicit
     /// `--scopes`, or the interactive menu), and an answer to it is a choice:
-    /// the enrolment records it, so a CLI contributor is not held for want of
+    /// the enrollment records it, so a CLI contributor is not held for want of
     /// a `set_consent_scopes` the CLI has no command for. Default answers
     /// taken for them (`--default`, or no terminal) record none, as the
     /// daemon's own `enroll` records none.
@@ -856,7 +856,7 @@ mod tests {
     }
 
     /// An empty list names nothing, so it does not turn a config that
-    /// predates the scope-choice record into an unchosen enrolment: the
+    /// predates the scope-choice record into an unchosen enrollment: the
     /// contributor who joined before the record keeps sending. On a config
     /// that has the record it records no choice, as before.
     #[test]

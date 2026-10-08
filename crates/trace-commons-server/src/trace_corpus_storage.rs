@@ -2140,7 +2140,7 @@ pub struct TraceGateDecisionRow {
     /// `None` means NOT INSTRUMENTED: every decision written before V53, and
     /// any path that records a decision without scoring it. It is not `Some(0)`
     /// — a below-floor trace earns a genuine composite of 0, and conflating
-    /// the two would enrol unmeasured rows into the sample as real
+    /// the two would enroll unmeasured rows into the sample as real
     /// observations. Readers MUST NOT default it.
     pub composite_score_micros: Option<i64>,
     /// Which vector-index shard the novelty score was computed against

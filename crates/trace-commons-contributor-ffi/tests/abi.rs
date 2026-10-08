@@ -4818,7 +4818,7 @@ fn the_certificate_reading_is_chosen_behind_the_abi_and_never_by_a_shell() {
     }
 }
 
-/// The ten login-enrolment refusals reach ten sentences, and none is silent.
+/// The ten login-enrollment refusals reach ten sentences, and none is silent.
 ///
 /// **Unlike an attestation reason, the empty string is never right here.** A
 /// reason this build cannot name has nothing honest to add to a mark that

@@ -21,7 +21,7 @@ enum PasskeySheetOutcome: Equatable {
     /// An existing passkey signed in, and Verify enrolled this Mac: either
     /// the account was unbound and Verify bound it (`bound`), or another Mac
     /// had bound it and Verify joined this one to it (`enrolled`). A sign-in
-    /// alone holds no enrolment and never ends the sheets with this. `name`
+    /// alone holds no enrollment and never ends the sheets with this. `name`
     /// is the one the daemon remembers for the signed-in account's own
     /// record (`signed_in_name`), read once Verify finished; nil when it has
     /// none.
@@ -86,7 +86,7 @@ enum PasskeyBindResult: Equatable {
         switch (result.outcome, result.bindingState) {
         case ("bound", "bound"): self = .bound
         case ("existing_account", "bound"), ("existing_account", "legacy"): self = .existingAccount
-        // `already_enrolled`: this Mac already holds the enrolment of the
+        // `already_enrolled`: this Mac already holds the enrollment of the
         // account the session signed in to (the daemon checked it locally,
         // and sent nothing), so it is the join Verify would have made. Only
         // a bound account's Verify accepts it (`verify()`).
@@ -129,7 +129,7 @@ enum PasskeyVerifyKind: Equatable {
 /// What "Use existing passkey" answered: the daemon's `binding_state` for
 /// the account it signed in to, or why it did not sign in.
 enum PasskeySignInResult: Equatable {
-    /// No Mac has bound the account yet: Verify binds it and enrols this one.
+    /// No Mac has bound the account yet: Verify binds it and enrolls this one.
     case unbound
     /// Another Mac bound it: Verify joins this Mac to it, which the commons
     /// allows only when this Mac's near.ai sign-in is the account's own.
@@ -304,8 +304,8 @@ final class PasskeySheetModel: ObservableObject {
     }
 
     /// P-1 Use existing and P-7 Sign in: the system sign-in sheet. A
-    /// sign-in holds no enrolment, so it never ends the sheets by itself:
-    /// an account no Mac has bound goes to Verify, whose bind enrols this
+    /// sign-in holds no enrollment, so it never ends the sheets by itself:
+    /// an account no Mac has bound goes to Verify, whose bind enrolls this
     /// Mac; one another Mac bound goes to Verify too, which joins this Mac to
     /// it; a legacy one is signed out again, fail closed, since adding a Mac
     /// to it with a passkey is not built.
@@ -335,7 +335,7 @@ final class PasskeySheetModel: ObservableObject {
         }
     }
 
-    /// The daemon holds a session this Mac cannot enrol under: sign it out
+    /// The daemon holds a session this Mac cannot enroll under: sign it out
     /// and stay on Choose. The notice is shown only once the sign-out is
     /// confirmed (it says "you were signed out"); otherwise the refusal is.
     /// No notice means a binding state this build does not know.
