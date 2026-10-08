@@ -580,5 +580,32 @@ mod tests {
         for private in ["msg_key", "args_key", "path_key", "what_if", "07070707"] {
             assert!(!wire.contains(private), "{private}");
         }
+        // The wire labels the shells read, exactly.
+        for label in [
+            "\"kind\":\"cache_written_again\"",
+            "\"kind\":\"re_read\"",
+            "\"kind\":\"crossed_long_context\"",
+            "\"basis\":\"inferred_from_counters\"",
+            "\"basis\":\"from_tool_calls\"",
+            "\"basis\":\"from_counters\"",
+        ] {
+            assert!(wire.contains(label), "{label}");
+        }
+        let shrank = UsageSeries {
+            turns: vec![ctx(1, 100_000), ctx(2, 10_000)],
+            tool_calls: vec![],
+            truncated: false,
+        };
+        let wire = serde_json::to_string(&lettered(&shrank)).unwrap();
+        assert!(wire.contains("\"kind\":\"context_shrank\""), "{wire}");
+        let codex = session_drill(
+            "snap",
+            &SessionBody::Codex { observed: None },
+            None,
+            None,
+            utc(),
+        );
+        let wire = serde_json::to_string(&codex).unwrap();
+        assert!(wire.contains("\"series_unavailable\":\"not_recorded\""));
     }
 }
