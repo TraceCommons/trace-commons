@@ -93,10 +93,11 @@ public struct GlassListRow: View {
     /// `GlassTokens.Color.selection`. Solid, so the sub-line keeps text
     /// contrast too (`SelectionContrastTests`).
     static let selectedInk = GlassTokens.Color.textOnAccent
-    /// The sub-line's ink when selected: the white ink at 80%, as #1146's
-    /// `.tc-list-row[aria-selected] .tc-list-row__sub` (owner ruling,
-    /// 2026-10-07: #1146 wins for theming).
-    static let selectedSubInk = GlassRGBA(selectedInk.rgb, alpha: 0.8)
+    /// The sub-line's ink when selected: the same solid white. #1146's
+    /// `.tc-list-row[aria-selected] .tc-list-row__sub` is white at 80%,
+    /// which is 3.5:1 on the selection; the sub-line is text, so it keeps
+    /// 4.5:1 (owner ruling, 2026-10-07: hold the WCAG floors).
+    static let selectedSubInk = selectedInk
 
     /// The watch switch's column, kept on every row (#1146 `38px`).
     static let watchColumn: CGFloat = GlassTokens.Size.watchSwitchWidth
@@ -108,11 +109,13 @@ public struct GlassListRow: View {
         return hovering ? GlassTokens.Color.rowHover : nil
     }
 
-    /// An unflagged sub-line's ink: tertiary, on an off row too, which then
-    /// fades by `rowOff` with the rest of the row (#1146 `glass.css`
-    /// `.tc-list-row[data-off]`).
+    /// An unflagged sub-line's ink: tertiary. An off row fades by `rowOff`
+    /// with the rest of the row (#1146 `glass.css` `.tc-list-row[data-off]`),
+    /// under which tertiary text falls to 3.9:1, so an off row's sub-line
+    /// takes the secondary ink, which faded clears 4.5:1 (owner ruling,
+    /// 2026-10-07: hold the WCAG floors; TextContrastTests).
     static func plainSubInk(off: Bool) -> GlassRGBA {
-        GlassTokens.Color.textTertiary
+        off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textTertiary
     }
 
     public var body: some View {

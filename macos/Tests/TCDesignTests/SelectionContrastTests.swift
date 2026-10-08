@@ -2,26 +2,44 @@ import XCTest
 
 @testable import TCDesign
 
-/// The selection is #1146's blue, #3A7BD5, and a selected row sets its
-/// title in white and its sub-line in white at 80%, as #1146 does (owner
-/// ruling, 2026-10-07: #1146 wins for theming). White on it is 4.22:1, which
-/// the ruling accepts over the earlier #2F6AC0 contrast fix.
+/// A selected row sets its title and its sub-line on the selection fill, and
+/// both are small text, so both must clear 4.5:1 in both appearances (owner
+/// ruling, 2026-10-07: hold the WCAG floors). #1146's selection is its blue,
+/// #3A7BD5, on which white is 4.22:1, and its sub-line is white at 80%,
+/// about 3.3:1; the dark selection is that blue darkened the least, at the
+/// same hue, that white clears the floor, and the sub-line is solid white.
 @MainActor
 final class SelectionContrastTests: XCTestCase {
-    func test_theSelectionIsTheReferenceBlue() {
-        XCTAssertEqual(GlassTokens.Color.selection.rgb, 0x3A7BD5)
-        XCTAssertEqual(GlassTokens.Color.selection.rgb, GlassTokens.Color.blue.rgb)
+    func test_aSelectedRowsInkClearsTextContrastOnTheSelection() {
+        let c = GlassTokens.Color.selection
+        for (name, fill) in [("dark", c.dark), ("light", c.light)] {
+            let ink = name == "dark" ? GlassListRow.selectedInk.dark : GlassListRow.selectedInk.light
+            let ratio = SwitchContrastTests.contrast(ink, fill)
+            XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(name): \(ratio)")
+        }
     }
 
-    func test_aSelectedRowsInkIsWhiteAndItsSubLineIsWhiteAt80() {
+    func test_aSelectedRowsSubLineIsTheSameSolidInk() {
         XCTAssertEqual(GlassListRow.selectedInk, GlassTokens.Color.textOnAccent)
-        XCTAssertEqual(GlassListRow.selectedSubInk.rgb, GlassListRow.selectedInk.rgb)
-        XCTAssertEqual(GlassListRow.selectedSubInk.alpha, 0.8)
+        XCTAssertEqual(GlassListRow.selectedInk.alpha, 1)
+        XCTAssertEqual(GlassListRow.selectedSubInk, GlassListRow.selectedInk)
     }
 
-    /// The title stays at the accepted 4.2:1 on the selection.
-    func test_aSelectedRowsTitleKeepsTheAcceptedContrast() {
-        let ratio = SwitchContrastTests.contrast(GlassListRow.selectedInk, GlassTokens.Color.selection)
-        XCTAssertGreaterThanOrEqual(ratio, 4.2, "\(ratio)")
+    /// The dark selection keeps #1146's blue hue: only its lightness moved.
+    func test_theDarkSelectionKeepsTheReferenceHue() {
+        func hue(_ c: GlassRGBA) -> Double {
+            let (r, g, b) = (c.red, c.green, c.blue)
+            let (hi, lo) = (max(r, g, b), min(r, g, b))
+            let d = hi - lo
+            guard d > 0 else { return 0 }
+            let h: Double = hi == r ? (g - b) / d : hi == g ? (b - r) / d + 2 : (r - g) / d + 4
+            return (h * 60 + 360).truncatingRemainder(dividingBy: 360)
+        }
+        let selection = GlassTokens.Color.selection.dark
+        let blue = GlassTokens.Color.blue.dark
+        XCTAssertEqual(hue(selection), hue(blue), accuracy: 1)
+        XCTAssertLessThan(SwitchContrastTests.contrast(GlassTokens.Color.textOnAccent, blue), 4.5,
+                          "the reason for the nudge: white on #1146's blue")
+        XCTAssertEqual(GlassTokens.Color.selection.light, GlassTokens.Color.blue.light)
     }
 }

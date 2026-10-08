@@ -308,7 +308,8 @@ public struct GlassToolbarButton: View {
 
     /// The glyph's ink, as #1146 draws it: `toolbarGlyph`, dimmed to
     /// `toolbarGlyphHidden` while its pane is hidden (owner ruling,
-    /// 2026-10-07: #1146 wins for theming).
+    /// 2026-10-07: #1146 wins for theming). Dimmed, it still clears the
+    /// 3:1 glyph floor on the control fill (ToolbarGlyphContrastTests).
     static func glyph(pressed: Bool?) -> GlassRGBA {
         pressed == false ? GlassTokens.Color.toolbarGlyphHidden : GlassTokens.Color.toolbarGlyph
     }
@@ -574,10 +575,19 @@ public struct GlassToggleStyle: ToggleStyle {
         }
     }
 
-    /// The knob: plain white on every track, the watch switch's too, as
-    /// #1146 draws it (owner ruling, 2026-10-07: white watch knob).
+    /// The knob: white on every track, the watch switch's too, as #1146
+    /// draws it.
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
         GlassTokens.Color.textOnAccent
+    }
+
+    /// A hairline ring inside the knob. On the bright watch green white is
+    /// about 1.8:1, so the knob is told apart from its track by this ring
+    /// instead, which clears the 3:1 glyph floor against the track
+    /// (SwitchContrastTests; owner ruling, 2026-10-07: hold the WCAG
+    /// floors). Every other knob clears it by itself.
+    static func knobEdge(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA? {
+        kind == .watch && isOn ? GlassTokens.Color.switchKnobEdge : nil
     }
 
     /// How long the knob takes to slide: #1146's `--tc-dur` (220ms) for a
@@ -609,6 +619,11 @@ public struct GlassToggleStyle: ToggleStyle {
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)
+                        .overlay {
+                            if let edge = Self.knobEdge(kind, isOn: configuration.isOn) {
+                                Circle().strokeBorder(edge.color, lineWidth: 1)
+                            }
+                        }
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
@@ -701,7 +716,7 @@ public struct GlassCheckMark: View {
 
 /// A labelled field: eyebrow label over a dark inset field (#1146
 /// `.tc-input`): the field fill with the well's inner edge, the prompt in
-/// tertiary text, and the shared disabled dimming. Focus is the system's
+/// the placeholder ink, and the shared disabled dimming. Focus is the system's
 /// ring.
 ///
 /// `secure` hides what is typed (a passphrase). `invalid` draws a 1pt ring
@@ -738,7 +753,9 @@ public struct GlassTextField: View {
         invalid ? GlassTokens.Color.statusOutside : nil
     }
 
-    /// The prompt's ink: #1146's 30% white (owner ruling, 2026-10-07).
+    /// The prompt's ink: #1146's white placeholder, raised from 30% so it
+    /// clears 4.5:1 on the field fill (owner ruling, 2026-10-07: hold the
+    /// WCAG floors; FormControlTests).
     static let promptInk = GlassTokens.Color.placeholder
 
     public var body: some View {
