@@ -16955,6 +16955,24 @@ mod tests {
             }
         }
 
+        /// A refused repeat `subscribe` leaves the connection's earlier
+        /// declaration exactly as it was.
+        #[tokio::test]
+        async fn a_refused_resubscribe_keeps_the_earlier_declaration() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["reengage_due"] })),
+            )
+            .await;
+            let resp = subscribe(&mut c, Some(serde_json::json!({ "accepts": [1] }))).await;
+            assert_eq!(resp["error"]["message"], ERR_SUBSCRIBE_ACCEPTS_INVALID);
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            assert_eq!(frame(&mut c.0).await["event"], EVENT_REENGAGE_DUE);
+        }
+
         #[test]
         fn opt_in_events_are_exactly_reengage_due() {
             assert_eq!(OPT_IN_EVENTS, &[EVENT_REENGAGE_DUE]);
