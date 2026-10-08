@@ -372,7 +372,7 @@ pub fn default_digest_key_store(store_dir: PathBuf) -> Box<dyn DigestKeyStore + 
 
 /// A test build never reaches a keychain or writes a key file outside a
 /// test's own directory: a past test leak left thousands of orphaned items.
-fn refuse_in_test_build() -> Result<(), DigestKeyError> {
+pub(crate) fn refuse_in_test_build() -> Result<(), DigestKeyError> {
     if cfg!(any(test, feature = "test-credential-store")) {
         Err(DigestKeyError::Unavailable(
             "insights_digest_key_test_build",
@@ -382,7 +382,7 @@ fn refuse_in_test_build() -> Result<(), DigestKeyError> {
     }
 }
 
-fn new_key_bytes() -> Result<[u8; 32], DigestKeyError> {
+pub(crate) fn new_key_bytes() -> Result<[u8; 32], DigestKeyError> {
     use ring::rand::SecureRandom;
     let mut bytes = [0u8; 32];
     ring::rand::SystemRandom::new()
@@ -391,7 +391,7 @@ fn new_key_bytes() -> Result<[u8; 32], DigestKeyError> {
     Ok(bytes)
 }
 
-fn decode_key(stored: &[u8]) -> Result<DigestKey, DigestKeyError> {
+pub(crate) fn decode_key(stored: &[u8]) -> Result<DigestKey, DigestKeyError> {
     let mut bytes = [0u8; 32];
     hex::decode_to_slice(stored, &mut bytes)
         .map_err(|_| DigestKeyError::Unavailable("insights_digest_key_invalid"))?;

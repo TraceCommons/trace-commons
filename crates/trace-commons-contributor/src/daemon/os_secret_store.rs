@@ -35,6 +35,10 @@ pub(crate) struct OsSecretBackend {
 // a constant label, never a path, account name or identifier.
 const INSIGHTS_DIGEST_KEY_SERVICE: &str = "trace-commons.insights.digest-key";
 const INSIGHTS_DIGEST_KEY_ACCOUNT: &str = "insights-digest-key-v1";
+// The daemon's own key for the Insights counter pass (feed T). A separate
+// entry from the in-process store's key: the daemon's digests never leave
+// it, and clearing its store on unenroll forgets only this key.
+const INSIGHTS_COUNTER_KEY_ACCOUNT: &str = "insights-counter-key-v1";
 
 impl OsSecretBackend {
     pub(crate) fn new() -> Result<Self, CredentialError> {
@@ -139,23 +143,50 @@ impl OsSecretBackend {
     /// Read the Insights digest key entry. Only meaningful on the store from
     /// [`OsSecretBackend::insights_digest_key`].
     pub(crate) fn read_insights_digest_key(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT)
+    }
+
+    pub(crate) fn write_insights_digest_key(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT, bytes)
+    }
+
+    pub(crate) fn delete_insights_digest_key(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(INSIGHTS_DIGEST_KEY_ACCOUNT)
+    }
+
+    /// Read the daemon's Insights counter key entry (owner decision D16,
+    /// open). Only meaningful on the store from
+    /// [`OsSecretBackend::insights_digest_key`].
+    pub(crate) fn read_insights_counter_key(&self) -> Result<Vec<u8>, CredentialError> {
+        self.read_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    pub(crate) fn write_insights_counter_key(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+        self.write_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT, bytes)
+    }
+
+    pub(crate) fn delete_insights_counter_key(&self) -> Result<(), CredentialError> {
+        self.delete_fixed(INSIGHTS_COUNTER_KEY_ACCOUNT)
+    }
+
+    fn read_fixed(&self, account: &str) -> Result<Vec<u8>, CredentialError> {
         let bytes = self
-            .entry_named(INSIGHTS_DIGEST_KEY_ACCOUNT)?
+            .entry_named(account)?
             .get_secret()
             .map_err(storage_error)?;
         validate_bytes(&bytes)?;
         Ok(bytes)
     }
 
-    pub(crate) fn write_insights_digest_key(&self, bytes: &[u8]) -> Result<(), CredentialError> {
+    fn write_fixed(&self, account: &str, bytes: &[u8]) -> Result<(), CredentialError> {
         validate_bytes(bytes)?;
-        self.entry_named(INSIGHTS_DIGEST_KEY_ACCOUNT)?
+        self.entry_named(account)?
             .set_secret(bytes)
             .map_err(storage_error)
     }
 
-    pub(crate) fn delete_insights_digest_key(&self) -> Result<(), CredentialError> {
-        self.entry_named(INSIGHTS_DIGEST_KEY_ACCOUNT)?
+    fn delete_fixed(&self, account: &str) -> Result<(), CredentialError> {
+        self.entry_named(account)?
             .delete_credential()
             .map_err(storage_error)
     }

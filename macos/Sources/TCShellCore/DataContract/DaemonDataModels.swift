@@ -693,6 +693,10 @@ extension DaemonData {
         /// Decode-only until the Insights settings draw it: the user's own
         /// context-tip threshold in tokens; `nil` is unset, never a default.
         public let insightsContextThreshold: Int?
+        /// Decode-only until the Insights settings draw it: whether the
+        /// daemon runs the counter pass for `insights_week` (owner decision
+        /// D4, open; off by default).
+        public let insightsCounterPass: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -717,6 +721,7 @@ extension DaemonData {
             case trajectorySourceMode = "trajectory_source_mode"
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
+            case insightsCounterPass = "insights_counter_pass"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
@@ -1687,5 +1692,125 @@ extension DaemonData {
         public let max: Int
         /// `points_per_accepted_trace`.
         public let unit: String
+    }
+    // MARK: Insights feed T
+
+    /// `insights_week`: one local ISO week from the daemon's counter pass
+    /// (owner decision D4, open; off by default). Use it only when
+    /// `showsCounterPass`; anything else is drawn as the saved-imports feed.
+    /// Labels and counts only: no path, digest or session id crosses.
+    public struct InsightsWeek: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when the store or key could not be
+        /// read, which is never drawn as zero.
+        public let readable: Bool?
+        public let reason: String?
+        public let updatedAt: String?
+        public let sessionsStored: Int?
+        public let isoWeek: String?
+        public let weekStart: String?
+        public let comparable: Bool?
+        public let unavailable: String?
+        public let changeVsLastWeek: [InsightsWeekChange]?
+        public let rollup: InsightsWeekRollup?
+
+        /// Enabled, readable, from the counter pass, and carrying a rollup.
+        public var showsCounterPass: Bool {
+            enabled && readable == true && feed == "counter_pass" && rollup != nil
+        }
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, reason, comparable, unavailable, rollup
+            case updatedAt = "updated_at"
+            case sessionsStored = "sessions_stored"
+            case isoWeek = "iso_week"
+            case weekStart = "week_start"
+            case changeVsLastWeek = "change_vs_last_week"
+        }
+    }
+
+    /// One source's change against last week; `permille` is `nil` with a
+    /// reason whenever either week cannot be compared.
+    public struct InsightsWeekChange: Codable, Equatable, Sendable {
+        public let source: String
+        public let permille: Int?
+        public let unavailable: String?
+    }
+
+    public struct InsightsWeekRollup: Codable, Equatable, Sendable {
+        public let weekStart: String
+        public let coverage: InsightsWeekCoverage
+        public let undatedSessions: Int
+        /// One line per harness; never summed together.
+        public let sources: [InsightsWeekSource]
+        public let byDay: [InsightsWeekDay]?
+        public let codexIntervalTokens: Int64?
+        /// Alphabetical by declared label, unknown (`nil`) last.
+        public let byModel: [InsightsWeekModel]
+        public let sessions: [InsightsWeekSession]
+
+        public enum CodingKeys: String, CodingKey {
+            case coverage, sources, sessions
+            case weekStart = "week_start"
+            case undatedSessions = "undated_sessions"
+            case byDay = "by_day"
+            case codexIntervalTokens = "codex_interval_tokens"
+            case byModel = "by_model"
+        }
+    }
+
+    public struct InsightsWeekCoverage: Codable, Equatable, Sendable {
+        public let known: Int
+        public let partial: Int
+        public let unknown: Int
+        public let reasons: [String: Int]
+    }
+
+    public struct InsightsWeekSource: Codable, Equatable, Sendable {
+        public let source: String
+        public let sessions: Int
+        /// `nil` is unknown, never zero.
+        public let tokens: Int64?
+        public let largestSessionTokens: Int64?
+        public let cacheShare: InsightsWeekShare?
+
+        public enum CodingKeys: String, CodingKey {
+            case source, sessions, tokens
+            case largestSessionTokens = "largest_session_tokens"
+            case cacheShare = "cache_share"
+        }
+    }
+
+    public struct InsightsWeekShare: Codable, Equatable, Sendable {
+        public let numerator: Int64
+        public let denominator: Int64
+    }
+
+    public struct InsightsWeekDay: Codable, Equatable, Sendable {
+        public let date: String
+        public let uncached: Int64
+        public let cacheRead: Int64
+        public let cacheWrite: Int64
+        public let output: Int64
+
+        public enum CodingKeys: String, CodingKey {
+            case date, uncached, output
+            case cacheRead = "cache_read"
+            case cacheWrite = "cache_write"
+        }
+    }
+
+    public struct InsightsWeekModel: Codable, Equatable, Sendable {
+        /// `nil` is an unknown label.
+        public let label: String?
+        public let tokens: Int64
+    }
+
+    public struct InsightsWeekSession: Codable, Equatable, Sendable {
+        public let source: String?
+        public let tokens: Int64?
+        public let state: String
+        public let reasons: [String]
     }
 }

@@ -387,6 +387,7 @@ pub const METHODS: &[&str] = &[
     "inference_connection_disconnect",
     "inference_calls",
     "insights_glance",
+    "insights_week",
     "inference_summary",
     "inference_call_proof",
     "model_spend",
@@ -488,6 +489,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "tool_destinations",
     "inference_calls",
     "insights_glance",
+    "insights_week",
     "inference_call_proof",
     "private_ai",
     "list_pending",
@@ -832,6 +834,10 @@ pub struct DaemonShared {
     /// is the durable recovery source; these queues are bounded and local to
     /// the daemon process.
     pub(crate) skill_loop: Mutex<super::skill_loop::SkillLoopState>,
+    /// The Insights counter pass (feed T) and its store. Inert while the
+    /// `insights_counter_pass` setting is off (owner decision D4, open). See
+    /// `daemon::insights_week`.
+    pub(crate) insights_counter: super::insights_week::CounterPass,
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -966,6 +972,7 @@ impl DaemonShared {
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
+        let insights_counter = super::insights_week::CounterPass::for_store(&store);
         Ok(Self {
             managed,
             store,
@@ -1024,6 +1031,7 @@ impl DaemonShared {
             harness_plans: super::harness::PlanStore::default(),
             native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
+            insights_counter,
         })
     }
 
@@ -2773,6 +2781,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
         "insights_glance" => super::insights_glance::handle_glance(shared, req),
+        "insights_week" => super::insights_week::handle_week(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
@@ -15213,7 +15222,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 75, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 76, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();

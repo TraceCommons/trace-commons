@@ -36,7 +36,7 @@ pub const ERR_TZ_INVALID: &str = "tz-invalid";
 pub const MAX_TZ_OFFSET_SECS: i64 = 18 * 3_600;
 
 /// The `tz` parameter: the shell's current UTC offset in seconds east.
-fn parse_tz(params: &serde_json::Value) -> Option<FixedOffset> {
+pub(crate) fn parse_tz(params: &serde_json::Value) -> Option<FixedOffset> {
     let seconds = params.get("tz")?.as_i64()?;
     if seconds.abs() > MAX_TZ_OFFSET_SECS {
         return None;
