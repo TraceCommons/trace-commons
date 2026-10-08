@@ -468,7 +468,7 @@ final class TracesRowWordsTests: XCTestCase {
         XCTAssertTrue(folder.isBucket)
         XCTAssertFalse(folder.offerableModes.contains(.autoUpload))
         let view = TracesTreeView(store: TracesStore(client: SampleDaemonClient(.empty)), selection: .constant(nil))
-        XCTAssertEqual(view.folderNotes(folder), [ProjectCopy.unresolvedBucketNote])
+        XCTAssertEqual(view.folderNotes(folder), [try XCTUnwrap(ProjectCopy.unresolvedBucketNote)])
     }
 
     /// An armed folder says the core's words for the disclosure the daemon

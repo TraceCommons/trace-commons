@@ -101,6 +101,9 @@ public enum GlassModalWidth: Sendable, Equatable {
 /// to assistive tech. Only the topmost modal answers the keyboard: Escape
 /// calls `onCancel`, Return takes the default action (never a destructive
 /// one). A click on the scrim calls `onCancel` too, as #1146's does.
+/// While the modal is `busy`, or its cancel action is disabled, none of
+/// those cancels it: the scrim, Escape, the close button and the cancel
+/// action are all inert until the work in flight answers.
 ///
 /// Every word is the caller's: `title`, `subtitle`, `closeLabel` (which
 /// names the close button) and the action titles. An empty `closeLabel`
@@ -112,6 +115,7 @@ public struct GlassModal<Content: View>: View {
     private let width: GlassModalWidth
     private let closeLabel: String
     private let actions: [GlassModalAction]
+    private let busy: Bool
     private let onCancel: () -> Void
     private let content: Content
     @Environment(\.glassModalIsTopmost) private var isTopmost
@@ -119,7 +123,7 @@ public struct GlassModal<Content: View>: View {
 
     public init(
         title: String, subtitle: String? = nil, width: GlassModalWidth = .regular, closeLabel: String = "",
-        actions: [GlassModalAction] = [], onCancel: @escaping () -> Void,
+        actions: [GlassModalAction] = [], busy: Bool = false, onCancel: @escaping () -> Void,
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
@@ -127,14 +131,23 @@ public struct GlassModal<Content: View>: View {
         self.width = width
         self.closeLabel = closeLabel
         self.actions = actions
+        self.busy = busy
         self.onCancel = onCancel
         self.content = content()
+    }
+
+    /// Whether anything may cancel the modal now: not while it is busy,
+    /// and not while its own cancel action is disabled (work in flight that
+    /// a cancel would leave unanswered or out of sight).
+    static func cancellable(actions: [GlassModalAction], busy: Bool) -> Bool {
+        !busy && !actions.contains { $0.role == .cancel && !$0.isEnabled }
     }
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous)
         let defaultAction = GlassModalAction.defaultAction(in: actions)
         let closeLabel = Self.closeLabel(own: closeLabel, host: hostCloseLabel)
+        let cancellable = Self.cancellable(actions: actions, busy: busy)
         VStack(alignment: .leading, spacing: 0) {
             // The title block and the close button centre on each other
             // (#1146 `.tc-modal__header`, `align-items: center`).
@@ -154,6 +167,7 @@ public struct GlassModal<Content: View>: View {
                 Spacer(minLength: 0)
                 if !closeLabel.isEmpty {
                     GlassRoundButton(closeLabel, systemImage: "xmark", small: true, action: onCancel)
+                        .disabled(!cancellable)
                 }
             }
             .padding(.top, 14)
@@ -172,7 +186,7 @@ public struct GlassModal<Content: View>: View {
                         let isDefault = action.id == defaultAction?.id
                         Button(action.title, action: action.action)
                             .buttonStyle(GlassButtonStyle(GlassModalAction.kind(action, isDefault: isDefault), small: true))
-                            .disabled(!action.isEnabled)
+                            .disabled(!action.isEnabled || (action.role == .cancel && !cancellable))
                             .keyboardShortcut(Self.shortcut(for: action, isDefault: isDefault, isTopmost: isTopmost))
                     }
                 }
@@ -193,13 +207,15 @@ public struct GlassModal<Content: View>: View {
         .clipShape(shape)
         .glassEdge(GlassTokens.Shadow.paneEdge + GlassTokens.Shadow.modal, in: shape)
         .focusSection()
-        .onExitCommand(perform: isTopmost ? onCancel : nil)
+        .onExitCommand(perform: isTopmost && cancellable ? onCancel : nil)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityAddTraits(.isModal)
         // The scrim around this modal closes it as Escape does (#1146
-        // `Modal`: `onClick={onClose}` on the scrim).
-        .preference(key: GlassModalScrimAction.self, value: GlassModalScrimAction.Action(run: onCancel))
+        // `Modal`: `onClick={onClose}` on the scrim), and like Escape not
+        // while it is busy: a click beside a modal never abandons work in
+        // flight.
+        .preference(key: GlassModalScrimAction.self, value: GlassModalScrimAction.Action(run: cancellable ? onCancel : {}))
     }
 
     /// The close button's name: the modal's own, else its host's; empty
@@ -229,16 +245,18 @@ public struct GlassConfirmation: View {
     private let subtitle: String?
     private let message: String?
     private let actions: [GlassModalAction]
+    private let busy: Bool
     private let onCancel: () -> Void
 
     public init(
         title: String, subtitle: String? = nil, message: String? = nil, actions: [GlassModalAction],
-        onCancel: @escaping () -> Void
+        busy: Bool = false, onCancel: @escaping () -> Void
     ) {
         self.title = title
         self.subtitle = subtitle
         self.message = message
         self.actions = actions
+        self.busy = busy
         self.onCancel = onCancel
     }
 
@@ -254,7 +272,7 @@ public struct GlassConfirmation: View {
     }
 
     public var body: some View {
-        GlassModal(title: title, subtitle: subtitle, width: Self.width, actions: actions, onCancel: onCancel) {
+        GlassModal(title: title, subtitle: subtitle, width: Self.width, actions: actions, busy: busy, onCancel: onCancel) {
             let paragraphs = Self.paragraphs(message)
             if paragraphs.isEmpty {
                 // #1146's body (`px-[18px] py-3`), empty.
@@ -325,6 +343,9 @@ public extension EnvironmentValues {
     /// names none of its own (#1146 draws one on every modal). Set once at
     /// the window's root, from the core's copy; empty draws none.
     @Entry var glassModalCloseLabel: String = ""
+    /// The mark a folder's tile draws (#1146 `ToolTile`'s "dir"), in the
+    /// core's words. Set once at the window's root; empty draws none.
+    @Entry var glassFolderMark: String = ""
 }
 
 /// A presented modal, on its way to the host.

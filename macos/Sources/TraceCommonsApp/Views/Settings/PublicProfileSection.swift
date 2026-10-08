@@ -199,6 +199,7 @@ struct GoPublicSheet: View {
                     isProminent: true
                 ) { model.claimHandle(handle, bio: bio) },
             ],
+            busy: model.profileBusy,
             onCancel: onDismiss
         ) {
             GlassModalBody { consent }

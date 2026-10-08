@@ -90,17 +90,27 @@ public class PrivateInferenceTests
 
     /// <summary>
     /// Every sentence arrives finished. A template with a hole in it would
-    /// make this shell a second place the wording lives.
+    /// make this shell a second place the wording lives. The core declares
+    /// its one template (<c>PRIVATE_INFERENCE_TEMPLATES</c>:
+    /// <c>inspector_tools_connected</c>), and any other hole fails here.
     /// </summary>
     [Fact]
     public void EverySentenceArrivesFinished()
     {
-        foreach (string sentence in Copy().Sentences)
+        PrivateInferenceCopy copy = Copy();
+        Assert.Contains("{connected}", copy.InspectorToolsConnected, StringComparison.Ordinal);
+        Assert.Contains("{total}", copy.InspectorToolsConnected, StringComparison.Ordinal);
+        foreach (string sentence in copy.Sentences)
         {
             Assert.False(string.IsNullOrWhiteSpace(sentence));
-            foreach (string marker in new[] { "{}", "{port}", "%@", "%s", "%d" })
+            foreach (string marker in new[] { "%@", "%s", "%d" })
             {
                 Assert.DoesNotContain(marker, sentence, StringComparison.Ordinal);
+            }
+
+            if (!string.Equals(sentence, copy.InspectorToolsConnected, StringComparison.Ordinal))
+            {
+                Assert.DoesNotContain("{", sentence, StringComparison.Ordinal);
             }
         }
     }

@@ -62,8 +62,13 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// than repeating `projectPath`, so a row renders this line only when
     /// it says something.
     let sessionPath: String?
-    let sizeBytes: Int
-    let discoveredAt: Date
+    /// The transcript's size and when the daemon found it. Every entry the
+    /// legacy queue decodes carries both (the decoder requires them); nil
+    /// only on a session carried over from the data contract
+    /// (`QueueEntryBridge.previewEntry`) whose daemon did not report it,
+    /// which is never drawn as zero bytes or as found at the epoch.
+    let sizeBytes: Int?
+    let discoveredAt: Date?
     let state: QueueState
     let reasonLabel: String?
     let attempts: Int

@@ -52,7 +52,7 @@ final class WitnessExportTests: XCTestCase {
         XCTAssertEqual(copy.signingAddressTitle, "Signing address")
         XCTAssertEqual(copy.measurementsTitle, "Expected measurements")
         XCTAssertEqual(copy.configure, "Save witness")
-        XCTAssertEqual(copy.clear, "Return to local redaction")
+        XCTAssertEqual(copy.clear, "Return")
         XCTAssertEqual(copy.inferenceHeading, "Model-call evidence")
         XCTAssertEqual(copy.tokenHeading, "Token distribution contribution")
         XCTAssertEqual(copy.inferenceEnable, "Enable")

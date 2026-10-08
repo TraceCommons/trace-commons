@@ -37,6 +37,18 @@ public enum TCPrivateInference {
         return String(cString: raw)
     }
 
+    /// The runtime tile's word for one `private_inference_state` label, as
+    /// the core's `runtime_word` picks it: every running label is on, a
+    /// stopped one off, and an unreported or unfamiliar label unknown,
+    /// never off. Nil only on a caught panic.
+    public static func runtimeWord(state: String) -> String? {
+        guard let raw = state.withCString({ tc_private_inference_runtime_word($0) }) else {
+            return nil
+        }
+        defer { tc_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// How firmly that sentence reads, as a raw
     /// `TC_PRIVATE_INFERENCE_TONE_*` value.
     ///

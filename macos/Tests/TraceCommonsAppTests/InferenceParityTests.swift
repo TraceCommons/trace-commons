@@ -338,7 +338,7 @@ final class InferenceParityTests: XCTestCase {
                        "GlassModalAction(copy.offerAccept, isDefault: true, isEnabled: !model.harnessBusy) {\n"
                            + "                    model.answerHarnessExposure(accepted: true)\n",
                        "onCancel: { model.answerHarnessExposure(accepted: false) }",
-                       "title: copy.harnessPreviewTitle, width: .narrow, actions: actions,\n",
+                       "title: copy.harnessPreviewTitle, width: .narrow, actions: actions, busy: model.harnessBusy,\n",
                        ".cancel(copy.harnessPreviewCancel) { model.cancelHarnessPreview() },\n",
                        "onCancel: { model.cancelHarnessPreview() }",
                        "if HarnessSurface.canCommit(plan, calls: model.harnessCalls) {\n"

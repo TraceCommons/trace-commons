@@ -123,23 +123,19 @@ public static class WithdrawCopy
         "This session may already have been distributed. Withdrawal cannot recall distributed copies.";
 
     /// <summary>
-    /// Withdrawal is authenticated by an account session, which this build
-    /// has no way to obtain.
+    /// The signed-out withdrawal line, the core's
+    /// <c>shell_words_copy::withdrawal_words().account_session_required</c>
+    /// verbatim (#1280 review).
     /// </summary>
     /// <remarks>
-    /// This is the failure contributors will actually hit, not an edge case:
     /// <c>daemon/withdraw.rs</c> answers <c>account-session-required</c>
-    /// before ever attempting the call, always, because the daemon holds a
-    /// device key and never an account session. So it is rendered as this
-    /// whole explanatory sentence rather than as a bare label. It leads with
-    /// the fact that nothing happened -- a contributor must not walk away
-    /// from a failed withdrawal believing their trace was taken back.
+    /// before any request is made, when the account sign-in is missing or
+    /// expired, so the sentence never claims an answer from the server. It
+    /// says that nothing was withdrawn as a sentence of its own -- a
+    /// contributor must not walk away from a failed withdrawal believing
+    /// their trace was taken back.
     /// </remarks>
-    public const string AccountSessionRequired =
-        "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so "
-        + "it is authenticated by your Trace Commons account rather than by this device -- that "
-        + "is what lets you withdraw a trace after losing the machine that sent it. This build "
-        + "has no account sign-in yet, so it cannot make the request.";
+    public const string AccountSessionRequired = "You're not signed in, or your sign-in has expired. Nothing was withdrawn. Sign in again to retry.";
 
     /// <summary>
     /// The daemon's label for "the server has no record of this submission

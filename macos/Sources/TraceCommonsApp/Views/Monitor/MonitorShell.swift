@@ -192,7 +192,13 @@ enum TracesGraphModel {
 /// the selected session's tool, zoom out, the range, zoom in, next, and
 /// jump to now.
 struct TracesGraphFooter: View {
+    /// History the bars are drawn from (`readable`): nil while unread or
+    /// after a failed read. A capped page still draws, because the newest
+    /// page covers the days the graph shows.
     let history: [DaemonData.HistoryRow]?
+    /// Whether `history` is a whole page (`countable`). When it is not, the
+    /// legend's shared figure is a dash, never a part count drawn as a total.
+    let complete: Bool
     let sessions: [DaemonData.QueueEntry]
     /// The selected session's tool; the graph counts only it, and the
     /// binoculars can focus the map on it.
@@ -221,7 +227,7 @@ struct TracesGraphFooter: View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             HStack(spacing: GlassTokens.Space.s3) {
                 GlassLegendCell(MenuWords.shared, value: Self.figure(shown?.shared ?? buckets.map(\.shared).reduce(0, +),
-                                                                        known: history != nil), status: .shared)
+                                                                        known: history != nil && complete), status: .shared)
                 GlassLegendCell(MenuWords.kept, value: String(shown?.kept ?? buckets.map(\.kept).reduce(0, +)), status: .kept)
             }
             GlassBarGraph(buckets.map { Self.bar($0, words: words) }, scaleFloor: 5, hovered: $hovered)
@@ -237,7 +243,7 @@ struct TracesGraphFooter: View {
                     action: onFocus)
                     .disabled(tool == nil)
                     .accessibilityAddTraits(focus && tool != nil ? .isSelected : [])
-                GlassPillIconButton(words?.zoomOut ?? "", glyph: "\u{2212}") { zoom(range.zoomedOut) }
+                GlassPillIconButton(words?.zoomOut ?? "", glyph: words?.zoomOutGlyph ?? "") { zoom(range.zoomedOut) }
                     .disabled(range.zoomedOut == nil)
                 Text(Self.rangeLabel(range: range, offset: offset, hovered: shown?.start, words: words))
                     .glassType(GlassTokens.TypeScale.label)
@@ -249,11 +255,11 @@ struct TracesGraphFooter: View {
                     .background(Capsule().fill(GlassColor.ink(0.07)))
                     .glassEdge(Self.rangeEdge, in: Capsule())
                     .accessibilityAddTraits(.updatesFrequently)
-                GlassPillIconButton(words?.zoomIn ?? "", glyph: "+") { zoom(range.zoomedIn) }
+                GlassPillIconButton(words?.zoomIn ?? "", glyph: words?.zoomInGlyph ?? "") { zoom(range.zoomedIn) }
                     .disabled(range.zoomedIn == nil)
                 GlassPillIconButton(MonitorShellWords.next, glyph: "\u{203A}") { step(1, from: .leading) }
                     .disabled(offset == 0)
-                GlassPillIconButton(words?.jumpToNow ?? "", glyph: "\u{203A}|") {
+                GlassPillIconButton(words?.jumpToNow ?? "", glyph: words?.jumpToNowGlyph ?? "") {
                     slide = .leading
                     withAnimation(Self.slideAnimation(reduceMotion)) { offset = 0 }
                 }
@@ -298,6 +304,21 @@ struct TracesGraphFooter: View {
     static func focusInk(focused: Bool, canFocus: Bool) -> GlassRGBA {
         guard canFocus else { return GlassTokens.Color.graphFocusOff }
         return focused ? GlassTokens.Color.graphFocusOn : GlassTokens.Color.graphFocusIdle
+    }
+
+    /// The history the bars are drawn from: the last page from a read that
+    /// did not fail, capped or not.
+    @MainActor
+    static func readable(_ history: [DaemonData.HistoryRow]?, failure: DaemonDataError?) -> [DaemonData.HistoryRow]? {
+        SummaryFacts.fresh(history, unless: failure)
+    }
+
+    /// The history the legend's total counts, by the map's rule
+    /// (`FlowMapScene.Contributions`, `FolderInspector.shared`): only a
+    /// whole page from a read that did not fail.
+    @MainActor
+    static func countable(_ history: [DaemonData.HistoryRow]?, failure: DaemonDataError?) -> [DaemonData.HistoryRow]? {
+        SummaryFacts.wholeHistory(SummaryFacts.fresh(history, unless: failure))
     }
 
     /// A count, or a dash while History has not been read: an unread record

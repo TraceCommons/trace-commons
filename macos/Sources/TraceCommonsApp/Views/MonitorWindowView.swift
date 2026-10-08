@@ -216,7 +216,9 @@ struct MonitorWindowView: View {
                 // sliding up from the pane's bottom edge as it opens.
                 if Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) == .traces && showsGraph {
                     TracesGraphFooter(
-                        history: home.history, sessions: traces.tree.allSessions, tool: selectedTool,
+                        history: TracesGraphFooter.readable(home.history, failure: home.failures["list_history"]),
+                        complete: TracesGraphFooter.countable(home.history, failure: home.failures["list_history"]) != nil,
+                        sessions: traces.tree.allSessions, tool: selectedTool,
                         focus: $mapFocus, onFocus: focusMap)
                         .padding(.horizontal, GlassTokens.Space.panePadding)
                         .padding(.vertical, GlassTokens.Space.s5)
@@ -324,6 +326,8 @@ struct MonitorWindowView: View {
         // Every modal raised here has #1146's close button, named in the
         // core's words.
         .environment(\.glassModalCloseLabel, MonitorWords.table?.close ?? "")
+        // A folder's tile mark, in the core's words.
+        .environment(\.glassFolderMark, TracesTreeWords.table?.folderMark ?? "")
         // Ron's `useInspectorDemand`: a key that was not there before (an
         // undo, a selected session, a folder's Submit all in flight)
         // opens the inspector, so none runs out of sight. A key going away

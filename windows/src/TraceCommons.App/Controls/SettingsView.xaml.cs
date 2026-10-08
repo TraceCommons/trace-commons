@@ -81,12 +81,12 @@ public sealed partial class SettingsView : UserControl
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = Settings.InferenceEvidenceHeading,
+            Title = Settings.PrivacyConfirmTitle,
             Content = new ScrollViewer
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.InferenceEvidenceDisclosure,
+                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.InferenceEvidenceDisclosure,
                         Settings.InferenceEvidenceCaptureNote, Settings.InferenceEvidenceScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },
@@ -142,12 +142,12 @@ public sealed partial class SettingsView : UserControl
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = Settings.TokenContributionHeading,
+            Title = Settings.PrivacyConfirmTitle,
             Content = new ScrollViewer
             {
                 Content = new TextBlock
                 {
-                    Text = string.Join("\n\n", Settings.TokenContributionDisclosure,
+                    Text = string.Join("\n\n", Settings.PrivacyConfirmDescription, Settings.TokenContributionDisclosure,
                         Settings.TokenContributionCaptureNote, Settings.TokenContributionScopeNote),
                     TextWrapping = TextWrapping.Wrap,
                 },

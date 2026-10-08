@@ -44,7 +44,7 @@ final class ConvergenceTokenTests: XCTestCase {
         for token in [
             GlassTokens.Color.cardHover, GlassTokens.Color.rowHover, GlassTokens.Color.toolbarExpanded,
             GlassTokens.Color.placeholder, GlassTokens.Color.rule, GlassTokens.Color.toolbarGlyph,
-            GlassTokens.Color.toolbarGlyphHidden, GlassTokens.Color.modalScrim,
+            GlassTokens.Color.toolbarGlyphHidden, GlassTokens.Color.switchKnobEdge, GlassTokens.Color.modalScrim,
         ] {
             XCTAssertNotNil(token.lightRGB ?? token.lightAlpha.map { _ in 0 })
         }

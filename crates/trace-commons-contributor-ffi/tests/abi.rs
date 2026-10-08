@@ -35,18 +35,18 @@ use trace_commons_contributor_ffi::{
     tc_near_ai_enroll_tone, tc_preview, tc_preview_body, tc_preview_open, tc_preview_search,
     tc_preview_summary_json, tc_preview_turns_json, tc_preview_unsure_spans_json,
     tc_private_inference_copy, tc_private_inference_quit_needs_notice,
-    tc_private_inference_serving_line, tc_private_inference_should_offer,
-    tc_private_inference_state_line, tc_private_inference_state_tone, tc_public_run_copy,
-    tc_public_run_error_line, tc_public_run_validate_editor, tc_routing_copy,
-    tc_routing_discovery_line, tc_routing_last_checked, tc_routing_state_line,
-    tc_routing_state_tone, tc_routing_token_line, tc_routing_tool_tone, tc_routing_tool_word,
-    tc_routing_unreachable_line, tc_scrub_detector_names, tc_search_original,
-    tc_session_detail_error_line, tc_session_notification_copy, tc_skill_draft_validate,
-    tc_skill_learning_copy, tc_skill_learning_error_line, tc_source_check_line, tc_string_free,
-    tc_subscribe, tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure,
-    tc_witness_copy, tc_witness_last_result_json, tc_witness_last_result_line,
-    tc_witness_last_result_tone, tc_witness_state_line, tc_witness_state_tone,
-    tc_witness_status_json, tc_witness_trust_state,
+    tc_private_inference_runtime_word, tc_private_inference_serving_line,
+    tc_private_inference_should_offer, tc_private_inference_state_line,
+    tc_private_inference_state_tone, tc_public_run_copy, tc_public_run_error_line,
+    tc_public_run_validate_editor, tc_routing_copy, tc_routing_discovery_line,
+    tc_routing_last_checked, tc_routing_state_line, tc_routing_state_tone, tc_routing_token_line,
+    tc_routing_tool_tone, tc_routing_tool_word, tc_routing_unreachable_line,
+    tc_scrub_detector_names, tc_search_original, tc_session_detail_error_line,
+    tc_session_notification_copy, tc_skill_draft_validate, tc_skill_learning_copy,
+    tc_skill_learning_error_line, tc_source_check_line, tc_string_free, tc_subscribe,
+    tc_toast_sent_text, tc_unsubscribe, tc_witness_clear, tc_witness_configure, tc_witness_copy,
+    tc_witness_last_result_json, tc_witness_last_result_line, tc_witness_last_result_tone,
+    tc_witness_state_line, tc_witness_state_tone, tc_witness_status_json, tc_witness_trust_state,
 };
 use trace_commons_contributor_ffi::{
     tc_harness_action_available, tc_harness_last_call_line, tc_harness_outcome_line,
@@ -3735,6 +3735,40 @@ fn the_private_inference_branch_tables_cross_the_abi() {
     assert_eq!(
         take_owned(unsafe { tc_private_inference_state_line(std::ptr::null()) }),
         copy::STATE_UNREPORTED
+    );
+}
+
+/// The runtime tile's word crosses as the core picks it, so no shell
+/// re-implements `runtime_word`: every label maps as the Rust does, and an
+/// unreported, unfamiliar or missing label is unknown, never off.
+#[test]
+fn the_runtime_word_crosses_as_the_core_picks_it() {
+    use trace_commons_contributor::private_inference_copy as copy;
+    let word = |state: &str| {
+        let state = CString::new(state).unwrap();
+        take_owned(unsafe { tc_private_inference_runtime_word(state.as_ptr()) })
+    };
+    for label in [
+        "off",
+        "running",
+        "running_no_backends",
+        "running_answered_elsewhere",
+        "running_destination_unknown",
+        "running_elsewhere",
+        "stopping",
+        "port_in_use",
+        "start_failed",
+        "crashed",
+        "",
+        "a_state_from_a_later_daemon",
+    ] {
+        assert_eq!(word(label), copy::runtime_word(label), "{label:?}");
+    }
+    assert_eq!(word("off"), copy::RUNTIME_OFF);
+    assert_eq!(word("a_state_from_a_later_daemon"), copy::RUNTIME_UNKNOWN);
+    assert_eq!(
+        take_owned(unsafe { tc_private_inference_runtime_word(std::ptr::null()) }),
+        copy::RUNTIME_UNKNOWN
     );
 }
 

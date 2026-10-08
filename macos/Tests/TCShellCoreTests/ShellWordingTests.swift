@@ -41,7 +41,9 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/DailyBudgetCopy.swift": 6,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
-        "TCShellCore/ProjectRow.swift": 2,
+        // Lowered from 2 (#1273 review): the line under the unresolved bucket
+        // is the core's (`MonitorTreeCopy.unresolved_bucket_note`).
+        "TCShellCore/ProjectRow.swift": 1,
         "TCShellCore/RedactionLabels.swift": 1,
         "TCShellCore/RedactionMarks.swift": 2,
         "TCShellCore/ScrubDetectors.swift": 2,

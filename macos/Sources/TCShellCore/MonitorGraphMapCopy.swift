@@ -6,6 +6,10 @@ public struct MonitorTracesGraphCopy: MonitorWordTable {
     public let zoomOut: String
     public let zoomIn: String
     public let jumpToNow: String
+    /// The glyphs on the zoom out, zoom in and jump-to-now pills.
+    public let zoomOutGlyph: String
+    public let zoomInGlyph: String
+    public let jumpToNowGlyph: String
     public let lastHours: String
     public let lastDays: String
     public let hoursBackOne: String
@@ -18,6 +22,9 @@ public struct MonitorTracesGraphCopy: MonitorWordTable {
         case zoomOut = "zoom_out"
         case zoomIn = "zoom_in"
         case jumpToNow = "jump_to_now"
+        case zoomOutGlyph = "zoom_out_glyph"
+        case zoomInGlyph = "zoom_in_glyph"
+        case jumpToNowGlyph = "jump_to_now_glyph"
         case lastHours = "last_hours"
         case lastDays = "last_days"
         case hoursBackOne = "hours_back_one"

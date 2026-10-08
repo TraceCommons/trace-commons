@@ -276,8 +276,10 @@ final class FirstRunFrameTests: XCTestCase {
         // Join's bold sentence is in the primary text colour.
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
         XCTAssertTrue(join.contains("Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary)"))
-        // Never rows on Rules are dimmed.
+        // Never rows on Rules are dimmed by ink, never by an opacity that
+        // takes their words under 4.5:1.
         let rules = try Self.appSource("Views/FirstRun/RulesScreen.swift")
-        XCTAssertTrue(rules.contains(".opacity(GlassTokens.Opacity.rowOff)"))
+        XCTAssertFalse(rules.contains(".opacity(GlassTokens.Opacity.rowOff)"))
+        XCTAssertTrue(rules.contains("dimmed by ink, not"))
     }
 }

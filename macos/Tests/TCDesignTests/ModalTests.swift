@@ -150,6 +150,7 @@ final class ModalTests: XCTestCase {
         let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
         let modal = try XCTUnwrap(sources["Modal.swift"])
         XCTAssertEqual(modal.components(separatedBy: ".onExitCommand").count - 1, 1)
-        XCTAssertTrue(modal.contains(".onExitCommand(perform: isTopmost ? onCancel : nil)"))
+        // And not while the modal is busy (#1273 review).
+        XCTAssertTrue(modal.contains(".onExitCommand(perform: isTopmost && cancellable ? onCancel : nil)"))
     }
 }

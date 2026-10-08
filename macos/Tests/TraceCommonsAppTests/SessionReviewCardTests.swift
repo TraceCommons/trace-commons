@@ -180,6 +180,18 @@ final class SessionReviewCardTests: XCTestCase {
                       "Contribute is armed over a core that is down")
     }
 
+    /// zmanian's follow-up on #1273: with the core down, Contribute's
+    /// tooltip gives the core-down reason (the banner's title), not the
+    /// consent gate's not-ready one.
+    func test_aCoreThatStoppedAnsweringExplainsContribute() throws {
+        let down = try XCTUnwrap(TracesHealth.coreDownLine?.title)
+        XCTAssertEqual(SessionReviewCard.coreDownHelp, down)
+        XCTAssertNotEqual(SessionReviewCard.coreDownHelp, TCConsentCopy.gateHelp(pinned: false))
+        let card = try Self.text(Self.card)
+        XCTAssertTrue(card.contains(".help(Self.coreAnswering(store.phase)\n"), "the tooltip does not check the core first")
+        XCTAssertTrue(card.contains(": Self.coreDownHelp)"))
+    }
+
     /// Native's Keep stays on the card, and its Undo stays in the prompts.
     func test_keepAndUndoKeepRemain() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
@@ -219,9 +231,17 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertEqual(carried.projectID, entry.projectId)
         XCTAssertEqual(carried.projectLabel, entry.projectLabel)
         XCTAssertEqual(carried.source, entry.source)
+        XCTAssertEqual(carried.sizeBytes, entry.sizeBytes)
+        XCTAssertEqual(carried.discoveredAt, entry.discoveredAt ?? entry.startedAt)
         // The legacy queue's own entry wins when it holds the session.
         let held = QueueEntryBridge.previewEntry(entry, in: [carried])
         XCTAssertEqual(held, carried)
+        // #1273 review: a size or a time the daemon did not report is never
+        // fabricated as zero bytes or the epoch.
+        let source = try Self.text(Self.card)
+        XCTAssertFalse(source.contains("entry.sizeBytes ?? 0"))
+        XCTAssertFalse(source.contains("Date(timeIntervalSince1970: 0)"))
+        XCTAssertTrue(source.contains("sizeBytes: entry.sizeBytes,\n            discoveredAt: entry.discoveredAt ?? entry.startedAt,"))
 
         let card = try Self.text(Self.card)
         for needle in [
