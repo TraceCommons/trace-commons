@@ -30,6 +30,12 @@ enum JoinLookUpOutcome: Equatable {
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinScreenLayout {
+    /// The extra space above the invite card (under the body) and above the
+    /// no-sharing card (under the account cards), on top of the frame's own
+    /// gaps (owner, 2026-10-08): `s8` + this under the body, `s6` + this
+    /// between the cards.
+    static let extraGap = GlassTokens.Space.s4
+
     /// Contributing needs an account; without one, setup is watching only.
     static func hasAccount(_ state: FirstRunState) -> Bool {
         switch state.account {
@@ -386,7 +392,7 @@ enum JoinScreenLayout {
 }
 
 /// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,
-/// the passkey and near.ai cards, the quiet no-sharing card, and "Skip:
+/// the passkey and near.ai cards, the no-sharing card, and "Skip:
 /// watch only" until an account exists.
 ///
 /// Join holds no daemon client: on a first pass the daemon is not running.
@@ -424,6 +430,7 @@ struct JoinScreen: View {
             title
         } content: {
             inviteCard
+                .padding(.top, JoinScreenLayout.extraGap)
             passkeyCard
             nearAICard
             if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
@@ -432,21 +439,31 @@ struct JoinScreen: View {
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            GlassCard(quiet: true) {
+            // The same card as the invite and account cards (owner,
+            // 2026-10-08), set apart from them by the extra gap.
+            GlassCard {
                 Text(copy.join.noSharing)
                     .glassType(GlassTokens.TypeScale.label)
                     .foregroundStyle(GlassColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            .padding(.top, JoinScreenLayout.extraGap)
         }
     }
 
+    /// The title, then the body in two paragraphs: the bold sentence on a
+    /// line of its own, in the primary ink (owner, 2026-10-08).
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            (Text(copy.join.body) + Text(" ")
-                + Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary))
+            Text(copy.join.body)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(copy.join.bodyEmphasis)
+                .glassType(GlassTokens.TypeScale.body.weight(.bold))
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

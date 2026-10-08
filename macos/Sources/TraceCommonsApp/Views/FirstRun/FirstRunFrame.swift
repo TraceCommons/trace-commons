@@ -91,6 +91,13 @@ enum FirstRunFrameLayout {
         !isCommitting && state.tier == .quick && state.step == .folders
     }
 
+    /// The tier tag in the pane's bar is Custom setup's only: Quick setup
+    /// shows none (owner, 2026-10-08), so the bar is left out there. The
+    /// pane's accessible name still names the tier on both.
+    static func showsTierTag(_ state: FirstRunState) -> Bool {
+        state.tier == .custom
+    }
+
     /// The disabled Continue explains itself only on the tool screens, where
     /// the reason is an unanswered tool; elsewhere the reason differs.
     static func showsAnswerEveryTool(_ state: FirstRunState, footer: FirstRunFooter) -> Bool {
@@ -138,7 +145,9 @@ struct FirstRunFrame<Header: View, Content: View>: View {
     var body: some View {
         GlassPane {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
-                bar
+                if FirstRunFrameLayout.showsTierTag(state) {
+                    bar
+                }
                 GlassStepProgress(labels: copy.frame.steps(for: state.tier), current: FirstRunFrameLayout.current(state))
                     .frame(maxWidth: .infinity)
                 header
@@ -163,7 +172,8 @@ struct FirstRunFrame<Header: View, Content: View>: View {
         .accessibilityLabel(copy.frame.eyebrow(for: state.tier))
     }
 
-    /// Ron's `ftux-pane__bar`: the tier's name on the right.
+    /// Ron's `ftux-pane__bar`: the tier's name on the right, on Custom
+    /// setup only (`FirstRunFrameLayout.showsTierTag`).
     private var bar: some View {
         HStack(spacing: GlassTokens.Space.s6) {
             Spacer(minLength: 0)

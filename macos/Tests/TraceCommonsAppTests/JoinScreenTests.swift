@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -868,6 +869,38 @@ final class JoinScreenTests: XCTestCase {
 
         XCTAssertEqual(daemon.unenrollCalls, 0)
         XCTAssertFalse(runner.state.signedOutOfEnrolment)
+    }
+
+    /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, the
+    /// no-sharing line sits in the same card as the invite and account
+    /// cards, and an extra gap sets the cards apart from the body and the
+    /// no-sharing card apart from the account cards.
+    func test_joinLaysOutItsBodyAndCardsAsRuled() throws {
+        let source = try Self.source()
+        // Two paragraphs, not one run of concatenated text.
+        XCTAssertFalse(source.contains("Text(copy.join.body) + Text("))
+        let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
+        let emphasis = try XCTUnwrap(source.range(of: "Text(copy.join.bodyEmphasis)\n"))
+        XCTAssertLessThan(body.lowerBound, emphasis.lowerBound)
+        let emphasisStyle = String(source[emphasis.upperBound...].prefix(200))
+        XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body.weight(.bold))"))
+        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
+
+        // The no-sharing card is the plain card every other Join card is.
+        XCTAssertFalse(source.contains("GlassCard(quiet: true)"))
+        let noSharing = try XCTUnwrap(source.range(of: "Text(copy.join.noSharing)"))
+        let before = String(source[..<noSharing.lowerBound].suffix(200))
+        XCTAssertTrue(before.hasSuffix("GlassCard {\n                "), before)
+
+        // The extra gap, a spacing token, above the invite card and above
+        // the no-sharing card, and nowhere else.
+        XCTAssertEqual(JoinScreenLayout.extraGap, GlassTokens.Space.s4)
+        XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 2)
+        let invite = try XCTUnwrap(source.range(of: "inviteCard\n                .padding(.top, JoinScreenLayout.extraGap)"))
+        let passkey = try XCTUnwrap(source.range(of: "passkeyCard\n            nearAICard"))
+        XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
+        let afterNoSharing = String(source[noSharing.upperBound...].prefix(400))
+        XCTAssertTrue(afterNoSharing.contains(".padding(.top, JoinScreenLayout.extraGap)"))
     }
 
     /// Every word on Join is the core's: the file holds no literal of two or

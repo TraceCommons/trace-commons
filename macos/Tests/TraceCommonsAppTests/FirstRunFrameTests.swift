@@ -4,7 +4,8 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// Ron's first-run frame (#1030 `ftux-frame.tsx`): the tier as the eyebrow,
+/// Ron's first-run frame (#1030 `ftux-frame.tsx`): the tier as the eyebrow
+/// (Custom setup only, owner 2026-10-08),
 /// the tier's step labels in the progress, and "Custom setup instead" only on
 /// Quick's Folders (`tool-screens.tsx`). Read from the real core table and
 /// the frame's source, the house pattern for a SwiftUI view.
@@ -30,6 +31,15 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertEqual(frame.eyebrow(for: .quick), frame.quickSetup)
         XCTAssertEqual(frame.eyebrow(for: .custom), frame.customSetup)
 
+        // The tier tag shows on Custom setup only (owner, 2026-10-08): Quick
+        // setup's pane has no bar. The pane's accessible name keeps the tier.
+        for tier in [FirstRunTier.quick, .custom] {
+            for step in FirstRunNavigation.steps(for: tier) {
+                XCTAssertEqual(
+                    FirstRunFrameLayout.showsTierTag(FirstRunState(tier: tier, step: step)), tier == .custom)
+            }
+        }
+
         // The current node is the state's step within its tier's list.
         for tier in [FirstRunTier.quick, .custom] {
             for (index, step) in FirstRunNavigation.steps(for: tier).enumerated() {
@@ -40,6 +50,9 @@ final class FirstRunFrameTests: XCTestCase {
         let source = try Self.source()
         XCTAssertTrue(source.contains("GlassPane"))
         XCTAssertTrue(source.contains("copy.frame.eyebrow(for: state.tier)"))
+        XCTAssertTrue(source.contains(".accessibilityLabel(copy.frame.eyebrow(for: state.tier))"))
+        let tag = try XCTUnwrap(source.range(of: "if FirstRunFrameLayout.showsTierTag(state) {\n                    bar\n"))
+        XCTAssertLessThan(tag.lowerBound, try XCTUnwrap(source.range(of: "GlassStepProgress(")).lowerBound)
         XCTAssertTrue(source.contains("GlassStepProgress(labels: copy.frame.steps(for: state.tier)"))
     }
 
@@ -273,9 +286,13 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
         // The Private AI switch is the settings style.
         XCTAssertTrue(uses.contains("GlassToggleStyle(.settings, showsLabel: false)"))
-        // Join's bold sentence is in the primary text colour.
+        // Join's bold sentence is in the primary text colour, its own
+        // paragraph (owner, 2026-10-08).
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
-        XCTAssertTrue(join.contains("Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary)"))
+        let emphasis = try XCTUnwrap(join.range(of: "Text(copy.join.bodyEmphasis)"))
+        let emphasisStyle = String(join[emphasis.upperBound...].prefix(200))
+        XCTAssertTrue(emphasisStyle.contains(".weight(.bold)"))
+        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
         // Never rows on Rules are dimmed by ink, never by an opacity that
         // takes their words under 4.5:1.
         let rules = try Self.appSource("Views/FirstRun/RulesScreen.swift")
