@@ -30,6 +30,7 @@ pub mod time_evidence;
 pub mod usage;
 pub mod usage_evidence;
 pub mod week_rollup;
+pub mod what_if;
 #[cfg(windows)]
 mod win_store_acl;
 
