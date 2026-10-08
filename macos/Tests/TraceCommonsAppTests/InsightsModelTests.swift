@@ -267,6 +267,11 @@ final class InsightsOverviewTests: XCTestCase {
         XCTAssertNil(model.inputs, "a new week closes the old drill-down")
 
         await recorder.fail()
+        model.showInputs("tokens")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.inputs)
+        XCTAssertNotNil(model.overview, "a failed drill-down closes only itself")
+        XCTAssertFalse(model.failed)
         model.reload()
         for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNil(model.overview, "a failed read never keeps the old figures")

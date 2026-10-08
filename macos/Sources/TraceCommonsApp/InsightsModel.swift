@@ -593,7 +593,8 @@ final class InsightsOverviewModel {
                      apply: @escaping @MainActor (InsightsOverviewModel, InsightsResponse) throws -> Void) {
         task?.cancel()
         token = UUID(); let current = token
-        busy = true; failed = false
+        busy = true
+        if operation.type != "card_inputs" { failed = false }
         let service = service
         task = Task { [weak self] in
             do {
@@ -604,8 +605,10 @@ final class InsightsOverviewModel {
                 self.busy = false
             } catch {
                 guard let self, self.active, self.token == current, !Task.isCancelled else { return }
-                self.overview = nil; self.inputs = nil
-                self.failed = true; self.busy = false
+                // A failed drill-down closes only itself; a failed week read
+                // never keeps the old figures.
+                if operation.type != "card_inputs" { self.overview = nil; self.failed = true }
+                self.inputs = nil; self.busy = false
             }
         }
     }

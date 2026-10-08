@@ -73,10 +73,11 @@ struct InsightsOverviewTab: View {
         var weeks = overview.weeks
         if !weeks.contains(overview.week_start) { weeks.insert(overview.week_start, at: 0) }
         return weeks.map { start in
-            let end = Calendar(identifier: .iso8601).date(
-                byAdding: .day, value: 6,
-                to: (try? Date(start, strategy: Date.ISO8601FormatStyle().year().month().day())) ?? Date())
-                .map { $0.formatted(Date.ISO8601FormatStyle().year().month().day()) } ?? start
+            // Dates are UTC midnights here, so six whole days of seconds land
+            // on the Sunday whatever the local zone's daylight changes do.
+            let day = Date.ISO8601FormatStyle().year().month().day()
+            let end = (try? Date(start, strategy: day))
+                .map { $0.addingTimeInterval(6 * 86_400).formatted(day) } ?? start
             return GlassPickerOption(InsightsOverviewWords.weekRange(start: start, end: end), value: start)
         }
     }
