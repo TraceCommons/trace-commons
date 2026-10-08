@@ -1811,6 +1811,10 @@ fn new_entry(
         subagent_count: transcript.subagent_count,
         subagents_dropped: transcript.subagents_dropped,
         shape: Some(super::queue::SessionShape::of(transcript)),
+        // Nudge value addendum, 4.4: the local-estimate features, from the
+        // same transcript at the same moment -- no extra read, lock or
+        // network. Local-only, like `shape`.
+        estimate_features: Some(super::queue::estimate_features_of(transcript)),
         // K9: built from the same raw transcript, at the same moment, for
         // the same reason -- see `queue::title_of`.
         title: super::queue::title_of(transcript),
@@ -6829,6 +6833,43 @@ mod tests {
         );
         assert_eq!(queue.pending().len(), 1, "exactly one live offer");
         assert_ne!(queue.pending()[0].session_hash, first_hash);
+    }
+
+    /// Nudge value addendum, 4.4: an entry is minted with its local-estimate
+    /// features, and a session that grew is minted afresh, so the
+    /// replacement's features describe the new content and the old entry's
+    /// are left behind with it.
+    #[tokio::test]
+    async fn a_grown_sessions_replacement_carries_fresh_estimate_features() {
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let first = {
+            let queue = f.shared.queue.lock().unwrap();
+            queue.all()[0].clone()
+        };
+        let first_features = first
+            .estimate_features
+            .clone()
+            .expect("a minted entry carries features");
+        assert!(first_features.content_bytes > 0, "{first_features:?}");
+
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+
+        let queue = f.shared.queue.lock().unwrap();
+        let fresh = queue.pending()[0];
+        assert_ne!(fresh.session_hash, first.session_hash);
+        let fresh_features = fresh
+            .estimate_features
+            .as_ref()
+            .expect("the replacement is minted with features");
+        assert!(
+            fresh_features.content_bytes > first_features.content_bytes,
+            "{fresh_features:?} vs {first_features:?}"
+        );
     }
 
     #[tokio::test]

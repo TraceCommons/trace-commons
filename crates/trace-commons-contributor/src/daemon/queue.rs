@@ -174,6 +174,38 @@ pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String>
     crate::daemon::preview::title_of(&redacted)
 }
 
+/// The session's local-estimate features (`lef1`), from the transcript the
+/// watcher already loaded to mint the entry: no extra read.
+///
+/// Every event is fed, delegated transcripts included, because the envelope
+/// is built from all of them (`session_hash` covers the same set). Each
+/// event kind maps to the role its envelope event type has: an opaque record
+/// becomes a content-free tool result in the envelope, so it is fed with its
+/// tool name and no text, and both sides count the same bytes.
+pub fn estimate_features_of(
+    transcript: &crate::source::SessionTranscript,
+) -> trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures {
+    use crate::source::SessionEventKind;
+    use trace_commons_protocol::local_credit_estimate::{EstimateRole, LocalEstimateAccumulator};
+    let mut acc = LocalEstimateAccumulator::new();
+    for event in &transcript.events {
+        let (role, text) = match event.kind {
+            SessionEventKind::User => (EstimateRole::User, event.content.as_deref()),
+            SessionEventKind::Assistant => (EstimateRole::Assistant, event.content.as_deref()),
+            SessionEventKind::ToolResult => (EstimateRole::ToolResult, event.content.as_deref()),
+            // Reasoning counts as other, as the gate's attribution does.
+            SessionEventKind::Reasoning | SessionEventKind::ToolCall => {
+                (EstimateRole::Other, event.content.as_deref())
+            }
+            // `envelope::raw_event_for` maps it to a tool result with no
+            // content.
+            SessionEventKind::Opaque => (EstimateRole::ToolResult, None),
+        };
+        acc.accumulate(role, text, event.tool_name.as_deref());
+    }
+    acc.finish()
+}
+
 /// One session offered to the contributor.
 ///
 /// `Default` supports focused test fixtures, which spell
@@ -481,6 +513,25 @@ pub struct QueueEntry {
     /// word of what was said. `None` on an entry written before this existed.
     #[serde(default)]
     pub shape: Option<SessionShape>,
+    /// Content-free numbers about the session (`lef1`: byte counts by role,
+    /// prompt and tool counts, a sampled byte entropy), from which
+    /// `list_pending` and `status` render a local credit estimate against the
+    /// calibration table in force. Minted with `shape`, from the same
+    /// transcript, at the same moment; see [`estimate_features_of`].
+    ///
+    /// Local-only, exactly like `shape`: it never reaches a log line, an
+    /// audit row, a history record or a notification, and only the estimate
+    /// derived from it reaches the wire. Not carried across a content
+    /// change: `reoffered_from` clears it, and a session that grew is minted
+    /// afresh by the watcher.
+    ///
+    /// `None` on every entry written before this field existed, which reads
+    /// as unknown -- no estimate -- never as 0. `#[serde(default)]` so an
+    /// older `daemon-queue.jsonl` still loads, and left out of the file when
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_features:
+        Option<trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures>,
     /// The session's title (K9): the first non-empty line of the redacted
     /// opening prompt, cut and truncated exactly as the K1 preview title is.
     /// See [`title_of`] for what "redacted" means on this path.
@@ -954,6 +1005,10 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         eligibility_reason: None,
         attestation: None,
         attestation_reason: None,
+        // Cleared for the same reason: the features describe the old bytes,
+        // and an estimate of content nobody measured is unknown, not the old
+        // figure. Absent renders as no estimate until a load mints features.
+        estimate_features: None,
         ..old
     }
 }
@@ -3657,6 +3712,101 @@ mod tests {
         let loaded = Queue::load(&store).unwrap();
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].shape, None);
+    }
+
+    /// A line queued before `estimate_features` existed still loads, with
+    /// none: the estimate is unknown for it, never 0.
+    #[test]
+    fn a_queue_line_written_before_estimate_features_still_loads() {
+        let (_d, store) = temp_store();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.estimate_features = Some(estimate_features_of(&crate::source::SessionTranscript {
+            events: vec![event(
+                crate::source::SessionEventKind::User,
+                None,
+                Some("hello"),
+            )],
+            ..Default::default()
+        }));
+        let mut value = serde_json::to_value(e).unwrap();
+        assert!(value.get("estimate_features").is_some(), "{value}");
+        value.as_object_mut().unwrap().remove("estimate_features");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].estimate_features, None);
+        // And `None` is left out of the file rather than written as null.
+        let line = serde_json::to_value(&loaded.all()[0]).unwrap();
+        assert!(line.get("estimate_features").is_none(), "{line}");
+    }
+
+    /// Every event kind is fed with the role its envelope event type has,
+    /// delegated transcripts included; an opaque record counts its tool
+    /// name and none of its text, as the envelope carries none.
+    #[test]
+    fn estimate_features_map_every_event_kind_as_the_envelope_does() {
+        use crate::source::SessionEventKind::{
+            Assistant, Opaque, Reasoning, ToolCall, ToolResult, User,
+        };
+        let tool = |kind, content: &str, name: &str| crate::source::SessionEvent {
+            kind,
+            content: Some(content.to_string()),
+            tool_name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(User, None, Some("hello")),
+                event(User, None, Some("   ")),
+                event(Assistant, None, Some("answer")),
+                event(Reasoning, None, Some("think")),
+                tool(ToolCall, "ls", "Bash"),
+                tool(ToolResult, "output!", "Bash"),
+                tool(Opaque, "not-in-the-envelope", "Odd"),
+                marker("subagent_transcript"),
+                event(User, None, Some("sub")),
+            ],
+            ..Default::default()
+        };
+        let f = estimate_features_of(&transcript);
+        assert_eq!(f.version, "lef1");
+        // 5 + 3 + 6 + 5 + 2 + 7 + 3: the opaque record's text is not counted.
+        assert_eq!(f.content_bytes, 31);
+        assert_eq!(f.tool_result_bytes, 7);
+        assert_eq!(f.agent_prose_bytes, 6);
+        assert_eq!(f.user_messages, 2, "blank text is not a message");
+        assert_eq!(f.distinct_tools, 2);
+        assert!(f.byte_entropy_milli.is_some_and(|m| m > 0));
+    }
+
+    /// `supersede` re-offers content the watcher never observed, so the
+    /// old features describe old bytes: cleared, never carried.
+    #[test]
+    fn supersede_clears_the_estimate_features() {
+        let mut q = Queue::new();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.estimate_features = Some(estimate_features_of(&crate::source::SessionTranscript {
+            events: vec![event(
+                crate::source::SessionEventKind::User,
+                None,
+                Some("hello"),
+            )],
+            ..Default::default()
+        }));
+        q.upsert(e, 500).unwrap();
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                None,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.estimate_features, None);
     }
 
     /// K9: a line queued before `title` existed still loads, with no title.

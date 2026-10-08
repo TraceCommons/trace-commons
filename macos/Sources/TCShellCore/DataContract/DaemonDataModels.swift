@@ -211,6 +211,10 @@ extension DaemonData {
         /// The sentence for each `secondLook` reason, index for index (R6/R7;
         /// DRAFT wording). Never shorter than `secondLook`.
         public let secondLookLines: [String]?
+        /// The local credit estimate (nudge value addendum, 4.6), on
+        /// `list_pending` rows only. Decoded, not drawn yet: its wording is
+        /// DRAFT in the core. Absent is unknown, never 0.
+        public let creditEstimate: CreditEstimate?
 
         public var id: String { entryId }
 
@@ -249,6 +253,7 @@ extension DaemonData {
             case unsureSpans = "unsure_spans"
             case secondLook = "second_look"
             case secondLookLines = "second_look_lines"
+            case creditEstimate = "credit_estimate"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -267,6 +272,17 @@ extension DaemonData {
         /// folder approve: the daemon's `held_for_review`. Manual Scrub check
         /// is not one of these.
         public var heldForReview: Bool { reasonLabel.map(ReasonLabel.needingAPerson.contains) ?? false }
+    }
+
+    /// A queue entry's `credit_estimate`: a band of displayed credit, never a
+    /// single number. `tier` is absent for a one-tier table; `basis` is
+    /// `built_in` or `published`.
+    public struct CreditEstimate: Codable, Equatable, Hashable, Sendable {
+        public let low: Double
+        public let high: Double
+        public let tier: String?
+        public let calibration: String
+        public let basis: String
     }
 
     /// A queue entry's `attested_inference`

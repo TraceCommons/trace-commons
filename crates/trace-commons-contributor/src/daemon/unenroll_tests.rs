@@ -163,6 +163,21 @@ fn unenroll_empties_the_mission_catalogue_slot() {
     assert!(s.mission_catalogue.lock().unwrap().is_none());
 }
 
+/// The estimate table is public and not account-scoped (nudge value
+/// addendum, 4.6), so signing out leaves whatever table is in force.
+#[test]
+fn unenroll_leaves_the_estimate_table_slot() {
+    let s = shared();
+    enroll_fixture(&s);
+    let published = crate::daemon::ipc::EstimateTableSlot {
+        basis: crate::daemon::ipc::ESTIMATE_BASIS_PUBLISHED,
+        ..crate::daemon::ipc::EstimateTableSlot::built_in()
+    };
+    *s.estimate_table.lock().unwrap() = published.clone();
+    unenroll(&s).unwrap();
+    assert_eq!(*s.estimate_table.lock().unwrap(), published);
+}
+
 /// Nudge S3: account B never inherits account A's suggestion ledger. Every
 /// nudge stamp goes, in memory and on disk; the suggestions switch is a
 /// setting about this Mac and stays.

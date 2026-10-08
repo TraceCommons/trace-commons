@@ -978,6 +978,93 @@ pub struct DaemonShared {
     /// exists; see [`super::mission_matching::MissionCatalogueSlot`]. A leaf
     /// lock: never held while any other lock here is taken.
     pub(crate) mission_catalogue: Mutex<Option<super::mission_matching::MissionCatalogueSlot>>,
+    /// The calibration table behind `credit_estimate` on `list_pending` rows
+    /// and on `status` (nudge value addendum, 4.6). Starts as the protocol's
+    /// built-in table (OWNER DECISION E2). The table is public and not
+    /// account-scoped, so `unenroll` leaves it. A leaf lock: read by cloning
+    /// before any other lock here is taken.
+    pub(crate) estimate_table: Mutex<EstimateTableSlot>,
+}
+
+/// `credit_estimate.basis` while the built-in table is in force.
+pub const ESTIMATE_BASIS_BUILT_IN: &str = "built_in";
+/// `credit_estimate.basis` while a fetched, accepted table is in force.
+pub const ESTIMATE_BASIS_PUBLISHED: &str = "published";
+
+/// The calibration table in force and where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EstimateTableSlot {
+    pub table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+    /// [`ESTIMATE_BASIS_BUILT_IN`] or [`ESTIMATE_BASIS_PUBLISHED`].
+    pub basis: &'static str,
+}
+
+impl EstimateTableSlot {
+    /// The protocol's built-in one-tier table (OWNER DECISION E2).
+    #[must_use]
+    pub fn built_in() -> Self {
+        Self {
+            table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+            basis: ESTIMATE_BASIS_BUILT_IN,
+        }
+    }
+}
+
+/// `credit_estimate` for one queue entry, or `None`, which a caller leaves
+/// out of the row (unknown, never 0).
+#[must_use]
+pub fn credit_estimate_value(
+    e: &super::queue::QueueEntry,
+    slot: &EstimateTableSlot,
+) -> Option<serde_json::Value> {
+    // Never on an entry on its way or delivered: its figure is history's,
+    // or nothing (nudge value addendum, 4.7).
+    let sent = matches!(
+        e.state,
+        super::queue::QueueState::Uploading | super::queue::QueueState::Uploaded
+    ) || e.submission_id.is_some();
+    if sent {
+        return None;
+    }
+    let features = e.estimate_features.as_ref()?;
+    let estimate = trace_commons_protocol::local_credit_estimate::estimate(features, &slot.table)?;
+    let mut value = serde_json::to_value(&estimate).ok()?;
+    value["basis"] = serde_json::Value::from(slot.basis);
+    Some(value)
+}
+
+/// `credit_estimate` summed over `subjects`, or `None` while none of them
+/// has an estimate.
+#[must_use]
+pub fn credit_estimate_sum(
+    subjects: &[&super::queue::QueueEntry],
+    slot: &EstimateTableSlot,
+) -> Option<serde_json::Value> {
+    // Sum of band ends over the subjects with an estimate (OWNER DECISION
+    // E8): wider than the band of the sum, the conservative direction. A
+    // subject without one is counted out of `known`, never summed as 0.
+    let mut low = 0.0;
+    let mut high = 0.0;
+    let mut known: usize = 0;
+    for e in subjects {
+        let Some(estimate) = credit_estimate_value(e, slot) else {
+            continue;
+        };
+        let (Some(l), Some(h)) = (estimate["low"].as_f64(), estimate["high"].as_f64()) else {
+            continue;
+        };
+        low += l;
+        high += h;
+        known += 1;
+    }
+    (known >= 1).then(|| {
+        serde_json::json!({
+            "low": low,
+            "high": high,
+            "known": known,
+            "calibration": slot.table.calibration_label(),
+        })
+    })
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -1173,6 +1260,7 @@ impl DaemonShared {
             native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             mission_catalogue: Mutex::new(None),
+            estimate_table: Mutex::new(EstimateTableSlot::built_in()),
         })
     }
 
@@ -2021,6 +2109,9 @@ impl DaemonShared {
             now,
             super::mission_matching::Probe::CacheOnly,
         );
+        // Credit estimate (nudge value addendum, 4.6): the table in force,
+        // cloned out of its leaf lock before the policy and queue section.
+        let estimate_table = self.estimate_table.lock().expect("estimate lock").clone();
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -2038,7 +2129,9 @@ impl DaemonShared {
                 .as_ref()
                 .map(|join| subjects.iter().filter(|e| join.fit(&policy, e) > 0).count())
         };
-        let backlog_mission_fit = fitting(&super::queue::unpurposed_entries(&queue, &policy));
+        let backlog = super::queue::unpurposed_entries(&queue, &policy);
+        let backlog_mission_fit = fitting(&backlog);
+        let backlog_credit_estimate = credit_estimate_sum(&backlog, &estimate_table);
         // Policy only, under the guard already held: whether the arming
         // offer would be drawn right now, which hides the backlog nudge.
         let arming_offer_present = policy.arming_suggestion(now).is_some();
@@ -2047,19 +2140,27 @@ impl DaemonShared {
         // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
         // the idle window needs.
         let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
-        let (idle_sessions, idle_candidate_count, idle_mission_fit) = match idle_window {
-            Some(window) => {
-                let candidates =
-                    super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
-                let mission_fit = fitting(&candidates);
-                (
-                    Some(idle_sessions_value(&candidates, window, mission_fit)),
-                    candidates.len(),
-                    mission_fit,
-                )
-            }
-            None => (None, 0, None),
-        };
+        let (idle_sessions, idle_candidate_count, idle_mission_fit, idle_credit_estimate) =
+            match idle_window {
+                Some(window) => {
+                    let candidates =
+                        super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+                    let mission_fit = fitting(&candidates);
+                    let credit_estimate = credit_estimate_sum(&candidates, &estimate_table);
+                    (
+                        Some(idle_sessions_value(
+                            &candidates,
+                            window,
+                            mission_fit,
+                            credit_estimate.clone(),
+                        )),
+                        candidates.len(),
+                        mission_fit,
+                        credit_estimate,
+                    )
+                }
+                None => (None, 0, None, None),
+            };
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -2107,6 +2208,16 @@ impl DaemonShared {
         };
         if let Some(fit) = lead_mission_fit {
             nudge["mission_fit"] = serde_json::Value::from(fit);
+        }
+        // The same rule for the credit estimate (OWNER DECISION E8): the
+        // leading kind's own subjects, and never an input to the lead.
+        let lead_credit_estimate = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => idle_credit_estimate,
+            Some(super::nudge::NudgeKind::ReviewBacklog) => backlog_credit_estimate,
+            _ => None,
+        };
+        if let Some(estimate) = lead_credit_estimate {
+            nudge["credit_estimate"] = estimate;
         }
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
@@ -3512,6 +3623,9 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // lock. `None` -- no live catalogue -- leaves every row without the
     // field, which reads as unknown, never as zero.
     let mission_fit = super::mission_matching::pending_mission_fit(shared, Utc::now());
+    // The estimate table in force, cloned out of its leaf lock before the
+    // policy and queue locks below.
+    let estimate_table = shared.estimate_table.lock().expect("estimate lock").clone();
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -3577,6 +3691,11 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
             let mut value = entry_value(e, admission_evidence);
             if let Some(fit) = mission_fit.as_ref().and_then(|fits| fits.get(&e.entry_id)) {
                 value["mission_fit"] = serde_json::json!(fit);
+            }
+            // Nudge value addendum, 4.6: the same pattern. Absent without
+            // features, without an estimate, or once the entry is sent.
+            if let Some(estimate) = credit_estimate_value(e, &estimate_table) {
+                value["credit_estimate"] = estimate;
             }
             value
         })
@@ -5068,6 +5187,7 @@ fn idle_sessions_value(
     candidates: &[&super::queue::QueueEntry],
     window: super::nudge::IdleWindow,
     mission_fit: Option<usize>,
+    credit_estimate: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let tools: std::collections::BTreeSet<&'static str> = candidates
         .iter()
@@ -5083,6 +5203,11 @@ fn idle_sessions_value(
     // live (OWNER DECISION V1).
     if let Some(fit) = mission_fit {
         value["mission_fit"] = serde_json::Value::from(fit);
+    }
+    // Additive (nudge value addendum, 4.6): summed band ends and `known`,
+    // present only while at least one candidate has an estimate.
+    if let Some(estimate) = credit_estimate {
+        value["credit_estimate"] = estimate;
     }
     value
 }
@@ -18472,6 +18597,275 @@ mod tests {
             assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 0);
             assert_eq!(idle_rows_fitting(&s), 1);
             assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 1);
+        }
+
+        // ---- credit estimate (nudge value addendum, section 4.6) ----
+
+        /// Features of a session whose only content is `text`.
+        fn features_of(
+            text: &str,
+        ) -> trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures {
+            crate::daemon::queue::estimate_features_of(&crate::source::SessionTranscript {
+                events: vec![crate::source::SessionEvent {
+                    kind: crate::source::SessionEventKind::User,
+                    content: Some(text.to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        }
+
+        /// An idle waiting entry, like `seed_idle`, carrying features.
+        fn seed_idle_estimated(s: &DaemonShared, days: i64) -> uuid::Uuid {
+            let entry_id = uuid::Uuid::new_v4();
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: crate::source::SOURCE_CLAUDE_CODE.to_string(),
+                        project_key: ASK.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(ASK),
+                        path: std::path::PathBuf::from(format!("/tmp/idle-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: Utc::now() - chrono::Duration::days(days),
+                        last_modified_at: Some(Utc::now() - chrono::Duration::days(days)),
+                        estimate_features: Some(features_of("add a rate limiter")),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id
+        }
+
+        fn list_rows(s: &DaemonShared, params: serde_json::Value) -> Vec<serde_json::Value> {
+            handle_request(s, &req("list_pending", params))
+                .result
+                .expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+
+        /// The built-in table's band, rounded out to the display step:
+        /// 1.27 to 2.90 shows as 1.0 to 3.0.
+        const BUILT_IN_LOW: f64 = 1.0;
+        const BUILT_IN_HIGH: f64 = 3.0;
+
+        /// A row with features carries the built-in band, its calibration
+        /// label and basis, and no tier (one-tier table). A row without
+        /// features carries no `credit_estimate` at all, never 0.
+        #[test]
+        fn list_pending_renders_the_estimate_only_for_entries_with_features() {
+            let s = live();
+            let with = seed_idle_estimated(&s, 1);
+            let without = seed_entry(&s, ASK);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows.len(), 2);
+            let row = |id: uuid::Uuid| {
+                rows.iter()
+                    .find(|r| r["entry_id"] == id.to_string())
+                    .unwrap()
+                    .clone()
+            };
+            let estimate = row(with)["credit_estimate"].clone();
+            assert_eq!(
+                estimate,
+                serde_json::json!({
+                    "low": BUILT_IN_LOW,
+                    "high": BUILT_IN_HIGH,
+                    "calibration": "lef1.t1/cq3",
+                    "basis": ESTIMATE_BASIS_BUILT_IN,
+                }),
+                "{estimate}"
+            );
+            assert!(row(without).get("credit_estimate").is_none());
+            // The features themselves never reach the wire.
+            for r in &rows {
+                assert!(r.get("estimate_features").is_none(), "{r}");
+            }
+        }
+
+        /// Features with no content give no estimate rather than a 0 band.
+        #[test]
+        fn an_entry_with_empty_features_has_no_estimate() {
+            let entry = crate::daemon::queue::QueueEntry {
+                estimate_features: Some(features_of("")),
+                ..Default::default()
+            };
+            assert_eq!(
+                credit_estimate_value(&entry, &EstimateTableSlot::built_in()),
+                None
+            );
+        }
+
+        /// Once an entry is on its way or delivered, its figure is
+        /// history's or nothing, never the estimate (section 4.7).
+        #[test]
+        fn an_uploading_or_uploaded_entry_has_no_estimate() {
+            let slot = EstimateTableSlot::built_in();
+            let pending = crate::daemon::queue::QueueEntry {
+                estimate_features: Some(features_of("add a rate limiter")),
+                ..Default::default()
+            };
+            let estimate = credit_estimate_value(&pending, &slot).expect("pending has one");
+            assert!(estimate["low"].as_f64().unwrap() > 0.0, "{estimate}");
+            for state in [QueueState::Uploading, QueueState::Uploaded] {
+                let sent = crate::daemon::queue::QueueEntry {
+                    state,
+                    ..pending.clone()
+                };
+                assert_eq!(credit_estimate_value(&sent, &slot), None, "{state:?}");
+            }
+            let with_submission = crate::daemon::queue::QueueEntry {
+                submission_id: Some(uuid::Uuid::new_v4()),
+                ..pending
+            };
+            assert_eq!(credit_estimate_value(&with_submission, &slot), None);
+        }
+
+        /// No candidate has features: neither `idle_sessions` nor `nudge`
+        /// names a `credit_estimate`, absent rather than 0.
+        #[test]
+        fn status_credit_estimate_is_absent_without_features() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert!(status["idle_sessions"].get("credit_estimate").is_none());
+            assert!(status["nudge"].get("credit_estimate").is_none());
+        }
+
+        /// `known` counts only the candidates with an estimate; the band
+        /// ends are summed over those alone, and the unknown one adds
+        /// nothing, never a 0. The leading idle nudge carries the same
+        /// aggregate, and the sum equals the idle-filter rows' own bands.
+        #[test]
+        fn status_credit_estimate_sums_only_the_known_candidates() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            seed_idle_estimated(&s, 6);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 7);
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["count"], 3, "{status}");
+            let want = serde_json::json!({
+                "low": 2.0 * BUILT_IN_LOW,
+                "high": 2.0 * BUILT_IN_HIGH,
+                "known": 2,
+                "calibration": "lef1.t1/cq3",
+            });
+            assert_eq!(status["idle_sessions"]["credit_estimate"], want);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["credit_estimate"], want);
+
+            let rows = list_rows(&s, serde_json::json!({"filter": "idle_sessions"}));
+            let estimates: Vec<&serde_json::Value> = rows
+                .iter()
+                .filter_map(|r| r.get("credit_estimate"))
+                .collect();
+            assert_eq!(estimates.len(), 2);
+            let sum =
+                |key: &str| -> f64 { estimates.iter().map(|e| e[key].as_f64().unwrap()).sum() };
+            assert_eq!(sum("low"), want["low"].as_f64().unwrap());
+            assert_eq!(sum("high"), want["high"].as_f64().unwrap());
+        }
+
+        /// A leading backlog nudge sums its own subjects: the previewed Ask
+        /// me entries `unpurposed_traces` counts.
+        #[test]
+        fn status_nudge_credit_estimate_sums_the_backlog_when_it_leads() {
+            let s = live();
+            for i in 0..NUDGE_BACKLOG_THRESHOLD {
+                let id = seed_idle_estimated(&s, 0);
+                assert!(s.queue.lock().unwrap().record_previewed_envelope(
+                    id,
+                    &format!("sha256:est{i}"),
+                    None,
+                    None
+                ));
+            }
+            // A pending entry that is not previewed: outside the backlog.
+            seed_idle_estimated(&s, 0);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "review_backlog", "{status}");
+            let n = NUDGE_BACKLOG_THRESHOLD as f64;
+            assert_eq!(
+                status["nudge"]["credit_estimate"],
+                serde_json::json!({
+                    "low": n * BUILT_IN_LOW,
+                    "high": n * BUILT_IN_HIGH,
+                    "known": NUDGE_BACKLOG_THRESHOLD,
+                    "calibration": "lef1.t1/cq3",
+                })
+            );
+        }
+
+        /// Gates close the lead, so `nudge` carries no `credit_estimate`;
+        /// the idle fact is still reported.
+        #[test]
+        fn a_paused_daemon_reports_the_idle_estimate_but_no_nudge_estimate() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["credit_estimate"]["known"], 1);
+            assert!(status["nudge"].get("credit_estimate").is_none());
+        }
+
+        /// The estimate is read only by `list_pending` and `status`: no
+        /// history, audit, notification or credit-summing module names it
+        /// (section 4.7), and `status` takes the table before the policy
+        /// lock, like the mission join.
+        #[test]
+        fn the_estimate_stays_out_of_history_audit_and_logs() {
+            for (name, source) in [
+                ("history.rs", include_str!("history.rs")),
+                ("audit.rs", include_str!("audit.rs")),
+                ("notify.rs", include_str!("notify.rs")),
+                ("commons_credit.rs", include_str!("commons_credit.rs")),
+                ("nudge.rs", include_str!("nudge.rs")),
+                ("attention.rs", include_str!("attention.rs")),
+            ] {
+                for word in ["estimate_features", "credit_estimate", "estimate_table"] {
+                    assert!(!source.contains(word), "{name} names {word}");
+                }
+            }
+            let source = include_str!("ipc.rs");
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            for line in production.lines() {
+                let logs = [
+                    "tracing::",
+                    "info!(",
+                    "warn!(",
+                    "debug!(",
+                    "error!(",
+                    "audit",
+                ]
+                .iter()
+                .any(|m| line.contains(m));
+                if logs {
+                    assert!(
+                        !line.contains("estimate"),
+                        "a log or audit line names the estimate: {line}"
+                    );
+                }
+            }
+            let body = source
+                .split("pub fn status_value(&self)")
+                .nth(1)
+                .expect("status_value exists");
+            let table = body
+                .find("self.estimate_table.lock()")
+                .expect("status reads the table slot");
+            let policy_lock = body
+                .find("let policy = self.policy.lock()")
+                .expect("policy section");
+            assert!(table < policy_lock, "the table must be read before policy");
         }
 
         /// `nudge_decline {idle_sessions}` is the in-app "Not now": it

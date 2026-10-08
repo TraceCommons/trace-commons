@@ -23,6 +23,10 @@
 //! - `{tool}`: one tool's display name, or [`TOOL_LIST_TWO`] /
 //!   [`TOOL_LIST_MANY`] filled. No folder labels and no paths, ever.
 //! - `{hours}`: the digest interval in hours.
+//! - `{m}`: how many matched missions a batch fits (nudge value addendum).
+//! - `{low}`, `{high}`: a local credit estimate's band ends, to one decimal
+//!   (multiples of 0.5). Every string carrying them says "estimate".
+//! - `{known}`: how many of a batch have a local credit estimate.
 //!
 //! The spec gives plural forms only ("{a} sessions accepted"). A count of
 //! one needs singular forms, which are not written yet and need the same
@@ -247,6 +251,50 @@ pub const SETTING_NOTIFY_BUDGET_HELP: &str = concat!(
 pub const ABOUT_SUGGESTIONS: &str =
     "These counts are kept on this computer only, and are removed when you sign out.";
 
+// ---------------------------------------------------------------------
+// Mission fit and the suggested order (nudge value addendum, revision 1).
+// ---------------------------------------------------------------------
+
+/// Appended to the U4/U1 card body and the digest's idle sentence, only
+/// when `mission_fit` is above zero; never "0 of them". DRAFT, NEEDS
+/// APPROVAL.
+pub const NUDGE_MISSION_FIT_CLAUSE: &str = "{m} of them fit a mission.";
+/// [`NUDGE_MISSION_FIT_CLAUSE`] for exactly one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_MISSION_FIT_CLAUSE_ONE: &str = "1 of them fits a mission.";
+/// The Traces sort control, `list_pending {order: "suggested"}`. DRAFT,
+/// NEEDS APPROVAL.
+pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
+/// The Traces sort control, queue order. DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_QUEUE: &str = "Oldest first";
+/// A row tag, only when the entry's `mission_fit` is above zero. DRAFT,
+/// NEEDS APPROVAL.
+pub const ENTRY_MISSION_FIT: &str = "Fits a mission";
+
+// ---------------------------------------------------------------------
+// The local credit estimate (nudge value addendum, revision 2).
+// ---------------------------------------------------------------------
+
+/// Appended to the U4/U1 card body when `credit_estimate.known` equals the
+/// count. Absent with no `credit_estimate`; never "about 0". DRAFT, NEEDS
+/// APPROVAL.
+pub const NUDGE_ESTIMATE_CLAUSE: &str = "Estimated credit before scoring: about {low} to {high}.";
+/// [`NUDGE_ESTIMATE_CLAUSE`] when only some of the batch have an estimate.
+/// DRAFT, NEEDS APPROVAL.
+pub const NUDGE_ESTIMATE_CLAUSE_PARTIAL: &str =
+    "Estimated credit for {known} of them, before scoring: about {low} to {high}.";
+/// A row's detail line. DRAFT, NEEDS APPROVAL.
+pub const ENTRY_ESTIMATE_BAND: &str = "Estimate: about {low} to {high} credit";
+/// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
+pub const ENTRY_ESTIMATE_TIER_HIGHER: &str = "Higher estimate";
+/// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
+pub const ENTRY_ESTIMATE_TIER_MIDDLE: &str = "Typical estimate";
+/// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
+pub const ENTRY_ESTIMATE_TIER_LOWER: &str = "Lower estimate";
+/// The estimate's info popover. DRAFT, NEEDS APPROVAL.
+pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the session's size and makeup. \
+     Nothing about the session is sent to make it. The credit a session gets is set when \
+     the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
+
 /// Every nudge string, as `(key, text)`, including both candidates of each
 /// owner pick so the word rules hold whichever is chosen. The later C ABI
 /// export is built from this table.
@@ -317,6 +365,21 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("SETTING_NOTIFY_RECAP", SETTING_NOTIFY_RECAP),
     ("SETTING_NOTIFY_BUDGET_HELP", SETTING_NOTIFY_BUDGET_HELP),
     ("ABOUT_SUGGESTIONS", ABOUT_SUGGESTIONS),
+    ("NUDGE_MISSION_FIT_CLAUSE", NUDGE_MISSION_FIT_CLAUSE),
+    ("NUDGE_MISSION_FIT_CLAUSE_ONE", NUDGE_MISSION_FIT_CLAUSE_ONE),
+    ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
+    ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
+    ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
+    ("NUDGE_ESTIMATE_CLAUSE", NUDGE_ESTIMATE_CLAUSE),
+    (
+        "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
+        NUDGE_ESTIMATE_CLAUSE_PARTIAL,
+    ),
+    ("ENTRY_ESTIMATE_BAND", ENTRY_ESTIMATE_BAND),
+    ("ENTRY_ESTIMATE_TIER_HIGHER", ENTRY_ESTIMATE_TIER_HIGHER),
+    ("ENTRY_ESTIMATE_TIER_MIDDLE", ENTRY_ESTIMATE_TIER_MIDDLE),
+    ("ENTRY_ESTIMATE_TIER_LOWER", ENTRY_ESTIMATE_TIER_LOWER),
+    ("ESTIMATE_EXPLAINER", ESTIMATE_EXPLAINER),
 ];
 
 #[cfg(test)]
@@ -406,6 +469,12 @@ mod tests {
     const MAX_TOOL: &str = "TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT";
     /// A long spelled-out date, wider than any the daemon writes.
     const MAX_DATE: &str = "Wednesday, 30 September 2026";
+    /// The widest estimate band end: `ESTIMATE_MAX_DISPLAYED_CREDIT` bounds
+    /// a single band, and a summed band over a large batch is wider, so
+    /// this leaves room for both (nudge value addendum, 3.3).
+    const MAX_ESTIMATE: &str = "999.5";
+    /// The widest `{known}` the estimate clause is drawn with.
+    const MAX_KNOWN: &str = "9999";
 
     /// `{tool}` at its widest: two capped names, which is longer than
     /// [`TOOL_LIST_MANY`] with any count.
@@ -431,6 +500,10 @@ mod tests {
             .replace("{c}", MAX_COUNT)
             .replace("{k}", MAX_COUNT)
             .replace("{hours}", MAX_COUNT)
+            .replace("{m}", MAX_COUNT)
+            .replace("{low}", MAX_ESTIMATE)
+            .replace("{high}", MAX_ESTIMATE)
+            .replace("{known}", MAX_KNOWN)
             .replace("{date}", MAX_DATE)
             .replace("{tool}", &max_tool())
             .replace("{x}", x);
@@ -569,6 +642,26 @@ mod tests {
                 "DIGEST_RECAP_SENTENCE",
                 fill_max(DIGEST_RECAP_SENTENCE, false),
             ),
+            // The digest's idle sentence carries the mission clause when
+            // sessions fit one (nudge value addendum, 3.3).
+            (
+                "DIGEST_IDLE_SENTENCE + NUDGE_MISSION_FIT_CLAUSE",
+                format!(
+                    "{} {}",
+                    fill_max(DIGEST_IDLE_SENTENCE, false),
+                    fill_max(NUDGE_MISSION_FIT_CLAUSE, false)
+                ),
+            ),
+            // The estimate clauses, each at its widest.
+            (
+                "NUDGE_ESTIMATE_CLAUSE",
+                fill_max(NUDGE_ESTIMATE_CLAUSE, false),
+            ),
+            (
+                "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
+                fill_max(NUDGE_ESTIMATE_CLAUSE_PARTIAL, false),
+            ),
+            ("ENTRY_ESTIMATE_BAND", fill_max(ENTRY_ESTIMATE_BAND, false)),
         ];
         for (key, body) in bodies {
             let len = body.chars().count();
@@ -627,6 +720,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Mission wording is count-based: no mission string carries a credit
+    /// placeholder, because the catalogue has no amount and the session
+    /// estimate has its own strings (nudge value addendum, 3.2). Scoped to
+    /// the mission keys, since the estimate strings carry one by design.
+    #[test]
+    fn no_mission_string_carries_a_credit_placeholder() {
+        let mission: Vec<_> = NUDGE_COPY
+            .iter()
+            .filter(|(key, _)| key.contains("MISSION"))
+            .collect();
+        assert_eq!(mission.len(), 3, "{mission:?}");
+        for (key, text) in mission {
+            for placeholder in ["{x}", "{low}", "{high}"] {
+                assert!(!text.contains(placeholder), "{key}: {text}");
+            }
+        }
+    }
+
+    /// Every string with an estimate figure says it is an estimate, so it
+    /// can never be read as scored credit (nudge value addendum, 4.7).
+    #[test]
+    fn every_estimate_figure_is_labelled_an_estimate() {
+        let mut figures = 0;
+        for (key, text) in NUDGE_COPY {
+            if text.contains("{low}") || text.contains("{high}") {
+                figures += 1;
+                assert!(
+                    text.to_lowercase().contains("estimate"),
+                    "{key} carries an estimate figure without saying so: {text}"
+                );
+            }
+        }
+        assert_eq!(figures, 3);
     }
 
     /// No path, folder label or title placeholder can reach a nudge.
