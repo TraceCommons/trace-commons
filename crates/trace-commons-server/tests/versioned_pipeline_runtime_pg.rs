@@ -26918,6 +26918,100 @@ async fn the_sweep_goes_on_after_one_failed_follow_up() {
     );
 }
 
+/// PR #1283 review, finding 4: follow-ups that fail on every pass do not
+/// hold the sweep's window. Each pass resumes after the last submission the
+/// previous pass read, wrapping to the start, so a lost follow-up behind a
+/// full window of failing ones is reached on the next pass, and the failing
+/// ones are still tried again.
+#[tokio::test]
+async fn failing_follow_ups_do_not_starve_the_sweep() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-starve-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up-starve";
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    // The sweep reads in id order: the two lowest fail on every pass and
+    // fill a window of two.
+    runs.sort_by_key(|run| run.submission_id);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in &runs {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(owner);
+
+    let faults = [
+        InvalidationFault::install(&tenant, runs[0].submission_id).await,
+        InvalidationFault::install(&tenant, runs[1].submission_id).await,
+    ];
+    let first = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    let second = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    for fault in faults {
+        fault.remove().await;
+    }
+    assert!(
+        first.is_err(),
+        "the first window holds only failing follow-ups"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, runs[2].run_id).await,
+        Some(("revoked".to_string(), "pending".to_string())),
+        "the second pass resumes after the first one's window"
+    );
+    assert_eq!(
+        second.expect("the follow-up behind the failing ones succeeded"),
+        1
+    );
+    for run in &runs[..2] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            None
+        );
+    }
+    // The cursor wraps: the failing follow-ups are tried again, and once
+    // they can succeed they are recovered.
+    let mut recovered = 0;
+    for _ in 0..2 {
+        recovered += service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+            .await
+            .unwrap();
+    }
+    assert_eq!(recovered, 2);
+    for run in &runs {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            Some(("revoked".to_string(), "pending".to_string()))
+        );
+    }
+}
+
 /// Merge review M4: a listed tenant with no pipeline run has nothing to
 /// recover, and since PR 5 each replica lists a tenant before its first
 /// activation. For such a tenant the recovery returns 0 from one read of

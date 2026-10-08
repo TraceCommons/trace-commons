@@ -1811,7 +1811,10 @@ the content first would leave a failed follow-up with no retry.
 another, so a process that stops between the two loses the follow-up. The
 worker recovers it: once a minute for each tenant (and on the tenant's
 first pass after a start), it finds up to 32 of the tenant's revoked or
-withdrawn submissions with a run whose index write started and no queued
+withdrawn submissions, in submission id order starting just after the last
+one the previous run read and wrapping round to the lowest (the position is
+kept in memory, so a restart begins at the lowest), with a run whose index
+write started and no queued
 invalidation, or with an export snapshot item that is not invalidated (a
 run that Settle keeps out of the index has no index work, and a snapshot
 can still hold it). It makes the follow-up for each (reason `withdrawn`
@@ -1824,7 +1827,9 @@ invalidation step. A listed tenant that has no pipeline run is answered from
 one read of `pipeline_runs`; its submissions are not read. One follow-up that fails is logged as
 `pipeline_lost_follow_up_failed` (with the tenant's `tenant_storage_ref`
 and a hash of the submission id), does not stop the others of the pass,
-and is retried a minute later. A recovery that recovers nothing because
+and is retried when a later run wraps round to it. Because each run starts
+after the last one, 32 or more follow-ups that fail every time cannot hold
+the window: the submissions after them are reached on the next run. A recovery that recovers nothing because
 of a failure is logged as `pipeline_worker_lost_follow_up_recovery_failed`
 and retried a minute later.
 

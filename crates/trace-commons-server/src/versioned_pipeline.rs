@@ -1421,11 +1421,19 @@ macro_rules! rebuildable_index_run_predicate {
 #[derive(Clone)]
 pub struct PgPipelineStore {
     backend: Arc<PgBackend>,
+    /// Per tenant, the last submission id the lost follow-up recovery read
+    /// (`recover_lost_inoperable_follow_ups`); the next pass resumes after
+    /// it. Shared by the store's clones; lost on restart, when the next
+    /// pass starts from the lowest id again.
+    lost_follow_up_cursors: Arc<std::sync::Mutex<std::collections::HashMap<String, Uuid>>>,
 }
 
 impl PgPipelineStore {
     pub fn new(backend: Arc<PgBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            lost_follow_up_cursors: Arc::default(),
+        }
     }
 
     async fn tenant_transaction<'a>(
@@ -4268,7 +4276,11 @@ impl PgPipelineStore {
     /// between the two leaves runs with index work and no queued
     /// invalidation, and export snapshot items that are not invalidated,
     /// which nothing else reaches. This finds at most `limit` such
-    /// submissions of `tenant_id`, in submission id order: revoked, or with
+    /// submissions of `tenant_id`, in submission id order from just after
+    /// the last one the previous pass of this store read for the tenant,
+    /// wrapping to the lowest id (PR #1283 review, finding 4: follow-ups
+    /// that fail on every pass would otherwise fill the window and keep the
+    /// later ones from ever being reached): revoked, or with
     /// a `trace_withdrawals` row, and with either a run whose index write
     /// started (`pending`, `complete`, `failed` or `cancelled`, the states
     /// `end_runs_of_inoperable_submission_on_tx` queues) and no invalidation
@@ -4280,7 +4292,8 @@ impl PgPipelineStore {
     /// queues an invalidation for every such run and invalidates every such
     /// item, so a recovered submission is not found again. A follow-up that
     /// fails is logged by label and the pass goes on to the next
-    /// submission; the failed one is found again on the next pass. Returns
+    /// submission; the failed one is found again when a later pass wraps
+    /// round to it. Returns
     /// how many it recovered, or the first error when every follow-up of
     /// the pass failed. The read probes every revoked or withdrawn
     /// submission of the tenant, recovered or not, so the worker runs it at
@@ -4294,6 +4307,12 @@ impl PgPipelineStore {
         limit: usize,
     ) -> Result<usize, DatabaseError> {
         let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let cursor: Option<Uuid> = self
+            .lost_follow_up_cursors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tenant_id)
+            .copied();
         let lost = {
             let mut client = self.backend.trace_pool().get().await?;
             let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -4348,9 +4367,9 @@ impl PgPipelineStore {
                                AND item.invalidated_at IS NULL
                         )
                       GROUP BY c.submission_id
-                      ORDER BY c.submission_id
+                      ORDER BY (c.submission_id <= $3::uuid) IS TRUE, c.submission_id
                       LIMIT $2",
-                    &[&tenant_id, &limit],
+                    &[&tenant_id, &limit, &cursor],
                 )
                 .await?;
             tx.commit().await?;
@@ -4358,6 +4377,15 @@ impl PgPipelineStore {
                 .map(|row| (row.get::<_, Uuid>(0), row.get::<_, bool>(1)))
                 .collect::<Vec<_>>()
         };
+        // The cursor moves as soon as the window is read, whatever its
+        // follow-ups do: a window whose follow-ups all fail answers an
+        // error, and the next pass must still move past it.
+        if let Some((last_read, _)) = lost.last() {
+            self.lost_follow_up_cursors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(tenant_id.to_string(), *last_read);
+        }
         let mut recovered = 0;
         let mut first_error = None;
         for (submission_id, withdrawn) in &lost {
