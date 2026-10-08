@@ -1796,9 +1796,11 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// what this machine holds, and a balance is not. It is a fact about an
 /// account that other computers, and a browser, spend from too.
 ///
-/// Ron's #1146 heading (`private-ai-balance-panel.tsx`); it was "What is
-/// left in your Private AI account".
-pub const BALANCE_TITLE: &str = "NEAR AI usage";
+/// After Ron's #1146 heading (`private-ai-balance-panel.tsx`, "NEAR AI
+/// usage"), but the figure under it is what remains, not what was used.
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "What is left
+/// in your Private AI account", then #1146's "NEAR AI usage".
+pub const BALANCE_TITLE: &str = "NEAR AI balance";
 pub const FUNDING_TITLE: &str = "Cloud billing";
 /// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
 /// machinery word, rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it
@@ -1811,8 +1813,12 @@ pub const FUNDING_WHAT: &str = "The billing link opens only after your account a
 pub const FUNDING_MANAGE: &str = "Manage billing";
 /// #1146's "Verify current account".
 pub const FUNDING_REFRESH: &str = "Verify current account";
-/// #1146's "Account destination not read."
-pub const FUNDING_UNAVAILABLE: &str = "Account destination not read.";
+/// #1146's "Account destination not read.", then the remedy, by the
+/// [`FUNDING_REFRESH`] control's name. DRAFT, NEEDS APPROVAL (#1273
+/// review, 2026-10-07): it was "The billing destination could not be
+/// verified. Refresh account to try again."
+pub const FUNDING_UNAVAILABLE: &str =
+    "Account destination not read. Verify current account to try again.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
@@ -2170,6 +2176,13 @@ pub const RUNTIME_UNKNOWN: &str = "Unknown";
 /// The Inference inspector's sub-line under its title. `{connected}` and
 /// `{total}` are counts from the tools list.
 pub const INSPECTOR_TOOLS_CONNECTED: &str = "{connected} of {total} tools connected";
+
+/// The fields of [`PrivateInferenceCopy`] that are templates, and the holes
+/// each carries. Every other field is a finished sentence, and a test holds
+/// the table to that, so a hole cannot reach a shell's finished-sentence
+/// list (Windows `PrivateInferenceCopy.Sentences`).
+pub const PRIVATE_INFERENCE_TEMPLATES: &[(&str, &[&str])] =
+    &[("inspector_tools_connected", &["connected", "total"])];
 /// The inspector's legend cell for connected tools.
 pub const INSPECTOR_CONNECTED: &str = "connected";
 /// The inspector's legend cell for listed tools that are not connected.
@@ -2988,6 +3001,15 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_declared_templates_carry_holes() {
+        let value = serde_json::to_value(private_inference_copy()).unwrap();
+        crate::witness_copy::tests::assert_only_declared_templates(
+            &value,
+            PRIVATE_INFERENCE_TEMPLATES,
+        );
+    }
+
     use super::*;
 
     /// Reviewed on #1162: the Scrub check's two hold labels used to fall

@@ -914,10 +914,14 @@ pub struct MonitorFlowMapCopy {
     pub tools_one: &'static str,
     pub tools: &'static str,
     /// This computer's card: `{label}` is the sessions waiting, `{count}`
-    /// those contributed. Approved 2026-10-07.
+    /// those contributed. Approved 2026-10-07, in the owner's words after
+    /// the #1273 review: watched sessions are queued unscrubbed until
+    /// preview, and the tools record them, so neither this card nor
+    /// [`Self::tool_watched`] says "recorded" or "scrubbed".
     pub hub: &'static str,
     /// The library's card: `{label}` is the traces contributed. Approved
-    /// 2026-10-07.
+    /// 2026-10-07 (owner wording after the #1273 review): folders set to
+    /// Never do not wait, so it names Ask me rather than "every other".
     pub library: &'static str,
     /// A tool's card title: `{label}` is its folders.
     pub tool_title: &'static str,
@@ -1316,12 +1320,11 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             folders: "{count} folders",
             tools_one: "1 tool",
             tools: "{count} tools",
-            hub: "Sessions are recorded and scrubbed here. {label} waiting for you; \
-                {count} contributed.",
+            hub: "Sessions are collected here. {label} waiting for you; {count} contributed.",
             library: "{label} contributed from this machine. Folders set to contribute \
-                automatically send scrubbed sessions here; every other folder waits for you.",
+                automatically send scrubbed sessions here; folders set to Ask me wait for you.",
             tool_title: "{tool} \u{00b7} {label}",
-            tool_watched: "Watched: new sessions are recorded and scrubbed on this computer.",
+            tool_watched: "Watched: new sessions are collected on this computer.",
             tool_waiting: "{count} waiting for you.",
             tool_nothing_waiting: "Nothing waiting.",
             tool_off: "Not watched: nothing new is read from this tool.",
@@ -1744,6 +1747,37 @@ mod tests {
         }
         assert!(map.hub.contains("{label}") && map.hub.contains("{count}"));
         assert!(map.library.starts_with("{label} contributed"));
+        // Ron's exact words (2026-10-07, after the #1273 review).
+        assert_eq!(
+            map.hub,
+            "Sessions are collected here. {label} waiting for you; {count} contributed."
+        );
+        assert_eq!(
+            map.tool_watched,
+            "Watched: new sessions are collected on this computer."
+        );
+        assert_eq!(
+            map.library,
+            "{label} contributed from this machine. Folders set to contribute automatically \
+             send scrubbed sessions here; folders set to Ask me wait for you."
+        );
+        // Watched sessions are queued unscrubbed until preview, and the
+        // tools record them: the hub and a watched tool claim neither.
+        for line in [map.hub, map.tool_watched] {
+            assert!(
+                !line.contains("scrubbed") && !line.contains("recorded"),
+                "{line}"
+            );
+        }
+        // Folders set to Never do not wait; the library names the mode
+        // that does, by its own label.
+        assert!(!map.library.contains("every other"));
+        assert!(
+            map.library
+                .contains(crate::project_copy::CONTRIBUTION_MODE_ASK_LABEL),
+            "{}",
+            map.library
+        );
         assert!(map.tool_title.contains("{tool}"));
         // The rule's names are the core's folder mode names, filled in.
         assert!(map.folder_rule.contains("{label}"));

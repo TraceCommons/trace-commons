@@ -11,7 +11,7 @@ import TCShellCore
 struct FlowMapScene: Equatable {
     struct Node: Identifiable, Equatable {
         enum Kind: Equatable {
-            /// This computer: where sessions are recorded and scrubbed.
+            /// This computer: where sessions are collected.
             case hub
             /// The commons library sessions are contributed to.
             case library(active: Bool)

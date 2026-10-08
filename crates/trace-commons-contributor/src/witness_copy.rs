@@ -48,9 +48,18 @@ pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
     "It is not a statement that a session is clean."
 );
 
-/// How the pin list is written, in Ron's #1146 words.
-pub const WITNESS_MEASUREMENTS_NOTE: &str =
-    "One measurement set per line. At least one valid pin required.";
+/// How the pin list is written, in Ron's #1146 words, then why more than
+/// one is pinned: an upgrade changes the measurement. DRAFT, NEEDS APPROVAL
+/// (#1273 review, 2026-10-07): #1146's two lines dropped the upgrade
+/// explanation, which was "More than one measurement can be pinned. An
+/// upgrade to the witness changes its measurement, so the new one is added
+/// here before the change happens; a client that holds only the old one
+/// will refuse the upgraded witness."
+pub const WITNESS_MEASUREMENTS_NOTE: &str = concat!(
+    "One measurement set per line. At least one valid pin required. A witness upgrade ",
+    "changes its measurement: add the new set before the upgrade, or the upgraded witness ",
+    "is refused."
+);
 
 /// Field titles (#1146).
 pub const WITNESS_URL_TITLE: &str = "Witness URL";
@@ -67,8 +76,15 @@ pub const WITNESS_MEASUREMENTS_PLACEHOLDER: &str =
 /// `{label}` is the label, verbatim.
 pub const WITNESS_OPERATOR_LABEL: &str = "Operator label: {label}";
 
+/// The fields of [`WitnessCopy`] that are templates, and the holes each
+/// carries. Every other field is a finished sentence, and a test holds the
+/// table to that, so a hole cannot reach a shell that renders as-is.
+pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[("operator_label", &["label"])];
+
 /// Actions (#1146).
 pub const WITNESS_CONFIGURE: &str = "Save witness";
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Stop using a
+/// witness".
 pub const WITNESS_CLEAR: &str = "Return to local redaction";
 
 /// What clearing actually does. Not "off": the redaction still happens, on
@@ -101,10 +117,14 @@ pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
 pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): they were "Include
+/// token probabilities" and "Stop including token probabilities".
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
 pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
-/// "Enable" (owner ruling, 2026-10-07): it was "Allow token review".
+/// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow token
+/// review".
 pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Not now".
 pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
 pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
 pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
@@ -132,11 +152,14 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "receipt was verified. A supported desktop app asks separately before sending a ",
     "session for witness review. This permission alone does not make it ready to send."
 );
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): they were "Review
+/// permission" and "Stop including inference bodies".
 pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
 pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
-/// "Enable" (owner ruling, 2026-10-07): it was "Allow sending captured
-/// bodies".
+/// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow sending
+/// captured bodies".
 pub const WITNESS_INFERENCE_CONFIRM: &str = "Enable";
+/// DRAFT, NEEDS APPROVAL (#1273 review, 2026-10-07): it was "Not now".
 pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
 
 /// The confirmation over either privacy option's disclosure (#1146
@@ -814,7 +837,7 @@ pub fn witness_copy() -> WitnessCopy {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const EVERY_STATE: [WitnessTrustState; 7] = [
@@ -1219,6 +1242,81 @@ mod tests {
             witness_refusal_line(Some("nothing-classifies-this")),
             generic
         );
+    }
+
+    /// Every string leaf of `value`, with its dotted path.
+    fn template_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::String(text) => out.push((path.to_string(), text.clone())),
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    template_leaves(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, item) in fields {
+                    let next = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    template_leaves(item, &next, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The `{name}` holes in `text`, in order.
+    fn holes_in(text: &str) -> Vec<String> {
+        let mut holes = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find('{') {
+            let close = rest[open..].find('}').expect("a hole closes") + open;
+            holes.push(rest[open + 1..close].to_string());
+            rest = &rest[close + 1..];
+        }
+        holes
+    }
+
+    /// Only the declared templates carry holes, and each carries exactly
+    /// its declared ones: a hole anywhere else would reach a shell's
+    /// finished-sentence list as a literal `{name}`.
+    pub(crate) fn assert_only_declared_templates(
+        value: &serde_json::Value,
+        declared: &[(&str, &[&str])],
+    ) {
+        let mut leaves = Vec::new();
+        template_leaves(value, "", &mut leaves);
+        assert!(!leaves.is_empty(), "the table is not being read");
+        for (path, text) in &leaves {
+            let holes = holes_in(text);
+            match declared.iter().find(|(field, _)| field == path) {
+                Some((_, expected)) => {
+                    let mut got = holes.clone();
+                    got.sort();
+                    let mut want: Vec<String> = expected.iter().map(|h| h.to_string()).collect();
+                    want.sort();
+                    assert_eq!(got, want, "{path} carries the wrong holes: {text:?}");
+                }
+                None => assert!(
+                    holes.is_empty() && !text.contains('}'),
+                    "{path} is not a declared template but has a hole: {text:?}"
+                ),
+            }
+        }
+        for (field, _) in declared {
+            assert!(
+                leaves.iter().any(|(path, _)| path == field),
+                "the declared template {field} is not in the table"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_declared_templates_carry_holes() {
+        let value = serde_json::to_value(witness_copy()).unwrap();
+        assert_only_declared_templates(&value, WITNESS_COPY_TEMPLATES);
     }
 
     #[test]

@@ -280,6 +280,10 @@ public enum ProjectCopy {
     /// daemon cannot name never has its path written into the audit log,
     /// notification text or history, and not being armable is the protective
     /// half of that.
-    /// #1146's line under the bucket (`projects-panel.tsx`).
+    /// #1146's line under the bucket (`projects-panel.tsx`). DRAFT, NEEDS
+    /// APPROVAL (#1273 review, 2026-10-07): it was "Trace Commons can't tell
+    /// which folder these ran in, so they can never be contributed
+    /// automatically. You'll always be asked." Still a Swift literal; it
+    /// belongs in the core's project table.
     public static let unresolvedBucketNote = "These sessions cannot be contributed automatically."
 }
