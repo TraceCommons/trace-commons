@@ -354,6 +354,15 @@ pub fn saved_turn_series(
     bytes: &[u8],
     keys: &dyn DigestKeyStore,
 ) -> Option<ClaudeTurnSeriesEvidence> {
+    // No assistant record, no turn to digest: never create a key for it. A
+    // record spelled with JSON escapes is missed here and the series stays
+    // unknown, which fails closed.
+    if !bytes
+        .windows(b"\"assistant\"".len())
+        .any(|w| w == b"\"assistant\"")
+    {
+        return None;
+    }
     let key = keys.load_or_create().ok()?;
     extract_claude_turn_series(bytes, &key).ok()
 }
@@ -789,6 +798,28 @@ mod tests {
         assert!(
             saved_turn_series(&fixture(), &InMemoryDigestKeyStore::with_seed([7; 32])).is_some()
         );
+    }
+
+    /// A file with no assistant record has no turn to digest, so saving it
+    /// never asks the key store for a key. Otherwise the first save of such a
+    /// file would create a keychain item for nothing -- and the FFI crate's
+    /// tests, which run without this crate's test build, save one.
+    #[test]
+    fn a_file_without_assistant_records_never_asks_for_a_key() {
+        struct Panicking;
+        impl DigestKeyStore for Panicking {
+            fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
+                panic!("key store read for a file with no turns")
+            }
+            fn load_or_create(&self) -> Result<DigestKey, DigestKeyError> {
+                panic!("key store read for a file with no turns")
+            }
+            fn clear(&self) -> Result<(), DigestKeyError> {
+                Ok(())
+            }
+        }
+        let user_only = b"{\"type\":\"user\",\"message\":{\"content\":\"synthetic request\"}}\n";
+        assert!(saved_turn_series(user_only, &Panicking).is_none());
     }
 
     #[test]
