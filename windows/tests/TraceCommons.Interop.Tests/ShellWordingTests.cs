@@ -81,7 +81,7 @@ public class ShellWordingTests
             { "TraceCommons.Interop/VerdictCopy.cs", 4 },
             { "TraceCommons.Interop/WatchCopy.cs", 7 },
             { "TraceCommons.Interop/WeekBandCopy.cs", 1 },
-            { "TraceCommons.Interop/WithdrawCopy.cs", 29 },
+            { "TraceCommons.Interop/WithdrawCopy.cs", 26 },
 
             // View models that compose a sentence rather than reading one.
             // ContributorSettingsViewModel is the file the settings-screen

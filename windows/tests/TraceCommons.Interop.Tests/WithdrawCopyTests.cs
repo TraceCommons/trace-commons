@@ -227,7 +227,7 @@ public sealed class WithdrawCopyTests
     }
 
     [Fact]
-    public void AFailedWithdrawalOpensBySayingNothingHappened()
+    public void AFailedWithdrawalSaysNothingHappened()
     {
         // A contributor must not walk away from a failure believing their
         // trace was taken back, whichever failure it was.
@@ -244,7 +244,10 @@ public sealed class WithdrawCopyTests
                      WithdrawCopy.FailureSentence(string.Empty),
                  })
         {
-            Assert.StartsWith("Nothing was withdrawn", sentence, StringComparison.Ordinal);
+            Assert.True(
+                sentence.StartsWith("Nothing was withdrawn", StringComparison.Ordinal)
+                    || sentence.Contains(". Nothing was withdrawn", StringComparison.Ordinal),
+                sentence);
         }
     }
 

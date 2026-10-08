@@ -310,19 +310,16 @@ enum WithdrawalCopyCheck {
 
         // A failed withdrawal must say nothing happened, as a sentence of
         // its own (at the start, or right after a full stop), and a
-        // not-found must disclose neither existence nor ownership. The
-        // signed-out line is said before any request is made, so it never
-        // claims an answer from the server either. (The core's tests pin
-        // each sentence and each tier's result in full.)
+        // not-found must disclose neither existence nor ownership. That the
+        // signed-out line never claims an answer from the server is the
+        // core's test (`shell_words_copy`), which pins each sentence and each
+        // tier's result in full, so this check reports only what it checks.
         let nothing = "Nothing was withdrawn"
-        let signedOut = WithdrawalCopy.accountSessionRequired.lowercased()
-        let claimsAnAnswer = ["rejected", "refused", "server", "commons", "declined"]
-            .contains(where: { signedOut.contains($0) })
         for sentence in [
             WithdrawalCopy.accountSessionRequired,
             WithdrawalCopy.notFound,
             WithdrawalCopy.failureSentence(label: "withdraw-failed"),
-        ] where claimsAnAnswer || !(sentence.hasPrefix(nothing) || sentence.contains(". " + nothing)) {
+        ] where !(sentence.hasPrefix(nothing) || sentence.contains(". " + nothing)) {
             problems.append("a failure sentence does not say nothing happened")
         }
         let lowerNotFound = WithdrawalCopy.notFound.lowercased()
