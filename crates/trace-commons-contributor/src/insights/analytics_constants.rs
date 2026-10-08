@@ -194,11 +194,11 @@ mod tests {
 
     #[test]
     fn held_and_default_decisions() {
-        assert!(!ADVICE_SHOWN);
-        assert!(EDIT_FAIL_EDIT_CARD);
-        assert!(!CODEX_PER_TURN_SERIES);
-        assert!(DEDUPE_TURNS_BY_MSG_KEY);
-        assert!(!LEDGER_MONEY_IN_INSIGHTS);
+        const { assert!(!ADVICE_SHOWN) };
+        const { assert!(EDIT_FAIL_EDIT_CARD) };
+        const { assert!(!CODEX_PER_TURN_SERIES) };
+        const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
+        const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
     }
 
     #[test]

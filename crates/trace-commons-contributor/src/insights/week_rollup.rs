@@ -995,7 +995,7 @@ mod tests {
             source(&rollup, AnalyticsSource::ClaudeCode).tokens,
             Some(TURN_TOTAL)
         );
-        assert!(DEDUPE_TURNS_BY_MSG_KEY);
+        const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
     }
 
     #[test]

@@ -74,7 +74,7 @@ pub fn lever(
         .iter()
         .filter(|week| week.comparable && week.week_start < this.week_start)
         .collect();
-    history.sort_by(|a, b| b.week_start.cmp(&a.week_start));
+    history.sort_by_key(|week| std::cmp::Reverse(week.week_start));
 
     let mut disabled = Vec::new();
     let mut any_baseline = false;
@@ -115,7 +115,7 @@ pub fn lever(
         };
         baseline.sort_unstable();
         let middle = baseline.len() / 2;
-        let twice_median = if baseline.len() % 2 == 0 {
+        let twice_median = if baseline.len().is_multiple_of(2) {
             baseline[middle - 1] + baseline[middle]
         } else {
             baseline[middle] * 2

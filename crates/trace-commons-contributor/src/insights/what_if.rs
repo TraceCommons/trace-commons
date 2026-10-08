@@ -141,6 +141,6 @@ mod tests {
 
     #[test]
     fn it_is_held_from_every_surface() {
-        assert!(!ADVICE_SHOWN);
+        const { assert!(!ADVICE_SHOWN) };
     }
 }
