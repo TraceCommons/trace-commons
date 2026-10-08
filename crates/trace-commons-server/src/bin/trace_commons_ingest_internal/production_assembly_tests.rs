@@ -843,3 +843,660 @@ async fn tenant_policy_authority_matches_legacy_admission() {
         .is_err()
     );
 }
+
+/// Wraps `IsolatedPipelineIndex` and reports itself production-qualified,
+/// standing in for the usearch-backed index in a default-features build.
+struct QualifiedIsolatedIndex(
+    Arc<trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex>,
+);
+
+impl trace_commons_gate_api::VectorIndexReader for QualifiedIsolatedIndex {
+    fn snapshot(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+    ) -> anyhow::Result<trace_commons_gate_api::IndexSnapshot> {
+        self.0.snapshot(tenant_storage_ref, index_id)
+    }
+
+    fn nearest(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        embedding: &[f32],
+        k: usize,
+        exclude_revision: Option<Uuid>,
+    ) -> anyhow::Result<Vec<trace_commons_gate_api::NearestNeighbor>> {
+        self.0
+            .nearest(tenant_storage_ref, index_id, embedding, k, exclude_revision)
+    }
+}
+
+impl trace_commons_gate_api::VectorIndexWriter for QualifiedIsolatedIndex {
+    fn upsert(
+        &self,
+        key: &trace_commons_gate_api::IndexEntryKey,
+        embedding: &[f32],
+        content_hash: &str,
+    ) -> Result<trace_commons_gate_api::IndexUpsertResult, trace_commons_gate_api::IndexWriteError>
+    {
+        self.0.upsert(key, embedding, content_hash)
+    }
+
+    fn invalidate_revision(
+        &self,
+        tenant_storage_ref: &trace_commons_gate_api::pipeline::TenantStorageRef,
+        index_id: &str,
+        revision_id: Uuid,
+    ) -> Result<bool, trace_commons_gate_api::IndexWriteError> {
+        self.0
+            .invalidate_revision(tenant_storage_ref, index_id, revision_id)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexReader for QualifiedIsolatedIndex {
+    fn dependency_identity(&self) -> &str {
+        USEARCH_PIPELINE_INDEX_READER_IDENTITY
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedIndexWriter for QualifiedIsolatedIndex {
+    fn dependency_identity(&self) -> &str {
+        USEARCH_PIPELINE_INDEX_WRITER_IDENTITY
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
+/// A privacy boundary that reports itself qualified and a prose-PII
+/// classifier, standing in for `ClassifierRedactorPipelinePrivacyBoundary`
+/// over a real backend. Finds nothing.
+struct ClassifyingPrivacy;
+
+#[async_trait::async_trait]
+impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
+    for ClassifyingPrivacy
+{
+    async fn rescrub(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn classifies_prose_pii(&self) -> bool {
+        true
+    }
+}
+
+/// `PipelineGateComponents` filled with qualified doubles: what the
+/// `near-ai-scorer` environment builder fills with the NEAR AI scorer, the
+/// fastembed embedder and the usearch index.
+fn test_components(
+    privacy: Option<
+        Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
+    >,
+) -> Arc<PipelineGateComponents> {
+    let index = Arc::new(QualifiedIsolatedIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    Arc::new(PipelineGateComponents {
+        scorer: Arc::new(FixedScorer),
+        scorer_descriptor: scorer_descriptor(&scorer_env()),
+        embedder: Arc::new(FixedEmbedder),
+        embedder_descriptor: embedder_descriptor(&with(
+            &embedder_env(),
+            TRACE_COMMONS_VECTOR_INDEX_DIM,
+            "2",
+        )),
+        index_reader: index.clone(),
+        index_writer: index,
+        index_root_shared_with_legacy: false,
+        authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| false),
+        )),
+        tenant_policy_count: 0,
+        privacy_backend: privacy
+            .is_some()
+            .then_some(trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi),
+        privacy,
+    })
+}
+
+fn classifying_privacy()
+-> Option<Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>> {
+    Some(Arc::new(ClassifyingPrivacy))
+}
+
+async fn backend_without_a_database() -> Arc<PgBackend> {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    )
+}
+
+async fn assembly_fixture(
+    dir: &tempfile::TempDir,
+) -> (TraceCorpusDbConnections, ConfiguredTraceArtifactStore) {
+    let backend = backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let crypto = SecretsCrypto::new(SecretString::from(
+        trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    ))
+    .unwrap();
+    let store = ConfiguredTraceArtifactStore::legacy(Arc::new(
+        LocalEncryptedTraceArtifactStore::new(dir.path(), crypto),
+    ));
+    (connections, store)
+}
+
+/// `main`'s gate configuration for these tests: the pilot template's floors
+/// (0, 0, 500000) and `main`'s defaults.
+const MAIN_GATE: trace_commons_server::versioned_pipeline_compat::MainGateConfig =
+    trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 0,
+    };
+
+fn issuer_checks() -> PipelineNoveltyUtilityChecks {
+    PipelineNoveltyUtilityChecks {
+        issuer_principal_ref: Some("principal_sha256:pipeline_issuer".to_string()),
+        ..PipelineNoveltyUtilityChecks::default()
+    }
+}
+
+/// The inputs a production boot hands `assemble_ingest_pipeline_runtime`,
+/// each overridable by a case.
+struct Boot {
+    production_required: bool,
+    tenants_processed: bool,
+    allow_test_dependencies: bool,
+    unqualified_routing_allowed: bool,
+    near_payout_controls: PipelineNearPayoutControls,
+    main_gate: trace_commons_server::versioned_pipeline_compat::MainGateConfig,
+    components: Option<Arc<PipelineGateComponents>>,
+}
+
+impl Boot {
+    fn production() -> Self {
+        Self {
+            production_required: true,
+            tenants_processed: true,
+            allow_test_dependencies: false,
+            unqualified_routing_allowed: false,
+            near_payout_controls: PipelineNearPayoutControls {
+                settlement_mode: PipelineNearSettlementMode::Disabled,
+                require_adapter_auth: false,
+            },
+            main_gate: MAIN_GATE,
+            components: Some(test_components(classifying_privacy())),
+        }
+    }
+
+    async fn assemble(
+        self,
+        assembler: &dyn IngestPipelineRuntimeAssembler,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        let dir = tempfile::tempdir().unwrap();
+        let (connections, store) = assembly_fixture(&dir).await;
+        assemble_ingest_pipeline_runtime_with_components(
+            Some(assembler),
+            Some(&connections),
+            Some(&store),
+            self.production_required,
+            PipelineLeaseConfig::default(),
+            self.tenants_processed,
+            self.allow_test_dependencies,
+            self.unqualified_routing_allowed,
+            None,
+            StdDuration::from_secs(60),
+            self.near_payout_controls,
+            &issuer_checks(),
+            self.main_gate,
+            self.components,
+        )
+        .map(|service| service.expect("an assembler was given"))
+    }
+}
+
+/// Spec 4.2 item 8: through `assemble_ingest_pipeline_runtime`, a correctly
+/// configured production assembly passes every startup refusal --
+/// production-qualified, `main`'s gate configuration, no zero floor, the
+/// privacy requirement met -- and binds the compatibility bundle under the
+/// production ids.
+#[tokio::test]
+async fn production_assembler_passes_every_startup_refusal() {
+    let service = Boot::production()
+        .assemble(&ProductionPipelineAssembler)
+        .await
+        .expect("a correctly configured production assembly starts");
+    assert!(pipeline_runtime_is_production_qualified(&service));
+    pipeline_runtime::validate_pipeline_privacy_filter_requirement(true, &service).unwrap();
+    assert!(service.binds_compatibility_bundle());
+    assert!(!service.payout_enabled());
+    let qualification = service
+        .bundle_qualification(service.default_package())
+        .unwrap();
+    assert!(qualification.blockers().is_empty(), "{qualification:?}");
+    assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
+    assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+    assert_eq!(
+        qualification.settlement_adapters["trace_credit"].identity,
+        "internal_trace_credit_ledger"
+    );
+    trace_commons_server::versioned_pipeline_qualification::validate_production_package(
+        service.default_package(),
+    )
+    .expect("the production package carries no development marker");
+    let config = service.compatibility_config().unwrap();
+    assert!(config.matches_main_gate(&MAIN_GATE));
+    assert_eq!(
+        config.scorer_model_id,
+        scorer_descriptor(&scorer_env()).compatibility_scorer_model_id()
+    );
+    assert_eq!(config.projection_id, PRODUCTION_COMPATIBILITY_PROJECTION_ID);
+    assert_eq!(config.index_id, PRODUCTION_COMPATIBILITY_INDEX_ID);
+}
+
+/// An assembly that binds floors other than `main`'s: the production
+/// assembler with the context's gate configuration shifted first.
+struct ShiftedFloorsAssembler;
+
+impl IngestPipelineRuntimeAssembler for ShiftedFloorsAssembler {
+    fn assemble(
+        &self,
+        mut context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        context.main_gate.novelty_floor_micros = Some(400_000);
+        ProductionPipelineAssembler.assemble(context)
+    }
+}
+
+/// Spec 4.2 item 9: each startup refusal still fires for a misconfigured
+/// production deployment.
+#[tokio::test]
+async fn production_assembler_refuses_what_it_must() {
+    let refusal =
+        |result: anyhow::Result<Arc<PipelineService>>| result.err().expect("refused").to_string();
+
+    let mut zero = MAIN_GATE;
+    zero.novelty_floor_micros = Some(0);
+    assert_eq!(
+        refusal(
+            Boot {
+                main_gate: zero,
+                ..Boot::production()
+            }
+            .assemble(&ProductionPipelineAssembler)
+            .await
+        ),
+        "compatibility_zero_floor"
+    );
+
+    assert_eq!(
+        refusal(Boot::production().assemble(&ShiftedFloorsAssembler).await),
+        "pipeline_runtime_main_gate_config_mismatch"
+    );
+
+    // No privacy backend: not production-qualified while tenants are routed,
+    // and, started anyway for tests, refused by the privacy requirement.
+    assert_eq!(
+        refusal(
+            Boot {
+                components: Some(test_components(None)),
+                ..Boot::production()
+            }
+            .assemble(&ProductionPipelineAssembler)
+            .await
+        ),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+    let without_privacy = Boot {
+        components: Some(test_components(None)),
+        production_required: false,
+        allow_test_dependencies: true,
+        ..Boot::production()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .unwrap();
+    assert_eq!(
+        pipeline_runtime::validate_pipeline_privacy_filter_requirement(true, &without_privacy)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_privacy_filter_required"
+    );
+
+    assert_eq!(
+        refusal(
+            Boot {
+                production_required: false,
+                allow_test_dependencies: true,
+                unqualified_routing_allowed: true,
+                ..Boot::production()
+            }
+            .assemble(&ProductionPipelineAssembler)
+            .await
+        ),
+        "pipeline_unqualified_routing_with_production_runtime"
+    );
+
+    assert_eq!(
+        refusal(
+            Boot {
+                components: None,
+                ..Boot::production()
+            }
+            .assemble(&ProductionPipelineAssembler)
+            .await
+        ),
+        "pipeline_production_components_missing"
+    );
+}
+
+/// Spec 4.2 item 10: the production runtime is an explicit opt-in on top of
+/// the `near-ai-scorer` build and the `enclave_near_ai` gate, and payout
+/// stays off whatever `main`'s NEAR settlement mode is.
+#[tokio::test]
+async fn runtime_selection_is_opt_in() {
+    let select = |raw: Option<&str>, gate: Option<&str>, near_ai: bool| {
+        pipeline_runtime_selection(raw, gate, near_ai).map_err(|error| error.to_string())
+    };
+    for unset in [None, Some(""), Some("  ")] {
+        for near_ai in [false, true] {
+            assert_eq!(
+                select(unset, Some("enclave_near_ai"), near_ai),
+                Ok(PipelineRuntimeSelection::None)
+            );
+        }
+    }
+    assert_eq!(
+        select(Some("production"), Some("enclave_near_ai"), true),
+        Ok(PipelineRuntimeSelection::Production)
+    );
+    assert_eq!(
+        select(Some(" production "), Some("enclave_near_ai"), true),
+        Ok(PipelineRuntimeSelection::Production)
+    );
+    assert_eq!(
+        select(Some("production"), Some("enclave_near_ai"), false),
+        Err("pipeline_runtime_production_requires_near_ai_scorer".to_string())
+    );
+    for gate in [None, Some(""), Some("in_memory"), Some("enclave_local_gpu")] {
+        assert_eq!(
+            select(Some("production"), gate, true),
+            Err("pipeline_runtime_production_requires_enclave_near_ai".to_string()),
+            "{gate:?}"
+        );
+    }
+    for other in ["Production", "prod", "reference", "none"] {
+        assert_eq!(
+            select(Some(other), Some("enclave_near_ai"), true),
+            Err("pipeline_runtime_selection_unknown".to_string()),
+            "{other}"
+        );
+    }
+    assert_eq!(PipelineRuntimeSelection::None.label(), "none");
+    assert_eq!(PipelineRuntimeSelection::Production.label(), "production");
+    assert!(ProductionPipelineAssembler.needs_gate_components());
+
+    for settlement_mode in [
+        PipelineNearSettlementMode::Disabled,
+        PipelineNearSettlementMode::DryRun,
+        PipelineNearSettlementMode::Http,
+    ] {
+        let service = Boot {
+            near_payout_controls: PipelineNearPayoutControls {
+                settlement_mode,
+                require_adapter_auth: true,
+            },
+            ..Boot::production()
+        }
+        .assemble(&ProductionPipelineAssembler)
+        .await
+        .unwrap();
+        assert!(!service.payout_enabled(), "{settlement_mode:?}");
+        assert_eq!(service.payout_controls(), None);
+    }
+}
+
+/// Spec 4.2 item 11: with the selection unset, `main` passes no assembler,
+/// so the default build serves no pipeline and readiness says why.
+#[tokio::test]
+async fn default_build_serves_no_pipeline() {
+    use tower::ServiceExt;
+
+    assert_eq!(
+        pipeline_runtime_selection(None, None, cfg!(feature = "near-ai-scorer")).unwrap(),
+        PipelineRuntimeSelection::None
+    );
+    assert!(PipelineRuntimeSelection::None.assembler().is_none());
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, store) = assembly_fixture(&dir).await;
+    assert!(
+        assemble_ingest_pipeline_runtime_with_components(
+            PipelineRuntimeSelection::None.assembler(),
+            Some(&connections),
+            Some(&store),
+            false,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            false,
+            None,
+            StdDuration::from_secs(60),
+            Boot::production().near_payout_controls,
+            &issuer_checks(),
+            MAIN_GATE,
+            None,
+        )
+        .unwrap()
+        .is_none()
+    );
+
+    let state = super::super::tests::test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(
+        state.pipeline_runtime_selection,
+        PipelineRuntimeSelection::None
+    );
+    let response = pipeline_runtime::build_pipeline_app(state)
+        .oneshot(
+            axum::http::Request::get("/v1/pipeline/readiness")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body["reason"], "pipeline_runtime_absent");
+}
+
+/// Spec A-D3 / plan A2: splitting the NEAR AI gate builder into components
+/// and orchestrator leaves the legacy gate version hash byte-identical. The
+/// NEAR AI arm's inputs (`max_tokens` 0, the hosted model id as the
+/// perplexity model) for a fixed configuration, pinned to the value the
+/// unsplit builder computed.
+#[test]
+fn near_ai_gate_version_hash_is_pinned() {
+    assert_eq!(
+        compute_gate_version_hash(
+            "gate-policy-v3",
+            0,
+            0,
+            500_000,
+            5,
+            "Qwen/Qwen3.6-35B-A3B-FP8",
+            0,
+            -8.0,
+            "BAAI/bge-large-en-v1.5",
+            512,
+            None,
+            1024,
+            2048,
+            3072,
+            16,
+            64,
+            50_000,
+        ),
+        "sha256:04908a88d9ae4f27e1b974d5b16b50cdddc2efd0524b4b002f8b3c1e9fd1922c"
+    );
+}
+
+fn gate_pins() -> LegacyGatePins {
+    LegacyGatePins {
+        model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+        tail_logprob_cutoff: -8.5,
+        embedder_model_id: "BAAI/bge-large-en-v1.5".to_string(),
+        embedder_output_dim: 1024,
+        embedder_max_tokens: 512,
+        embedder_matryoshka_dim: None,
+    }
+}
+
+/// The package names the scorer and embedder by their descriptors; a start
+/// whose descriptors would name other values than the gate was built with
+/// is refused, so the package can never name a scorer that is not the one
+/// running.
+#[test]
+fn descriptors_must_match_the_gate_they_name() {
+    let scorer = scorer_descriptor(&scorer_env());
+    let embedder = embedder_descriptor(&embedder_env());
+    ensure_descriptors_match_gate(&scorer, &embedder, &gate_pins()).unwrap();
+    let refused = |pins: LegacyGatePins| {
+        ensure_descriptors_match_gate(&scorer, &embedder, &pins)
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        refused(LegacyGatePins {
+            model: "Qwen/Qwen3.8-27B".to_string(),
+            ..gate_pins()
+        }),
+        "pipeline_scorer_descriptor_mismatch"
+    );
+    assert_eq!(
+        refused(LegacyGatePins {
+            tail_logprob_cutoff: -8.0,
+            ..gate_pins()
+        }),
+        "pipeline_scorer_descriptor_mismatch"
+    );
+    for pins in [
+        LegacyGatePins {
+            embedder_model_id: "BAAI/bge-small-en-v1.5".to_string(),
+            ..gate_pins()
+        },
+        LegacyGatePins {
+            embedder_output_dim: 768,
+            ..gate_pins()
+        },
+        LegacyGatePins {
+            embedder_max_tokens: 256,
+            ..gate_pins()
+        },
+        LegacyGatePins {
+            embedder_matryoshka_dim: Some(768),
+            ..gate_pins()
+        },
+    ] {
+        assert_eq!(refused(pins), "pipeline_embedder_descriptor_mismatch");
+    }
+}
+
+/// `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` is required under the
+/// production selection and checked against the novelty root and the dedup
+/// root as the legacy gate resolves them (the dedup default is
+/// `<novelty>/../dedup-index`).
+#[test]
+fn pipeline_index_root_is_required_and_separate() {
+    assert_eq!(
+        pipeline_index_root_from(&lookup_from(&[]))
+            .unwrap_err()
+            .to_string(),
+        "pipeline_vector_index_root_missing"
+    );
+    assert_eq!(
+        pipeline_index_root_from(&lookup_from(&[(
+            TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT,
+            "  "
+        )]))
+        .unwrap_err()
+        .to_string(),
+        "pipeline_vector_index_root_missing"
+    );
+    for (pairs, root) in [
+        (vec![], "/var/lib/trace-commons-vector-index/pipeline"),
+        (vec![], "/var/lib/dedup-index"),
+        (
+            vec![(TRACE_COMMONS_VECTOR_INDEX_ROOT, "/srv/novelty")],
+            "/srv/dedup-index/pipeline",
+        ),
+        (
+            vec![(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT, "/srv/dedup")],
+            "/srv/dedup",
+        ),
+    ] {
+        let mut pairs = pairs;
+        pairs.push((TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT, root));
+        assert_eq!(
+            pipeline_index_root_from(&lookup_from(&pairs))
+                .unwrap_err()
+                .to_string(),
+            "pipeline_vector_index_root_shared",
+            "{root}"
+        );
+    }
+    assert_eq!(
+        pipeline_index_root_from(&lookup_from(&[(
+            TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT,
+            "/var/lib/trace-commons-pipeline-index"
+        )]))
+        .unwrap(),
+        PathBuf::from("/var/lib/trace-commons-pipeline-index")
+    );
+}
