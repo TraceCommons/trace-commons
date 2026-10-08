@@ -504,8 +504,8 @@ mod tests {
 
     #[test]
     fn codex_reads_not_recorded_with_its_observed_change() {
-        // Owner decision D11, open: no Codex per-turn series.
-        assert!(!crate::insights::analytics_constants::CODEX_PER_TURN_SERIES);
+        // Owner decision D11, open (`CODEX_PER_TURN_SERIES`): no Codex
+        // per-turn series.
         let body = SessionBody::Codex {
             observed: Some(CodexObserved {
                 first_at: at(9, 0),
@@ -576,10 +576,9 @@ mod tests {
     fn no_digest_or_what_if_reaches_the_wire() {
         let drill = session_drill("snap", &rewritten_twice(), None, None, utc());
         let wire = serde_json::to_string(&drill).unwrap();
+        // Owner decision D2, open (`ADVICE_SHOWN`): no what-if field at all.
         for private in ["msg_key", "args_key", "path_key", "what_if", "07070707"] {
             assert!(!wire.contains(private), "{private}");
         }
-        // Owner decision D2, open.
-        assert!(!crate::insights::analytics_constants::ADVICE_SHOWN);
     }
 }
