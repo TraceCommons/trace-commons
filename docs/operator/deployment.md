@@ -885,7 +885,8 @@ psql --single-transaction -v ON_ERROR_STOP=1 -f migrations/V109__versioned_pipel
 This command applies the file and records nothing. Then record version 109,
 with the name `versioned_pipeline_followups`, in `_trace_commons_migrations`,
 as that route says; if it is not recorded, the next boot with the migrator
-URL applies V109 again and stops at its first `ADD CONSTRAINT`.
+URL applies V109 again and stops at the `ADD CONSTRAINT` on
+`pipeline_review_assessments`.
 
 Without `--single-transaction`, a failure after the first statement leaves
 `pipeline_run_settlements` without forced row security, and a second run of
