@@ -1,12 +1,36 @@
 import Foundation
 import Observation
 import TCBridge
+import TCShellCore
 
 @Observable @MainActor
 final class InsightsModel {
     typealias Service = @Sendable (InsightsRequest) async throws -> InsightsResponse
     /// Shared with the sibling tab models, so every tab reads the same store.
     let service: Service
+    /// Reads `insights_week` through the daemon client (Insights feed T).
+    typealias WeekReader = @Sendable (String?) async throws -> DaemonData.InsightsWeek
+    /// Which counter rows the window's week figures come from. One at a time;
+    /// the two are never mixed.
+    enum WeekFeed: Equatable, Sendable { case saved, counterPass }
+    /// The core's feed-line keys (`service::INSIGHTS_FEED_LINE_KEYS`). The
+    /// window names the feed it shows with these and nothing else.
+    enum FeedLineKey {
+        static let saved = "insights_feed_saved"
+        static let counterPass = "insights_feed_counter_pass"
+        static let counterPassUnavailable = "insights_feed_counter_pass_unavailable"
+    }
+    private let weekReader: WeekReader?
+    private var weekGeneration = UUID()
+    /// Feed T only when the daemon answered enabled and readable; feed S
+    /// (saved imports) otherwise.
+    private(set) var weekFeed: WeekFeed = .saved
+    /// The daemon's week, held only while `weekFeed` is `.counterPass`.
+    private(set) var counterWeek: DaemonData.InsightsWeek?
+    /// Set when feed T is switched on but could not be read, shown with the
+    /// saved-imports line; `nil` when it is off or the daemon predates it.
+    private(set) var counterPassNoticeKey: String?
+    var feedLineKey: String { weekFeed == .counterPass ? FeedLineKey.counterPass : FeedLineKey.saved }
     private var task: Task<Void, Never>?
     private var episodeTask: Task<Void, Never>?
     private var cardTask: Task<Void, Never>?
@@ -62,15 +86,44 @@ final class InsightsModel {
             defer { if scoped { file?.stopAccessingSecurityScopedResource() } }
             return try TCInsights.call(request)
         }.value
-    }) { self.service = service }
+    }, weekReader: WeekReader? = nil) {
+        self.service = service
+        self.weekReader = weekReader
+    }
+
+    /// Ask the daemon for one week of feed T (`nil` is the current week).
+    /// Shows it only when it is switched on and readable; otherwise the
+    /// saved-imports feed, with a notice only when it is on but unreadable.
+    /// A later failure drops an earlier T week whole.
+    func loadWeek(isoWeek: String? = nil) async {
+        let generation = UUID(); weekGeneration = generation
+        guard let weekReader else { showSavedFeed(notice: false); return }
+        let outcome: Result<DaemonData.InsightsWeek, Error>
+        do { outcome = .success(try await weekReader(isoWeek)) } catch { outcome = .failure(error) }
+        guard weekGeneration == generation else { return }
+        switch outcome {
+        case .success(let week) where week.showsCounterPass:
+            weekFeed = .counterPass; counterWeek = week; counterPassNoticeKey = nil
+        case .success(let week):
+            showSavedFeed(notice: week.enabled)
+        case .failure(let error):
+            showSavedFeed(notice: !((error as? DaemonDataError)?.isNotServed ?? false))
+        }
+    }
+    private func showSavedFeed(notice: Bool) {
+        weekFeed = .saved; counterWeek = nil
+        counterPassNoticeKey = notice ? FeedLineKey.counterPassUnavailable : nil
+    }
 
     func open() {
         active = true
         perform(.init("copy"))
         refreshEpisodes()
+        if weekReader != nil { Task { [weak self] in await self?.loadWeek() } }
     }
     func close() {
         active = false; generation = UUID(); task?.cancel(); task = nil; busy = false
+        weekGeneration = UUID()
         episodePresentation = UUID(); episodeTask?.cancel(); episodeTask = nil; episodeBusy = false
         cardPresentation = UUID(); cardTask?.cancel(); cardTask = nil; cardBusy = false
         cardResult = nil; cardText = nil; cardError = nil

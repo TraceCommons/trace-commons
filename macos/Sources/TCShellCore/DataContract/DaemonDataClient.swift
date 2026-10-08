@@ -184,6 +184,15 @@ public protocol DaemonDataClient: Sendable {
     /// `inference_calls`. `limit` 1-200; `cursor` is the previous page's `nextCursor`.
     func inferenceCalls(limit: Int, cursor: String?) async throws -> DaemonData.InferenceCallPage
 
+    // MARK: Insights
+
+    /// `insights_week`: one local ISO week (`YYYY-Www`; `nil` is the current
+    /// week) from the daemon's counter pass, Insights feed T (owner decision
+    /// D4, open). Answers `enabled: false` while the setting is off; an older
+    /// daemon refuses it as `unknown_method`. Either way, and on any failed
+    /// read, the window shows the saved-imports feed instead, never both.
+    func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
+
     // MARK: Network methods (C3, #1187)
 
     /// Z1.1, `inference_summary`: IronWire's upstream grouped summary;

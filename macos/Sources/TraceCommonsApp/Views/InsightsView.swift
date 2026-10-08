@@ -15,12 +15,18 @@ struct InsightsView: View {
     @State private var choosingFile = false
     @State private var source = "codex"
 
+    /// `daemon` is the app's live client, for the week from the daemon's
+    /// counter pass (feed T); without one the window shows saved imports.
     @MainActor init(storeSelection: InsightsStoreSelection = .standard,
-                    storeCopy: [String: String]? = TCInsights.copy()) {
+                    storeCopy: [String: String]? = TCInsights.copy(),
+                    daemon: (any DaemonDataClient)? = nil) {
         let router = InsightsServiceRouter(selection: storeSelection)
         let service: InsightsModel.Service = { request in try await router.call(request) }
+        let weekReader: InsightsModel.WeekReader? = daemon.map { client in
+            { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
+        }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
-                  model: InsightsModel(service: service),
+                  model: InsightsModel(service: service, weekReader: weekReader),
                   comparisonModel: ComparisonTasksModel(service: service),
                   specificationModel: ComparisonSpecificationsModel(service: service))
     }

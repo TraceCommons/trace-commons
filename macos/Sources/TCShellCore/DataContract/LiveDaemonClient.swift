@@ -239,6 +239,14 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         return try await call("inference_calls", params: params, as: DaemonData.InferenceCallPage.self)
     }
 
+    // MARK: Insights
+
+    public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
+        var params: [String: Any] = ["tz": TimeZone.current.secondsFromGMT()]
+        if let isoWeek { params["iso_week"] = isoWeek }
+        return try await call("insights_week", params: params, as: DaemonData.InsightsWeek.self)
+    }
+
     // MARK: Network methods (C3, #1187)
 
     public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {

@@ -387,12 +387,28 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_limitation_analysis_dates_are_not_activity_time", "Dates show when snapshots were analyzed, not when the work happened."),
         ("summary_limitation_source_formats_are_not_model_identity", "Source formats identify the imported file format, not which model performed the work."),
         ("summary_limitation_no_model_rankings_time_savings_or_cost", "These observations do not establish model rankings, time saved, or cost."),
+        // The feed line: which counter rows the window's week figures come
+        // from. DRAFT, NEEDS APPROVAL (owner decision D17, open).
+        ("insights_feed_saved", "Only sessions you analyzed are counted."),
+        ("insights_feed_counter_pass", "Sessions in your watched folders."),
+        ("insights_feed_counter_pass_unavailable", "Watched-folder counting is unavailable right now."),
     ].into_iter().map(|(key, value)| (key.to_owned(), value.to_owned()))
     .chain(super::card_presentation::ui_copy())
     // Token analytics, DRAFT, NEEDS APPROVAL (owner decision D17, open).
     .chain(super::analytics_copy::ANALYTICS_COPY.iter().map(|(key, value)| ((*key).to_owned(), (*value).to_owned())))
     .collect()
 }
+
+/// The feed-line keys in [`ui_copy`]: saved imports (feed S), the daemon's
+/// counter pass (feed T), and the notice that the counter pass could not be
+/// read, shown with the saved-imports line. A shell names the feed it shows
+/// with these and authors no sentence of its own. Their wording is DRAFT,
+/// NEEDS APPROVAL (owner decision D17, open).
+pub const INSIGHTS_FEED_LINE_KEYS: &[&str] = &[
+    "insights_feed_saved",
+    "insights_feed_counter_pass",
+    "insights_feed_counter_pass_unavailable",
+];
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1235,6 +1251,29 @@ mod tests {
     /// snake_case wire form by naming convention only, with nothing linking
     /// the two: renaming or adding a variant leaves a shell indexing a
     /// missing key. Iterate every variant and require its key to exist.
+    #[test]
+    fn the_insights_feed_lines_are_core_copy_and_marked_draft() {
+        let copy = ui_copy();
+        for key in INSIGHTS_FEED_LINE_KEYS {
+            assert!(
+                copy.get(*key).is_some_and(|line| !line.is_empty()),
+                "missing ui_copy key {key}"
+            );
+        }
+        assert_eq!(
+            copy["insights_feed_saved"],
+            "Only sessions you analyzed are counted."
+        );
+        assert_eq!(
+            copy["insights_feed_counter_pass"],
+            "Sessions in your watched folders."
+        );
+        assert_eq!(
+            copy["insights_feed_counter_pass_unavailable"],
+            "Watched-folder counting is unavailable right now."
+        );
+    }
+
     #[test]
     fn ui_copy_has_a_key_for_every_summary_and_model_variant() {
         use super::super::models::{DeclarationKind, RecordCoordinates};

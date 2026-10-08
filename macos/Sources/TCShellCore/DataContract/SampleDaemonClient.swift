@@ -379,6 +379,15 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("inference_calls", as: DaemonData.InferenceCallPage.self)
     }
 
+    // MARK: Insights
+
+    public func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no counter pass is recorded, so the window shows the
+        // saved-imports feed, as it would against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_week")
+    }
+
     // MARK: Network methods (C3, #1187): hand-written samples
 
     public func networkInferenceSummary() async throws -> DaemonData.NetworkInferenceSummary {

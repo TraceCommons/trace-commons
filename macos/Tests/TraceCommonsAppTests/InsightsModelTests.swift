@@ -3,6 +3,7 @@ import XCTest
 import SwiftUI
 import AppKit
 import TCBridge
+import TCShellCore
 @testable import TraceCommonsApp
 
 final class InsightsModelTests: XCTestCase {
@@ -320,5 +321,130 @@ private actor OverviewRecorder {
                 with: "\"\(request.operation.week_start ?? "2026-09-07")\",\"week_end\"")
         }
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+    }
+}
+
+/// Feed T in the window (owner decision D4, open): the model reads
+/// `insights_week` through the daemon client and shows it only when the
+/// daemon answers enabled and readable; anything else is feed S, with the
+/// feed line naming which. The two are never mixed.
+final class InsightsWeekFeedTests: XCTestCase {
+    static let counted = """
+    {"enabled": true, "feed": "counter_pass", "readable": true,
+     "updated_at": "2026-10-08T09:59:12+00:00", "sessions_stored": 3,
+     "iso_week": "2026-W41", "week_start": "2026-10-05",
+     "comparable": false, "unavailable": "below_coverage_floor",
+     "change_vs_last_week": [
+       {"source": "claude_code", "permille": null, "unavailable": "below_coverage_floor"}],
+     "rollup": {"feed": "counter_pass", "week_start": "2026-10-05",
+       "coverage": {"known": 1, "partial": 1, "unknown": 1,
+                    "reasons": {"some_turns_unknown": 1, "no_usage_counters": 1}},
+       "undated_sessions": 0,
+       "sources": [{"source": "claude_code", "sessions": 3, "tokens": 37235,
+                    "largest_session_tokens": 30000,
+                    "cache_share": {"numerator": 24500, "denominator": 37000}}],
+       "by_day": [{"date": "2026-10-05", "uncached": 15, "cache_read": 24500,
+                   "cache_write": 12600, "output": 120}],
+       "codex_interval_tokens": null,
+       "by_model": [{"label": "claude-fixture-model", "tokens": 37235},
+                    {"label": null, "tokens": 0}],
+       "sessions": [{"source": "claude_code", "tokens": 37235, "state": "partial",
+                     "reasons": ["some_turns_unknown"]}]}}
+    """
+
+    static func week(_ json: String) throws -> DaemonData.InsightsWeek {
+        try DaemonDataDecoding.decoder().decode(DaemonData.InsightsWeek.self, from: Data(json.utf8))
+    }
+
+    @MainActor
+    private func model(_ reader: InsightsModel.WeekReader?) -> InsightsModel {
+        InsightsModel(service: { _ in throw InsightsError.invalidResponse }, weekReader: reader)
+    }
+
+    @MainActor
+    func testAnEnabledReadableWeekShowsFeedT() async throws {
+        let week = try Self.week(Self.counted)
+        let model = model({ _ in week })
+        await model.loadWeek()
+        XCTAssertEqual(model.weekFeed, .counterPass)
+        XCTAssertEqual(model.counterWeek?.rollup?.sources.first?.tokens, 37235)
+        XCTAssertEqual(model.counterWeek?.rollup?.byModel.last?.label, nil)
+        XCTAssertEqual(model.feedLineKey, InsightsModel.FeedLineKey.counterPass)
+        XCTAssertNil(model.counterPassNoticeKey)
+    }
+
+    @MainActor
+    func testSwitchedOffOrAnOlderDaemonShowsFeedSWithoutANotice() async throws {
+        let off = try Self.week(#"{"enabled": false, "feed": "counter_pass"}"#)
+        let readers: [InsightsModel.WeekReader?] = [
+            nil,
+            { _ in off },
+            { _ in throw DaemonDataError.daemon(code: "unknown_method", message: "insights_week") },
+            { _ in throw DaemonDataError.notAvailableYet(method: "insights_week") },
+        ]
+        for reader in readers {
+            let model = model(reader)
+            await model.loadWeek()
+            XCTAssertEqual(model.weekFeed, .saved)
+            XCTAssertNil(model.counterWeek)
+            XCTAssertEqual(model.feedLineKey, InsightsModel.FeedLineKey.saved)
+            XCTAssertNil(model.counterPassNoticeKey)
+        }
+    }
+
+    @MainActor
+    func testAFailedOrUnreadableReadShowsFeedSAndSaysCountingIsUnavailable() async throws {
+        let unreadable = try Self.week(
+            #"{"enabled": true, "feed": "counter_pass", "readable": false, "reason": "store_unreadable"}"#)
+        let readers: [InsightsModel.WeekReader] = [
+            { _ in unreadable },
+            { _ in throw DaemonDataError.unreachable },
+            { _ in throw DaemonDataError.undecodable(method: "insights_week") },
+        ]
+        for reader in readers {
+            let model = model(reader)
+            await model.loadWeek()
+            XCTAssertEqual(model.weekFeed, .saved)
+            XCTAssertNil(model.counterWeek)
+            XCTAssertEqual(model.feedLineKey, InsightsModel.FeedLineKey.saved)
+            XCTAssertEqual(model.counterPassNoticeKey, InsightsModel.FeedLineKey.counterPassUnavailable)
+        }
+    }
+
+    @MainActor
+    func testFeedTIsDroppedWholeWhenALaterReadFails() async throws {
+        let week = try Self.week(Self.counted)
+        let fail = FlipReader(week: week)
+        let model = model({ iso in try await fail.read(iso) })
+        await model.loadWeek()
+        XCTAssertEqual(model.weekFeed, .counterPass)
+        await fail.breakIt()
+        await model.loadWeek(isoWeek: "2026-W40")
+        XCTAssertEqual(model.weekFeed, .saved)
+        XCTAssertNil(model.counterWeek, "never a T figure under the S feed line")
+        let asked = await fail.asked
+        XCTAssertEqual(asked, [nil, "2026-W40"])
+    }
+
+    @MainActor
+    func testTheFeedLinesAreCoreCopy() throws {
+        let copy = try XCTUnwrap(TCInsights.copy())
+        for key in [InsightsModel.FeedLineKey.saved, InsightsModel.FeedLineKey.counterPass,
+                    InsightsModel.FeedLineKey.counterPassUnavailable] {
+            XCTAssertFalse(copy[key, default: ""].isEmpty, key)
+        }
+    }
+}
+
+private actor FlipReader {
+    let week: DaemonData.InsightsWeek
+    private var broken = false
+    private(set) var asked: [String?] = []
+    init(week: DaemonData.InsightsWeek) { self.week = week }
+    func breakIt() { broken = true }
+    func read(_ iso: String?) throws -> DaemonData.InsightsWeek {
+        asked.append(iso)
+        if broken { throw DaemonDataError.unreachable }
+        return week
     }
 }
