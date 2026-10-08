@@ -201,6 +201,18 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         notFound = Set(candidates.filter { !$0.exists }.map(\.source))
     }
 
+    /// The state with the required data use (`consent_options`' `always_on`
+    /// scope) among its scopes. That use is always included: Uses shows its
+    /// box ticked and locked (owner, 2026-10-08), and Start includes it in
+    /// what it sends, so what is sent matches what is shown. Nothing else
+    /// is ticked for the person. Unchanged when no required use is known.
+    public func includingRequiredScope(_ name: String?) -> FirstRunState {
+        guard let name, !scopes.contains(name) else { return self }
+        var included = self
+        included.scopes.insert(name)
+        return included
+    }
+
     /// Whether the daemon holds an enrollment for this first run, which is
     /// what consent scopes, the Automatic grant and the enrollment's marker
     /// need. An earlier first run's enrollment; a passkey Verify bound; or

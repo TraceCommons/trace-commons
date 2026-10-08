@@ -5,8 +5,9 @@ import XCTest
 @testable import TraceCommonsApp
 
 /// Ron's Uses screen (#1030 `uses-screen.tsx`): the always-on use shown
-/// unticked and required, Start held until it is ticked (owner, 2026-09-28
-/// point 4), the Sharing picker worded by the core, and the Private AI card
+/// ticked, locked and required, and always included in what Start sends
+/// (owner, 2026-10-08, superseding 2026-09-28 point 4), nothing optional
+/// ticked, the Sharing picker worded by the core, and the Private AI card
 /// on Custom only. Read from the real core tables and the screen's source,
 /// the house pattern for a SwiftUI view.
 final class UsesScreenTests: XCTestCase {
@@ -45,24 +46,50 @@ final class UsesScreenTests: XCTestCase {
         return try String(contentsOf: url, encoding: .utf8)
     }
 
-    func test_theRequiredUseStartsUnticked() throws {
+    func test_theRequiredUseIsTickedAndLockedAndNothingOptionalIs() throws {
         XCTAssertEqual(UsesScreenLayout.requiredScope(options)?.name, "debugging_evaluation")
         XCTAssertEqual(
             UsesScreenLayout.optionalScopes(options).map(\.name),
             ["benchmark_only", "ranking_training", "model_training"])
         XCTAssertEqual(UsesScreenLayout.handleScopes(options).map(\.name), ["public_attribution"])
 
-        // Nothing is ticked for the person, the floor included.
+        // The required use is included in the state; nothing optional is
+        // ticked for the person.
         let fresh = FirstRunState(tier: .quick, step: .uses, account: .nearAI)
         XCTAssertTrue(fresh.scopes.isEmpty)
-        XCTAssertFalse(UsesScreenLayout.isTicked("debugging_evaluation", in: fresh))
+        let included = UsesScreenLayout.includingRequired(fresh, required: UsesScreenLayout.requiredScope(options))
+        XCTAssertEqual(included.scopes, ["debugging_evaluation"])
+        XCTAssertTrue(UsesScreenLayout.isTicked("debugging_evaluation", in: included))
+        for optional in UsesScreenLayout.optionalScopes(options) + UsesScreenLayout.handleScopes(options) {
+            XCTAssertFalse(UsesScreenLayout.isTicked(optional.name, in: included), optional.name)
+        }
+        // Optional choices are kept; with no required use known, nothing
+        // changes.
+        var chosen = fresh
+        chosen.scopes = ["ranking_training"]
+        XCTAssertEqual(
+            UsesScreenLayout.includingRequired(chosen, required: UsesScreenLayout.requiredScope(options)).scopes,
+            ["ranking_training", "debugging_evaluation"])
+        XCTAssertEqual(UsesScreenLayout.includingRequired(chosen, required: nil), chosen)
 
-        // The row carries Ron's inline "required", and nothing in the screen
-        // ticks a scope except the person's own toggle.
+        // The row carries Ron's inline "required"; its box is ticked and
+        // locked, and the person's toggle ticks only the optional ones.
         let source = try Self.source()
         XCTAssertTrue(source.contains("Text(copy.uses.required)"))
+        XCTAssertTrue(source.contains("Toggle(required.title, isOn: .constant(true))"))
+        let requiredToggle = try XCTUnwrap(source.range(of: "Toggle(required.title, isOn: .constant(true))"))
+        XCTAssertTrue(String(source[requiredToggle.upperBound...].prefix(160)).contains(".disabled(true)"))
+        XCTAssertFalse(source.contains("scope(required.name)"))
         XCTAssertEqual(source.components(separatedBy: "scopes.insert(").count - 1, 1)
         XCTAssertFalse(source.contains("scopes = "))
+        // The state takes the required use once it is known, and Start
+        // includes it before it routes, so what is sent is what is shown.
+        XCTAssertTrue(source.contains(".onChange(of: required?.name, initial: true) { _, _ in includeRequired() }"))
+        let start = try XCTUnwrap(source.range(of: "private func start() {"))
+        let startBody = String(source[start.upperBound...].prefix(300))
+        let include = try XCTUnwrap(startBody.range(of: "includeRequired()"))
+        let route = try XCTUnwrap(startBody.range(of: "UsesScreenLayout.startRoute(runner.state)"))
+        XCTAssertLessThan(include.lowerBound, route.lowerBound)
 
         // The optional group reads Ron's summary, every placeholder filled.
         let uses = try copy().uses
@@ -94,18 +121,14 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(source.contains("optional + UsesScreenLayout.handleScopes(options)"))
     }
 
-    func test_startIsDisabledUntilTheRequiredUseIsTicked() throws {
+    /// Start waits for no tick: the required use is always included. It
+    /// still needs the required use known, the sharing words, an account it
+    /// can finish, and no Start running.
+    func test_startDoesNotWaitForATick() throws {
         let grant = try grant()
         let uses = try copy().uses
-        var state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
+        let state = FirstRunState(tier: .quick, step: .uses, account: .nearAI, enrolledInvite: "INVITE-1")
         let required = UsesScreenLayout.requiredScope(options)
-        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
-
-        // Every optional use ticked is still not the required one.
-        state.scopes = Set(UsesScreenLayout.optionalScopes(options).map(\.name))
-        XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
-
-        state.scopes.insert("debugging_evaluation")
         XCTAssertTrue(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: false))
 
         // Without the sharing words, or while a Start is running, it stays
@@ -114,10 +137,10 @@ final class UsesScreenTests: XCTestCase {
         XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: required, grant: grant, isCommitting: true))
         XCTAssertFalse(UsesScreenLayout.canStart(state, uses: uses, requiredScope: nil, grant: grant, isCommitting: false))
 
-        // The footer note is Ron's, until the box is ticked.
-        XCTAssertNil(UsesScreenLayout.footerNote(uses, state: state, requiredScope: required))
-        state.scopes.remove("debugging_evaluation")
-        XCTAssertEqual(UsesScreenLayout.footerNote(uses, state: state, requiredScope: required), uses.baseUseNote)
+        // No footer note asks for the required use (owner, 2026-10-08).
+        let source = try Self.source()
+        XCTAssertFalse(source.contains("baseUseNote"))
+        XCTAssertFalse(source.contains("note: "))
     }
 
     /// The core's grant copy with `field` removed, as a copy that lacks it

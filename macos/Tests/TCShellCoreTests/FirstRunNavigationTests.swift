@@ -155,19 +155,30 @@ final class FirstRunNavigationTests: XCTestCase {
         }
     }
 
-    func test_startWaitsForTheRequiredUse() {
+    /// The required use is always included (owner, 2026-10-08), so Start
+    /// waits for it to be known, never for a tick.
+    func test_startWaitsForTheRequiredUseToBeKnownNotTicked() {
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .enrolled
         state.scopes = ["evaluation"]
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
-
-        state.scopes.insert("research")
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
-
         XCTAssertFalse(
             FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil),
             "with no required use known, Start stays disabled"
         )
+
+        // Including it adds only the required use, once, and keeps the rest.
+        let included = state.includingRequiredScope("research")
+        XCTAssertEqual(included.scopes, ["evaluation", "research"])
+        XCTAssertEqual(included.includingRequiredScope("research"), included)
+        XCTAssertEqual(state.includingRequiredScope(nil), state)
+        var others = included
+        others.scopes = state.scopes
+        XCTAssertEqual(others, state, "nothing but the scopes changes")
+
+        // Start sends what the state holds, the required use included.
+        XCTAssertEqual(
+            FirstRunPlan.calls(for: included, at: .start).first, .setConsentScopes(["evaluation", "research"]))
     }
 
     func test_joinWaitsForAnAccountAnswer() {

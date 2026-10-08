@@ -25,6 +25,8 @@
 //!   item 9) and the passkey popups' Back alike.
 //! - Folders has no line for a tool missing from this Mac: its row asks
 //!   nothing and offers "Get {tool}" (owner, 2026-10-08).
+//! - Uses has no note asking for the first use to be ticked: the required
+//!   use is always included, its box ticked and locked (owner, 2026-10-08).
 //! - Join adds `invite_dead` for a real invite the daemon refused,
 //!   `pay_range_points` and `pay_range_points_one` to word the invite's
 //!   credit range in the one unit the daemon accepts, `passkey_chosen` and
@@ -315,7 +317,6 @@ pub struct UsesCopy {
     pub sharing: &'static str,
     pub sharing_loading: &'static str,
     pub sharing_unavailable: &'static str,
-    pub base_use_note: &'static str,
     pub start: &'static str,
     /// Start finished on Ask me because the Automatic grant was refused.
     pub sharing_refused: &'static str,
@@ -533,7 +534,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing: "Sharing",
             sharing_loading: "Loading sharing copy…",
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
-            base_use_note: "Tick the first use to contribute. Without it nothing is shared.",
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -747,6 +747,15 @@ mod tests {
         // Rules has its own retry word, not Folders' "Look again".
         assert_eq!(copy.rules.retry, "Try again");
         assert_ne!(copy.rules.retry, copy.folders.retry);
+    }
+
+    /// The required use is always included, so nothing asks for it to be
+    /// ticked (owner, 2026-10-08).
+    #[test]
+    fn nothing_asks_for_the_required_use_to_be_ticked() {
+        let json = serde_json::to_value(first_run_copy()).unwrap();
+        assert!(json["uses"].get("base_use_note").is_none());
+        assert!(!json.to_string().contains("Tick the first use"));
     }
 
     /// Back is the frame's one word, read by the first-run footer and the

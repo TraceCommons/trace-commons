@@ -95,11 +95,13 @@ public enum FirstRunNavigation {
     /// - Rules: true here, since every choice there is optional; the
     ///   screen itself holds Continue until its folders have loaded
     ///   (`RulesScreenLayout.canContinue`), which this state cannot see.
-    /// - Uses: the required use ticked, and something Start can do: finish
+    /// - Uses: the required use known, and something Start can do: finish
     ///   watching only (not while the daemon holds an enrollment, which
     ///   watching only cannot finish under), reopen a chosen passkey's
-    ///   sheets, or finish an enrollment the daemon holds. With no required use known, Start stays
-    ///   disabled.
+    ///   sheets, or finish an enrollment the daemon holds. With no required
+    ///   use known, Start stays disabled. The required use is not waited
+    ///   on: it is always included (`FirstRunState.includingRequiredScope`,
+    ///   owner 2026-10-08), so there is no tick to wait for.
     public static func canContinue(
         _ state: FirstRunState,
         candidates: [SourceCandidate],
@@ -116,10 +118,9 @@ public enum FirstRunNavigation {
         case .rules:
             return true
         case .uses:
-            guard let requiredScope else { return false }
+            guard requiredScope != nil else { return false }
             let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
-            let startable = watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
-            return startable && state.scopes.contains(requiredScope)
+            return watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
         }
     }
 

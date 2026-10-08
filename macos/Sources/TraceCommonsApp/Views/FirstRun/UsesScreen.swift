@@ -16,8 +16,8 @@ enum UsesScreenLayout {
         case none
     }
 
-    /// The floor scope (`consent_options`' `always_on`), shown unticked and
-    /// required.
+    /// The floor scope (`consent_options`' `always_on`), shown ticked,
+    /// locked and required: it is always included (owner, 2026-10-08).
     static func requiredScope(_ options: [ConsentScope]) -> ConsentScope? {
         options.first(where: \.alwaysOn)
     }
@@ -68,9 +68,11 @@ enum UsesScreenLayout {
         return FirstRunCopy.fill(template, ["count": String(optional.count), "selected": String(on)])
     }
 
-    /// Start: the required use ticked (`FirstRunNavigation.canContinue`),
-    /// the sharing line for the path shown present (the fallback says
-    /// Starting is disabled, so it is), and no Start already running.
+    /// Start: the required use known and an account Start can finish
+    /// (`FirstRunNavigation.canContinue`), the sharing line for the path
+    /// shown present (the fallback says Starting is disabled, so it is),
+    /// and no Start already running. The required use is not waited on:
+    /// it is always included (`includingRequired`).
     static func canStart(
         _ state: FirstRunState, uses: FirstRunCopy.Uses, requiredScope: ConsentScope?, grant: AutomaticGrantCopy?,
         isCommitting: Bool
@@ -101,10 +103,10 @@ enum UsesScreenLayout {
         return .commit
     }
 
-    /// Ron's footer note, while the required use is unticked.
-    static func footerNote(_ uses: FirstRunCopy.Uses, state: FirstRunState, requiredScope: ConsentScope?) -> String? {
-        guard let requiredScope, state.scopes.contains(requiredScope.name) else { return uses.baseUseNote }
-        return nil
+    /// The state Start commits: the required use always among its scopes,
+    /// as its locked, ticked box shows (`FirstRunState.includingRequiredScope`).
+    static func includingRequired(_ state: FirstRunState, required: ConsentScope?) -> FirstRunState {
+        state.includingRequiredScope(required?.name)
     }
 
     /// The path the screen shows: Automatic only for an account that can
@@ -273,7 +275,6 @@ struct UsesScreen: View {
                 isEnabled: UsesScreenLayout.canStart(
                     runner.state, uses: copy.uses, requiredScope: required, grant: grant,
                     isCommitting: runner.isCommitting),
-                note: UsesScreenLayout.footerNote(copy.uses, state: runner.state, requiredScope: required),
                 busy: runner.isCommitting,
                 action: start)
         ) {
@@ -287,6 +288,9 @@ struct UsesScreen: View {
                 }
             }
         }
+        // The required use is in the state as soon as it is known, so the
+        // state matches its ticked box; Start includes it again regardless.
+        .onChange(of: required?.name, initial: true) { _, _ in includeRequired() }
         .task {
             // `enroll` re-reads the route, not status; the grant's
             // `connected` is read from status, so it is refreshed here.
@@ -316,8 +320,11 @@ struct UsesScreen: View {
                 if let required {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                         HStack(spacing: GlassTokens.Space.s4) {
-                            Toggle(required.title, isOn: scope(required.name))
+                            // Always included, so ticked and locked: the
+                            // person cannot untick it (owner, 2026-10-08).
+                            Toggle(required.title, isOn: .constant(true))
                                 .toggleStyle(GlassCheckboxStyle())
+                                .disabled(true)
                             // Ron's inline "required" in the on colour.
                             Text(copy.uses.required)
                                 .glassType(GlassTokens.TypeScale.mono)
@@ -366,8 +373,9 @@ struct UsesScreen: View {
         }
     }
 
-    /// One scope's box. The person's toggle is the only thing that ticks a
-    /// scope on this screen.
+    /// One optional scope's box. The person's toggle is the only thing that
+    /// ticks an optional scope on this screen; the required one is always
+    /// included (`includeRequired`).
     private func scope(_ name: String) -> Binding<Bool> {
         Binding(
             get: { runner.state.scopes.contains(name) },
@@ -442,7 +450,16 @@ struct UsesScreen: View {
 
     // MARK: - Start
 
+    /// Put the required use in the state, once it is known.
+    private func includeRequired() {
+        let included = UsesScreenLayout.includingRequired(
+            runner.state, required: UsesScreenLayout.requiredScope(model.consentScopes))
+        if included != runner.state { runner.state = included }
+    }
+
     private func start() {
+        // What Start sends matches what is shown: the required use included.
+        includeRequired()
         switch UsesScreenLayout.startRoute(runner.state) {
         case .disclose:
             disclosure = SharingDisclosureFlow()

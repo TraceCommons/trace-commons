@@ -195,7 +195,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sharing: String
         public let sharingLoading: String
         public let sharingUnavailable: String
-        public let baseUseNote: String
         public let start: String
         /// Start's failures, one per call that can stop it, and the refused
         /// grant, which finishes on Ask me.
