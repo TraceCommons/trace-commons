@@ -20468,6 +20468,9 @@ use pipeline_runtime::{
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
 
+#[path = "trace_commons_ingest_internal/production_assembly.rs"]
+mod production_assembly;
+
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
 use pipeline_activation::{
