@@ -596,6 +596,42 @@ pub mod prod_client {
             );
         }
 
+        /// PR #1283 review, finding 2: `check_response_status` in
+        /// google-cloud-storage 0.24 answers `HttpClient` with the status
+        /// when an error body is not the JSON error, the likely shape of a
+        /// media download's 404. That 404 is the same answer as a
+        /// `Response` 404: an integrity failure. Any other status in that
+        /// shape is transport.
+        #[test]
+        fn a_fetch_404_without_a_json_body_is_an_integrity_failure() {
+            let http_client = |status: u16| {
+                let response = reqwest::Response::from(
+                    axum::http::Response::builder()
+                        .status(status)
+                        .body("Not Found")
+                        .expect("a response"),
+                );
+                GcsError::HttpClient(
+                    response
+                        .error_for_status()
+                        .expect_err("an error status is an error"),
+                )
+            };
+            let not_found = get_failure(http_client(404));
+            assert!(
+                crate::trace_artifact_store::is_trace_artifact_integrity_error(&not_found),
+                "{not_found:#}"
+            );
+            for status in [401, 403, 429, 500, 503] {
+                assert!(
+                    !crate::trace_artifact_store::is_trace_artifact_integrity_error(&get_failure(
+                        http_client(status)
+                    )),
+                    "{status} is transport"
+                );
+            }
+        }
+
         #[tokio::test]
         async fn try_new_without_credentials_returns_init_error() {
             // No real ADC available in unit-test env; just confirm the

@@ -982,6 +982,19 @@ jobs:
       # client, which is the exact call that panicked.
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-ai-scorer
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
+      # The production Google Cloud Storage client (`ProdGcsObjectClient`) is
+      # behind `gcs-client`, which the pilot builds and no other job compiles.
+      # Its unit tests pin how a fetch failure is classified: a 404 (with or
+      # without a JSON error body) is an integrity failure the pipeline
+      # charges, every other failure is transport (PR #1283 review, finding
+      # 2). A filter that matches nothing passes with "0 passed", so the step
+      # requires at least one.
+      - name: gcs-client lib tests
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --features gcs-client --lib trace_artifact_gcs 2>&1 | tee gcs-client-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-tests.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.
