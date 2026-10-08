@@ -912,3 +912,167 @@ enum InsightsPatternsWords {
         ])
     }
 }
+
+/// The Sessions tab (drill-in) over one saved snapshot (feed S). The
+/// selection follows the saved list: the newest session until another is
+/// picked, and the newest left when the picked one is deleted.
+@Observable @MainActor
+final class InsightsSessionsModel {
+    private let service: InsightsModel.Service
+    private var task: Task<Void, Never>?
+    private var token = UUID()
+    private var active = false
+    private(set) var busy = false
+    private(set) var failed = false
+    private(set) var drill: InsightsSessionDrill?
+    /// The saved snapshot on screen.
+    private(set) var selected: String?
+
+    init(service: @escaping InsightsModel.Service) { self.service = service }
+
+    func open() { active = true; load() }
+    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false }
+    func reload() { load() }
+    func select(_ snapshotID: String) { selected = snapshotID; load() }
+
+    /// Keep the selection inside the saved list, newest first. Reads only
+    /// when the selection changes.
+    func sync(snapshotIDs: [String]) {
+        if let selected, snapshotIDs.contains(selected) { return }
+        guard let newest = snapshotIDs.first else {
+            token = UUID(); task?.cancel(); task = nil
+            selected = nil; drill = nil; failed = false; busy = false
+            return
+        }
+        select(newest)
+    }
+
+    private func load() {
+        guard active, let snapshotID = selected else { return }
+        task?.cancel()
+        token = UUID(); let current = token
+        busy = true; failed = false
+        let service = service
+        let operation = InsightsRequest.Operation("session_drill", tz: InsightsOverviewModel.offset,
+                                                  snapshotID: snapshotID)
+        task = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                guard response.type == operation.type, let drill = response.session,
+                      drill.session_ref == snapshotID else { throw InsightsError.invalidResponse }
+                self.drill = drill; self.busy = false
+            } catch {
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                // A failed read never keeps another session's figures.
+                self.drill = nil; self.failed = true; self.busy = false
+            }
+        }
+    }
+}
+
+/// The core's Sessions words, filled with the core's figures. Nothing here
+/// composes a sentence.
+enum InsightsSessionsWords {
+    private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
+
+    /// The local date of the first event, in the user's locale.
+    static func date(_ wire: String?, copy: [String: String]) -> String {
+        let parse = Date.ISO8601FormatStyle().year().month().day()
+        guard let wire, let day = try? Date(wire, strategy: parse) else { return dash(copy) }
+        let style = Date.FormatStyle(timeZone: TimeZone(secondsFromGMT: 0) ?? .current).month(.abbreviated).day()
+        return day.formatted(style)
+    }
+
+    /// Hours and minutes between the first and last event.
+    static func span(_ seconds: UInt64?, copy: [String: String]) -> String {
+        guard let seconds else { return dash(copy) }
+        return Duration.seconds(Int64(clamping: seconds))
+            .formatted(.units(allowed: [.hours, .minutes], width: .abbreviated))
+    }
+
+    static func header(_ drill: InsightsSessionDrill, copy: [String: String]) -> String {
+        InsightsOverviewWords.fill(text("analytics_session_header", copy), [
+            "date": date(drill.date, copy: copy),
+            "harness": InsightsOverviewWords.harness(drill.source, copy: copy),
+            "n": drill.turns.map(String.init) ?? dash(copy),
+            "t": InsightsOverviewWords.figure(drill.tokens, copy: copy),
+            "span": span(drill.span_secs, copy: copy),
+        ])
+    }
+
+    /// Why there is no chart; `nil` when there is one.
+    static func unavailableLine(_ drill: InsightsSessionDrill, copy: [String: String]) -> String? {
+        switch drill.series_unavailable {
+        case nil: return nil
+        case "not_recorded": return text("analytics_codex_not_recorded", copy)
+        case let reason?: return InsightsOverviewWords.reason(reason, copy: copy)
+        }
+    }
+
+    static func turnLabel(_ ordinal: UInt32, copy: [String: String]) -> String {
+        InsightsOverviewWords.fill(text("analytics_turn", copy), ["n": String(ordinal)])
+    }
+
+    struct Segment: Identifiable, Equatable {
+        let turn: UInt32
+        let series: String
+        let tokens: UInt64
+        var id: String { String(turn) + "/" + series }
+    }
+
+    /// The stacked bars, cache read at the bottom, then uncached, then cache
+    /// write. A turn with an unknown counter draws nothing, never a zero bar.
+    static func segments(_ drill: InsightsSessionDrill, copy: [String: String]) -> [Segment] {
+        (drill.series ?? []).flatMap { turn -> [Segment] in
+            guard let read = turn.cache_read, let uncached = turn.uncached, let write = turn.cache_write else {
+                return []
+            }
+            return [
+                Segment(turn: turn.ordinal, series: text("analytics_series_cache_read", copy), tokens: UInt64(read)),
+                Segment(turn: turn.ordinal, series: text("analytics_series_uncached", copy), tokens: UInt64(uncached)),
+                Segment(turn: turn.ordinal, series: text("analytics_series_cache_write", copy), tokens: write),
+            ]
+        }
+    }
+
+    /// A marker card: its title, its detail, a re-read's file label, and
+    /// last the derivation label.
+    static func markerLines(_ marker: InsightsDrillMarker, threshold: UInt64,
+                            copy: [String: String]) -> [String] {
+        let fill = InsightsOverviewWords.fill
+        let figure = { (value: UInt64?) in InsightsOverviewWords.figure(value, copy: copy) }
+        var lines: [String]
+        switch marker.kind {
+        case "cache_written_again":
+            lines = [
+                fill(text("analytics_marker_cache_rewrite", copy),
+                     ["m": marker.pause_minutes.map(String.init) ?? dash(copy)]),
+                fill(text("analytics_marker_cache_rewrite_detail", copy),
+                     ["t": String(marker.turn_ordinal), "x": figure(marker.cache_write)]),
+            ]
+        case "context_shrank":
+            lines = [fill(text("analytics_marker_shrank", copy), ["t": String(marker.turn_ordinal)])]
+        case "crossed_long_context":
+            lines = [fill(text("analytics_marker_crossed", copy), ["threshold": figure(threshold)]),
+                     text("analytics_marker_crossed_detail", copy)]
+        case "re_read":
+            let letter = marker.file_letter ?? dash(copy)
+            let label = marker.file_ext.map {
+                fill(text("analytics_file_label", copy), ["letter": letter, "ext": $0])
+            } ?? fill(text("analytics_file_label_no_ext", copy), ["letter": letter])
+            lines = [fill(text("analytics_marker_reread", copy), ["letter": letter]),
+                     text("analytics_marker_reread_detail", copy), label]
+        default:
+            return [dash(copy)]
+        }
+        switch marker.basis {
+        case "inferred_from_counters": lines.append(text("analytics_marker_inferred", copy))
+        case "from_counters": lines.append(text("analytics_from_counters", copy))
+        case "from_tool_calls": lines.append(text("analytics_marker_from_tool_calls", copy))
+        default: break
+        }
+        return lines
+    }
+}

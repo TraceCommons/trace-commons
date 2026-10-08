@@ -6,9 +6,10 @@ per app launch. Their existing roots, onboarding, and activation checks still
 apply. Returning to Insights does not stop services already activated.
 
 The window has tabs. **Overview** (the default) shows one local week of the
-snapshots you saved, **Patterns** shows where that week's tokens went, and
-**Analyze** holds the whole screen described below. **Spend** is shown
-disabled with a "Later" chip; Sessions is not drawn until its slice lands.
+snapshots you saved, **Patterns** shows where that week's tokens went,
+**Sessions** shows one saved session turn by turn, and **Analyze** holds the
+whole screen described below. **Spend** is shown disabled with a "Later"
+chip.
 
 Choose a Codex rollout, Claude Code session or trajectory file to analyze it
 locally. Analysis is
@@ -56,6 +57,19 @@ not add up to the week's tokens. Only Claude Code sessions record tool calls,
 so a week with Codex sessions says how many sessions the figures cover. The
 re-read table names files only by a letter and the extension; no path is
 stored or shown. Week-to-week change reads as a dash here.
+
+Sessions reads `session_drill` for one saved snapshot, the newest unless you
+pick another. The header gives the date, harness, turns, tokens and the time
+between the first and last recorded event, which is not active time. Input
+sent each turn is stacked cache read, uncached and cache write, with a dashed
+line at the long-context threshold. A turn with any counter unknown is a gap,
+never a zero bar. Markers fire once per occurrence and are lettered in turn
+order: the cache written again after a pause (inferred from counters; expiry
+itself is not observable), context shrinking (inferred), context passing the
+threshold, and a file read again with no edit tool call to it in between
+(from the order of tool calls, named by letter and extension). Codex sessions
+show that turn-by-turn usage is not recorded. No what-if estimate and no
+project name are shown.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening

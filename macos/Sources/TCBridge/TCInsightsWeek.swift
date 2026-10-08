@@ -165,3 +165,57 @@ public struct InsightsPatternSessions: Decodable, Sendable, Equatable {
     public let tz: Int32
     public let sessions: [InsightsPatternSession]
 }
+
+// Sessions (drill-in) over one saved snapshot (feed S), as `session_drill`
+// returns it. Decode only.
+
+/// One turn. Every counter is `nil` when any of the turn's counters is
+/// unknown: no bar is drawn for it, never a zero bar.
+public struct InsightsDrillTurn: Decodable, Sendable, Equatable, Identifiable {
+    public let ordinal: UInt32
+    public let uncached: UInt32?
+    public let cache_read: UInt32?
+    public let cache_write: UInt64?
+    public let output: UInt32?
+    public let context: UInt64?
+    public var id: UInt32 { ordinal }
+}
+
+/// One lettered marker. Only its kind's fields are present.
+public struct InsightsDrillMarker: Decodable, Sendable, Equatable, Identifiable {
+    public let letter: String
+    public let turn_ordinal: UInt32
+    /// `cache_written_again`, `context_shrank`, `crossed_long_context` or
+    /// `re_read`.
+    public let kind: String
+    /// `inferred_from_counters`, `from_counters` or `from_tool_calls`.
+    public let basis: String
+    public let pause_minutes: UInt32?
+    public let cache_write: UInt64?
+    public let context_from: UInt64?
+    public let context: UInt64?
+    /// A re-read file's position letter and its extension, never a name.
+    public let file_letter: String?
+    public let file_ext: String?
+    public var id: String { letter }
+}
+
+public struct InsightsSessionDrill: Decodable, Sendable, Equatable {
+    public let feed: String
+    public let session_ref: String
+    public let source: String?
+    /// Local date of the first recorded event (`yyyy-MM-dd`).
+    public let date: String?
+    public let tz: Int32
+    public let turns: UInt32?
+    public let tokens: UInt64?
+    /// Between the first and last recorded event; not active time.
+    public let span_secs: UInt64?
+    public let state: String
+    public let reasons: [String]
+    public let long_context_threshold: UInt64
+    /// `nil` with `series_unavailable` saying why (`not_recorded` for Codex).
+    public let series: [InsightsDrillTurn]?
+    public let series_unavailable: String?
+    public let markers: [InsightsDrillMarker]
+}

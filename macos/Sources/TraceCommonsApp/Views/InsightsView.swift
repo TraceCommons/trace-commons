@@ -10,6 +10,7 @@ struct InsightsView: View {
     @State private var specificationModel: ComparisonSpecificationsModel
     @State private var overviewModel: InsightsOverviewModel
     @State private var patternsModel: InsightsPatternsModel
+    @State private var sessionsModel: InsightsSessionsModel
     @State private var tab: InsightsTab
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
@@ -49,6 +50,7 @@ struct InsightsView: View {
         _specificationModel = State(initialValue: specificationModel)
         _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
+        _sessionsModel = State(initialValue: InsightsSessionsModel(service: model.service))
         _tab = State(initialValue: initialTab)
     }
 
@@ -73,8 +75,7 @@ struct InsightsView: View {
         }
     }
 
-    /// The tab container. A tab whose slice has not landed (Sessions) is
-    /// not drawn; Spend is shown disabled with its Later chip.
+    /// The tab container. Spend is shown disabled with its Later chip.
     /// The models open and close with the container, not with a tab.
     private var tabs: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -82,9 +83,10 @@ struct InsightsView: View {
                 GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
                     GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
                     GlassSegment(model.text("analytics_tab_patterns"), value: InsightsTab.patterns),
+                    GlassSegment(model.text("analytics_tab_sessions"), value: InsightsTab.sessions),
                     GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
                 ])
-                .frame(maxWidth: 360)
+                .frame(maxWidth: 480)
                 HStack(spacing: GlassTokens.Space.s3) {
                     Text(model.text("analytics_tab_spend")).foregroundStyle(GlassColor.textTertiary)
                     GlassChip(glass: model.text("analytics_later"), muted: true)
@@ -96,6 +98,8 @@ struct InsightsView: View {
             switch tab {
             case .overview: InsightsOverviewTab(model: overviewModel, copy: model.copy)
             case .patterns: InsightsPatternsTab(model: patternsModel, copy: model.copy)
+            case .sessions:
+                InsightsSessionsTab(model: sessionsModel, snapshotIDs: model.snapshots.map(\.id), copy: model.copy)
             case .analyze: content
             }
         }
@@ -104,6 +108,7 @@ struct InsightsView: View {
         .onAppear { specificationModel.open() }
         .onAppear { overviewModel.open() }
         .onAppear { patternsModel.open() }
+        .onAppear { sessionsModel.open(); sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id)) }
         .onChange(of: comparisonTaskVersions) { _, _ in
             specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
         }
@@ -111,6 +116,7 @@ struct InsightsView: View {
             updateSpecificationSources()
             overviewModel.reload()
             patternsModel.reload()
+            sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id))
         }
         .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
             comparisonModel.upstreamEvidenceChanged()
@@ -118,7 +124,7 @@ struct InsightsView: View {
         }
         .onDisappear {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
-            patternsModel.close()
+            patternsModel.close(); sessionsModel.close()
         }
     }
 
@@ -303,7 +309,7 @@ struct InsightDetail: View {
 }
 
 /// The Insights window's tabs that have landed.
-enum InsightsTab: Hashable { case overview, patterns, analyze }
+enum InsightsTab: Hashable { case overview, patterns, sessions, analyze }
 
 /// The assessment choices, by their wire values; their words are the
 /// copy table's `category_` and `outcome_` entries.

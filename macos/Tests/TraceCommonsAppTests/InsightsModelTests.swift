@@ -624,3 +624,178 @@ private actor PatternsRecorder {
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }
+
+/// The Sessions tab's model and words: one saved session turn by turn, its
+/// markers lettered by the core, an unknown turn drawn as a gap, and a Codex
+/// session read as not recorded.
+final class InsightsSessionsTests: XCTestCase {
+    static let words: [String: String] = [
+        "analytics_unavailable": "\u{2014}",
+        "claude_code": "CLAUDE",
+        "codex": "CODEX",
+        "analytics_session_header": "{date} | {harness} | {n} turns | {t} tokens | {span} between",
+        "analytics_turn": "Turn {n}",
+        "analytics_codex_not_recorded": "NOT RECORDED",
+        "analytics_reason_no_usage_counters": "NO COUNTERS",
+        "analytics_reason_source_unsupported": "UNSUPPORTED",
+        "analytics_marker_cache_rewrite": "Rewritten after {m} min",
+        "analytics_marker_cache_rewrite_detail": "Turn {t} wrote {x}",
+        "analytics_marker_crossed": "Passed {threshold}",
+        "analytics_marker_crossed_detail": "LONG RANGE",
+        "analytics_marker_shrank": "Shrank at {t}",
+        "analytics_marker_inferred": "INFERRED",
+        "analytics_marker_reread": "File {letter} again",
+        "analytics_marker_reread_detail": "NO EDIT",
+        "analytics_marker_from_tool_calls": "TOOL ORDER",
+        "analytics_from_counters": "COUNTERS",
+        "analytics_file_label": "File {letter} \u{b7} {ext}",
+        "analytics_file_label_no_ext": "File {letter}",
+    ]
+
+    static let claudeJSON = """
+    {"type":"session_drill","session":{
+      "feed":"saved","session_ref":"snap-1","source":"claude_code","date":"2026-10-03","tz":0,
+      "turns":3,"tokens":1100000,"span_secs":7800,"state":"partial","reasons":["some_turns_unknown"],
+      "long_context_threshold":200000,
+      "series":[
+        {"ordinal":1,"uncached":1000,"cache_read":0,"cache_write":60000,"output":100,"context":61000},
+        {"ordinal":2,"uncached":null,"cache_read":null,"cache_write":null,"output":null,"context":null},
+        {"ordinal":3,"uncached":0,"cache_read":0,"cache_write":0,"output":0,"context":0}],
+      "series_unavailable":null,
+      "markers":[
+        {"letter":"A","turn_ordinal":2,"kind":"cache_written_again","basis":"inferred_from_counters",
+         "pause_minutes":14,"cache_write":64000,"context_from":null,"context":null,"file_letter":null,"file_ext":null},
+        {"letter":"B","turn_ordinal":2,"kind":"re_read","basis":"from_tool_calls",
+         "pause_minutes":null,"cache_write":null,"context_from":null,"context":null,"file_letter":"A","file_ext":".rs"},
+        {"letter":"C","turn_ordinal":3,"kind":"context_shrank","basis":"inferred_from_counters",
+         "pause_minutes":null,"cache_write":null,"context_from":90000,"context":1000,"file_letter":null,"file_ext":null},
+        {"letter":"D","turn_ordinal":3,"kind":"crossed_long_context","basis":"from_counters",
+         "pause_minutes":null,"cache_write":null,"context_from":null,"context":210000,"file_letter":null,"file_ext":null}]}}
+    """
+
+    static let codexJSON = """
+    {"type":"session_drill","session":{
+      "feed":"saved","session_ref":"snap-2","source":"codex","date":null,"tz":0,
+      "turns":null,"tokens":null,"span_secs":null,"state":"unknown","reasons":["no_usage_counters"],
+      "long_context_threshold":200000,"series":null,"series_unavailable":"not_recorded","markers":[]}}
+    """
+
+    func drill(_ json: String = claudeJSON) throws -> InsightsSessionDrill {
+        try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8)).session)
+    }
+
+    func testTheHeaderIsTheCoresTemplateFilledAndAnUnknownIsTheDash() throws {
+        let copy = Self.words
+        let header = InsightsSessionsWords.header(try drill(), copy: copy)
+        XCTAssertTrue(header.contains(" | CLAUDE | 3 turns | "), header)
+        XCTAssertTrue(header.contains(InsightsOverviewWords.figure(1_100_000, copy: copy) + " tokens"), header)
+        XCTAssertFalse(header.contains("{"), header)
+        XCTAssertFalse(header.contains("2026-10-03"), "the date is formatted, not the wire value")
+        let codex = InsightsSessionsWords.header(try drill(Self.codexJSON), copy: copy)
+        XCTAssertEqual(codex, "\u{2014} | CODEX | \u{2014} turns | \u{2014} tokens | \u{2014} between")
+    }
+
+    func testAnUnknownTurnIsAGapAndNeverAZeroBar() throws {
+        let segments = InsightsSessionsWords.segments(try drill(), copy: Self.words)
+        XCTAssertFalse(segments.contains { $0.turn == 2 }, "an unknown turn draws nothing")
+        // A measured zero is still a bar.
+        XCTAssertEqual(segments.filter { $0.turn == 3 }.map(\.tokens), [0, 0, 0])
+        XCTAssertEqual(segments.filter { $0.turn == 1 }.map(\.tokens), [0, 1000, 60000])
+    }
+
+    func testMarkerCardsAreTheCoresWordsWithTheirDerivationLabels() throws {
+        let markers = try drill().markers
+        let copy = Self.words
+        let cards = markers.map { InsightsSessionsWords.markerLines($0, threshold: 200_000, copy: copy) }
+        XCTAssertEqual(cards[0], ["Rewritten after 14 min",
+                                  "Turn 2 wrote " + InsightsOverviewWords.figure(64_000, copy: copy), "INFERRED"])
+        XCTAssertEqual(cards[1], ["File A again", "NO EDIT", "File A \u{b7} .rs", "TOOL ORDER"])
+        XCTAssertEqual(cards[2], ["Shrank at 3", "INFERRED"])
+        XCTAssertEqual(cards[3], ["Passed " + InsightsOverviewWords.figure(200_000, copy: copy),
+                                  "LONG RANGE", "COUNTERS"])
+        XCTAssertEqual(markers.map(\.letter), ["A", "B", "C", "D"])
+    }
+
+    func testACodexSessionReadsNotRecordedAndDrawsNoChart() throws {
+        let codex = try drill(Self.codexJSON)
+        XCTAssertEqual(InsightsSessionsWords.unavailableLine(codex, copy: Self.words), "NOT RECORDED")
+        XCTAssertTrue(InsightsSessionsWords.segments(codex, copy: Self.words).isEmpty)
+        XCTAssertNil(InsightsSessionsWords.unavailableLine(try drill(), copy: Self.words))
+    }
+
+    @MainActor
+    func testTheSessionsModelFollowsTheSavedListAndDropsAFailedRead() async throws {
+        let recorder = SessionsRecorder()
+        let model = InsightsSessionsModel(service: { try await recorder.call($0) })
+        model.open()
+        model.sync(snapshotIDs: [])
+        XCTAssertNil(model.selected)
+        var requests = await recorder.requests
+        XCTAssertTrue(requests.isEmpty, "no session, no read")
+
+        model.sync(snapshotIDs: ["snap-1", "snap-2"])
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.selected, "snap-1", "the newest saved session first")
+        XCTAssertEqual(model.drill?.session_ref, "snap-1")
+        requests = await recorder.requests
+        XCTAssertEqual(requests.map(\.operation.type), ["session_drill"])
+        XCTAssertEqual(requests[0].operation.snapshot_id, "snap-1")
+        XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
+
+        // The list changing without dropping the selection reads nothing.
+        model.sync(snapshotIDs: ["snap-0", "snap-1", "snap-2"])
+        XCTAssertEqual(model.selected, "snap-1")
+        requests = await recorder.requests
+        XCTAssertEqual(requests.count, 1)
+
+        model.select("snap-2")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.drill?.series_unavailable, "not_recorded")
+
+        // A deleted selection moves to the newest left.
+        model.sync(snapshotIDs: ["snap-1"])
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.selected, "snap-1")
+
+        await recorder.fail()
+        model.reload()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.drill, "a failed read never keeps the old session")
+        XCTAssertTrue(model.failed)
+
+        model.sync(snapshotIDs: [])
+        XCTAssertNil(model.selected)
+        XCTAssertNil(model.drill)
+        model.close()
+    }
+
+    @MainActor
+    func testAnUnknownSnapshotOverTheRealCoreFailsWithoutCreatingTheStore() async throws {
+        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = InsightsSessionsModel(service: { request in
+            try await Task.detached {
+                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
+            }.value
+        })
+        model.open()
+        model.sync(snapshotIDs: ["missing"])
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(model.failed)
+        XCTAssertNil(model.drill)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
+        model.close()
+    }
+}
+
+private actor SessionsRecorder {
+    var requests: [InsightsRequest] = []
+    private var failing = false
+    func fail() { failing = true }
+    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+        requests.append(request)
+        if failing { throw InsightsError.service("insights-operation-failed") }
+        let json = request.operation.snapshot_id == "snap-2"
+            ? InsightsSessionsTests.codexJSON : InsightsSessionsTests.claudeJSON
+        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+    }
+}

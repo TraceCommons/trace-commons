@@ -1074,6 +1074,16 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
+    // The Sessions tab fills the core's analytics words with one saved
+    // session's figures (`InsightsSessionsWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights Sessions words",
+        "TraceCommonsApp/Views/InsightsSessionsTab.swift",
+        "InsightsSessionsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still
