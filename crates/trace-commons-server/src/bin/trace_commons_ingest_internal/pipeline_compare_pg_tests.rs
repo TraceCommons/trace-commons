@@ -358,9 +358,11 @@ impl CompareTenants {
 struct CompareAppOptions<'a> {
     tenants: CompareTenants,
     /// `None`, or `baseline_quality_floor` (PC-D8).
+    // baseline-old-path:
     skew: Option<&'a str>,
     /// `true` in the run (spec section 8.1). `false` only in the tests that
     /// need a baseline quarantine of a medium-risk trace.
+    // baseline-old-path:
     accept_medium_risk: bool,
 }
 
@@ -426,6 +428,9 @@ impl CompareApp {
         ))
     }
 }
+
+/// The time limit of one HTTP call of the harness.
+const HTTP_CALL_BOUND: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The candidate's runtime: the compatibility package with `main`'s gate
 /// values (`CompatibilityBundleConfig::production_compatible`), the reference
@@ -567,8 +572,9 @@ async fn start_compare_app(
         insert_token(&mut tokens, tenant, token, role);
     }
 
-    // The old gate reads only KEK-wrapped (v2) envelopes, so the two paths
-    // store into the service-owned store of the gate-worker tests.
+    // baseline-old-path: the old gate reads only KEK-wrapped (v2) envelopes,
+    // so the two paths store into the service-owned store of the gate-worker
+    // tests, and the old gate gets the decryptor of that store.
     let state_dir = tempfile::tempdir().expect("temp dir");
     let (configured_store, decryptor, _) =
         fixture_gate_worker_artifact_store_with_key(artifact_root, master_key_hex);
@@ -632,6 +638,8 @@ async fn start_compare_app(
         decryptor,
         "enclave_reference_compare",
     ));
+    // baseline-old-path: the credit delta and the medium-risk rule of the
+    // old path. The candidate has them in its bundle.
     state_mut.novelty_utility_credit_points_delta = LEGACY_NOVELTY_UTILITY_CREDIT_POINTS_DELTA;
     state_mut.accept_medium_risk_submissions = options.accept_medium_risk;
     state_mut.pipeline_service = Some(service.clone());
@@ -654,7 +662,12 @@ async fn start_compare_app(
     let root = state_mut.root.clone();
 
     let (base, stop, server) = serve_pipeline_app(state).await;
-    let client = reqwest::Client::new();
+    // A server that does not answer gives `compare_http_failed`, so the run
+    // can write its partial report.
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_CALL_BOUND)
+        .build()
+        .expect("compare_http_client_failed");
     wait_for_pipeline_ready(&client, &base).await;
     let app = CompareApp {
         base,
@@ -1272,7 +1285,9 @@ async fn review_candidate_run(
         .send(
             probes,
             reqwest::Method::GET,
-            "/v1/review/pipeline/quarantine",
+            // The queue is oldest first, and its default limit is 50. The
+            // store permits 500 at most (`list_review_queue`).
+            "/v1/review/pipeline/quarantine?limit=500",
             reviewer,
             None,
         )
@@ -1454,11 +1469,10 @@ async fn candidate_finish(
             .service
             .load_index_command(&run, evidence)
             .await
-            .map_err(|_| "compare_candidate_evidence_incomplete")?;
-        if let Some(command) = command {
-            record.member_chunks = command.entries().iter().map(|entry| entry.chunk).collect();
-            record.member_chunks.sort_unstable();
-        }
+            .map_err(|_| "compare_candidate_evidence_incomplete")?
+            .ok_or("compare_candidate_evidence_incomplete")?;
+        record.member_chunks = command.entries().iter().map(|entry| entry.chunk).collect();
+        record.member_chunks.sort_unstable();
     }
     Ok(checked(probes, record))
 }
@@ -1874,7 +1888,6 @@ async fn one_trace_reaches_both_gates() {
 
     // 3. The candidate receipt goes to the pipeline, and the worker
     // completes the run.
-    let started = std::time::Instant::now();
     let (code, receipt) = post_trace(
         &app.client,
         &app.base,
@@ -1891,7 +1904,6 @@ async fn one_trace_reaches_both_gates() {
         "complete",
     )
     .await;
-    let candidate_complete_ms = started.elapsed().as_millis();
 
     // 4. The Score evidence holds a measured perplexity.
     let tx = tenant_tx(&mut client, &app.tenants.candidate).await;
@@ -1923,11 +1935,6 @@ async fn one_trace_reaches_both_gates() {
         .await
         .expect("the index command loads");
 
-    eprintln!(
-        "compare_spike baseline_perplexity_micros={baseline_perplexity} \
-         candidate_perplexity_micros={candidate_perplexity} \
-         candidate_complete_ms={candidate_complete_ms}"
-    );
     assert_eq!(u64::try_from(baseline_perplexity), Ok(candidate_perplexity));
     app.shutdown().await;
 }
@@ -2114,11 +2121,14 @@ async fn a_declared_medium_trace_is_aligned() {
     assert_eq!(pair.candidate.review_source, ReviewSource::Alignment);
     assert!(pair.candidate.terminal);
     assert!(pair.candidate.scored);
-    let TraceComparison::Unexplained { fields } = compare_records(&pair.baseline, &pair.candidate)
-    else {
-        panic!("a different admission is an unexplained difference");
-    };
-    assert!(fields.contains(&"admission"), "{fields:?}");
+    // The admission is the one difference: each gate value, the membership,
+    // and the credit event are equal after the alignment.
+    assert_eq!(
+        compare_records(&pair.baseline, &pair.candidate),
+        TraceComparison::Unexplained {
+            fields: vec!["admission"]
+        }
+    );
     app.shutdown().await;
 }
 
@@ -2138,12 +2148,13 @@ async fn a_declared_high_trace_is_aligned() {
     assert_eq!(pair.candidate.review, ReviewLabel::None);
     assert!(pair.candidate.terminal);
     assert!(!pair.candidate.scored);
-    let TraceComparison::Unexplained { fields } = compare_records(&pair.baseline, &pair.candidate)
-    else {
-        panic!("a different admission is an unexplained difference");
-    };
-    assert!(fields.contains(&"admission"), "{fields:?}");
-    assert!(!fields.contains(&"scored"), "{fields:?}");
+    // The two sides are not scored, so the admission is the one difference.
+    assert_eq!(
+        compare_records(&pair.baseline, &pair.candidate),
+        TraceComparison::Unexplained {
+            fields: vec!["admission"]
+        }
+    );
     app.shutdown().await;
 }
 
@@ -2427,6 +2438,13 @@ async fn twenty_quarantined_traces_all_complete() {
         );
         assert!(pair.candidate.terminal, "trace {number}");
         assert!(pair.baseline.terminal, "trace {number}");
+        assert_eq!(
+            compare_records(&pair.baseline, &pair.candidate),
+            TraceComparison::Unexplained {
+                fields: vec!["admission"]
+            },
+            "trace {number}"
+        );
     }
     app.shutdown().await;
 }
@@ -2482,6 +2500,10 @@ async fn the_hash_rule_is_driven_on_both_sides() {
         assert!(record.terminal);
         assert!(record.scored);
     }
+    assert_eq!(
+        compare_records(&pair.baseline, &pair.candidate),
+        TraceComparison::Equal
+    );
 
     let odd = hash_rule_fixture("hash_odd", ReviewLabel::Reject);
     let pair = drive_pair(&app, &odd, 1).await;
@@ -2496,6 +2518,10 @@ async fn the_hash_rule_is_driven_on_both_sides() {
         assert!(record.terminal);
         assert!(!record.scored);
     }
+    assert_eq!(
+        compare_records(&pair.baseline, &pair.candidate),
+        TraceComparison::Equal
+    );
     app.shutdown().await;
 }
 
@@ -2650,6 +2676,122 @@ async fn a_second_gate_decision_is_refused() {
     assert_eq!(again.err(), Some("compare_baseline_scored_twice"));
     assert_eq!(gate_decision_count(&app, fixture.submission_id).await, 2);
     app.shutdown().await;
+}
+
+/// PC-D20. A review call that the old path refuses gives a baseline that is
+/// not terminal, and no gate call follows it. A review action for a run that
+/// the worker completed gives no candidate record, and it does not wait for
+/// the bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_review_call_is_not_terminal() {
+    let Some((app, _artifacts)) = start_test_app(PASSING_FLOORS, true).await else {
+        return;
+    };
+    let fixture = prose_fixture("review_refused");
+    let envelope = compare_envelope(&fixture).await;
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let probes = Probes::new(&app.tenants, &fixture, &envelope);
+    let baseline_seen = baseline_admission(&app, &probes, &body, fixture.submission_id)
+        .await
+        .unwrap();
+    let candidate_seen = candidate_admission(&app, &probes, &body, fixture.submission_id)
+        .await
+        .unwrap();
+    assert_eq!(baseline_seen.admission, AdmissionLabel::Admit);
+    assert_eq!(candidate_seen.admission, AdmissionLabel::Admit);
+
+    // The old path refuses a review lease for a trace that it accepted.
+    let calls_before = app.http_call_count();
+    let baseline = baseline_finish(
+        &app,
+        &probes,
+        &fixture,
+        baseline_seen,
+        AlignmentAction::ApproveBaseline,
+        record_base(&fixture, 0),
+    )
+    .await
+    .unwrap();
+    assert_eq!(app.http_call_count(), calls_before + 1);
+    assert!(!baseline.terminal);
+    assert!(!baseline.scored);
+    assert_eq!(baseline.review, ReviewLabel::Approve);
+    assert_eq!(gate_decision_count(&app, fixture.submission_id).await, 0);
+
+    // The worker completes an admitted run, so it never waits for a review.
+    let started = std::time::Instant::now();
+    let candidate = candidate_finish(
+        &app,
+        &probes,
+        &fixture,
+        candidate_seen,
+        AlignmentAction::ApproveCandidate,
+        record_base(&fixture, 0),
+    )
+    .await;
+    assert_eq!(candidate.err(), Some("compare_candidate_review_failed"));
+    assert!(started.elapsed() < std::time::Duration::from_secs(30));
+    app.shutdown().await;
+}
+
+#[test]
+fn a_score_outcome_with_a_missing_field_is_refused() {
+    let awards = trace_commons_gate_api::pipeline::InstrumentAwards::new(Vec::new()).unwrap();
+    let mut evidence = ScoreEvidence::fixed(awards);
+    evidence.quality_passed = Some(true);
+    evidence.novelty_passed = Some(false);
+    evidence.perplexity_micros = Some(11);
+    evidence.tail_fraction_micros = Some(12);
+    evidence.peak_perplexity_micros = Some(13);
+    evidence.novelty_score_micros = Some(14);
+    evidence.peak_novelty_micros = Some(15);
+    evidence.chunk_count = Some(2);
+    evidence.total_chunk_count = Some(3);
+    evidence.chunks_capped = Some(true);
+    assert_eq!(
+        candidate_gate_values(&evidence),
+        Ok(GateValues {
+            quality_passed: true,
+            novelty_passed: false,
+            perplexity_micros: 11,
+            tail_fraction_micros: 12,
+            peak_perplexity_micros: 13,
+            novelty_score_micros: 14,
+            peak_novelty_micros: 15,
+            chunk_count: 2,
+            total_chunk_count: 3,
+            chunks_capped: true,
+            index_cardinality: None,
+            credit_quality_micros: None,
+            credit_quality_version: None,
+        })
+    );
+    let without: [fn(&mut ScoreEvidence); 10] = [
+        |evidence| evidence.quality_passed = None,
+        |evidence| evidence.novelty_passed = None,
+        |evidence| evidence.perplexity_micros = None,
+        |evidence| evidence.tail_fraction_micros = None,
+        |evidence| evidence.peak_perplexity_micros = None,
+        |evidence| evidence.novelty_score_micros = None,
+        |evidence| evidence.peak_novelty_micros = None,
+        |evidence| evidence.chunk_count = None,
+        |evidence| evidence.total_chunk_count = None,
+        |evidence| evidence.chunks_capped = None,
+    ];
+    for remove in without {
+        let mut incomplete = evidence.clone();
+        remove(&mut incomplete);
+        assert_eq!(
+            candidate_gate_values(&incomplete),
+            Err("compare_candidate_evidence_incomplete")
+        );
+    }
+    // A credit quality that `i64` cannot hold is refused too.
+    evidence.credit_quality_micros = Some(u64::MAX);
+    assert_eq!(
+        candidate_gate_values(&evidence),
+        Err("compare_candidate_evidence_incomplete")
+    );
 }
 
 /// PC-D18. The baseline receipt scans the tenant's derived files, and the
