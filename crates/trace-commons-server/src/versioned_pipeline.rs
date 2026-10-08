@@ -6845,7 +6845,7 @@ async fn invalidate_pipeline_exports_on_tx(
         &[&tenant_id, &submission_ids],
     )
     .await?;
-    clear_gate_decision_dedup_on_tx(tx, tenant_id, &submission_ids).await?;
+    clear_gate_decision_dedup_on_tx(tx, tenant_id, submission_ids).await?;
     Ok(())
 }
 
