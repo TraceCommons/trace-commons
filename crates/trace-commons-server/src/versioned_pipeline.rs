@@ -11891,11 +11891,14 @@ impl PipelineService {
                         withheld
                     };
                     // poldsam P-1: a leg an earlier attempt already
-                    // dispatched (its adapter answered `Unavailable`, so the
-                    // effect may have happened) is not completed as withheld
-                    // with no receipt: it fails as `settlement_unreconciled`,
-                    // as a dispatched leg forfeited by a withdrawal is, for an
-                    // operator to reconcile against the adapter's records by
+                    // dispatched (its adapter answered `Unavailable`, the
+                    // process stopped after the call, or the Settle policy
+                    // was suspended while the call was in flight, GRD-004,
+                    // so the effect may have happened) is not completed as
+                    // withheld with no receipt: it fails as
+                    // `settlement_unreconciled`, as a dispatched leg
+                    // forfeited by a withdrawal is, for an operator to
+                    // reconcile against the adapter's records by
                     // `operation_ref_hash`. The retry stays charged, so the
                     // attempts run out and the run fails with the leg kept.
                     if withheld.is_some() && settlement.dispatched_at.is_some() {
