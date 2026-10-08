@@ -27,12 +27,17 @@ public sealed partial class InsightsView : UserControl, IDisposable
     public async Task ActivateAsync()
     {
         await ViewModel.LoadAsync();
+        _activated = true;
         await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
     }
+    // Set once the core's words are loaded. The Pivot selects its first tab
+    // while the control is built, before then, and that read would present
+    // with no words; ActivateAsync reads the tab on screen instead.
+    private bool _activated;
     // The tabs read their figures when shown; Analyze reads nothing new.
     private async void OnTabChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (!_closed && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
+        if (!_closed && _activated && Tabs.SelectedIndex >= 0) await ViewModel.SelectTabAsync(Tabs.SelectedIndex);
     }
     // A week picker's own index follows the model; only a choice the model
     // is not already showing reads again.
