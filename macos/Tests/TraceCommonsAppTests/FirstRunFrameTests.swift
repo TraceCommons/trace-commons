@@ -81,7 +81,7 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertLessThan(spacer.lowerBound, customize.lowerBound)
         XCTAssertLessThan(customize.lowerBound, primary.lowerBound)
         let customizeBody = String(rowBody[customize.upperBound...].prefix(200))
-        XCTAssertTrue(customizeBody.contains(".buttonStyle(GlassButtonStyle(.glass))"), customizeBody)
+        XCTAssertTrue(customizeBody.contains(".buttonStyle(GlassButtonStyle(.glass, size: .bar))"), customizeBody)
         XCTAssertFalse(source.contains("GlassButtonStyle(.link)"))
     }
 
@@ -115,7 +115,26 @@ final class FirstRunFrameTests: XCTestCase {
         let backBody = String(rowBody[back.upperBound..<spacer.lowerBound])
         XCTAssertTrue(backBody.contains("Button(copy.frame.back)"))
         XCTAssertTrue(backBody.contains("state = FirstRunNavigation.back(state)"))
-        XCTAssertTrue(backBody.contains(".buttonStyle(GlassButtonStyle(.glass))"))
+        XCTAssertTrue(backBody.contains(".buttonStyle(GlassButtonStyle(.glass, size: .bar))"))
+    }
+
+    /// Owner ruling, 2026-10-08: every button in the footer's action bar is
+    /// Continue's size. Back, Customize and Cancel are `.bar`; no button in
+    /// the bar is left at the inline size.
+    func test_everyFooterButtonIsTheCTAsSize() throws {
+        let source = try Self.source()
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let end = try XCTUnwrap(source.range(of: "extension FirstRunFrame where", range: row.upperBound..<source.endIndex))
+        let rowBody = String(source[row.upperBound..<end.lowerBound])
+        let styles = rowBody.components(separatedBy: ".buttonStyle(").dropFirst().map { String($0.prefix(60)) }
+        XCTAssertEqual(styles.count, 4, rowBody)
+        for style in styles where !style.hasPrefix("GlassButtonStyle(.primary)") {
+            XCTAssertTrue(style.contains("size: .bar"), style)
+        }
+        for name in ["copy.frame.back", "copy.frame.customSetupInstead"] {
+            let at = try XCTUnwrap(rowBody.range(of: name))
+            XCTAssertTrue(String(rowBody[at.upperBound...].prefix(200)).contains("size: .bar"), name)
+        }
     }
 
     /// Ron's Continue carries "Answer every tool above to continue" as its
@@ -166,7 +185,7 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertLessThan(cancelButton.lowerBound, primary.lowerBound)
         let cancelBody = String(rowBody[cancelButton.upperBound..<primary.lowerBound])
         XCTAssertTrue(cancelBody.contains("Button(cancel.title, action: cancel.action)"))
-        XCTAssertTrue(cancelBody.contains("GlassButtonStyle(.secondary)"))
+        XCTAssertTrue(cancelBody.contains("GlassButtonStyle(.secondary, size: .bar)"))
     }
 
     private static func appSource(_ path: String) throws -> String {

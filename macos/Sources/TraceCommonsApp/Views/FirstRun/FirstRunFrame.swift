@@ -185,13 +185,14 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
 
     private var footerRow: some View {
         HStack(spacing: GlassTokens.Space.s6) {
-            // The secondary buttons are TCDesign's neutral glass pill, the
-            // folder picker's style.
+            // The secondary buttons are TCDesign's neutral glass pill at the
+            // action bar's size: every button in the bar is Continue's size
+            // (owner ruling, 2026-10-08).
             if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {
                 Button(copy.frame.back) {
                     state = FirstRunNavigation.back(state)
                 }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(.glass, size: .bar))
             }
             if let note = footer.note {
                 Text(note)
@@ -203,11 +204,11 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                 Button(copy.frame.customSetupInstead) {
                     state = FirstRunNavigation.switchTier(state, to: .custom)
                 }
-                .buttonStyle(GlassButtonStyle(.glass))
+                .buttonStyle(GlassButtonStyle(.glass, size: .bar))
             }
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
-                    .buttonStyle(GlassButtonStyle(.secondary))
+                    .buttonStyle(GlassButtonStyle(.secondary, size: .bar))
             }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {
