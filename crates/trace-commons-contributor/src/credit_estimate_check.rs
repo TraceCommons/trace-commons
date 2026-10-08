@@ -36,7 +36,9 @@ pub const CHECK_JOINED: &str =
 pub const CHECK_WITHHELD: &str = "Given 0 credit (left out of the band): {withheld}";
 /// DRAFT, NEEDS APPROVAL. `{inside}` of `{estimated}` inside the estimate.
 pub const CHECK_COVERAGE: &str =
-    "Credit inside the estimate's range: {inside} of {estimated} ({share}%)";
+    "Credit inside the estimate's range: {inside} of {estimated} ({share})";
+/// DRAFT, NEEDS APPROVAL. Stands in for a share with nothing to divide.
+pub const CHECK_NOT_MEASURED: &str = "not measured";
 /// DRAFT, NEEDS APPROVAL. Rank agreement between the estimate's score and
 /// the credit given.
 pub const CHECK_SPEARMAN: &str = "Rank agreement with credit given (Spearman): {rho}";
@@ -220,9 +222,10 @@ pub fn render(report: &DeviceCheckReport) -> Vec<String> {
             .replace("{joined}", &report.joined.to_string()),
         CHECK_WITHHELD.replace("{withheld}", &report.withheld.to_string()),
     ];
-    let share = report
-        .band_coverage
-        .map_or_else(|| "-".to_string(), |s| format!("{:.0}", s * 100.0));
+    let share = report.band_coverage.map_or_else(
+        || CHECK_NOT_MEASURED.to_string(),
+        |s| format!("{:.0}%", s * 100.0),
+    );
     lines.push(
         CHECK_COVERAGE
             .replace("{inside}", &report.inside_band.to_string())
@@ -352,6 +355,8 @@ mod tests {
         let text = lines.join("\n");
         assert!(!text.contains("alice"), "{text}");
         assert!(text.contains("1 of 1 (100%)"), "{text}");
+        let empty = render(&agreement(0, &[], &LocalEstimateTable::built_in())).join("\n");
+        assert!(empty.contains("0 of 0 (not measured)"), "{empty}");
         for line in [
             CHECK_HEADING,
             CHECK_JOINED,
@@ -360,6 +365,7 @@ mod tests {
             CHECK_SPEARMAN,
             CHECK_SPEARMAN_UNAVAILABLE,
             CHECK_TABLE,
+            CHECK_NOT_MEASURED,
         ] {
             assert!(line.len() <= 100, "{line}");
         }
