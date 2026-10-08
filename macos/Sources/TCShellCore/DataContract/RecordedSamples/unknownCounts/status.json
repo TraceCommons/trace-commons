@@ -11,6 +11,7 @@
   "queue_depth": 3,
   "dev_dry_run": false,
   "contribution_mode_partial": false,
+  "contribution_mode": "notify_only",
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -54,6 +55,5 @@
     "projects": []
   },
   "contribution_override": null,
-  "contribution_mode": "notify_only",
   "_sample": "absent on purpose: older daemon"
 }

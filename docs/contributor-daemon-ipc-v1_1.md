@@ -146,6 +146,12 @@ old behaviour, because no application has shipped against `v1` yet. See
   K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
   (#1196) have already landed. See ["View menu: Group by and Sort by
   (K15)"](#view-menu-group-by-and-sort-by-k15).
+- **Upsell S3 (in-app suggestions).** `status` now carries `nudge`: which
+  in-app suggestion leads, if any, as labels, a count and a time. Three new
+  methods: `nudge_decline` (the in-app "Not now"), `nudge_opened` (the
+  suggestion's own action) and `set_suggestions_enabled` (the switch, which
+  `set_settings` also accepts as `suggestions_enabled`). Each publishes
+  `status_changed`. See ["`status.nudge`"](#statusnudge).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -587,7 +593,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -601,6 +607,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
+| `nudge_decline` | `kind` (**required**: a suggestion kind label, today only `review_backlog`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_opened` | `kind` (**required**, as above); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
@@ -624,6 +633,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "queue_depth": 0,
   "decisions_owed": 0,
   "unpurposed_traces": 0,
+  "nudge": { "state": "none", "lead": null },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
   "daily_budget": {
@@ -656,7 +666,8 @@ contribution override" below.
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
 additive; see their sections below. `unpurposed_traces` is additive; see
-"`status.unpurposed_traces`" below.
+"`status.unpurposed_traces`" below. `nudge` is additive; see "`status.nudge`"
+below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -934,6 +945,84 @@ newly discovered project under the automatic grant. Switching Scrub check
 can also move it without changing an already-pending entry. When one does, the daemon
 publishes `status_changed`, so a shell that refreshes status only on
 `queue_changed` does not keep the old badge.
+
+#### `status.nudge`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (upsell S3). Which
+in-app suggestion leads right now -- a card on Traces or History, a row in the
+menu-bar panel -- if any. Labels, one count and one time; never a path, a
+folder label, an id or a title.
+
+```json
+"nudge": { "state": "armed", "lead": "review_backlog", "count": 6 }
+"nudge": { "state": "none", "lead": null }
+"nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z" }
+"nudge": { "state": "unknown", "lead": null }
+```
+
+- `state` is `armed`, `none` or `unknown`, always present. **A shell draws
+  nothing for `none` or `unknown`**, and nothing when `nudge` is absent (a
+  daemon predating it). `unknown` is never read as "nothing to suggest", and
+  absent is never read as `none`.
+- `lead` is always present: a kind label when `state` is `armed`, `null`
+  otherwise. Today the only kind is `review_backlog` (U1). Later revisions add
+  kinds ahead of and behind it; a shell that meets a `lead` it does not know
+  draws nothing.
+- `count` is present only with a lead: for `review_backlog` it is
+  `unpurposed_traces`. It is for the card's sentence, never a badge number,
+  and it never moves `decisions_owed`.
+- `cooldown_until` is present only while an in-app "Not now" silences a kind
+  that would otherwise lead, and says when that lapses.
+
+**When `review_backlog` leads.** `unpurposed_traces` is at least 5 (DRAFT,
+owner decision 10), every gate below is open, the arming offer is absent, and
+no "Not now" is in force.
+
+**Gates, checked first.** `state` is `none`, with no lead and no count,
+whenever any of these holds: `paused`; `consent_hold` is non-null; not
+`logged_in` (no live enrollment); suggestions switched off
+(`suggestions_enabled`, see `set_settings`). It is `unknown` while the daemon
+is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
+true -- because its view may not be current. **Decisions owed come first:**
+while `arming_suggestion` would return an offer, `review_backlog` is hidden
+(`none`), because "decide on these" beside "arm this folder" is two asks at
+once.
+
+**"Not now" (`nudge_decline {kind}`).** Silences that kind for 7 days (DRAFT,
+owner decision 10), capped at half of `queue_ttl_days`, so a declined
+suggestion always comes back while the sessions it is about are still queued.
+A "Not now" stamped after the current time (the clock went backwards) reads as
+still in force: it can only suppress. A notification's own "Not now" never
+calls this; it writes nothing.
+
+**`nudge_opened {kind}`.** Sent only from the suggestion's own action (the
+card's Review, the panel row's tap), never because a card or row was shown.
+It records when, and does not retire the suggestion: `review_backlog` retires
+by fact, when the count falls below the threshold.
+
+Both requests refuse a missing or non-string `kind` with `bad_params` /
+`nudge-kind-required`, a kind this daemon does not know with `bad_params` /
+`nudge-kind-unrecognized`, and any non-null `subject` with `bad_params` /
+`nudge-subject-unrecognized` (no kind takes one yet). A refusal writes and
+publishes nothing. On success each persists its stamp in the daemon state
+file before answering (`unavailable` / `state-write-failed` if it cannot, and
+nothing is kept), then publishes `status_changed`.
+
+**The switch.** `set_suggestions_enabled {on}` and `set_settings
+{"suggestions_enabled": bool}` are the same setting by two routes; either
+publishes `status_changed` when it changes. Default `true` (DRAFT, owner
+decision 14), including for a settings file written before the key existed.
+It governs the in-app cards and the panel row only.
+
+**What it is computed from, and when.** The suggestion ledger, the switch and
+`queue_ttl_days` are snapshotted before the policy and queue section of
+`status`, each in its own short lock; `unpurposed_traces` and whether the
+arming offer is present are read inside that section, under the same guards
+as `decisions_owed`. Reading `status` never writes the ledger.
+
+**Lifetime.** The ledger (kind labels and times only) lives in the daemon
+state file. `unenroll` clears it, so a next account inherits none of this
+one's stamps; `suggestions_enabled` is a setting about this Mac and stays.
 
 #### `routing`
 
@@ -3808,8 +3897,8 @@ Takes a JSON object whose top-level keys must come from
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`,
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
-`private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
-`max_bytes_per_day` --
+`private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
+`max_uploads_per_day`, `max_bytes_per_day` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -3837,6 +3926,12 @@ below): a digest with nothing pending and nothing contributed since the
 last one never fires, on either schedule. This is open decision #5 on issue
 #1118; both schedules ship rather than picking one, so the choice is a
 setting rather than a release cliff.
+
+`suggestions_enabled` (boolean, default `true`) switches the in-app
+suggestions -- the upsell cards on Traces and History and the menu-bar panel
+row -- on or off. It is the same setting `set_suggestions_enabled` writes,
+and a change by either route publishes `status_changed`, because
+`status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
 `{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including

@@ -175,6 +175,17 @@ pub struct DaemonState {
     /// bound.
     #[serde(default)]
     pub community: Option<super::community::CommunityStanding>,
+    /// Upsell: the in-app suggestion ledger, keyed by kind label or
+    /// `kind:opaque id` (`nudge::ledger_key`), never by a path or a folder
+    /// label. Times only. Cleared by `unenroll` (`clear_nudges`), so a next
+    /// account never inherits this one's "Not now"s; removed with the rest
+    /// of this file by `ConfigStore::wipe`.
+    ///
+    /// `#[serde(default)]` so a file written before it existed loads, and
+    /// not written while empty, so an install that never saw a suggestion
+    /// keeps writing the bytes it always did.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub nudges: BTreeMap<String, super::nudge::NudgeLedger>,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -204,6 +215,7 @@ impl DaemonState {
             history_refresh_due_at: None,
             last_community_poll_at: None,
             community: None,
+            nudges: BTreeMap::new(),
             last_written: LastWritten::default(),
         }
     }
@@ -240,6 +252,17 @@ impl DaemonState {
         store.write_daemon_file(DAEMON_STATE_FILE, &body)?;
         self.last_written = LastWritten(Some((store.dir().to_path_buf(), digest)));
         Ok(())
+    }
+
+    /// Forget every in-app suggestion stamp: what `unenroll` calls so a next
+    /// account inherits none of this one's. Returns whether anything was
+    /// there to forget, so the caller saves only when it must. Later upsell
+    /// slices clear their own fields here too, so one call stays "every
+    /// nudge field".
+    pub fn clear_nudges(&mut self) -> bool {
+        let had = !self.nudges.is_empty();
+        self.nudges.clear();
+        had
     }
 
     /// Reset the daily volume counters when the UTC day has rolled over.
@@ -548,5 +571,56 @@ mod tests {
             Some("/Users/testuser/code/proj"),
             "the field that did exist must still decode"
         );
+    }
+
+    /// Upsell S3: a state file written before the nudge ledger existed loads
+    /// with an empty one, and an empty ledger adds nothing to the file, so
+    /// an install that never saw a suggestion writes the bytes it always did.
+    #[test]
+    fn the_nudge_ledger_defaults_empty_and_writes_nothing_while_empty() {
+        let (_d, store) = temp_store();
+        let body = serde_json::json!({
+            "schema_version": DAEMON_STATE_SCHEMA,
+            "cwd_cache": {},
+            "prior_uploads": {},
+            "last_observation": {},
+            "last_digest_at": null,
+            "day_bucket": null,
+            "uploads_today": 0,
+            "bytes_today": 0
+        });
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let loaded = DaemonState::load(&store).unwrap();
+        assert!(loaded.nudges.is_empty());
+        let written = serde_json::to_value(DaemonState::new()).unwrap();
+        assert!(written.get("nudges").is_none(), "{written}");
+    }
+
+    /// A stamped ledger survives a restart, and `clear_nudges` (what
+    /// `unenroll` calls) empties it.
+    #[test]
+    fn the_nudge_ledger_round_trips_and_clears() {
+        let (_d, store) = temp_store();
+        let mut state = DaemonState::new();
+        let at = DateTime::parse_from_rfc3339("2026-10-07T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        state.nudges.insert(
+            "review_backlog".to_string(),
+            super::super::nudge::NudgeLedger {
+                declined_at: Some(at),
+                ..Default::default()
+            },
+        );
+        state.save(&store).unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        assert_eq!(loaded, state);
+        assert!(loaded.clear_nudges(), "a non-empty ledger reports a change");
+        assert!(loaded.nudges.is_empty());
+        assert!(!loaded.clear_nudges(), "an empty one reports none");
     }
 }

@@ -338,6 +338,9 @@ extension DaemonData {
         /// `list_projects` carries, from the same daemon function. Never a
         /// badge number. `nil` is unknown (an older daemon): no upsell, never 0.
         public let unpurposedTraces: Int?
+        /// Which in-app suggestion leads (upsell S3). `nil` from an older
+        /// daemon: no row and no card, never a lead of its own.
+        public let nudge: Nudge?
         public let nextDigestAt: Date?
         public let health: Health?
         public let dailyBudget: DailyBudget?
@@ -380,6 +383,7 @@ extension DaemonData {
             case queueDepth = "queue_depth"
             case decisionsOwed = "decisions_owed"
             case unpurposedTraces = "unpurposed_traces"
+            case nudge
             case nextDigestAt = "next_digest_at"
             case health
             case dailyBudget = "daily_budget"
@@ -394,6 +398,26 @@ extension DaemonData {
             case contributionMode = "contribution_mode"
             case contributionModePartial = "contribution_mode_partial"
             case devDryRun = "dev_dry_run"
+        }
+    }
+
+    /// `status.nudge` (upsell S3). Decoded only; no screen draws it yet.
+    /// `state` is `armed`, `none` or `unknown`; only `armed` names a `lead`.
+    /// `none` and `unknown` both draw nothing.
+    public struct Nudge: Codable, Equatable, Sendable {
+        public let state: String?
+        /// A kind label such as `review_backlog`, or `nil`.
+        public let lead: String?
+        /// The leading kind's count; present only with a lead.
+        public let count: Int?
+        /// When an in-app "Not now" lapses; present only while one is in force.
+        public let cooldownUntil: Date?
+
+        public enum CodingKeys: String, CodingKey {
+            case state
+            case lead
+            case count
+            case cooldownUntil = "cooldown_until"
         }
     }
 
@@ -682,6 +706,8 @@ extension DaemonData {
         public let privateInference: Bool?
         /// Whether the first-run Private AI question has been answered.
         public let privateInferenceOfferSeen: Bool?
+        /// Whether in-app suggestions (upsell cards, panel row) are on.
+        public let suggestionsEnabled: Bool?
         /// The listener's own report; never assumed running.
         public let privateInferenceState: PrivateInferenceState?
         /// `unset`, `off` or `watch` per tool. `unset` is never drawn as off.
@@ -707,6 +733,7 @@ extension DaemonData {
             case maxBytesPerDay = "max_bytes_per_day"
             case privateInference = "private_inference"
             case privateInferenceOfferSeen = "private_inference_offer_seen"
+            case suggestionsEnabled = "suggestions_enabled"
             case privateInferenceState = "private_inference_state"
             case claudeSourceMode = "claude_source_mode"
             case codexSourceMode = "codex_source_mode"

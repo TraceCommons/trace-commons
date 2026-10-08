@@ -62,6 +62,7 @@ pub mod nearai_credential;
 pub mod nearai_onboarding;
 mod network_data;
 pub mod notify;
+pub mod nudge;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
 // Under `test-credential-store` (test builds only) nothing outside the manual

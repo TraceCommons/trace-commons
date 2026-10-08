@@ -11,6 +11,10 @@
   "queue_depth": 3,
   "decisions_owed": 3,
   "unpurposed_traces": 1,
+  "nudge": {
+    "state": "none",
+    "lead": null
+  },
   "next_digest_at": "1970-01-01T00:00:00Z",
   "health": {
     "last_error_label": null,

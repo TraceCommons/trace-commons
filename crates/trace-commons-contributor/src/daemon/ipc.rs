@@ -213,6 +213,13 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 pub const ERR_BAD_VERDICT: &str = "outcome-invalid";
 /// `approve`'s `correction` was not a string.
 pub const ERR_BAD_CORRECTION: &str = "correction-invalid";
+/// `nudge_decline` / `nudge_opened` without a string `kind`.
+pub const ERR_NUDGE_KIND_REQUIRED: &str = "nudge-kind-required";
+/// A `kind` this daemon has no suggestion for. Refused rather than stored,
+/// so every ledger key is a known label.
+pub const ERR_NUDGE_KIND_UNRECOGNIZED: &str = "nudge-kind-unrecognized";
+/// A `subject` for a kind that takes none (no kind takes one yet).
+pub const ERR_NUDGE_SUBJECT_UNRECOGNIZED: &str = "nudge-subject-unrecognized";
 /// `approve` carried a correction without a `partly` or `failed` outcome.
 ///
 /// The shells only show the field for those two verdicts, and the same rule
@@ -354,6 +361,9 @@ pub const METHODS: &[&str] = &[
     "dismiss",
     "arming_suggestion",
     "decline_arming",
+    "nudge_decline",
+    "nudge_opened",
+    "set_suggestions_enabled",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -497,6 +507,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "project_automatic_copy",
     "arming_suggestion",
     "decline_arming",
+    // Upsell S3: each writes only the daemon state or settings file.
+    "nudge_decline",
+    "nudge_opened",
+    "set_suggestions_enabled",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -1906,6 +1920,21 @@ impl DaemonShared {
         }
     }
 
+    /// What `status.nudge` reads besides the queue and the gates: the
+    /// suggestion ledger, the suggestions switch and the queue TTL. Each is
+    /// taken in its own short lock, state then settings, and released before
+    /// returning, so `status_value` can call this before its policy and
+    /// queue section without nesting either under them.
+    pub(crate) fn nudge_snapshot(&self) -> NudgeSnapshot {
+        let ledger = self.state.lock().expect("state lock").nudges.clone();
+        let settings = self.settings.lock().expect("settings lock");
+        NudgeSnapshot {
+            ledger,
+            suggestions_enabled: settings.suggestions_enabled,
+            queue_ttl_days: settings.queue_ttl_days,
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         let now = Utc::now();
@@ -1931,6 +1960,13 @@ impl DaemonShared {
         let witness_capacity = self.witness_capacity();
         // Snapshot settings without nesting its lock under policy or queue.
         let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
+        // Upsell: the suggestion ledger and the switches it reads, each in
+        // its own short lock, before the policy and queue section below.
+        let nudge_snapshot = self.nudge_snapshot();
+        // Read once, here, rather than inside the object below: `is_paused`
+        // takes the state lock, and both feed the nudge gates as well.
+        let paused = self.is_paused(now);
+        let logged_in = self.logged_in();
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -1941,6 +1977,9 @@ impl DaemonShared {
         // Same guards as `decisions_owed`, and the same function
         // `list_projects` reports, so the two answers always agree.
         let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
+        // Policy only, under the guard already held: whether the arming
+        // offer would be drawn right now, which hides the backlog nudge.
+        let arming_offer_present = policy.arming_suggestion(now).is_some();
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -1948,10 +1987,27 @@ impl DaemonShared {
         drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
+        let consent_hold = crate::config::consent_hold(cfg.as_ref());
+        let nudge = nudge_value(&super::nudge::lead(
+            &super::nudge::LeadInputs {
+                paused,
+                consent_hold: consent_hold.is_some(),
+                enrolled: logged_in,
+                // The health that turns the strip to attention, plus a
+                // reached daily cap: either way nothing is going out.
+                healthy: health.last_error_label.is_none() && !budget.blocked(),
+                suggestions_enabled: nudge_snapshot.suggestions_enabled,
+                arming_offer_present,
+                unpurposed_traces: Some(unpurposed_traces),
+                queue_ttl_days: nudge_snapshot.queue_ttl_days,
+            },
+            &nudge_snapshot.ledger,
+            now,
+        ));
         #[cfg_attr(not(debug_assertions), allow(unused_mut))]
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
-            "logged_in": self.logged_in(),
+            "logged_in": logged_in,
             "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
@@ -1959,8 +2015,8 @@ impl DaemonShared {
             // under the enrollment because its scopes were saved by enrollment
             // and never chosen; `null` otherwise. Label only. See
             // `config::consent_hold`.
-            "consent_hold": crate::config::consent_hold(cfg.as_ref()),
-            "paused": self.is_paused(now),
+            "consent_hold": consent_hold,
+            "paused": paused,
             "queue_depth": queue.pending().len(),
             // Additive (K6). The badge's exact count: `Pending` entries that
             // need a decision from this person. Unlike `queue_depth`, this
@@ -1976,6 +2032,11 @@ impl DaemonShared {
             // previewed `Pending` entries in folders set to Ask me. Every one
             // is also in `decisions_owed`; never a badge number of its own.
             "unpurposed_traces": unpurposed_traces,
+            // Additive (upsell S3). Which in-app suggestion leads, if any:
+            // `{state, lead, count?, cooldown_until?}`, labels, a count and
+            // a time only. See `nudge::lead` and the v1_1 doc's
+            // "`status.nudge`".
+            "nudge": nudge,
             "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
@@ -2965,6 +3026,10 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 Err(e) => Response::err(req.id, ERR_UNAVAILABLE, &e.to_string()),
             }
         }
+        // Upsell S3: the in-app suggestion's own actions and its switch.
+        "nudge_decline" => handle_nudge_stamp(shared, req, NudgeStamp::Declined),
+        "nudge_opened" => handle_nudge_stamp(shared, req, NudgeStamp::Opened),
+        "set_suggestions_enabled" => handle_set_suggestions_enabled(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -4799,6 +4864,108 @@ fn handle_list_audit(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+/// What [`DaemonShared::nudge_snapshot`] takes before the policy and queue
+/// section of `status_value`.
+pub(crate) struct NudgeSnapshot {
+    pub ledger: std::collections::BTreeMap<String, super::nudge::NudgeLedger>,
+    pub suggestions_enabled: bool,
+    pub queue_ttl_days: i64,
+}
+
+/// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
+/// unless `state` is `armed`), `count` only with a lead, `cooldown_until`
+/// only while a "Not now" silences one. Labels, a count and a time only.
+fn nudge_value(lead: &super::nudge::NudgeLead) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "state": lead.state.label(),
+        "lead": lead.lead.map(super::nudge::NudgeKind::label),
+    });
+    if let Some(count) = lead.count {
+        value["count"] = serde_json::Value::from(count);
+    }
+    if let Some(until) = lead.cooldown_until {
+        value["cooldown_until"] = serde_json::json!(until);
+    }
+    value
+}
+
+/// Which ledger stamp a nudge request writes.
+#[derive(Debug, Clone, Copy)]
+enum NudgeStamp {
+    /// `nudge_decline`: the in-app "Not now".
+    Declined,
+    /// `nudge_opened`: the nudge's own action (a card's Review, the panel
+    /// row). Never sent for merely being shown.
+    Opened,
+}
+
+/// `nudge_decline {kind, subject?}` and `nudge_opened {kind, subject?}`.
+///
+/// Shaped like `decline_arming`: validate, stamp, persist, then publish
+/// `status_changed` so every shell redraws. A kind this daemon does not know
+/// is refused rather than stored, so a ledger key is always a known label.
+/// No kind takes a subject yet, so any subject is refused; a later kind that
+/// does names its opaque ids here. Logs nothing.
+fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -> Response {
+    let Some(label) = req.params.get("kind").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_REQUIRED);
+    };
+    let Some(kind) = super::nudge::NudgeKind::parse(label) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_UNRECOGNIZED);
+    };
+    if req.params.get("subject").is_some_and(|v| !v.is_null()) {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_SUBJECT_UNRECOGNIZED);
+    }
+    let key = super::nudge::ledger_key(kind, None);
+    let now = Utc::now();
+    let mut state = shared.state.lock().expect("state lock");
+    let before = state.nudges.get(&key).cloned();
+    let entry = state.nudges.entry(key.clone()).or_default();
+    match stamp {
+        NudgeStamp::Declined => entry.declined_at = Some(now),
+        NudgeStamp::Opened => entry.opened_at = Some(now),
+    }
+    if state.save(&shared.store).is_err() {
+        // Fail closed: a stamp that did not reach disk is not kept in
+        // memory either, so a restart cannot disagree with this answer.
+        match before {
+            Some(previous) => {
+                state.nudges.insert(key, previous);
+            }
+            None => {
+                state.nudges.remove(&key);
+            }
+        }
+        return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
+    }
+    drop(state);
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    let answer = match stamp {
+        NudgeStamp::Declined => serde_json::json!({ "declined": true }),
+        NudgeStamp::Opened => serde_json::json!({ "opened": true }),
+    };
+    Response::ok(req.id, answer)
+}
+
+/// `set_suggestions_enabled {on}`: the in-app suggestions switch. Writes
+/// through `set_settings`, so the file is saved by the one path that keeps
+/// stored credentials intact, and that path publishes `status_changed`.
+fn handle_set_suggestions_enabled(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ "suggestions_enabled": on }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ "suggestions_enabled": on }))
+}
+
 fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(locks) = crate::daemon::nearai_credential::session::coordination(shared.store.dir())
     else {
@@ -4817,6 +4984,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
+    let suggestions_before = settings.suggestions_enabled;
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -4889,6 +5057,11 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // person without changing a queue row. Switching back can remove
             // that obligation too. Neither transition may leave badges stale.
             shared.publish_if_decisions_owed_changed(decisions_owed_before);
+            // `status.nudge` reads the suggestions switch, so a change to it
+            // is a status change whichever request made it.
+            if value["suggestions_enabled"].as_bool() != Some(suggestions_before) {
+                shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            }
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
@@ -15431,7 +15604,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 74, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 77, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -17008,6 +17181,318 @@ mod tests {
             assert!(event_is_opt_in(EVENT_REENGAGE_DUE));
             assert!(!event_is_opt_in(EVENT_QUEUE_CHANGED));
             assert!(!event_is_opt_in(EVENT_DIGEST_DUE));
+        }
+    }
+
+    /// Upsell S3: `status.nudge`, `nudge_decline`, `nudge_opened` and
+    /// `set_suggestions_enabled`.
+    mod nudges {
+        use super::*;
+        use crate::daemon::nudge::{
+            NUDGE_BACKLOG_THRESHOLD, NudgeKind, decline_cooldown, ledger_key,
+        };
+
+        const ASK: &str = "/tmp/nudge-ask";
+
+        /// A live enrollment: config with chosen scopes and a device key, so
+        /// `status.logged_in` is true.
+        fn live() -> DaemonShared {
+            let s = enrolled_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
+            assert!(s.logged_in());
+            s
+        }
+
+        /// `n` previewed, undecided entries in an Ask-me folder.
+        fn seed_backlog(s: &DaemonShared, n: usize) {
+            for i in 0..n {
+                let id = seed_entry(s, ASK);
+                let digest = format!("sha256:nudge{i}");
+                assert!(
+                    s.queue
+                        .lock()
+                        .unwrap()
+                        .record_previewed_envelope(id, &digest, None, None)
+                );
+            }
+        }
+
+        fn status_of(s: &DaemonShared) -> serde_json::Value {
+            handle_request(s, &req("status", serde_json::json!({})))
+                .result
+                .expect("status answers")
+        }
+
+        fn nudge_of(s: &DaemonShared) -> serde_json::Value {
+            let status = status_of(s);
+            assert!(status.get("nudge").is_some(), "{status}");
+            status["nudge"].clone()
+        }
+
+        fn saw_status_changed(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> bool {
+            let mut saw = false;
+            while let Ok(event) = rx.try_recv() {
+                saw |= event.event == EVENT_STATUS_CHANGED;
+            }
+            saw
+        }
+
+        #[test]
+        fn a_backlog_at_the_threshold_leads_with_review_backlog() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let status = status_of(&s);
+            let nudge = &status["nudge"];
+            assert_eq!(nudge["state"], "armed", "{status}");
+            assert_eq!(nudge["lead"], "review_backlog");
+            assert_eq!(nudge["count"], NUDGE_BACKLOG_THRESHOLD);
+            assert_eq!(nudge["count"], status["unpurposed_traces"]);
+            assert!(nudge.get("cooldown_until").is_none(), "{nudge}");
+            // The suggestion is not a decision: the badge does not move.
+            assert_eq!(status["decisions_owed"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        #[test]
+        fn below_the_threshold_nothing_leads_and_nothing_is_counted() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD - 1);
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({"state": "none", "lead": null}),
+            );
+        }
+
+        /// Paused, consent-held or signed out: `none`. Unhealthy: `unknown`.
+        /// Never `armed`, and never a count.
+        #[test]
+        fn closed_gates_never_arm() {
+            let paused = live();
+            seed_backlog(&paused, NUDGE_BACKLOG_THRESHOLD);
+            paused.paused.store(true, Ordering::Relaxed);
+            paused.state.lock().unwrap().paused = true;
+            assert_eq!(nudge_of(&paused)["state"], "none");
+
+            let held = unchosen_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&held.store).unwrap();
+            seed_backlog(&held, NUDGE_BACKLOG_THRESHOLD);
+            assert!(!status_of(&held)["consent_hold"].is_null());
+            assert_eq!(nudge_of(&held)["state"], "none");
+
+            let signed_out = shared();
+            seed_backlog(&signed_out, NUDGE_BACKLOG_THRESHOLD);
+            assert_eq!(status_of(&signed_out)["logged_in"], false);
+            assert_eq!(nudge_of(&signed_out)["state"], "none");
+
+            let unhealthy = live();
+            seed_backlog(&unhealthy, NUDGE_BACKLOG_THRESHOLD);
+            unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(
+                nudge_of(&unhealthy),
+                serde_json::json!({"state": "unknown", "lead": null}),
+            );
+        }
+
+        /// Spec section 3: U1 is hidden while `arming_suggestion` returns
+        /// an offer.
+        #[test]
+        fn the_backlog_is_hidden_while_the_arming_offer_is_present() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            {
+                let mut policy = s.policy.lock().unwrap();
+                for _ in 0..crate::daemon::policy::ARMING_SUGGESTION_THRESHOLD {
+                    policy.record_contribution(ASK);
+                }
+            }
+            let offer = handle_request(&s, &req("arming_suggestion", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert!(offer.get("project_id").is_some(), "{offer}");
+            assert_eq!(nudge_of(&s)["state"], "none");
+        }
+
+        #[test]
+        fn not_now_silences_the_backlog_persists_and_publishes() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("decline answers"),
+                serde_json::json!({"declined": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["state"], "none", "{nudge}");
+            assert!(nudge["lead"].is_null());
+            assert!(nudge.get("count").is_none(), "{nudge}");
+            let until: chrono::DateTime<Utc> =
+                serde_json::from_value(nudge["cooldown_until"].clone()).unwrap();
+            let declined = s.state.lock().unwrap().nudges
+                [&ledger_key(NudgeKind::ReviewBacklog, None)]
+                .declined_at
+                .unwrap();
+            assert_eq!(until, declined + decline_cooldown(14));
+
+            // Persisted: a restarted daemon still honours it.
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert_eq!(
+                reloaded.nudges[&ledger_key(NudgeKind::ReviewBacklog, None)].declined_at,
+                Some(declined)
+            );
+            // And it never moved the badge.
+            assert_eq!(status_of(&s)["decisions_owed"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        #[test]
+        fn opening_stamps_the_ledger_and_leaves_the_lead_alone() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("opened answers"),
+                serde_json::json!({"opened": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let ledger = DaemonState::load(&s.store).unwrap().nudges;
+            let entry = &ledger[&ledger_key(NudgeKind::ReviewBacklog, None)];
+            assert!(entry.opened_at.is_some());
+            assert!(entry.declined_at.is_none());
+            // U1 resolves by fact, not by click: opening does not retire it.
+            assert_eq!(nudge_of(&s)["state"], "armed");
+        }
+
+        /// Unknown kinds, a subject no kind takes, and a missing kind are
+        /// refused by label, and nothing is written or published.
+        #[test]
+        fn decline_and_opened_refuse_what_they_do_not_know() {
+            let s = live();
+            let mut rx = s.events.subscribe();
+            for method in ["nudge_decline", "nudge_opened"] {
+                for (params, label) in [
+                    (serde_json::json!({}), "nudge-kind-required"),
+                    (serde_json::json!({"kind": 3}), "nudge-kind-required"),
+                    (
+                        serde_json::json!({"kind": "/Users/x/proj"}),
+                        "nudge-kind-unrecognized",
+                    ),
+                    (
+                        serde_json::json!({"kind": "review_backlog", "subject": "p1"}),
+                        "nudge-subject-unrecognized",
+                    ),
+                ] {
+                    let r = handle_request(&s, &req(method, params.clone()));
+                    let err = r.error.expect("refused");
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method} {params}");
+                    assert_eq!(err.message, label, "{method} {params}");
+                }
+            }
+            assert!(!saw_status_changed(&mut rx));
+            assert!(s.state.lock().unwrap().nudges.is_empty());
+        }
+
+        #[test]
+        fn suggestions_off_leads_nothing_persists_and_publishes() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": false})),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"suggestions_enabled": false})
+            );
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(nudge_of(&s)["state"], "none");
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["suggestions_enabled"], false);
+            assert!(
+                !crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .suggestions_enabled
+            );
+
+            // Back on through `set_settings`: the same switch, and the same
+            // event, by either route.
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_settings",
+                    serde_json::json!({"suggestions_enabled": true}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(nudge_of(&s)["state"], "armed");
+
+            let bad = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": "no"})),
+            );
+            assert_eq!(bad.error.expect("refused").message, "on-required");
+        }
+
+        /// Lock order: the ledger and the settings it reads are snapshotted
+        /// in their own short locks before the policy and queue section,
+        /// never inside it. Two pins: the snapshot takes neither the policy
+        /// nor the queue lock (it finishes while another thread holds both),
+        /// and `status_value` calls it before it takes the policy lock.
+        #[test]
+        fn the_nudge_snapshot_is_taken_before_the_policy_and_queue_section() {
+            let s = std::sync::Arc::new(live());
+            let policy = s.policy.lock().unwrap();
+            let queue = s.queue.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = {
+                let s = std::sync::Arc::clone(&s);
+                std::thread::spawn(move || {
+                    let _ = s.nudge_snapshot();
+                    let _ = tx.send(());
+                })
+            };
+            let finished = rx.recv_timeout(std::time::Duration::from_secs(30));
+            drop(queue);
+            drop(policy);
+            worker.join().unwrap();
+            assert!(
+                finished.is_ok(),
+                "nudge_snapshot must not take the policy or queue lock"
+            );
+
+            let source = include_str!("ipc.rs");
+            let body = source
+                .split("pub fn status_value(&self)")
+                .nth(1)
+                .expect("status_value exists");
+            let snapshot = body.find("self.nudge_snapshot()").expect("snapshot taken");
+            let policy_lock = body
+                .find("let policy = self.policy.lock()")
+                .expect("policy section");
+            assert!(
+                snapshot < policy_lock,
+                "snapshot must precede the policy lock"
+            );
         }
     }
 }

@@ -11,6 +11,10 @@
   "queue_depth": 4,
   "decisions_owed": 4,
   "unpurposed_traces": 0,
+  "nudge": {
+    "state": "none",
+    "lead": null
+  },
   "next_digest_at": null,
   "health": {
     "last_error_label": null,

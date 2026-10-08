@@ -146,6 +146,39 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
     assert!(!crate::daemon::audit::load(&s.store).unwrap().is_empty());
 }
 
+/// Upsell S3: account B never inherits account A's suggestion ledger. Every
+/// nudge stamp goes, in memory and on disk; the suggestions switch is a
+/// setting about this Mac and stays.
+#[tokio::test]
+async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
+    let s = shared();
+    enroll_fixture(&s);
+    for method in ["nudge_decline", "nudge_opened"] {
+        let r = handle_request(&s, &req(method, json!({"kind": "review_backlog"})));
+        assert!(r.error.is_none(), "{method}: {:?}", r.error);
+    }
+    let off = handle_request(&s, &req("set_suggestions_enabled", json!({"on": false})));
+    assert!(off.error.is_none(), "{:?}", off.error);
+    assert!(
+        !crate::daemon::state::DaemonState::load(&s.store)
+            .unwrap()
+            .nudges
+            .is_empty()
+    );
+
+    assert!(call(&s).await.error.is_none());
+
+    assert!(s.state.lock().unwrap().nudges.is_empty());
+    assert!(
+        crate::daemon::state::DaemonState::load(&s.store)
+            .unwrap()
+            .nudges
+            .is_empty(),
+        "the cleared ledger is persisted"
+    );
+    assert!(!s.settings.lock().unwrap().suggestions_enabled);
+}
+
 #[tokio::test]
 async fn unenroll_writes_one_label_only_audit_row() {
     let s = shared();
