@@ -595,6 +595,22 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub scrub_check_defaulted_on_upgrade: bool,
 
+    /// Whether Insights may read the proxy ledger's token counters (feed L):
+    /// `insights_glance`, the `tokens` on `inference_calls`, and the
+    /// `usage_changed` event. Off, nothing reads the ledger for Insights.
+    /// Starts as `insights::analytics_constants::LEDGER_FEED_DEFAULT_ON`,
+    /// owner decision D3, open.
+    #[serde(default = "default_insights_ledger_feed")]
+    pub insights_ledger_feed: bool,
+
+    /// The context, in tokens, the user chose for the context tip. **No
+    /// default**: unset until the user sets it, so the tip reports a counter
+    /// against the user's own limit and never one this daemon picked. The tip
+    /// itself is held by owner decision D2, open. Serialized as `null` when
+    /// unset, so a shell can tell "unset" from an older daemon.
+    #[serde(default)]
+    pub insights_context_threshold: Option<u32>,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -985,6 +1001,15 @@ pub fn attested_bodies_dir_for(
     Some(token.parent()?.join(IRONWIRE_BODIES_SUBDIR))
 }
 
+fn default_insights_ledger_feed() -> bool {
+    crate::insights::analytics_constants::LEDGER_FEED_DEFAULT_ON
+}
+
+/// The smallest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MIN: u32 = 1_000;
+/// The largest context threshold the tip accepts.
+pub const INSIGHTS_CONTEXT_THRESHOLD_MAX: u32 = 10_000_000;
+
 fn default_approval_hold_secs() -> u64 {
     DEFAULT_APPROVAL_HOLD_SECS
 }
@@ -1031,6 +1056,8 @@ impl Default for DaemonSettings {
             token_capture_enabled: None,
             private_inference: false,
             private_inference_offer_seen: false,
+            insights_ledger_feed: default_insights_ledger_feed(),
+            insights_context_threshold: None,
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             legacy_claude_root: None,
@@ -1586,6 +1613,25 @@ pub fn apply_settings_object(
                     .as_str()
                     .and_then(ScrubCheck::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed L (owner decision D3, open). Off by default.
+            "insights_ledger_feed" => {
+                settings.insights_ledger_feed =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The context tip's threshold: a number in range, or `null` to
+            // unset it. There is no default to fall back to.
+            "insights_context_threshold" => {
+                settings.insights_context_threshold = match value {
+                    serde_json::Value::Null => None,
+                    _ => Some(parse_ranged_u64(
+                        value,
+                        SettingRange::new(
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MIN),
+                            u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX),
+                        ),
+                    )? as u32),
+                };
             }
             _ => return Err(ERR_SETTINGS_UNKNOWN_FIELD),
         }
@@ -2382,6 +2428,84 @@ mod tests {
             !s.private_inference,
             "recording that the offer was answered must never start anything"
         );
+    }
+
+    /// The Insights ledger feed (owner decision D3, open) starts off, an
+    /// older settings file loads it off, and it takes a boolean only.
+    #[test]
+    fn the_insights_ledger_feed_starts_off_and_takes_a_boolean() {
+        assert!(!DaemonSettings::default().insights_ledger_feed);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        v.as_object_mut().unwrap().remove("insights_ledger_feed");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_ledger_feed);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": true})),
+            Ok(true)
+        );
+        assert!(s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": "on"})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.insights_ledger_feed);
+    }
+
+    /// The context threshold has no default; it is a number in range or
+    /// `null`, and `get_settings` reports it either way.
+    #[test]
+    fn the_insights_context_threshold_has_no_default() {
+        let defaults = DaemonSettings::default();
+        assert_eq!(defaults.insights_context_threshold, None);
+        let v = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(
+            v.get("insights_context_threshold"),
+            Some(&serde_json::Value::Null),
+            "unset is reported as null, not left out"
+        );
+        let mut older = v.clone();
+        older
+            .as_object_mut()
+            .unwrap()
+            .remove("insights_context_threshold");
+        let settings: DaemonSettings = serde_json::from_value(older).expect("settings load");
+        assert_eq!(settings.insights_context_threshold, None);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": 200_000})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, Some(200_000));
+        for bad in [
+            serde_json::json!(0),
+            serde_json::json!(INSIGHTS_CONTEXT_THRESHOLD_MIN - 1),
+            serde_json::json!(u64::from(INSIGHTS_CONTEXT_THRESHOLD_MAX) + 1),
+            serde_json::json!("200000"),
+            serde_json::json!(-5),
+        ] {
+            assert_eq!(
+                apply_settings_object(
+                    &mut s,
+                    &serde_json::json!({"insights_context_threshold": bad})
+                ),
+                Err(ERR_SETTINGS_INVALID_VALUE)
+            );
+            assert_eq!(s.insights_context_threshold, Some(200_000));
+        }
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_context_threshold": null})
+            ),
+            Ok(true)
+        );
+        assert_eq!(s.insights_context_threshold, None);
     }
 
     /// The marker is a boolean and nothing else, refused by the same label

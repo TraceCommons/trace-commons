@@ -584,7 +584,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -3784,7 +3784,7 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
-`max_bytes_per_day` --
+`max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4656,6 +4656,27 @@ with it false. That default is what makes an offer appear on the first start
 after an upgrade as well as on a fresh install: an installed build's
 settings file has no such key, so the first build that knows the key reads
 it as unanswered and asks once.
+
+#### `insights_ledger_feed` and `insights_context_threshold`
+
+Both are additive; a daemon that predates them refuses them as
+`settings-unknown-field`, and `get_settings` from it omits them.
+
+`insights_ledger_feed` takes a boolean and defaults to `false` (owner
+decision D3, open). It is the one gate on Insights reading the proxy
+ledger's token counters (feed L). While it is `false`, nothing reads the
+ledger for Insights: `insights_glance` answers `enabled: false` without
+touching the ledger, `inference_calls` rows carry no `tokens` key, and
+`usage_changed` is never published. A settings file written before the key
+existed loads it as `false`.
+
+`insights_context_threshold` takes an integer from 1000 to 10000000 (tokens),
+or `null` to unset it; anything else is `settings-invalid-value`. **It has no
+default**: `get_settings` reports `null` until the contributor sets it, so a
+shell can tell "unset" from an older daemon (key absent). It is the
+contributor's own limit for the context tip in `insights_glance`, which is
+itself held by owner decision D2 (open); setting it lights nothing while that
+decision is open.
 
 #### `scrub_check`
 
