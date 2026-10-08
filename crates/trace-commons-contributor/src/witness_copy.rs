@@ -399,6 +399,7 @@ pub struct WitnessReviewCopy {
     pub heading: &'static str,
     pub disclosure: &'static str,
     pub action: &'static str,
+    /// The confirm button. Approved 2026-10-08 (button rule).
     pub confirm: &'static str,
     pub cancel: &'static str,
     pub working: &'static str,
@@ -764,7 +765,7 @@ pub fn witness_copy() -> WitnessCopy {
             heading: "Review with your configured witness",
             disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
             action: "Prepare witness review",
-            confirm: "Send this session for review",
+            confirm: "Send",
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",

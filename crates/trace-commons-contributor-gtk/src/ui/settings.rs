@@ -946,9 +946,11 @@ fn offer_pause(app: &Rc<App>) {
     );
     dialog.add_responses(&[
         ("cancel", "Cancel"),
-        ("hour", "For 1 hour"),
-        ("tomorrow", "Until tomorrow morning"),
-        ("forever", "Until I turn it back on"),
+        // The core's pause lengths (`pause_hour`, `pause_morning`,
+        // `pause_until_resumed`), button rule 2026-10-08.
+        ("hour", "1 hour"),
+        ("tomorrow", "Until morning"),
+        ("forever", "Until resumed"),
     ]);
     dialog.set_close_response("cancel");
     let app = Rc::clone(app);
@@ -5347,9 +5349,15 @@ fn wire_token_storage(app: &Rc<App>) {
         let Some(storage) = a.settings.token_storage.borrow().clone() else {
             return;
         };
+        // The button is short; the confirmation keeps the full title.
+        let title = if storage.discard_title.is_empty() {
+            &storage.discard_label
+        } else {
+            &storage.discard_title
+        };
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(&storage.discard_label),
+            Some(title),
             Some(&storage.discard_confirmation),
         );
         dialog.add_responses(&[

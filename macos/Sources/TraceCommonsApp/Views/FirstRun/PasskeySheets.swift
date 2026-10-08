@@ -489,7 +489,7 @@ struct PasskeySheets: View {
                 GlassNotice(tone: .outside) { Text(error) }
             }
             refusalNotice
-            blockButton(copy.passkey.nameTitle, .primary) { Task { await model.submitName() } }
+            blockButton(copy.passkey.nameSubmit, .primary) { Task { await model.submitName() } }
                 .disabled(model.nameError != nil)
             // #1030's StatusNote: the amber warning glyph before the words.
             GlassNotice(tone: .ask) {

@@ -75,7 +75,10 @@ struct InsightsView: View {
                             GlassPickerOption(model.text("trajectory"), value: "trajectory"),
                         ])
                         Button(model.text("choose_file")) { choosingFile = true }
+                        // Short labels repeat on this screen; each is named in full
+                        // for VoiceOver, in the core's words.
                         Button(model.text("refresh")) { model.refresh() }
+                            .accessibilityLabel(model.text("refresh_accessibility"))
                         if model.busy { GlassSpinner() }
                     }.disabled(model.busy)
                     if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
@@ -107,11 +110,13 @@ struct InsightsView: View {
                         HStack {
                             if model.selectedIsSaved {
                                 Button(model.text("delete"), role: .destructive) { model.delete() }
+                                    .accessibilityLabel(model.text("delete_accessibility"))
                                     .buttonStyle(GlassButtonStyle(.destructive, small: true))
                             } else {
                                 VStack(alignment: .leading) {
                                     Text(model.text("save_notice")).glassType(GlassTokens.TypeScale.caption)
                                     Button(model.text("save")) { model.save() }
+                                        .accessibilityLabel(model.text("save_accessibility"))
                                 }
                             }
                         }.disabled(model.busy)

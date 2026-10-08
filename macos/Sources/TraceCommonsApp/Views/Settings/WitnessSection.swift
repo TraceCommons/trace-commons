@@ -298,7 +298,7 @@ struct WitnessSection: View {
         // Discard is destructive: right-most, never on Return.
         .glassModal(isPresented: $showingTokenDiscard) {
             GlassConfirmation(
-                title: storage.discardLabel, message: storage.discardConfirmation,
+                title: storage.discardTitle ?? storage.discardLabel, message: storage.discardConfirmation,
                 actions: [
                     .cancel(storage.cancelLabel) { showingTokenDiscard = false },
                     .destructive(storage.confirmLabel) {

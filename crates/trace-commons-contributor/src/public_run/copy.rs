@@ -91,6 +91,7 @@ pub struct PublicRunCopy {
     pub source_placeholder: &'static str,
     pub source_help: &'static str,
     pub cancel_edit: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub review_page: &'static str,
     pub exact_public_preview: &'static str,
     pub observed_evidence: &'static str,
@@ -190,7 +191,7 @@ pub fn public_run_copy() -> PublicRunCopy {
         source_placeholder: "Optional tracecommons.ai/runs link or slug",
         source_help: "Add when workflow varies an existing public run.",
         cancel_edit: "Cancel",
-        review_page: "Create public page",
+        review_page: "Create page",
         exact_public_preview: "Exact public preview",
         observed_evidence: "Observed evidence",
         use_workflow: "Use workflow",

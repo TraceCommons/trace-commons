@@ -21,7 +21,7 @@ final class MonitorTracesCopyExportTests: XCTestCase {
     /// Keep and its undo are Customize's words, so the two surfaces agree.
     func testKeepIsTheCustomizeLabel() throws {
         let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
-        XCTAssertEqual(copy.keep, "Keep on this Mac")
+        XCTAssertEqual(copy.keep, "Keep")
     }
 
     /// A core that does not answer, and a request that failed, each get the
