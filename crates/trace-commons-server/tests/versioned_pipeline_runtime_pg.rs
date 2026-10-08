@@ -24999,21 +24999,28 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
 /// table through that role's grants and policies, as it does in production.
 async fn gate_driver_backend() -> PgBackend {
     const GATE_DRIVER_LOGIN: &str = "trace_gate_driver_pipeline_test";
+    // Provisioned once per process: concurrent role DDL on one role fails
+    // with `tuple concurrently updated` when several tests start together.
+    static GATE_DRIVER_PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .expect("runtime_backend read the same variable");
-    let owner = owner_client().await;
-    owner
-        .batch_execute(&format!(
-            "DO $$ BEGIN
+    GATE_DRIVER_PROVISIONED
+        .get_or_init(|| async {
+            let owner = owner_client().await;
+            owner
+                .batch_execute(&format!(
+                    "DO $$ BEGIN
                  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{GATE_DRIVER_LOGIN}') THEN
                      CREATE ROLE {GATE_DRIVER_LOGIN} LOGIN;
                  END IF;
              END $$;
              ALTER ROLE {GATE_DRIVER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
              GRANT trace_gate_driver TO {GATE_DRIVER_LOGIN};"
-        ))
-        .await
-        .expect("provision the gate driver login");
+                ))
+                .await
+                .expect("provision the gate driver login");
+        })
+        .await;
     let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
     gate_url
         .set_username(GATE_DRIVER_LOGIN)
@@ -43768,5 +43775,192 @@ async fn withdrawal_leaves_credit_withheld_reason_as_legacy_does() {
         gate_decision_rows(&tenant, run.submission_id).await,
         vec![without_dedup(&before[0])],
         "the withdrawal changes nothing on the row but the dedup columns"
+    );
+}
+
+/// A legacy gate decision row for `submission_id`, as `main`'s gate writes
+/// one: no `source`, so it reads as `legacy_gate`.
+async fn insert_legacy_gate_decision(tenant_id: &str, submission_id: uuid::Uuid) -> uuid::Uuid {
+    let decision_id = uuid::Uuid::new_v4();
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_gate_decisions (
+             tenant_id, decision_id, submission_id, gate_policy_version,
+             gate_version_hash, perplexity_micros, tail_fraction_micros,
+             perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+             novelty_passed, embedding_evidence_hash, attestation_chain_hash
+         ) VALUES ($1,$2,$3,'legacy-v1','sha256:legacy',5000000,100000,true,900000,
+                   'sha256:nn',true,'sha256:ee','sha256:aa')",
+        &[&tenant_id, &decision_id, &submission_id],
+    )
+    .await
+    .expect("insert the legacy gate decision row");
+    tx.commit().await.unwrap();
+    decision_id
+}
+
+/// Spec C-D7: `main`'s consumers pick a pipeline row up through their own,
+/// unmodified readers, each run as the role it runs as in production: the
+/// dedup signal and rederive enumerations, the contributor cap enumeration
+/// (joined to the submission's principal) and the score listing as
+/// `trace_gate_driver`, and the account trust fact candidates and recorder
+/// (V85) for the account the receipt principal is linked to.
+#[tokio::test]
+async fn consumers_see_pipeline_rows() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-consumers-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    // After the receipt, which created the tenant row the account needs.
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let decision_id = expected_pipeline_decision_id(&tenant, run.run_id);
+
+    let dedup = gate.list_dedup_signals(i64::MAX).await.unwrap();
+    assert!(
+        dedup
+            .iter()
+            .any(|row| row.tenant_id == tenant && row.decision_id == decision_id),
+        "the dedup signal enumeration lists the pipeline row"
+    );
+    let rederive = gate.list_dedup_rederive_rows(i64::MAX).await.unwrap();
+    assert!(
+        rederive.iter().any(|row| row.tenant_id == tenant
+            && row.decision_id == decision_id
+            && row.submission_id == run.submission_id),
+        "the dedup rederive enumeration lists the pipeline row"
+    );
+    let cap = gate.list_contributor_cap_signals(i64::MAX).await.unwrap();
+    let cap_row = cap
+        .iter()
+        .find(|row| row.tenant_id == tenant && row.decision_id == decision_id)
+        .expect("the contributor cap enumeration lists the pipeline row");
+    assert_eq!(cap_row.auth_principal_ref, RECEIPT_PRINCIPAL);
+    assert!(cap_row.credit_quality_micros.is_some());
+    let scores = gate
+        .list_scores_by_submission_ids(&[run.submission_id])
+        .await
+        .unwrap();
+    assert_eq!(scores.len(), 1, "the score listing reads the pipeline row");
+    assert!(scores[0].gate_passed);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let candidates = tx
+        .query(
+            "SELECT source_kind, source_id
+               FROM trace_account_trust_fact_candidates($1, $2, 100)",
+            &[&tenant, &account_id],
+        )
+        .await
+        .expect("list the account's trust fact candidates");
+    assert!(
+        candidates.iter().any(|row| {
+            row.get::<_, String>("source_kind") == "gate_evaluation"
+                && row.get::<_, uuid::Uuid>("source_id") == decision_id
+        }),
+        "the pipeline row is a gate evaluation fact candidate"
+    );
+    let outcome: Option<String> = tx
+        .query_one(
+            "SELECT trace_record_account_trust_fact($1, $2, 'gate_evaluation', $3)",
+            &[&tenant, &account_id, &decision_id],
+        )
+        .await
+        .expect("record the gate evaluation fact")
+        .get(0);
+    assert_eq!(
+        outcome.as_deref(),
+        Some("evaluated_passed"),
+        "an accepted pipeline submission that passed both gates"
+    );
+    tx.commit().await.unwrap();
+}
+
+/// Spec C-D3 / O-C3: the credit-quality sweep's enumeration
+/// (`list_gate_decisions_for_credit_scoring`, as `trace_gate_driver`) leaves
+/// a pipeline row out, so the sweep never overwrites the credit quality the
+/// pipeline's Score computed under its bundle; a legacy row with a scored
+/// perplexity in the same tenant is still listed.
+#[tokio::test]
+async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-credit-quality-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let pipeline_decision = expected_pipeline_decision_id(&tenant, run.run_id);
+    let pipeline_row = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(pipeline_row.len(), 1);
+    assert!(
+        pipeline_row[0].perplexity_micros > 0,
+        "a scored pipeline row"
+    );
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    let legacy_decision = insert_legacy_gate_decision(&tenant, legacy_submission).await;
+
+    let listed: BTreeSet<uuid::Uuid> = gate
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumerate as the gate driver")
+        .into_iter()
+        .filter(|input| input.tenant_id == tenant)
+        .map(|input| input.decision_id)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([legacy_decision]),
+        "the legacy row is listed and the pipeline row is not"
+    );
+    assert_ne!(pipeline_decision, legacy_decision);
+}
+
+/// Regression on `main`'s gate enumeration (`db/postgres.rs`): a pipeline
+/// submission is never listed for `main`'s gate driver, whether its run is
+/// still in flight (no row yet) or complete (with its pipeline row).
+#[tokio::test]
+async fn legacy_gate_driver_still_skips_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-driver-{}", uuid::Uuid::new_v4());
+    let complete = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, complete.submission_id)
+            .await
+            .len(),
+        1
+    );
+    let (in_flight, _) = run_to_settle_ready(&service, &tenant).await;
+    assert!(
+        gate_decision_rows(&tenant, in_flight.submission_id)
+            .await
+            .is_empty()
+    );
+    let listed = gate
+        .list_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30, 10_000)
+        .await
+        .expect("list as the gate driver");
+    assert!(
+        !listed.iter().any(|item| item.tenant_id == tenant),
+        "no pipeline submission is listed for main's gate: {listed:?}"
     );
 }

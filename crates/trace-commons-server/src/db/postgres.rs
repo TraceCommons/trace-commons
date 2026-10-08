@@ -5560,6 +5560,12 @@ impl Database for PgBackend {
                  -- leaves credit quality NULL; scoring it here would hand
                  -- every skipped duplicate the graded-floor product.
                  WHERE COALESCE(perplexity_micros, 0) > 0
+                   -- A row the pipeline's Settle wrote already holds the
+                   -- credit quality its Score computed under the bundle's
+                   -- pinned calibration; rescoring it here would overwrite
+                   -- that (spec 2026-10-08, Slice C, O-C3). V116 grants
+                   -- trace_gate_driver this column.
+                   AND source <> 'pipeline_settle'
                  ORDER BY decided_at ASC
                  LIMIT $1",
                 &[&limit],
