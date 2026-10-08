@@ -43026,3 +43026,568 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
         Some(fixture.a.bundle_id.as_str())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Spec 2026-10-08 (pipeline production assembly), Slice C: Settle writes one
+// `trace_gate_decisions` row per compatibility submission, so `main`'s
+// consumers see pipeline traffic.
+// ---------------------------------------------------------------------------
+
+/// One gate decision row, as the Slice C tests read it.
+#[derive(Debug, Clone, PartialEq)]
+struct GateDecisionRow {
+    decision_id: uuid::Uuid,
+    submission_id: uuid::Uuid,
+    source: String,
+    pipeline_run_id: Option<uuid::Uuid>,
+    gate_policy_version: String,
+    gate_version_hash: String,
+    perplexity_micros: i64,
+    tail_fraction_micros: i64,
+    peak_perplexity_micros: Option<i64>,
+    perplexity_passed: bool,
+    novelty_score_micros: i64,
+    peak_novelty_micros: Option<i64>,
+    novelty_passed: bool,
+    nearest_neighbor_hash: String,
+    embedding_evidence_hash: String,
+    attestation_chain_hash: String,
+    chunk_count: Option<i32>,
+    total_chunk_count: Option<i32>,
+    chunks_capped: Option<bool>,
+    credit_quality_micros: Option<i64>,
+    credit_quality_calibration_version: Option<i32>,
+    index_cardinality_at_scoring: Option<i64>,
+    credit_withheld_reason: Option<String>,
+    vector_entry_id: Option<uuid::Uuid>,
+    vector_index_snapshot_id: Option<uuid::Uuid>,
+    agent_prose_perplexity_micros: Option<i64>,
+    attributed_token_fraction_micros: Option<i64>,
+    dedup_simhash: Option<i64>,
+    dedup_cluster_id: Option<uuid::Uuid>,
+    dedup_cluster_size: Option<i32>,
+    dedup_signal_version: Option<String>,
+    composite_score_micros: Option<i64>,
+}
+
+/// Every gate decision row of `submission_id`, read as the owner under the
+/// tenant's context.
+async fn gate_decision_rows(tenant_id: &str, submission_id: uuid::Uuid) -> Vec<GateDecisionRow> {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT * FROM trace_gate_decisions
+              WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY decided_at, decision_id",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read the gate decision rows");
+    tx.commit().await.unwrap();
+    rows.iter()
+        .map(|row| GateDecisionRow {
+            decision_id: row.get("decision_id"),
+            submission_id: row.get("submission_id"),
+            source: row.get("source"),
+            pipeline_run_id: row.get("pipeline_run_id"),
+            gate_policy_version: row.get("gate_policy_version"),
+            gate_version_hash: row.get("gate_version_hash"),
+            perplexity_micros: row.get("perplexity_micros"),
+            tail_fraction_micros: row.get("tail_fraction_micros"),
+            peak_perplexity_micros: row.get("peak_perplexity_micros"),
+            perplexity_passed: row.get("perplexity_passed"),
+            novelty_score_micros: row.get("novelty_score_micros"),
+            peak_novelty_micros: row.get("peak_novelty_micros"),
+            novelty_passed: row.get("novelty_passed"),
+            nearest_neighbor_hash: row.get("nearest_neighbor_hash"),
+            embedding_evidence_hash: row.get("embedding_evidence_hash"),
+            attestation_chain_hash: row.get("attestation_chain_hash"),
+            chunk_count: row.get("chunk_count"),
+            total_chunk_count: row.get("total_chunk_count"),
+            chunks_capped: row.get("chunks_capped"),
+            credit_quality_micros: row.get("credit_quality_micros"),
+            credit_quality_calibration_version: row.get("credit_quality_calibration_version"),
+            index_cardinality_at_scoring: row.get("index_cardinality_at_scoring"),
+            credit_withheld_reason: row.get("credit_withheld_reason"),
+            vector_entry_id: row.get("vector_entry_id"),
+            vector_index_snapshot_id: row.get("vector_index_snapshot_id"),
+            agent_prose_perplexity_micros: row.get("agent_prose_perplexity_micros"),
+            attributed_token_fraction_micros: row.get("attributed_token_fraction_micros"),
+            dedup_simhash: row.get("dedup_simhash"),
+            dedup_cluster_id: row.get("dedup_cluster_id"),
+            dedup_cluster_size: row.get("dedup_cluster_size"),
+            dedup_signal_version: row.get("dedup_signal_version"),
+            composite_score_micros: row.get("composite_score_micros"),
+        })
+        .collect()
+}
+
+/// The decision id spec C-D2 fixes for a run's row.
+fn expected_pipeline_decision_id(tenant_id: &str, run_id: uuid::Uuid) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("trace_commons.pipeline_gate_decision.v1\n{tenant_id}\n{run_id}").as_bytes(),
+    )
+}
+
+/// The run's committed Score outcome.
+async fn score_outcome_of(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> PhaseOutcomeRecord {
+    service
+        .store()
+        .outcome_for_phase(tenant_id, run_id, Phase::Score)
+        .await
+        .unwrap()
+        .expect("the run committed a Score outcome")
+}
+
+/// A compatibility service over the reference dependencies, `main`'s
+/// default (zero-delta) configuration.
+async fn compatibility_row_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    compatibility_test_service(
+        backend.clone(),
+        artifact_store(dir),
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await
+}
+
+/// A Settle outcome `commit_settle` accepts the shape of; the refusal tests
+/// never get past its lease or policy check, so its content is not read.
+fn placeholder_settle_outcome() -> StoredPhaseResult {
+    StoredPhaseResult {
+        phase: Phase::Settle,
+        decision: serde_json::json!({}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    }
+}
+
+/// Spec C-D1 to C-D3: a compatibility run that reaches Settle writes exactly
+/// one `trace_gate_decisions` row, from its Score evidence, marked as the
+/// pipeline's and naming its run; the legacy-only columns stay NULL for the
+/// sweeps to fill.
+#[tokio::test]
+async fn settle_writes_one_gate_decision_row_per_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+    let row = &rows[0];
+
+    let score = score_outcome_of(&service, &tenant, run.run_id).await;
+    let evidence: ScoreEvidence = serde_json::from_value(score.evidence.clone()).unwrap();
+    let package = service
+        .store()
+        .load_bundle(&tenant, &run.bundle_id)
+        .await
+        .unwrap()
+        .expect("the run's bound package is on file");
+    let micros = |value: Option<u64>| value.map(|value| i64::try_from(value).unwrap());
+
+    assert_eq!(
+        row.decision_id,
+        expected_pipeline_decision_id(&tenant, run.run_id)
+    );
+    assert_eq!(row.submission_id, run.submission_id);
+    assert_eq!(row.source, "pipeline_settle");
+    assert_eq!(row.pipeline_run_id, Some(run.run_id));
+    assert_eq!(
+        row.gate_policy_version,
+        format!("pipeline:{}", run.bundle_id)
+    );
+    assert_eq!(
+        row.gate_version_hash,
+        package.manifest.score.configuration_hash
+    );
+    assert_eq!(
+        Some(row.perplexity_micros),
+        micros(evidence.perplexity_micros)
+    );
+    assert_eq!(
+        Some(row.tail_fraction_micros),
+        micros(evidence.tail_fraction_micros)
+    );
+    assert_eq!(
+        row.peak_perplexity_micros,
+        micros(evidence.peak_perplexity_micros)
+    );
+    assert_eq!(Some(row.perplexity_passed), evidence.quality_passed);
+    assert_eq!(
+        Some(row.novelty_score_micros),
+        micros(evidence.novelty_score_micros)
+    );
+    assert_eq!(
+        row.peak_novelty_micros,
+        micros(evidence.peak_novelty_micros)
+    );
+    assert_eq!(Some(row.novelty_passed), evidence.novelty_passed);
+    assert_eq!(
+        Some(row.nearest_neighbor_hash.clone()),
+        evidence.nearest_neighbor_hash
+    );
+    let no_command = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(b"pipeline_no_index_command"))
+    );
+    assert_eq!(
+        row.embedding_evidence_hash,
+        evidence
+            .embedding_artifact_hash
+            .clone()
+            .unwrap_or(no_command)
+    );
+    // The Score outcome's content hash: SHA-256 over the canonical JSON of
+    // its decision, evidence and evaluation under a fixed schema string.
+    let outcome_bytes =
+        trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_score_outcome_hash.v1",
+            "decision": score.decision,
+            "evidence": score.evidence,
+            "evaluation": score.evaluation,
+        }))
+        .unwrap();
+    assert_eq!(
+        row.attestation_chain_hash,
+        format!("sha256:{}", hex::encode(Sha256::digest(&outcome_bytes)))
+    );
+    assert_eq!(
+        row.chunk_count,
+        evidence.chunk_count.map(|n| i32::try_from(n).unwrap())
+    );
+    assert_eq!(
+        row.total_chunk_count,
+        evidence
+            .total_chunk_count
+            .map(|n| i32::try_from(n).unwrap())
+    );
+    assert_eq!(row.chunks_capped, evidence.chunks_capped);
+    assert_eq!(
+        row.credit_quality_micros,
+        micros(evidence.credit_quality_micros)
+    );
+    assert_eq!(
+        row.credit_quality_calibration_version,
+        evidence.credit_quality_version
+    );
+    assert_eq!(
+        row.index_cardinality_at_scoring,
+        micros(evidence.index_cardinality)
+    );
+    // A zero-delta run makes no award, so no leg was withheld.
+    assert_eq!(row.credit_withheld_reason, None);
+    // Columns the pipeline does not own: NULL, for the sweeps or for later.
+    assert_eq!(row.vector_entry_id, None);
+    assert_eq!(row.vector_index_snapshot_id, None);
+    assert_eq!(row.agent_prose_perplexity_micros, None);
+    assert_eq!(row.attributed_token_fraction_micros, None);
+    assert_eq!(row.dedup_simhash, None);
+    assert_eq!(row.dedup_cluster_id, None);
+    assert_eq!(row.dedup_cluster_size, None);
+    assert_eq!(row.dedup_signal_version, None);
+    assert_eq!(row.composite_score_micros, None);
+}
+
+/// Spec C-D2: the row is idempotent per run. Settle's commit cannot run
+/// twice for one run (its transition guard and lease refuse it), so what a
+/// retry after a crash after commit amounts to is the same row offered
+/// again: it is a no-op, and a row under any other decision id for the same
+/// submission is refused by V116's partial unique index.
+#[tokio::test]
+async fn settle_gate_decision_row_is_idempotent_per_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-idempotent-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let written = PgPipelineStore::write_pipeline_gate_decision_on_tx(&tx, &run)
+        .await
+        .expect("offering the same row again is a no-op");
+    assert!(!written, "the row already exists, so nothing is written");
+    tx.commit().await.unwrap();
+    assert_eq!(gate_decision_rows(&tenant, run.submission_id).await, before);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[
+                &tenant,
+                &uuid::Uuid::new_v4(),
+                &run.submission_id,
+                &uuid::Uuid::new_v4(),
+            ],
+        )
+        .await
+        .expect_err("a second pipeline row for the submission is refused");
+    assert!(
+        db_error_message(&error).contains("trace_gate_decisions_one_pipeline_row"),
+        "{error:?}"
+    );
+}
+
+/// Spec C-D1: a Settle commit refused for a stale lease writes no row.
+#[tokio::test]
+async fn stale_settle_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-stale-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = service.store();
+    let first = store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .expect("the Settle-ready run is claimable");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the expired lease is reclaimed");
+    let error = store
+        .commit_settle(&first, placeholder_settle_outcome(), "excluded")
+        .await
+        .expect_err("a stale lease cannot commit Settle");
+    assert!(
+        error.to_string().contains("pipeline lease is stale"),
+        "{error}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty(),
+        "a refused Settle commit writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: a Settle commit refused because its policy was suspended
+/// writes no row.
+#[tokio::test]
+async fn suspended_settle_policy_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-suspended-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = service.store();
+    let leased = store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the Settle-ready run is claimable");
+    service
+        .intervene_policy(
+            &tenant,
+            &scored.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &policy_actor(),
+            "suspend_settle_gate_row",
+        )
+        .await
+        .expect("suspend the Settle policy");
+    let error = store
+        .commit_settle(&leased, placeholder_settle_outcome(), "excluded")
+        .await
+        .expect_err("a suspended Settle policy cannot commit");
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+        "{error}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty(),
+        "a refused Settle commit writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: a run rejected in Review never reaches Settle and gets no row,
+/// as `main`'s gate driver writes none for a submission it does not score.
+#[tokio::test]
+async fn rejected_run_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-row-rejected-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_principal_ref('d'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("reviewer_declined").unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let ended = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review ends the run with the rejection");
+    assert_eq!(ended.state, PipelineRunState::Complete);
+    assert_eq!(ended.next_phase, None);
+    assert!(
+        gate_decision_rows(&tenant, parked.submission_id)
+            .await
+            .is_empty(),
+        "a rejected run writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: only the compatibility bundle's Score evidence has the legacy
+/// fields, so a run under any other bundle writes no row.
+#[tokio::test]
+async fn a_non_compatibility_bundle_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-row-minimal-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert!(
+        gate_decision_rows(&tenant, run.submission_id)
+            .await
+            .is_empty(),
+        "a minimal-bundle run writes no gate decision row"
+    );
+}
+
+/// Spec C-D5 / O-C4: the row is written by the pilot's least-privilege
+/// ingest runtime. `runtime_backend` connects as a login whose only grants
+/// come from `trace_ingest_runtime` (and the account admission group), so a
+/// row written through it proves the INSERT those grants allow.
+#[tokio::test]
+async fn pipeline_gate_decision_insert_works_under_the_runtime_role() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let member: bool = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT pg_has_role(current_user, 'trace_ingest_runtime', 'MEMBER')
+                AND NOT has_table_privilege(current_user, 'trace_gate_decisions', 'TRUNCATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        member,
+        "the runtime login is the ingest runtime, not an owner"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-runtime-role-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await.len(),
+        1
+    );
+}
+
+/// Spec C-D3: `credit_withheld_reason` is the Settle leg's label when one of
+/// `main`'s NoveltyUtility checks withheld the award.
+#[tokio::test]
+async fn a_withheld_award_records_its_reason_on_the_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-withheld-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].credit_withheld_reason.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+}
