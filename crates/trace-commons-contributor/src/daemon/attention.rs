@@ -107,7 +107,13 @@ pub const N4_MIN_INTERVAL: Duration = Duration::hours(24);
 /// A re-engagement notification kind. The digest (N0) is not one: it is
 /// decided by `notify::digest_due_for_schedule` and arrives here as a
 /// [`DigestPlan`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// Serialized as its [`Kind::label`] (pinned by a test in `state.rs`), which
+/// is how the attention log in the daemon state file spells it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum Kind {
     /// N1, U4: finished sessions idle for the threshold. The primary trigger.
     IdleSessions,
@@ -277,7 +283,8 @@ impl NotifySettings {
 }
 
 /// How an announced kind reached the person.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Route {
     /// As the digest's third sentence.
     Folded,
@@ -285,8 +292,9 @@ pub enum Route {
     Standalone,
 }
 
-/// One announcement. Kind label and time only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One announcement. Kind label and time only. Persisted as
+/// `DaemonState::attention_log`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AttentionEntry {
     pub kind: Kind,
     pub at: DateTime<Utc>,

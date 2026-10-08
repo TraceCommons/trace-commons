@@ -168,6 +168,17 @@ old behaviour, because no application has shipped against `v1` yet. See
   `status.idle_sessions.count` counts. No new event. See
   ["`status.idle_sessions`"](#statusidle_sessions) and
   ["`status.nudge`"](#statusnudge).
+- **Nudge A2 (notification settings).** Settings gain
+  `notifications_enabled` (the master switch), `menu_bar_mark_enabled`,
+  `notify` (one switch per notification kind: `digest`, `idle_sessions`,
+  `verdicts_landed`, `weekly_recap`, `insights_tip`) and the one-time offer
+  markers `verdicts_offer_pending` and `idle_offer_pending`. Three new
+  methods write them: `set_menu_bar_mark_enabled`,
+  `set_notifications_enabled` and `set_notify_kind`; `set_settings` accepts
+  the same keys. Each publishes `status_changed` when a value changes. They
+  are stored and reported now; the digest, the news mark and the
+  re-engagement arbiter read them in later slices, so today no behaviour
+  changes. See ["Notification settings"](#notification-settings).
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -609,7 +620,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -626,6 +637,9 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `nudge_decline` | `kind` (**required**: a suggestion kind label with a "Not now", today `idle_sessions` or `review_backlog`, which share one; `verdicts_landed` is refused with `nudge-kind-not-declinable`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
 | `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
+| `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
 | `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
@@ -4022,6 +4036,8 @@ Takes a JSON object whose top-level keys must come from
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
+`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`verdicts_offer_pending`, `idle_offer_pending`,
 `max_uploads_per_day`, `max_bytes_per_day` --
 a key this method does
 not recognize is
@@ -4056,6 +4072,71 @@ suggestions -- the suggestion cards on Traces and History and the menu-bar panel
 row -- on or off. It is the same setting `set_suggestions_enabled` writes,
 and a change by either route publishes `status_changed`, because
 `status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
+
+`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`verdicts_offer_pending` and `idle_offer_pending` are the notification
+settings; see ["Notification settings"](#notification-settings) for their
+defaults and refusals.
+
+#### Notification settings
+
+Additive (nudge A2). All of them are settings about this Mac: `unenroll`
+keeps them. `get_settings` reports them as stored.
+
+- `notifications_enabled` (boolean, default `true`): "Notifications from
+  Trace Commons", the master switch over the digest and every
+  re-engagement kind. The OS permission is a separate, outer switch. This is
+  not `local_notifications`, which only says whether the daemon itself
+  renders.
+- `menu_bar_mark_enabled` (boolean, default `true`, DRAFT, owner decision
+  19): the menu-bar news mark and the idle halo. Separate from every
+  notification switch.
+- `notify` (object): one boolean per kind -- `digest` (N0, default `true`),
+  `idle_sessions` (N1), `verdicts_landed` (N2), `weekly_recap` (N3, default
+  `false`, held for the gamification ruling) and `insights_tip` (N4, default
+  `false`, owner decision 25). One switch governs both the sentence folded
+  into a due digest and the standalone notification. Revision 2's
+  `digest_enabled` is `notify.digest`; there is no `digest_extras_enabled`.
+  A key this daemon does not know (a later kind written by a newer build)
+  is kept on load and save, so an older daemon does not drop it.
+- `verdicts_offer_pending`, `idle_offer_pending` (boolean, absent when
+  false): the one-time History-card and Traces-card offers for an install
+  that existed before the two kinds.
+
+**New installs and upgrades.** With no settings file, the install is new:
+`idle_sessions` and `verdicts_landed` are `true` (DRAFT, owner decisions 7
+and 3) and no offer is pending. A settings file that does not hold
+`notify.verdicts_landed` (or holds `null`) is an install that predates the
+kind: it loads with the kind `false` and `verdicts_offer_pending: true`, and
+likewise `idle_sessions` with `idle_offer_pending: true` -- decided per
+kind, so nothing is switched on silently (constraint 12). The answer is
+kept in memory and written by the next save; until then every load decides
+it the same way.
+
+**Writing.** `set_settings` takes `notify` as a partial object
+(`{"notify": {"verdicts_landed": true}}`); every key must be one of the five
+kinds (`bad_params` / `settings-unknown-notify-kind` otherwise) and every
+value a boolean (`bad_params` / `settings-invalid-value`), and a refused
+object changes nothing. Setting `verdicts_landed` or `idle_sessions`
+either way clears that kind's offer marker: the person has answered. The
+markers can also be cleared directly (`{"verdicts_offer_pending": false}`),
+for an offer dismissed without an answer, such as a denied OS permission.
+`set_menu_bar_mark_enabled {on}`, `set_notifications_enabled {on}` and
+`set_notify_kind {kind, on}` write through `set_settings`. They refuse a
+missing or non-boolean `on` with `bad_params` / `on-required`, and
+`set_notify_kind` refuses a missing or non-string `kind` with `bad_params` /
+`notify-kind-required` and a kind outside the five with `bad_params` /
+`notify-kind-unrecognized`. A refusal writes and publishes nothing. Any
+route publishes `status_changed` when one of these values changes, and
+nothing when the value written is the one already stored.
+
+**What reads them.** As of A2, nothing changes behaviour: the digest still
+posts as before. The digest (`notifications_enabled`, `notify.digest`), the
+news mark (`menu_bar_mark_enabled`) and the re-engagement arbiter (every
+kind) read them as those slices land. The daemon state file also gains an
+attention log (kind label, route and time per announcement, pruned to 8
+days) and a last-notified time, both cleared by `unenroll`; neither is on
+the wire.
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
 `{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including

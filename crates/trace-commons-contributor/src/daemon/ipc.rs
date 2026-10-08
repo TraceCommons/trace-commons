@@ -377,6 +377,9 @@ pub const METHODS: &[&str] = &[
     "nudge_decline",
     "nudge_opened",
     "set_suggestions_enabled",
+    "set_menu_bar_mark_enabled",
+    "set_notifications_enabled",
+    "set_notify_kind",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -524,6 +527,10 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "nudge_decline",
     "nudge_opened",
     "set_suggestions_enabled",
+    // Nudge A2: each writes only the settings file, through `set_settings`.
+    "set_menu_bar_mark_enabled",
+    "set_notifications_enabled",
+    "set_notify_kind",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -3085,6 +3092,13 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "nudge_decline" => handle_nudge_stamp(shared, req, NudgeStamp::Declined),
         "nudge_opened" => handle_nudge_stamp(shared, req, NudgeStamp::Opened),
         "set_suggestions_enabled" => handle_set_suggestions_enabled(shared, req),
+        "set_menu_bar_mark_enabled" => {
+            handle_set_bool_setting(shared, req, "menu_bar_mark_enabled")
+        }
+        "set_notifications_enabled" => {
+            handle_set_bool_setting(shared, req, "notifications_enabled")
+        }
+        "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -5101,6 +5115,58 @@ fn handle_set_suggestions_enabled(shared: &DaemonShared, req: &Request) -> Respo
     Response::ok(req.id, serde_json::json!({ "suggestions_enabled": on }))
 }
 
+/// Nudge A2: `set_menu_bar_mark_enabled {on}` and
+/// `set_notifications_enabled {on}`. Each is one boolean setting, written
+/// through `set_settings` exactly as `handle_set_suggestions_enabled` does,
+/// so the file is saved by the one path that keeps stored credentials intact
+/// and that path publishes `status_changed` when the value changes.
+fn handle_set_bool_setting(shared: &DaemonShared, req: &Request, key: &'static str) -> Response {
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ key: on }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ key: on }))
+}
+
+/// Nudge A2: `set_notify_kind {kind, on}`: one notification kind's switch,
+/// written as `set_settings {"notify": {kind: on}}`. `kind` is one of
+/// `settings::notify_kind_labels` -- the digest or an arbiter kind label --
+/// checked here first so a refusal names the request's own parameter.
+/// Answering `verdicts_landed` or `idle_sessions` ends that kind's one-time
+/// offer (see `settings::apply_notify_object`).
+fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(kind) = req.params.get("kind").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "notify-kind-required");
+    };
+    let Some(kind) = crate::daemon::settings::notify_kind_labels()
+        .into_iter()
+        .find(|label| *label == kind)
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "notify-kind-unrecognized");
+    };
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ "notify": { kind: on } }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ "kind": kind, "on": on }))
+}
+
 fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(locks) = crate::daemon::nearai_credential::session::coordination(shared.store.dir())
     else {
@@ -5120,6 +5186,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
     let suggestions_before = settings.suggestions_enabled;
+    let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -5168,6 +5235,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let manual = super::settings::ScrubCheck::Manual;
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
+            let attention_after = attention_settings(&settings);
             drop(settings);
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
@@ -5194,7 +5262,11 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             shared.publish_if_decisions_owed_changed(decisions_owed_before);
             // `status.nudge` reads the suggestions switch, so a change to it
             // is a status change whichever request made it.
-            if value["suggestions_enabled"].as_bool() != Some(suggestions_before) {
+            // Nudge A2: so are the mark, the master, the per-kind switches
+            // and the one-time offers.
+            if value["suggestions_enabled"].as_bool() != Some(suggestions_before)
+                || attention_after != attention_before
+            {
                 shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
             }
             add_admission_setting(shared, &mut value);
@@ -5202,6 +5274,20 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
         }
         Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
     }
+}
+
+/// The settings `status.nudge`'s mark and the arbiter read, compared before
+/// and after a `set_settings` write so a change publishes `status_changed`.
+fn attention_settings(
+    settings: &crate::daemon::settings::DaemonSettings,
+) -> (bool, bool, crate::daemon::settings::NotifyKinds, bool, bool) {
+    (
+        settings.menu_bar_mark_enabled,
+        settings.notifications_enabled,
+        settings.notify.clone(),
+        settings.verdicts_offer_pending,
+        settings.idle_offer_pending,
+    )
 }
 
 /// `set_settings`, plus the one thing it cannot do synchronously: start or
@@ -15739,7 +15825,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 77, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 80, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -17729,6 +17815,139 @@ mod tests {
                 &req("set_suggestions_enabled", serde_json::json!({"on": "no"})),
             );
             assert_eq!(bad.error.expect("refused").message, "on-required");
+        }
+
+        /// Nudge A2: the mark and master switches, each a boolean, each
+        /// persisted through `set_settings` and reported by `get_settings`,
+        /// and each publishing `status_changed` when it changes (the mark
+        /// reads them) -- and nothing when it does not.
+        #[test]
+        fn the_mark_and_master_switches_persist_and_publish() {
+            for (method, key) in [
+                ("set_menu_bar_mark_enabled", "menu_bar_mark_enabled"),
+                ("set_notifications_enabled", "notifications_enabled"),
+            ] {
+                let s = live();
+                let mut rx = s.events.subscribe();
+                let r = handle_request(&s, &req(method, serde_json::json!({"on": false})));
+                assert_eq!(
+                    r.result.expect("set answers"),
+                    serde_json::json!({ key: false }),
+                    "{method}"
+                );
+                assert!(saw_status_changed(&mut rx), "{method}");
+                let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                    .result
+                    .unwrap();
+                assert_eq!(settings[key], false, "{method}");
+                let stored = serde_json::to_value(
+                    crate::daemon::settings::DaemonSettings::load(&s.store).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(stored[key], false, "{method}: persisted");
+
+                // The same value again changes nothing and says nothing.
+                let r = handle_request(&s, &req(method, serde_json::json!({"on": false})));
+                assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                assert!(!saw_status_changed(&mut rx), "{method}: unchanged");
+
+                // Back on through `set_settings`: the same switch.
+                let r = handle_request(&s, &req("set_settings", serde_json::json!({ key: true })));
+                assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                assert!(saw_status_changed(&mut rx), "{method}");
+
+                for bad in [serde_json::json!({}), serde_json::json!({"on": "no"})] {
+                    let r = handle_request(&s, &req(method, bad.clone()));
+                    let err = r.error.expect("refused");
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method} {bad}");
+                    assert_eq!(err.message, "on-required", "{method} {bad}");
+                }
+                assert!(
+                    !saw_status_changed(&mut rx),
+                    "{method}: a refusal publishes nothing"
+                );
+            }
+        }
+
+        /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an
+        /// arbiter kind label, writes `notify.<kind>`, ends that kind's
+        /// one-time offer, and publishes `status_changed`. An unknown kind,
+        /// a missing kind or a non-boolean `on` is refused and writes nothing.
+        #[test]
+        fn set_notify_kind_writes_one_kind_and_ends_its_offer() {
+            let s = live();
+            {
+                let mut settings = s.settings.lock().unwrap();
+                settings.verdicts_offer_pending = true;
+                settings.idle_offer_pending = true;
+                settings.save(&s.store).unwrap();
+            }
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "verdicts_landed", "on": true}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"kind": "verdicts_landed", "on": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let stored = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+            assert!(stored.notify.verdicts_landed);
+            assert!(!stored.verdicts_offer_pending, "the person answered");
+            assert!(stored.idle_offer_pending, "the other offer stays");
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["notify"]["verdicts_landed"], true);
+
+            for label in crate::daemon::settings::notify_kind_labels() {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_notify_kind",
+                        serde_json::json!({"kind": label, "on": false}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{label}: {:?}", r.error);
+                assert_eq!(
+                    s.settings.lock().unwrap().notify.get(label),
+                    Some(false),
+                    "{label}"
+                );
+            }
+            let _ = saw_status_changed(&mut rx);
+
+            let before = s.settings.lock().unwrap().clone();
+            for (params, label) in [
+                (
+                    serde_json::json!({"kind": "future_kind", "on": true}),
+                    "notify-kind-unrecognized",
+                ),
+                (serde_json::json!({"on": true}), "notify-kind-required"),
+                (
+                    serde_json::json!({"kind": 7, "on": true}),
+                    "notify-kind-required",
+                ),
+                (
+                    serde_json::json!({"kind": "digest", "on": "yes"}),
+                    "on-required",
+                ),
+            ] {
+                let r = handle_request(&s, &req("set_notify_kind", params.clone()));
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
+                assert_eq!(err.message, label, "{params}");
+            }
+            assert_eq!(
+                *s.settings.lock().unwrap(),
+                before,
+                "a refusal writes nothing"
+            );
+            assert!(!saw_status_changed(&mut rx));
         }
 
         /// Lock order: the ledger and the settings it reads are snapshotted
