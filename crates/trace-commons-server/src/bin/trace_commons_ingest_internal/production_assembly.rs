@@ -256,6 +256,128 @@ impl IdentifiedEmbedder for FastEmbedPipelineEmbedder {
     }
 }
 
+/// The production `trace_credit` settlement adapter (spec A-D9). Trace
+/// Credit has no effect outside the ledger: the pipeline's own Settle
+/// transaction writes the `trace_credit_ledger` row, so `settle` answers an
+/// internal receipt for the expected result and does nothing else, which
+/// makes it idempotent by construction. It refuses any other instrument.
+pub(crate) struct InternalTraceCreditSettlementAdapter {
+    instrument_id: trace_commons_gate_api::pipeline::InstrumentId,
+}
+
+impl InternalTraceCreditSettlementAdapter {
+    pub(crate) fn new() -> Self {
+        Self {
+            instrument_id: trace_commons_gate_api::pipeline::InstrumentId::trace_credit(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl trace_commons_gate_api::SettlementAdapter for InternalTraceCreditSettlementAdapter {
+    fn instrument_id(&self) -> &trace_commons_gate_api::pipeline::InstrumentId {
+        &self.instrument_id
+    }
+
+    fn adapter_identity(&self) -> &str {
+        INTERNAL_TRACE_CREDIT_ADAPTER_IDENTITY
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+
+    fn payout_rail(&self) -> &str {
+        "none"
+    }
+
+    async fn settle(
+        &self,
+        request: &trace_commons_gate_api::SettlementRequest,
+    ) -> Result<trace_commons_gate_api::SettlementReceipt, trace_commons_gate_api::SettlementError>
+    {
+        if request.instrument_id() != &self.instrument_id {
+            return Err(trace_commons_gate_api::SettlementError::Rejected);
+        }
+        trace_commons_gate_api::SettlementReceipt::internal(request.expected_result_ref_hash())
+            .map_err(|_| trace_commons_gate_api::SettlementError::Rejected)
+    }
+}
+
+/// Whether `main` reads a tenant's submission policy from the database
+/// (`TRACE_COMMONS_DB_TENANT_POLICY_READS` and its tenant rollout).
+pub(crate) type DbTenantPolicyReads = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// The production authority source (spec A-D8, O-A1): the tenant
+/// submission policies `main` parsed from `TRACE_COMMONS_TENANT_POLICIES`
+/// and `main`'s `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY`.
+///
+/// How it mirrors `main`, read from the admission code:
+/// - `main` checks a submission against the tenant's policy
+///   (`enforce_tenant_submission_policy`) and the token's claim allowlists
+///   (`enforce_signed_claim_submission_restrictions`) before it routes the
+///   receipt to the pipeline, so `tenant` carries no allowlist of its own:
+///   the claim allowlists are per request, and were already applied.
+/// - `policy` is the tenant's policy, `None` for a tenant absent from the
+///   map, and `require_policy` is `main`'s flag, so an absent tenant is
+///   permitted exactly when `main` permits it. The pipeline's
+///   `NoveltyUtility` leg reads `policy` as `main`'s utility credit check
+///   (`record_matches_utility_credit_policy_abac`) reads the same policy.
+/// - A tenant whose policy `main` reads from the database is answered `None`
+///   (the pipeline then refuses it with `authority_control_missing`): this
+///   provider is synchronous and cannot read the database, and answering
+///   from the environment map instead could apply a stale policy.
+pub(crate) struct TenantPolicyPipelineAuthorityProvider {
+    policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
+    require_policy: bool,
+    db_policy_reads: DbTenantPolicyReads,
+}
+
+impl TenantPolicyPipelineAuthorityProvider {
+    pub(crate) fn new(
+        policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
+        require_policy: bool,
+        db_policy_reads: DbTenantPolicyReads,
+    ) -> Self {
+        Self {
+            policies,
+            require_policy,
+            db_policy_reads,
+        }
+    }
+
+    pub(crate) fn tenant_policy_count(&self) -> usize {
+        self.policies.len()
+    }
+}
+
+impl trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider
+    for TenantPolicyPipelineAuthorityProvider
+{
+    fn authority_for_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Option<trace_commons_server::trace_authority::SubmissionAuthority> {
+        if (self.db_policy_reads)(tenant_id) {
+            return None;
+        }
+        Some(trace_commons_server::trace_authority::SubmissionAuthority {
+            tenant: trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+            policy: self.policies.get(tenant_id).map(|policy| {
+                trace_commons_server::trace_authority::SubmissionAllowlists {
+                    allowed_consent_scopes: policy.allowed_consent_scopes.clone(),
+                    allowed_uses: policy.allowed_uses.clone(),
+                }
+            }),
+            require_policy: self.require_policy,
+        })
+    }
+
+    fn production_qualified(&self) -> bool {
+        true
+    }
+}
+
 /// Where the pipeline's own vector index lives (spec A-D6). Required under
 /// the production selection, and never the legacy novelty or dedup root.
 pub(crate) const TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT: &str =

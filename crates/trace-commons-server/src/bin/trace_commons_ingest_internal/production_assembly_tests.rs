@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 use super::*;
+use trace_commons_protocol::llm::recording::{TraceFile, TraceResponse, TraceStep};
+use trace_commons_protocol::trace_contribution::{
+    DeterministicTraceRedactor, RecordedTraceContributionOptions, TraceRedactor,
+};
 
 /// The five development markers `validate_production_package` refuses in any
 /// artifact of a production package.
@@ -609,4 +613,233 @@ mod usearch_pipeline_index {
             49
         );
     }
+}
+
+fn trace_credit_request(atomic_units: u128) -> trace_commons_gate_api::SettlementRequest {
+    trace_commons_gate_api::SettlementRequest::new(
+        trace_commons_gate_api::pipeline::TenantStorageRef::new(format!(
+            "tenant_sha256:{}",
+            "ab".repeat(16)
+        ))
+        .unwrap(),
+        Uuid::from_u128(5),
+        trace_commons_gate_api::pipeline::InstrumentId::trace_credit(),
+        trace_commons_gate_api::pipeline::AtomicUnits::from_raw(atomic_units),
+        format!("sha256:{}", "1".repeat(64)),
+        format!("sha256:{}", "2".repeat(64)),
+    )
+    .unwrap()
+}
+
+/// Spec 4.2 item 6: the production Trace Credit adapter answers an internal
+/// receipt for the expected result, the same one every time, settles only
+/// `trace_credit`, and is production-qualified.
+#[tokio::test]
+async fn internal_trace_credit_adapter_is_idempotent_and_qualified() {
+    use trace_commons_gate_api::SettlementAdapter;
+    let adapter = InternalTraceCreditSettlementAdapter::new();
+    assert_eq!(
+        adapter.instrument_id(),
+        &trace_commons_gate_api::pipeline::InstrumentId::trace_credit()
+    );
+    assert_eq!(adapter.adapter_identity(), "internal_trace_credit_ledger");
+    assert_eq!(adapter.payout_rail(), "none");
+    assert!(adapter.production_qualified());
+    let request = trace_credit_request(1_000);
+    let first = adapter.settle(&request).await.unwrap();
+    let second = adapter.settle(&request).await.unwrap();
+    assert_eq!(first, second);
+    assert!(first.answers(&request));
+    assert_eq!(first.result_ref_hash(), request.expected_result_ref_hash());
+    assert_eq!(first.external_receipt_hash(), None, "no external effect");
+}
+
+async fn policy_test_envelope(
+    scopes: &[ConsentScope],
+    card_scope: ConsentScope,
+    uses: &[TraceAllowedUse],
+) -> TraceContributionEnvelope {
+    let trace = TraceFile {
+        model_name: "fixture-model".to_string(),
+        memory_snapshot: Vec::new(),
+        http_exchanges: Vec::new(),
+        steps: vec![TraceStep {
+            request_hint: None,
+            response: TraceResponse::UserInput {
+                content: "Please inspect the workspace".to_string(),
+            },
+            expected_tool_results: Vec::new(),
+            timestamp: None,
+        }],
+    };
+    let raw = trace_commons_protocol::trace_contribution::RawTraceContribution::from_recorded_trace(
+        &trace,
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            pseudonymous_contributor_id: Some("sha256:contributor".to_string()),
+            tenant_scope_ref: Some("tenant_sha256:client".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::default()
+        .redact_trace(raw)
+        .await
+        .expect("redaction should succeed");
+    envelope.consent.scopes = scopes.to_vec();
+    envelope.trace_card.consent_scope = card_scope;
+    envelope.trace_card.allowed_uses = uses.to_vec();
+    envelope
+}
+
+fn policy_test_auth(tenant_id: &str) -> TenantAuth {
+    TenantAuth {
+        tenant_id: tenant_id.to_string(),
+        role: TokenRole::Contributor,
+        principal_ref: static_token_principal_ref("contributor-token"),
+        legacy_principal_ref: None,
+        expires_at: None,
+        auth_method: TraceAuthMethod::StaticToken,
+        signed_claim_issuer: None,
+        signed_claim_audiences: BTreeSet::new(),
+        signed_claim_subject: None,
+        allowed_consent_scopes: BTreeSet::new(),
+        allowed_uses: BTreeSet::new(),
+    }
+}
+
+/// Spec 4.2 item 7 (O-A1): for a tenant present in
+/// `TRACE_COMMONS_TENANT_POLICIES`, one present with empty allowlists, and
+/// one absent, under both values of
+/// `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY`, the pipeline's grant
+/// check (`SubmissionAuthority::permits`) answers what the legacy admission
+/// check (`enforce_tenant_submission_policy`) answers, and the authority
+/// carries the tenant's policy, which the pipeline's `NoveltyUtility` leg
+/// reads as `main`'s utility credit check reads it. A tenant whose policy
+/// `main` reads from the database is answered `None` (the pipeline refuses
+/// it with `authority_control_missing`), because this provider cannot read
+/// the database.
+#[tokio::test]
+async fn tenant_policy_authority_matches_legacy_admission() {
+    let mut policies = BTreeMap::new();
+    policies.insert(
+        "tenant-present".to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+            allowed_uses: BTreeSet::from([TraceAllowedUse::Evaluation]),
+        },
+    );
+    policies.insert(
+        "tenant-empty".to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        },
+    );
+    policies.insert(
+        "tenant-db".to_string(),
+        TenantSubmissionPolicy {
+            allowed_consent_scopes: BTreeSet::new(),
+            allowed_uses: BTreeSet::new(),
+        },
+    );
+    let policies = Arc::new(policies);
+    let inside = policy_test_envelope(
+        &[ConsentScope::DebuggingEvaluation],
+        ConsentScope::DebuggingEvaluation,
+        &[TraceAllowedUse::Evaluation],
+    )
+    .await;
+    let outside_scope = policy_test_envelope(
+        &[ConsentScope::ModelTraining],
+        ConsentScope::ModelTraining,
+        &[TraceAllowedUse::Evaluation],
+    )
+    .await;
+    let outside_use = policy_test_envelope(
+        &[ConsentScope::DebuggingEvaluation],
+        ConsentScope::DebuggingEvaluation,
+        &[TraceAllowedUse::ModelTraining],
+    )
+    .await;
+
+    for require_policy in [false, true] {
+        let provider = TenantPolicyPipelineAuthorityProvider::new(
+            policies.clone(),
+            require_policy,
+            Arc::new(|tenant_id: &str| tenant_id == "tenant-db"),
+        );
+        assert!(
+            trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider::production_qualified(&provider)
+        );
+        assert_eq!(
+            trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider::authority_for_tenant(&provider, "tenant-db"),
+            None
+        );
+        for tenant_id in ["tenant-present", "tenant-empty", "tenant-absent"] {
+            let authority =
+                trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider::authority_for_tenant(&provider, tenant_id)
+                    .expect("an env-policy tenant has an authority");
+            assert_eq!(authority.require_policy, require_policy);
+            assert_eq!(
+                authority.tenant,
+                trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+                "the per-token claim allowlist is per request; the handler enforces it before routing"
+            );
+            assert_eq!(
+                authority.policy,
+                policies.get(tenant_id).map(|policy| {
+                    trace_commons_server::trace_authority::SubmissionAllowlists {
+                        allowed_consent_scopes: policy.allowed_consent_scopes.clone(),
+                        allowed_uses: policy.allowed_uses.clone(),
+                    }
+                }),
+                "{tenant_id}"
+            );
+            for (case, envelope) in [
+                ("inside", &inside),
+                ("outside_scope", &outside_scope),
+                ("outside_use", &outside_use),
+            ] {
+                let legacy = enforce_tenant_submission_policy(
+                    &policy_test_auth(tenant_id),
+                    envelope,
+                    policies.get(tenant_id),
+                    require_policy,
+                )
+                .is_ok();
+                let mut scopes = envelope.consent.scopes.clone();
+                if !scopes.contains(&envelope.trace_card.consent_scope) {
+                    scopes.push(envelope.trace_card.consent_scope);
+                }
+                let pipeline = authority.permits(&scopes, &envelope.trace_card.allowed_uses);
+                assert_eq!(
+                    legacy, pipeline,
+                    "{tenant_id} {case} require_policy={require_policy}"
+                );
+            }
+        }
+    }
+
+    // Where the two checks differ: legacy admission requires every requested
+    // scope to be allowed, `permits` any one. Legacy admission runs first
+    // and refuses such a submission before it is routed, so the pipeline
+    // never sees it.
+    let mixed = policy_test_envelope(
+        &[
+            ConsentScope::DebuggingEvaluation,
+            ConsentScope::ModelTraining,
+        ],
+        ConsentScope::DebuggingEvaluation,
+        &[TraceAllowedUse::Evaluation],
+    )
+    .await;
+    assert!(
+        enforce_tenant_submission_policy(
+            &policy_test_auth("tenant-present"),
+            &mixed,
+            policies.get("tenant-present"),
+            false,
+        )
+        .is_err()
+    );
 }
