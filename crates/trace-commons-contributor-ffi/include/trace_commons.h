@@ -2146,6 +2146,12 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * Sessions (feed S): session_drill {snapshot_id,tz} returns one saved
  * session's per-turn counters (an unknown turn is null, never 0) and lettered
  * markers; Codex series is null as not_recorded. No path, digest or what-if.
+ * Comparisons (feed T): comparisons {counter_weeks?,week_start?,tz,
+ * recap_card_enabled?} marks each goal over the daemon's insights_week
+ * history passed through, and returns the lever and the weekly summary card;
+ * without counter_weeks nothing is compared. goal_set {id?,goal},
+ * goal_delete {id}, lever_feedback {kind,week_start,action?} and
+ * recap_opened {week_start} write rule IDs and Monday dates only.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;

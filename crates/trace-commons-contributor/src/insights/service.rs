@@ -586,6 +586,50 @@ pub enum LocalInsightsOperation {
         snapshot_id: String,
         tz: i32,
     },
+    /// Feed T comparisons: each goal with its six weekly marks, the lever of
+    /// the week and the weekly summary card. `counter_weeks` is the daemon's
+    /// `insights_week` `history`, passed through unchanged, and absent under
+    /// feed S; `recap_card_enabled` is the daemon's
+    /// `insights_recap_card_enabled`, passed through. Goals and the lever's
+    /// feedback live here and the counter rows in the daemon, so neither side
+    /// can compare alone. Measured figures only; no rate, path or assumption.
+    /// A read: an absent store is not created.
+    Comparisons {
+        #[serde(default)]
+        counter_weeks: Option<Vec<super::goals::WeekFigures>>,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+        #[serde(default)]
+        recap_card_enabled: bool,
+    },
+    /// Add a goal, or replace the one with `id`.
+    GoalSet {
+        #[serde(default)]
+        id: Option<String>,
+        goal: super::goals::Goal,
+    },
+    GoalDelete {
+        id: String,
+    },
+    /// "Not useful" on the lever's kind in the week shown (its Monday), or,
+    /// with `action: reenable`, the kind turned back on. Stored as the kind
+    /// and the week only.
+    LeverFeedback {
+        kind: super::patterns::PatternKind,
+        week_start: chrono::NaiveDate,
+        #[serde(default = "lever_not_useful")]
+        action: super::goal_store::LeverFeedbackAction,
+    },
+    /// "Open recap": the summary card for this closed week (its Monday) was
+    /// opened and does not appear again.
+    RecapOpened {
+        week_start: chrono::NaiveDate,
+    },
+}
+
+fn lever_not_useful() -> super::goal_store::LeverFeedbackAction {
+    super::goal_store::LeverFeedbackAction::NotUseful
 }
 
 /// Fixed labels for a malformed analytics read.
@@ -595,6 +639,8 @@ pub enum AnalyticsRequestError {
     TzInvalid,
     /// `weeks` is zero or more than the bars a card draws.
     WeeksInvalid,
+    /// `counter_weeks` are not Mondays in order, or too many.
+    CounterWeeksInvalid,
 }
 
 impl std::fmt::Display for AnalyticsRequestError {
@@ -602,6 +648,7 @@ impl std::fmt::Display for AnalyticsRequestError {
         f.write_str(match self {
             Self::TzInvalid => "insights_tz_invalid",
             Self::WeeksInvalid => "insights_weeks_invalid",
+            Self::CounterWeeksInvalid => "insights_counter_weeks_invalid",
         })
     }
 }
@@ -734,6 +781,21 @@ pub enum LocalInsightsResponse {
     },
     SessionDrill {
         session: Box<super::session_drill::SessionDrill>,
+    },
+    Comparisons {
+        comparisons: Box<super::recap::WeekComparisons>,
+    },
+    GoalSet {
+        state: Box<super::goal_store::GoalState>,
+    },
+    GoalDelete {
+        state: Box<super::goal_store::GoalState>,
+    },
+    LeverFeedback {
+        state: Box<super::goal_store::GoalState>,
+    },
+    RecapOpened {
+        state: Box<super::goal_store::GoalState>,
     },
 }
 
@@ -1237,6 +1299,65 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 )),
             }
         }
+        LocalInsightsOperation::Comparisons {
+            counter_weeks,
+            week_start,
+            tz,
+            recap_card_enabled,
+        } => {
+            use super::recap::{ComparisonsRequest, counter_weeks_valid, week_comparisons};
+            use super::week_rollup::local_week_start;
+            let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+            if counter_weeks
+                .as_deref()
+                .is_some_and(|weeks| !counter_weeks_valid(weeks))
+            {
+                return Err(AnalyticsRequestError::CounterWeeksInvalid.into());
+            }
+            let now = chrono::Utc::now();
+            let current_week = local_week_start(&now, &tz);
+            let week_start = week_start.map_or(current_week, |day| {
+                use chrono::Datelike;
+                day - chrono::Duration::days(i64::from(day.weekday().num_days_from_monday()))
+            });
+            let state = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => store.goal_state()?,
+                None => super::goal_store::GoalState::default(),
+            };
+            LocalInsightsResponse::Comparisons {
+                comparisons: Box::new(week_comparisons(
+                    counter_weeks.as_deref(),
+                    ComparisonsRequest {
+                        week_start,
+                        current_week,
+                        recap_card_enabled,
+                    },
+                    &state,
+                )),
+            }
+        }
+        LocalInsightsOperation::GoalSet { id, goal } => LocalInsightsResponse::GoalSet {
+            state: Box::new(store()?.goal_set(id.as_deref(), goal)?),
+        },
+        LocalInsightsOperation::GoalDelete { id } => {
+            let state = match existing_store(request.store_dir.as_deref())? {
+                Some(store) => store.goal_delete(&id)?,
+                None => return Err(super::goal_store::GoalStoreError::NotFound.into()),
+            };
+            LocalInsightsResponse::GoalDelete {
+                state: Box::new(state),
+            }
+        }
+        LocalInsightsOperation::LeverFeedback {
+            kind,
+            week_start,
+            action,
+        } => LocalInsightsResponse::LeverFeedback {
+            state: Box::new(store()?.lever_feedback(kind, week_start, action)?),
+        },
+        LocalInsightsOperation::RecapOpened { week_start } => LocalInsightsResponse::RecapOpened {
+            state: Box::new(store()?.recap_opened(week_start)?),
+        },
         LocalInsightsOperation::SessionDrill { snapshot_id, tz } => {
             let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
             let insight = existing_store(request.store_dir.as_deref())?
@@ -1302,6 +1423,9 @@ fn public_error(error: anyhow::Error) -> anyhow::Error {
         return anyhow!(error.to_string());
     }
     if let Some(error) = error.downcast_ref::<AnalyticsRequestError>() {
+        return anyhow!(error.to_string());
+    }
+    if let Some(error) = error.downcast_ref::<super::goal_store::GoalStoreError>() {
         return anyhow!(error.to_string());
     }
     if error.downcast_ref::<ResponseTooLarge>().is_some() {
@@ -2284,5 +2408,172 @@ mod tests {
                 .to_string(),
             "insights-comparison-result-stale"
         );
+    }
+
+    fn analytics_call(
+        directory: &std::path::Path,
+        operation: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        dispatch_json(
+            serde_json::json!({"store_dir": directory, "operation": operation})
+                .to_string()
+                .as_bytes(),
+        )
+        .map(|text| serde_json::from_str(&text).unwrap())
+    }
+
+    /// The daemon's `history` for the 13 weeks ending at the current UTC
+    /// week, each comparable with the given Claude tokens.
+    fn counter_weeks(tokens: impl Fn(i64) -> u64) -> serde_json::Value {
+        let now = chrono::Utc::now();
+        let current = super::super::week_rollup::local_week_start(&now, &chrono::Utc);
+        serde_json::Value::Array(
+            (0..13)
+                .rev()
+                .map(|back| {
+                    serde_json::json!({
+                        "week_start": (current - chrono::Duration::weeks(back)).to_string(),
+                        "comparable": true,
+                        "tokens": {"claude_code": tokens(back)},
+                        "cache_share_permille": {"claude_code": 300},
+                        "patterns": {"repeated_reads": 100_000},
+                        "sessions": 6,
+                        "pattern_counts": {"repeated_reads": 3},
+                        "reread_files": 2,
+                        "past_threshold": null
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn comparisons_on_an_absent_store_are_feed_s_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let found = analytics_call(
+            &directory,
+            serde_json::json!({"type": "comparisons", "tz": 0}),
+        )
+        .unwrap();
+        assert_eq!(found["type"], "comparisons");
+        let found = &found["comparisons"];
+        assert_eq!(found["feed"], "saved");
+        assert_eq!(found["goals"], serde_json::json!([]));
+        assert_eq!(found["lever"]["unavailable"], "needs_counter_pass");
+        assert_eq!(found["recap"], serde_json::Value::Null);
+        // Feed T figures over an absent store: compared, nothing created.
+        let found = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|_| 1_000_000)
+            }),
+        )
+        .unwrap();
+        assert_eq!(found["comparisons"]["feed"], "counter_pass");
+        assert!(found["comparisons"]["recap"].is_object());
+        assert!(!directory.exists());
+
+        let mut tuesday = counter_weeks(|_| 1);
+        tuesday[0]["week_start"] = serde_json::json!("2026-09-01");
+        for (bad, error) in [
+            (
+                serde_json::json!({"type": "comparisons", "tz": 19 * 3600}),
+                "insights_tz_invalid",
+            ),
+            (
+                serde_json::json!({"type": "comparisons", "tz": 0, "counter_weeks": tuesday}),
+                "insights_counter_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "comparisons", "tz": 0, "rate": 3}),
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "goal_delete", "id": "goal-1"}),
+                "insights_goal_not_found",
+            ),
+        ] {
+            assert_eq!(
+                analytics_call(&directory, bad).unwrap_err().to_string(),
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn goal_and_lever_writes_feed_the_comparisons() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        let set = analytics_call(
+            &directory,
+            serde_json::json!({"type": "goal_set", "goal": {
+                "kind": "weekly_tokens_under", "source": "claude_code", "tokens": 900_000
+            }}),
+        )
+        .unwrap();
+        assert_eq!(set["type"], "goal_set");
+        let id = set["state"]["goals"][0]["id"].as_str().unwrap().to_string();
+        let compared = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|back| if back == 0 { 800_000 } else { 1_000_000 })
+            }),
+        )
+        .unwrap();
+        let goal = &compared["comparisons"]["goals"][0];
+        assert_eq!(goal["id"], id.as_str());
+        assert_eq!(goal["figure"], 800_000);
+        assert_eq!(
+            goal["marks"]["marks"],
+            serde_json::json!(["not_met", "not_met", "not_met", "not_met", "not_met", "met"])
+        );
+        assert_eq!(
+            goal["marks"]["change"],
+            serde_json::json!({"direction": "down", "from": 1_000_000})
+        );
+        let recap = &compared["comparisons"]["recap"];
+        let closed = recap["week_start"].as_str().unwrap().to_string();
+
+        for bad in [
+            serde_json::json!({"type": "goal_set", "goal": {"kind": "long_context_under", "tokens": 0}}),
+            serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": "2026-10-06"}),
+            serde_json::json!({"type": "recap_opened", "week_start": "2026-10-06"}),
+        ] {
+            assert!(analytics_call(&directory, bad).is_err());
+        }
+        let feedback = analytics_call(
+            &directory,
+            serde_json::json!({"type": "lever_feedback", "kind": "repeated_reads", "week_start": closed}),
+        )
+        .unwrap();
+        assert_eq!(feedback["type"], "lever_feedback");
+        assert_eq!(
+            feedback["state"]["lever_dismissals"][0]["kind"],
+            "repeated_reads"
+        );
+        let opened = analytics_call(
+            &directory,
+            serde_json::json!({"type": "recap_opened", "week_start": closed}),
+        )
+        .unwrap();
+        assert_eq!(opened["state"]["recap_opened_week"], closed.as_str());
+        let after = analytics_call(
+            &directory,
+            serde_json::json!({
+                "type": "comparisons", "tz": 0, "recap_card_enabled": true,
+                "counter_weeks": counter_weeks(|_| 1_000_000)
+            }),
+        )
+        .unwrap();
+        assert_eq!(after["comparisons"]["recap"], serde_json::Value::Null);
+        let deleted = analytics_call(
+            &directory,
+            serde_json::json!({"type": "goal_delete", "id": id}),
+        )
+        .unwrap();
+        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
     }
 }

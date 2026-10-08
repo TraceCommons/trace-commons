@@ -50,6 +50,14 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// counters (an unknown turn is `null`, never 0) and lettered markers. A Codex
 /// session's series is `null` with `series_unavailable: "not_recorded"`. An
 /// unknown snapshot is `insights_not_found`. No path, digest or what-if.
+/// Feed T comparisons: `{"type":"comparisons","counter_weeks":[...],
+/// "week_start":"2026-10-05","tz":3600,"recap_card_enabled":true}` marks each
+/// goal over the daemon's `insights_week` `history`, passed through
+/// unchanged, and returns the lever of the week and the weekly summary card;
+/// without `counter_weeks` nothing is compared. `goal_set` (`goal`, optional
+/// `id`), `goal_delete` (`id`), `lever_feedback` (`kind`, `week_start`,
+/// optional `action`: `not_useful` or `reenable`) and `recap_opened`
+/// (`week_start`) store rule IDs and Monday dates only.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -503,6 +511,38 @@ mod tests {
         assert_eq!(drill["series_unavailable"], "not_recorded");
         assert_eq!(drill["markers"], serde_json::json!([]));
         assert!(!read.to_string().contains("PRIVATE_SESSION_ID"));
+    }
+
+    #[test]
+    fn goals_and_comparisons_cross_the_abi() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
+        assert_eq!(compared["type"], "comparisons");
+        assert_eq!(compared["comparisons"]["feed"], "saved");
+        assert!(!store.exists());
+        let set = json_call(
+            &store,
+            serde_json::json!({"type":"goal_set","goal":{"kind":"repeated_reads_under","tokens":50000}}),
+        )
+        .unwrap();
+        let id = set["state"]["goals"][0]["id"].clone();
+        let compared = json_call(&store, serde_json::json!({"type":"comparisons","tz":0})).unwrap();
+        assert_eq!(compared["comparisons"]["goals"][0]["id"], id);
+        assert_eq!(
+            compared["comparisons"]["goals"][0]["unavailable"],
+            "needs_counter_pass"
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"lever_feedback","kind":"repeated_reads","week_start":"2026-10-07"}),
+            )
+            .unwrap_err(),
+            "insights_week_invalid"
+        );
+        let deleted = json_call(&store, serde_json::json!({"type":"goal_delete","id":id})).unwrap();
+        assert_eq!(deleted["state"]["goals"], serde_json::json!([]));
     }
 
     #[test]
