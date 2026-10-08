@@ -410,7 +410,7 @@ struct TracesTreeView: View {
         var lines: [String] = []
         if let refused = refusal(folder.id) { lines.append(refused) }
         lines += store.disclosureLines(folder.disclosure)
-        if folder.isBucket { lines.append(ProjectCopy.unresolvedBucketNote) }
+        if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { lines.append(note) }
         return lines
     }
 

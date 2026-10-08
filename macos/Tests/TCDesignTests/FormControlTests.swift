@@ -16,9 +16,40 @@ final class FormControlTests: XCTestCase {
         XCTAssertNil(GlassTextField.ring(invalid: false))
     }
 
-    /// The prompt is tertiary text, which clears 4.5:1 on the pane.
-    func test_thePromptClearsTextContrast() {
+    /// The prompt is the placeholder ink, in the text field and the text
+    /// area alike.
+    func test_thePromptIsThePlaceholderInk() {
         XCTAssertEqual(GlassTextField.promptInk, GlassTokens.Color.placeholder)
+    }
+
+    /// A prompt is text, so it clears 4.5:1 on the field fill over every
+    /// ground a field can sit on, in both appearances (owner ruling,
+    /// 2026-10-07: hold the WCAG floors). #1146's 30% was 2.60 in dark and
+    /// 2.03 in light.
+    func test_thePromptClearsTextContrastOnTheFieldOverEveryGround() {
+        typealias L = LightContrastGroundsTests
+        let c = GlassTokens.Color.self
+        let scene = L.solid(c.sceneBase.dark)
+        let pane = L.solid(c.paneOpaque.dark)
+        let darkGrounds: [(String, L.RGB)] = [
+            ("sceneBase", scene),
+            ("paneOpaque", pane),
+            ("paneBase", L.over(c.paneBase.dark, scene)),
+            ("well on pane", L.over(c.wellFill.dark, pane)),
+            ("well on scene", L.over(c.wellFill.dark, scene)),
+            ("popover", L.over(c.popoverFill.dark, scene)),
+            ("menu", L.over(c.menuFill.dark, scene)),
+            ("node card", L.over(c.nodeCardFill.dark, L.solid(c.mapFieldOuter.dark))),
+        ]
+        let ink = GlassTextField.promptInk
+        for (dark, grounds) in [(true, darkGrounds), (false, L.lightGrounds)] {
+            for (name, ground) in grounds {
+                let field = L.over(dark ? c.fieldFill.dark : c.fieldFill.light, ground)
+                let prompt = L.over(dark ? ink.dark : ink.light, field)
+                let ratio = L.contrast(prompt, field)
+                XCTAssertGreaterThanOrEqual(ratio, 4.5, "\(dark ? "dark" : "light") prompt on \(name): \(ratio)")
+            }
+        }
     }
 
     /// A secure field and a plain one lay out alike.

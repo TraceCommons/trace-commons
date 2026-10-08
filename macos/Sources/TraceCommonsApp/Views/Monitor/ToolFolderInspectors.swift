@@ -88,7 +88,7 @@ struct FolderInspector: View {
             )
             .disabled(store.writing.contains(folder.id))
             ForEach(store.disclosureLines(folder.disclosure), id: \.self) { caption($0) }
-            if folder.isBucket { caption(ProjectCopy.unresolvedBucketNote) }
+            if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { caption(note) }
         } else {
             caption(words.inspector.noRule)
         }

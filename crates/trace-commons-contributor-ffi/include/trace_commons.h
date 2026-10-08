@@ -791,6 +791,16 @@ int32_t     tc_private_inference_quit_needs_notice(int32_t requested_on, const c
  */
 char*       tc_private_inference_state_line(const char* state);
 
+/* The Private AI runtime tile's word for one private_inference_state label:
+ * every running label is "On", a stopped one "Off", and an unreported or
+ * unfamiliar label "Unknown", never "Off". A shell must not re-implement this
+ * mapping.
+ *
+ * An empty, NULL or non-UTF-8 label answers the unknown word. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_private_inference_runtime_word(const char* state);
+
 /* How firmly the sentence tc_private_inference_state_line returned reads: one
  * of the TC_PRIVATE_INFERENCE_TONE_* values.
  *

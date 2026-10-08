@@ -207,8 +207,10 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
             "The skill must pass every applicability check and its repository plans must beat both controls without regressions before installation."
         }
         "skill-install-occupied" => {
-            // #1146's `skill-install-preview.tsx`.
-            "Target path is occupied. Installation refused."
+            // #1146's `skill-install-preview.tsx`, then the remedy. Approved 2026-10-07: it was "A skill
+            // already occupies this path. Choose another name or remove it,
+            // then retry."
+            "Target path is occupied. Installation refused. Choose another name or remove what is there, then retry."
         }
         "skill-install-plan-changed" | "skill-review-changed" => {
             "The reviewed skill changed. Review the exact package again."

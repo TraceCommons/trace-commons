@@ -144,14 +144,22 @@ final class SettingsSectionsTests: XCTestCase {
     /// word is the core's.
     func test_watchingHasRonsWatcherCard() throws {
         let source = try SettingsParityTests.text("Views/Settings/WatchingSection.swift")
-        for needle in ["if model.statusRead == .answered {\n            watcher(paused: model.status.paused)",
+        for needle in ["if model.statusRead == .answered {\n            watcher(paused: model.status.paused, armed: Self.controlsArmed(",
                        "GlassEyebrowCard(SettingsLegacyWords.watcherEyebrow, title: SettingsLegacyWords.watcherTitle)",
                        "GlassChip(glass: paused ? SettingsLegacyWords.watcherPaused : SettingsLegacyWords.watcherWatching,",
                        "Button(SettingsLegacyWords.pauseWatcher) { model.pause(until: nil) }",
-                       ".disabled(paused)", "Button(SettingsLegacyWords.resumeWatcher) { model.resume() }",
-                       ".disabled(!paused)", "Text(SettingsLegacyWords.watcherCaption)"] {
+                       ".disabled(paused || !armed)", "Button(SettingsLegacyWords.resumeWatcher) { model.resume() }",
+                       ".disabled(!paused || !armed)", "Text(SettingsLegacyWords.watcherCaption)",
+                       "lastReadFailed: model.statusReadFailed, startup: model.startup"] {
             XCTAssertTrue(source.contains(needle), "WatchingSection.swift lacks \(needle)")
         }
+        // #1273 review: a stale status (answered once, its last read failed,
+        // or the core not running) never arms Pause or Resume.
+        XCTAssertTrue(WatchingSection.controlsArmed(read: .answered, lastReadFailed: false, startup: .running))
+        XCTAssertFalse(WatchingSection.controlsArmed(read: .answered, lastReadFailed: true, startup: .running))
+        XCTAssertFalse(WatchingSection.controlsArmed(read: .answered, lastReadFailed: false, startup: .starting))
+        XCTAssertFalse(WatchingSection.controlsArmed(read: .answered, lastReadFailed: false, startup: .refused("x")))
+        XCTAssertFalse(WatchingSection.controlsArmed(read: .failed, lastReadFailed: true, startup: .running))
         let shell = try XCTUnwrap(MonitorWords.table?.shell)
         for word in [shell.watcherEyebrow, shell.watcherTitle, shell.watcherWatching, shell.watcherPaused,
                      shell.watcherCaption, shell.settingsRefresh, shell.consentEyebrow, shell.desktopEyebrow,

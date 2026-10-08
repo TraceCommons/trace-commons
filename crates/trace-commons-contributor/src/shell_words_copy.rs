@@ -23,10 +23,15 @@
 //! - The undo card counts up ("Approved 7s ago"), never down: the deadline
 //!   is the daemon's next upload sweep, which nothing in a shell can see
 //!   (owner ruling: undo count-up stays).
-//! - A withdrawal or profile change that did not happen says so first.
+//! - A withdrawal that did not happen says "Nothing was withdrawn" as a
+//!   sentence of its own, and the signed-out one, sent before any request,
+//!   never claims an answer from the server. A profile change that did not
+//!   happen says so first.
 //!
-//! Sentences marked "DRAFT, NEEDS APPROVAL (#1146 parity, 2026-10-07)" are
-//! consent or disclosure wording changed for parity and not yet approved.
+//! Consent and disclosure wording changed for #1146 parity, or for accuracy
+//! after the #1273 review, is marked "Approved 2026-10-07" once the owner
+//! approved it; a sentence still marked "DRAFT, NEEDS APPROVAL" is not yet
+//! approved.
 
 use std::collections::BTreeMap;
 
@@ -71,15 +76,17 @@ pub const WITHDRAWAL_CREDIT_NOTE: &str =
 /// Withdrawal's words: the confirmation, the result, and the refusals.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct WithdrawalWords {
-    /// A row's Withdraw button.
+    /// A row's Withdraw button. Approved 2026-10-07.
     pub withdraw: &'static str,
-    /// The confirmation's title and description (#1146 `withdrawal-control.tsx`).
+    /// The confirmation's title (#1146 `withdrawal-control.tsx`). Approved
+    /// 2026-10-07 with the parity set; it was "Withdraw this trace?".
     pub confirm_title: &'static str,
+    /// The confirmation's description (#1146). Approved 2026-10-07: new; there was none.
     pub confirm_description: &'static str,
     /// The confirmation's way back.
     pub keep: &'static str,
-    /// The confirmation's action, for every tier: "Withdraw" (owner ruling,
-    /// 2026-10-07; #1146 said "Confirm withdrawal").
+    /// The confirmation's action, for every tier: "Withdraw". Approved
+    /// 2026-10-07 (owner ruling; #1146 said "Confirm withdrawal").
     pub confirm: &'static str,
     pub withdrawing: &'static str,
     /// No confirmation could be worded, so withdrawal is not offered.
@@ -101,7 +108,8 @@ pub struct WithdrawalWords {
     /// The server did not say which tier applied, so the furthest is not
     /// ruled out. Approved 2026-10-07.
     pub result_unknown: &'static str,
-    /// The account session was refused, in the owner's words (2026-10-07).
+    /// No usable account session on this machine, so no request was made.
+    /// Approved 2026-10-07.
     pub account_session_required: &'static str,
     /// No such submission under this account; never says which of "not
     /// yours" and "does not exist".
@@ -137,7 +145,8 @@ pub fn withdrawal_words() -> WithdrawalWords {
         commons_distributed: WITHDRAWAL_COMMONS_DISTRIBUTED,
         credit_note: WITHDRAWAL_CREDIT_NOTE,
         result_heading: "Withdrawn by you",
-        result_not_distributed: "Content deleted. No one outside privacy review saw it.",
+        // Approved 2026-10-07.
+        result_not_distributed: "Content deleted. It was never shared beyond review.",
         result_commons_not_distributed: "Content deleted and excluded from future exports.",
         result_commons_distributed: concat!(
             "Content deleted from managed stores. Previously distributed copies cannot be ",
@@ -147,9 +156,12 @@ pub fn withdrawal_words() -> WithdrawalWords {
             "Withdrawal completed. Distribution reach is unavailable. If copies were already ",
             "distributed, they cannot be recalled."
         ),
+        // Approved 2026-10-07. Sent before any request, when the stored
+        // session is absent or expired (`daemon/withdraw.rs`), so it never
+        // claims a server answer.
         account_session_required: concat!(
-            "The stored account session was rejected. Nothing was withdrawn. Sign in ",
-            "again to retry."
+            "You're not signed in, or your sign-in has expired. Nothing was withdrawn. ",
+            "Sign in again to retry."
         ),
         not_found: concat!(
             "Nothing was withdrawn and nothing was deleted. There is no trace with that id ",
@@ -406,6 +418,8 @@ pub struct SettingsWords {
     pub consent_heading: &'static str,
     pub connected: &'static str,
     pub not_connected: &'static str,
+    /// Approved 2026-10-07: it was "Sessions
+    /// are being queued, but nothing can be sent."
     pub queued_nothing_sent: &'static str,
     pub extra_scan_configured: &'static str,
     pub session_finished_after: &'static str,
@@ -436,6 +450,8 @@ pub struct SettingsWords {
     /// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite).
     pub applies_from_now: &'static str,
     pub always_included: &'static str,
+    /// The optional scopes' heading. Approved 2026-10-07: it was "Optional \u{2014} each one lets your traces do
+    /// more".
     pub optional_data_use: &'static str,
     pub credit: &'static str,
     /// The tag on the always-on scope.
@@ -604,6 +620,51 @@ mod tests {
         );
     }
 
+    /// Each tier's result, as approved (2026-10-07). A per-tier pin rather
+    /// than only "the outcomes differ": a softened or swapped sentence
+    /// passes distinctness and fails here.
+    #[test]
+    fn each_withdrawal_result_is_its_tiers_approved_sentence() {
+        let w = withdrawal_words();
+        assert_eq!(
+            w.result_not_distributed,
+            "Content deleted. It was never shared beyond review."
+        );
+        assert_eq!(
+            w.result_commons_not_distributed,
+            "Content deleted and excluded from future exports."
+        );
+        assert_eq!(
+            w.result_commons_distributed,
+            "Content deleted from managed stores. Previously distributed copies cannot be recalled."
+        );
+        assert_eq!(
+            w.result_unknown,
+            "Withdrawal completed. Distribution reach is unavailable. If copies were already \
+             distributed, they cannot be recalled."
+        );
+        // And each still agrees with its tier's canonical body: the furthest
+        // tier is never reported as recallable, the middle one keeps the
+        // exclusion its body promises, and the nearest claims neither.
+        assert!(w.commons_distributed.contains("cannot be recalled"));
+        assert!(w.result_commons_distributed.contains("cannot be recalled"));
+        assert!(
+            w.commons_not_distributed
+                .contains("excludes it from everything")
+        );
+        assert!(
+            w.result_commons_not_distributed
+                .contains("excluded from future exports")
+        );
+        assert!(w.not_distributed.contains("Nothing was distributed"));
+        for claim in ["excluded", "recalled", "distributed"] {
+            assert!(
+                !w.result_not_distributed.contains(claim),
+                "{claim:?} in the not-distributed result"
+            );
+        }
+    }
+
     #[test]
     fn a_withdrawal_result_never_claims_more_than_its_tier() {
         let w = withdrawal_words();
@@ -625,17 +686,40 @@ mod tests {
         assert!(!w.result_not_distributed.contains("excluded"));
     }
 
+    /// Every did-not-happen line says "Nothing was withdrawn" as a sentence
+    /// of its own: at the start, or right after a full stop.
     #[test]
-    fn a_withdrawal_that_did_not_happen_says_so() {
+    fn a_withdrawal_that_did_not_happen_says_so_in_its_own_sentence() {
         let w = withdrawal_words();
         for sentence in [w.account_session_required, w.not_found, w.failed] {
             assert!(
-                sentence.contains("Nothing was withdrawn"),
-                "{sentence:?} does not say nothing happened"
+                sentence.starts_with("Nothing was withdrawn")
+                    || sentence.contains(". Nothing was withdrawn"),
+                "{sentence:?} does not say, in a sentence of its own, that nothing happened"
             );
         }
         let lower = w.not_found.to_lowercase();
         assert!(!lower.contains("belongs to") && !lower.contains("does not exist"));
+    }
+
+    /// The signed-out line is sent before any request, when the stored
+    /// session is absent or expired (`daemon/withdraw.rs`), so Commons never
+    /// saw it; a real refusal comes back as `withdraw-failed`. Neither line
+    /// claims a server answer.
+    #[test]
+    fn a_withdrawal_refused_here_never_claims_a_server_answer() {
+        let w = withdrawal_words();
+        assert_eq!(
+            w.account_session_required,
+            "You're not signed in, or your sign-in has expired. Nothing was withdrawn. \
+             Sign in again to retry."
+        );
+        for sentence in [w.account_session_required, w.failed] {
+            let lower = sentence.to_lowercase();
+            for claim in ["rejected", "refused", "server", "commons", "declined"] {
+                assert!(!lower.contains(claim), "{claim:?} in {sentence:?}");
+            }
+        }
     }
 
     #[test]

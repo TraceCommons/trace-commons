@@ -669,6 +669,15 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string _inferenceEvidenceNotice = string.Empty;
     public bool InferenceEvidenceEnabled => _inferenceEvidenceEnabled;
     public string InferenceEvidenceHeading => _witnessCopy?.InferenceHeading ?? string.Empty;
+
+    /// <summary>
+    /// The title over both privacy confirmations, and the line under it: the
+    /// core's <c>WITNESS_PRIVACY_CONFIRM_TITLE</c> and
+    /// <c>WITNESS_PRIVACY_CONFIRM_DESCRIPTION</c>, as macOS and GTK title them.
+    /// </summary>
+    public string PrivacyConfirmTitle => _witnessCopy?.PrivacyConfirmTitle ?? string.Empty;
+
+    public string PrivacyConfirmDescription => _witnessCopy?.PrivacyConfirmDescription ?? string.Empty;
     public string InferenceEvidenceDisclosure => _witnessCopy?.InferenceDisclosure ?? string.Empty;
     public string InferenceEvidenceCaptureNote => _witnessCopy?.InferenceCaptureNote ?? string.Empty;
     public string InferenceEvidenceScopeNote => _witnessCopy?.InferenceScopeNote ?? string.Empty;

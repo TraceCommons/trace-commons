@@ -194,6 +194,16 @@ final class MonitorShellTests: XCTestCase {
         XCTAssertEqual(TracesGraphFooter.focusInk(focused: true, canFocus: false), GlassTokens.Color.graphFocusOff)
         let shell = try Self.text("Views/Monitor/MonitorShell.swift")
         XCTAssertFalse(shell.contains("GlassButtonStyle(.glass, small: true, selected:"), "the focus pill is not a CTA")
+        // #1273 review: the zoom and jump glyphs are the core's, never
+        // literals.
+        for glyph in ["glyph: words?.zoomOutGlyph ?? \"\")", "glyph: words?.zoomInGlyph ?? \"\")",
+                      "glyph: words?.jumpToNowGlyph ?? \"\")"] {
+            XCTAssertTrue(shell.contains(glyph), "the footer lacks \(glyph)")
+        }
+        let graphWords = try XCTUnwrap(MonitorShellWords.graphWords)
+        XCTAssertEqual(graphWords.zoomOutGlyph, "\u{2212}")
+        XCTAssertEqual(graphWords.zoomInGlyph, "+")
+        XCTAssertEqual(graphWords.jumpToNowGlyph, "\u{203A}|")
         // Six pills around the range, in #1146's order.
         let order = ["MonitorShellWords.previous, glyph:", "systemImage: \"binoculars\"", "words?.zoomOut",
                      ".glassEdge(Self.rangeEdge", "words?.zoomIn", "MonitorShellWords.next, glyph:", "words?.jumpToNow"]

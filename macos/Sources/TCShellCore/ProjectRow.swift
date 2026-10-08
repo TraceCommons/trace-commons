@@ -273,13 +273,7 @@ public enum ProjectCopy {
     // (`project_copy::FOLDER_MODE_LABELS`), read through the pill's table:
     // `ContributionModeCopy.label(for:)`, and `ProjectCopy.modeChoiceLabel(_:)`
     // in `TraceCommonsApp/ProjectModeWords.swift`, which reaches the dylib.
-
-
-    /// A statement of what the daemon does, not an apology. Nothing in it is
-    /// a contributor's to fix: the bucket exists so that a directory the
-    /// daemon cannot name never has its path written into the audit log,
-    /// notification text or history, and not being armable is the protective
-    /// half of that.
-    /// #1146's line under the bucket (`projects-panel.tsx`).
-    public static let unresolvedBucketNote = "These sessions cannot be contributed automatically."
+    // Nor is the line under the bucket: it is the core's
+    // (`MonitorTreeCopy.unresolved_bucket_note`), read as
+    // `ProjectCopy.unresolvedBucketNote` in that same file.
 }

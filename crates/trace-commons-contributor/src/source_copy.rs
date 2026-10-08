@@ -214,7 +214,8 @@ pub struct SourceSettingsCopy {
 /// `from_trajectory`), and counts it as a decision owed. Owner decision
 /// 2026-10-05: the declaration does not ship without this row.
 ///
-/// Every string here is DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// Approved 2026-10-07, with the decline button cut to two words (owner
+/// ruling: a button is an action verb, or a verb and an object).
 #[derive(serde::Serialize)]
 pub struct TrajectorySettingsCopy {
     /// The row's name.
@@ -255,8 +256,9 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
             tool.adapter_name(),
             SourceSettingsToolCopy {
                 key,
-                decline: if tool == SourceTool::OpenCode { "Don't read OpenCode exports".into() }
-                    else { format!("I don't use {}", tool.name()) },
+                // Two words at most (owner ruling, 2026-10-07): the row
+                // already names the tool, so the button need not.
+                decline: if tool == SourceTool::OpenCode { "Don't read".into() } else { "Not used".into() },
                 explanation: (tool == SourceTool::OpenCode).then_some(
                     "Choose a folder of JSON files saved with opencode export SESSION_ID. Only those exports are read; this does not read OpenCode's live session store or configure model calls."),
                 choose_folder: (tool == SourceTool::OpenCode).then_some("Choose an exports folder…"),
@@ -284,7 +286,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
             explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
             watching: "A folder of exported traces is read.",
             off: "No folder of exported traces is read.",
-            decline: "Stop reading exported traces",
+            decline: "Stop reading",
         },
     }
 }
@@ -340,14 +342,14 @@ mod tests {
                     .contains("Previously queued sessions are not removed")
             );
             if source == SourceTool::OpenCode {
-                assert_eq!(tool.decline, "Don't read OpenCode exports");
+                assert_eq!(tool.decline, "Don't read");
                 assert!(
                     tool.explanation
                         .unwrap()
                         .contains("opencode export SESSION_ID")
                 );
             } else {
-                assert_eq!(tool.decline, format!("I don't use {}", source.name()));
+                assert_eq!(tool.decline, "Not used");
             }
         }
         let payload = serde_json::to_value(copy).unwrap();

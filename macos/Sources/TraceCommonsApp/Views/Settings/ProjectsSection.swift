@@ -169,8 +169,8 @@ struct ProjectsSection: View {
                         placeholder: copy.title)
                 }
             }
-            if project.isUnresolvedBucket {
-                Text(ProjectCopy.unresolvedBucketNote)
+            if project.isUnresolvedBucket, let note = ProjectCopy.unresolvedBucketNote {
+                Text(note)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)

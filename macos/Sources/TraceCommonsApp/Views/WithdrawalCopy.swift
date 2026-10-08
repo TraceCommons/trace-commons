@@ -240,8 +240,10 @@ enum WithdrawalCopy {
     /// report, and rule 1 -- never a generic "withdrawn" -- cannot hold.
     static var noBulkAction: String { words?.noBulkAction ?? "" }
 
-    /// The defect notice's title when `WithdrawalCopyCheck` fails.
-    static var wordingDefect: String { words?.wordingDefect ?? "" }
+    /// The defect notice's title when `WithdrawalCopyCheck` fails; the
+    /// core's unavailable word when the table did not decode (the likeliest
+    /// defect), never "".
+    static var wordingDefect: String? { ShellWords.defectTitle(words?.wordingDefect) }
 }
 
 /// Assertions that belong on the copy, not on the plumbing.
@@ -306,13 +308,18 @@ enum WithdrawalCopyCheck {
             problems.append("an unknown trace is not warned about distributed copies and credit")
         }
 
-        // A failed withdrawal must say nothing happened, and a not-found
-        // must disclose neither existence nor ownership.
+        // A failed withdrawal must say nothing happened, as a sentence of
+        // its own (at the start, or right after a full stop), and a
+        // not-found must disclose neither existence nor ownership. That the
+        // signed-out line never claims an answer from the server is the
+        // core's test (`shell_words_copy`), which pins each sentence and each
+        // tier's result in full, so this check reports only what it checks.
+        let nothing = "Nothing was withdrawn"
         for sentence in [
             WithdrawalCopy.accountSessionRequired,
             WithdrawalCopy.notFound,
             WithdrawalCopy.failureSentence(label: "withdraw-failed"),
-        ] where !sentence.contains("Nothing was withdrawn") {
+        ] where !(sentence.hasPrefix(nothing) || sentence.contains(". " + nothing)) {
             problems.append("a failure sentence does not say nothing happened")
         }
         let lowerNotFound = WithdrawalCopy.notFound.lowercased()

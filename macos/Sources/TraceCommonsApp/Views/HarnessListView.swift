@@ -229,7 +229,7 @@ private struct HarnessPreviewSheet: View {
 
     var body: some View {
         GlassModal(
-            title: copy.harnessPreviewTitle, width: .narrow, actions: actions,
+            title: copy.harnessPreviewTitle, width: .narrow, actions: actions, busy: model.harnessBusy,
             onCancel: { model.cancelHarnessPreview() }
         ) {
             GlassModalBody { details }
@@ -328,6 +328,7 @@ private struct HarnessExposureSheet: View {
                     model.answerHarnessExposure(accepted: true)
                 },
             ],
+            busy: model.harnessBusy,
             onCancel: { model.answerHarnessExposure(accepted: false) }
         ) {
             GlassModalBody { question }

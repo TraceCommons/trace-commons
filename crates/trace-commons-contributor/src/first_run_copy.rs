@@ -274,7 +274,7 @@ pub struct RulesCopy {
     /// `{count}`: a folder's older sessions beyond the newest 500 the
     /// picker lists (`list_past_sessions`' `not_listed`; owner decision
     /// 2026-10-05). Shown only when `{count}` is above zero.
-    /// DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+    /// Approved 2026-10-07.
     pub not_listed: &'static str,
     /// A session's weekday names, Sunday first, as Ron's `WEEKDAYS`.
     pub weekdays: [&'static str; 7],
@@ -339,7 +339,7 @@ pub struct PasskeyCopy {
     pub default_name: &'static str,
     /// Ron's warning, reworded (Kristi b#11): an account can hold more than
     /// one passkey (`passkey_add_*`), so losing one is not losing the
-    /// account. DRAFT, NEEDS APPROVAL (reworded, 2026-10-06).
+    /// account. Approved 2026-10-07.
     pub name_warning: &'static str,
     pub name_empty: &'static str,
     /// `{max}`: the longest name allowed, in characters.

@@ -760,18 +760,13 @@ pub fn withdraw_result_sentence(reach: Option<&str>) -> String {
     }
 }
 
-/// Withdrawal is authenticated by an account session, which this build has
-/// no way to obtain. Leads with the fact that nothing happened: a
-/// contributor must not walk away from a failed withdrawal believing their
-/// trace was taken back.
-pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = concat!(
-    "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it \
-     is authenticated by your ",
-    app_name!(),
-    " account rather than by this device -- that is what lets you withdraw a trace after \
-     losing the machine that sent it. This build has no account sign-in yet, so it cannot \
-     make the request."
-);
+/// The signed-out withdrawal line, read from the core's withdrawal table
+/// (#1280 review) so every shell says the same thing. It is said before any
+/// request is made, so it never claims an answer from the server, and it
+/// states that nothing was withdrawn as a sentence of its own.
+pub fn withdraw_account_session_required() -> &'static str {
+    trace_commons_contributor::shell_words_copy::withdrawal_words().account_session_required
+}
 
 /// The daemon's label for "the server has no record of this submission for
 /// this account".
@@ -797,7 +792,7 @@ pub const WITHDRAW_NOT_FOUND_LABELS: [&str; 3] = ["not-found", "not_found", "sub
 /// indistinguishable to whoever is asked to help.
 pub fn withdraw_failure_sentence(label: &str) -> String {
     if label == "account-session-required" {
-        return WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string();
+        return withdraw_account_session_required().to_string();
     }
     if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
         return WITHDRAW_NOT_FOUND.to_string();
@@ -1703,7 +1698,7 @@ pub const ROOTS_CLINE: &str = "Cline sessions";
 /// not, and the path beside it still says exactly what would be read.
 pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent sessions";
 pub const ROOTS_WATCH: &str = "Watch this folder";
-pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_OFF: &str = "Not used";
 pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
 pub const ROOTS_CONTINUE: &str = "Continue";
 pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
@@ -2242,6 +2237,7 @@ pub use trace_commons_contributor::witness_copy::{
     WITNESS_INFERENCE_DISCLOSURE, WITNESS_INFERENCE_ENABLE, WITNESS_INFERENCE_ENABLED,
     WITNESS_INFERENCE_HEADING, WITNESS_INFERENCE_SAVE_FAILED, WITNESS_INFERENCE_SCOPE_NOTE,
     WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE, WITNESS_MEASUREMENTS_TITLE,
+    WITNESS_PRIVACY_CONFIRM_DESCRIPTION, WITNESS_PRIVACY_CONFIRM_TITLE,
     WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_TOKEN_CANCEL, WITNESS_TOKEN_CAPTURE_NOTE,
     WITNESS_TOKEN_CONFIRM, WITNESS_TOKEN_DISABLE, WITNESS_TOKEN_DISABLED, WITNESS_TOKEN_DISCLOSURE,
     WITNESS_TOKEN_ENABLE, WITNESS_TOKEN_ENABLED, WITNESS_TOKEN_HEADING, WITNESS_TOKEN_SAVE_FAILED,
@@ -2998,19 +2994,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_withdrawal_opens_by_saying_nothing_happened() {
+    fn a_failed_withdrawal_says_nothing_happened() {
         // A contributor must not walk away from a failure believing their
         // trace was taken back, whichever failure it was.
         for sentence in [
-            WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string(),
+            withdraw_account_session_required().to_string(),
             WITHDRAW_NOT_FOUND.to_string(),
             withdraw_failure_sentence("withdraw-failed"),
             withdraw_failure_sentence("account-session-required"),
             withdraw_failure_sentence("not-found"),
         ] {
             assert!(
-                sentence.starts_with("Nothing was withdrawn"),
-                "a failure sentence does not open by saying nothing happened: {sentence}"
+                sentence.starts_with("Nothing was withdrawn")
+                    || sentence.contains(". Nothing was withdrawn"),
+                "a failure sentence does not say nothing happened: {sentence}"
             );
         }
     }

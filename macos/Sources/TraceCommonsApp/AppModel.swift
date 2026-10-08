@@ -443,13 +443,18 @@ final class AppModel: ObservableObject {
     /// only then works out the change -- which is still shown before it is
     /// made.
     func answerHarnessExposure(accepted: Bool) {
-        guard let request = harnessExposureRequest else { return }
-        harnessExposureRequest = nil
+        guard let request = harnessExposureRequest, !harnessBusy else { return }
         guard accepted else {
+            harnessExposureRequest = nil
             answerPrivateInferenceOffer(accepted: false)
             return
         }
-        guard let client, !harnessBusy else { return }
+        guard let client else {
+            harnessExposureRequest = nil
+            return
+        }
+        // The sheet stays up, busy, until the write answers: a scrim click
+        // or Escape meanwhile cannot abandon it (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { () -> (DaemonSettingsView, HarnessPlan?) in
@@ -458,6 +463,7 @@ final class AppModel: ObservableObject {
             }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessExposureRequest = nil
                 switch outcome {
                 case .success(let (settings, plan)):
                     self.publishIfChanged(\.daemonSettings, settings)
@@ -504,6 +510,7 @@ final class AppModel: ObservableObject {
     /// The contributor said no to the change. The file keeps every value it
     /// has, and the plan is simply dropped -- it expires on the far side.
     func cancelHarnessPreview() {
+        guard !harnessBusy else { return }
         harnessPreview = nil
     }
 
@@ -521,12 +528,13 @@ final class AppModel: ObservableObject {
             let planID = plan.planID,
             let client, !harnessBusy
         else { return }
-        harnessPreview = nil
+        // The preview stays up, busy, until the commit answers (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { try client.harnessCommit(planID: planID) }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessPreview = nil
                 if case .failure = outcome { self.reportHarnessFailure() }
                 self.refreshHarnesses()
             }
@@ -1043,7 +1051,10 @@ final class AppModel: ObservableObject {
                 waiting,
                 projectID: \.projectID,
                 projectLabel: \.projectLabel,
-                sizeBytes: \.sizeBytes
+                // Every decoded queue entry carries its size; only a
+                // carried-over preview entry can lack one, and none is
+                // ever in `pending`.
+                sizeBytes: { $0.sizeBytes ?? 0 }
             )
         )
         recomputeNothingMatched()
