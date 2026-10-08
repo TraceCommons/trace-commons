@@ -784,8 +784,7 @@ impl CorpusHttp {
             .as_array()?
             .iter()
             .find(|document| document["submission_id"] == submission_id.to_string())
-            .and_then(|document| document.get("pipeline"))
-            .and_then(|pipeline| serde_json::from_value(pipeline.clone()).ok())
+            .and_then(pipeline_block)
     }
 
     async fn forensic(
@@ -2770,6 +2769,60 @@ fn corpus_run_config_refuses_bad_check_ids_and_a_package_with_a_bundle() {
     );
 }
 
+/// The pipeline block of a status `document`, as the harness reads it.
+/// `None` for a document with no block, a block that does not read, and a
+/// block with an amount the client cannot read: an unreadable amount is not
+/// a status the harness accepts.
+fn pipeline_block(document: &serde_json::Value) -> Option<TracePipelineStatusUpdate> {
+    document
+        .get("pipeline")
+        .and_then(|pipeline| serde_json::from_value(pipeline.clone()).ok())
+        .filter(|status: &TracePipelineStatusUpdate| {
+            status
+                .instruments
+                .iter()
+                .all(|instrument| instrument.atomic_units.readable().is_some())
+        })
+}
+
+/// Multi-lens review C27: an amount the client cannot read is not a status
+/// the harness accepts. Its block reads as absent, so the run never reads
+/// as terminal and the fixture fails as `run_not_terminal`, as it did when a
+/// malformed amount failed the whole block.
+#[test]
+fn the_corpus_harness_does_not_accept_a_pipeline_block_with_an_unreadable_amount() {
+    let document = |atomic_units: serde_json::Value| {
+        serde_json::json!({
+            "submission_id": Uuid::nil(),
+            "pipeline": {
+                "run_id": Uuid::nil(),
+                "bundle_id": "sha256:bundle",
+                "processing_state": "complete",
+                "current_phase": null,
+                "responsible_phase": null,
+                "reason_label": null,
+                "instruments": [{
+                    "instrument_id": "storage_rebate",
+                    "atomic_units": atomic_units,
+                    "operation_state": "complete",
+                    "internal_settlement_state": "not_applicable",
+                    "payout_rail": "none",
+                    "payout_state": "disabled",
+                    "reason_label": null
+                }]
+            }
+        })
+    };
+    let readable = pipeline_block(&document(serde_json::json!("5"))).expect("a readable block");
+    assert_eq!(readable.instruments.len(), 1);
+    assert_eq!(pipeline_block(&document(serde_json::json!(5))), None);
+    assert_eq!(pipeline_block(&document(serde_json::Value::Null)), None);
+    assert_eq!(
+        pipeline_block(&serde_json::json!({"submission_id": Uuid::nil()})),
+        None
+    );
+}
+
 #[test]
 fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     let fixture: CorpusFixture =
@@ -2791,7 +2844,9 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     };
     let instrument = trace_commons_protocol::trace_contribution::TraceInstrumentStatusUpdate {
         instrument_id: "storage_rebate".into(),
-        atomic_units: "5".into(),
+        atomic_units: trace_commons_protocol::trace_contribution::InstrumentAmount::Readable(
+            trace_commons_protocol::trace_contribution::DecimalAtomicUnits::from(5),
+        ),
         operation_state: "complete".into(),
         internal_settlement_state: "not_applicable".into(),
         payout_rail: "none".into(),

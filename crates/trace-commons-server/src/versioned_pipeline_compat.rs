@@ -245,7 +245,8 @@ impl CompatibilityBundleConfig {
         );
         // Zaki review 1, round 2, finding 11: `main`'s gate refuses to start
         // only when every floor is zero (every trace would pass), and runs
-        // with a zero tail-fraction floor, its documented pilot value; a
+        // with any one floor positive -- the pilot template
+        // (`deploy/pilot-gcp/ingest.env.template`) sets 0, 0 and 500000; a
         // production-compatible configuration is validated the same way.
         if self.qualification == CompatibilityQualification::ProductionCompatible {
             anyhow::ensure!(
@@ -1767,9 +1768,10 @@ mod tests {
 
     /// Finding 11: a production-compatible configuration is validated as
     /// `main` validates its gate configuration at startup. All-zero floors
-    /// are refused; a zero tail-fraction floor with the other floors
-    /// positive -- `main`'s documented pilot value -- is accepted, and so is
-    /// any single positive floor.
+    /// are refused; any single positive floor is accepted, so the pilot
+    /// template's floors (perplexity 0, tail fraction 0, novelty 500000;
+    /// poldsam P-4) are, and so is a zero tail-fraction floor with the other
+    /// two positive.
     #[test]
     fn production_compatibility_is_validated_as_mains_gate_configuration() {
         let config = |perplexity, tail, novelty| {
@@ -1790,7 +1792,8 @@ mod tests {
             COMPATIBILITY_ZERO_FLOOR_LABEL,
             "all-zero floors are refused, as main refuses them"
         );
-        config(2_000_000, 0, 500_000).expect("the pilot's zero tail floor is accepted");
+        config(0, 0, 500_000).expect("the pilot template's floors are accepted");
+        config(2_000_000, 0, 500_000).expect("a zero tail floor alone is accepted");
         config(1, 0, 0).expect("one positive floor is enough, as on main");
         config(0, 0, 1).expect("one positive floor is enough, as on main");
     }

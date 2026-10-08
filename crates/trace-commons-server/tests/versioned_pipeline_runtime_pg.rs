@@ -41,9 +41,14 @@ use trace_commons_server::config::DatabaseConfig;
 use trace_commons_server::db::postgres::PgBackend;
 use trace_commons_server::error::DatabaseError;
 use trace_commons_server::secrets::SecretsCrypto;
+use trace_commons_server::trace_artifact_gcs::{
+    GcsObjectClient, GcsObjectFetch, GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
+};
+use trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper;
 use trace_commons_server::trace_artifact_store::{
     EncryptedTraceArtifact, EncryptedTraceArtifactReceipt, LocalEncryptedTraceArtifactStore,
-    PreparedSerializedJsonArtifact, TraceArtifactKind, TraceArtifactStore,
+    PreparedSerializedJsonArtifact, ServiceOwnedTraceArtifactStore, TraceArtifactKind,
+    TraceArtifactProviderConfig, TraceArtifactStore,
 };
 use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
 use trace_commons_server::trace_corpus_storage::{
@@ -3655,6 +3660,30 @@ async fn count_credit_ledger_rows_for_run(
     tx.commit()
         .await
         .expect("commit count_credit_ledger_rows_for_run");
+    count
+}
+
+/// poldsam P-5: `run_id`'s `trace_credit_ledger` rows whose event type is
+/// `novelty_utility`. `count_credit_ledger_rows_for_run` counts every event
+/// type, so a test that means "the NoveltyUtility row" reads this one.
+async fn count_novelty_utility_rows_for_run(
+    backend: &Arc<PgBackend>,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_credit_ledger
+              WHERE tenant_id = $1 AND pipeline_run_id = $2
+                AND event_type = 'novelty_utility'",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("count NoveltyUtility ledger rows")
+        .get(0);
+    tx.commit().await.unwrap();
     count
 }
 
@@ -11867,13 +11896,17 @@ async fn a_forfeited_trace_credit_leg_reads_as_forfeited_not_pending() {
         "a forfeited trace_credit leg must not read as Pending"
     );
 
-    let credit_summary = product
-        .contributor_credit(&tenant, principal)
-        .await
-        .unwrap();
-    assert_eq!(
-        credit_summary.pending_microcredits, 0,
-        "a forfeited leg must not count toward pending credit"
+    let trace_credit = status
+        .instruments
+        .iter()
+        .find(|instrument| instrument.instrument_id == InstrumentId::trace_credit().as_str())
+        .expect("the trace_credit instrument");
+    assert!(
+        !matches!(
+            trace_credit.internal_settlement_state.as_str(),
+            "pending" | "approved"
+        ),
+        "a forfeited leg must not read as credit still pending: {trace_credit:?}"
     );
 }
 
@@ -14338,6 +14371,12 @@ async fn a_missing_cap_waits_uncharged_and_an_amount_over_the_cap_stays_charged(
         run.attempt_count + 1,
         "an amount over a configured cap stays a charged failure"
     );
+    // Multi-lens review C5: only `artifact_integrity_failed` waits an hour.
+    // Every other charged label keeps the short backoff.
+    assert!(
+        blocked.next_attempt_at - chrono::Utc::now() < chrono::Duration::seconds(1),
+        "a charged retry under another label is due again at once"
+    );
     let rows = settlement_rows(&backend, &tenant, run.run_id).await;
     assert_eq!(leg_state(&rows, "storage_rebate"), "failed");
     assert_eq!(
@@ -15986,7 +16025,7 @@ async fn insert_export_snapshot_and_item(
             &tenant,
             &snapshot_id,
             &format!("sha256:{}", "d".repeat(64)),
-            &"exporter_sha256:testexporter",
+            &format!("exporter_sha256:{}", "a".repeat(64)),
             &"research",
             &format!("sha256:{}", "e".repeat(64)),
             &"policy-test-v1",
@@ -16450,22 +16489,29 @@ async fn product_reads_are_tenant_and_principal_scoped() {
 
     let product = PipelineProductStore::new(backend.clone());
 
+    // Every submission id of both tenants, asked by each owner: a
+    // contributor gets its own and nothing else.
+    let every_submission = [
+        run_a1.submission_id,
+        run_a2.submission_id,
+        run_b1.submission_id,
+    ];
     let p1_statuses = product
-        .own_contributor_statuses(&tenant_a, principal_1)
+        .contributor_statuses(&tenant_a, principal_1, &every_submission)
         .await
         .unwrap();
     assert_eq!(p1_statuses.len(), 1);
     assert_eq!(p1_statuses[0].submission_id, run_a1.submission_id);
 
     let p2_statuses = product
-        .own_contributor_statuses(&tenant_a, principal_2)
+        .contributor_statuses(&tenant_a, principal_2, &every_submission)
         .await
         .unwrap();
     assert_eq!(p2_statuses.len(), 1);
     assert_eq!(p2_statuses[0].submission_id, run_a2.submission_id);
 
     let b1_statuses = product
-        .own_contributor_statuses(&tenant_b, principal_1)
+        .contributor_statuses(&tenant_b, principal_1, &every_submission)
         .await
         .unwrap();
     assert_eq!(b1_statuses.len(), 1);
@@ -16529,18 +16575,7 @@ async fn product_reads_are_tenant_and_principal_scoped() {
             .all(|status| status.submission_id != run_b1.submission_id)
     );
 
-    // Credit and attestation reads are scoped the same way.
-    let credit_a1 = product
-        .contributor_credit(&tenant_a, principal_1)
-        .await
-        .unwrap();
-    assert_eq!(credit_a1.submission_count, 1);
-    let credit_b1 = product
-        .contributor_credit(&tenant_b, principal_1)
-        .await
-        .unwrap();
-    assert_eq!(credit_b1.submission_count, 1);
-
+    // Attestation reads are scoped the same way.
     let attestations_a1 = product
         .own_score_attestation_entries(&tenant_a, principal_1)
         .await
@@ -17711,8 +17746,12 @@ async fn compatibility_credit_matches_main_gate_path() {
     // Exactly one ledger row, with the `NoveltyUtility` event type and the
     // configured delta, and carried by no finalized batch.
     assert_eq!(
-        count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
-        1
+        (
+            count_credit_ledger_rows_for_run(&backend, &tenant_positive, run_positive.run_id).await,
+            count_novelty_utility_rows_for_run(&backend, &tenant_positive, run_positive.run_id)
+                .await,
+        ),
+        (1, 1)
     );
     let (event_type, points_delta) =
         credit_ledger_event_for_run(&backend, &tenant_positive, run_positive.run_id)
@@ -17938,6 +17977,11 @@ async fn settled_compatibility_award(
     );
     let leg = trace_credit_settlement(service, &tenant, run.run_id).await;
     let rows = count_credit_ledger_rows_for_run(backend, &tenant, run.run_id).await;
+    assert_eq!(
+        count_novelty_utility_rows_for_run(backend, &tenant, run.run_id).await,
+        rows,
+        "every ledger row of a compatibility run is a NoveltyUtility event"
+    );
     let status = PipelineProductStore::new(backend.clone())
         .contributor_statuses(&tenant, principal, &[run.submission_id])
         .await
@@ -18220,6 +18264,192 @@ async fn the_tenant_policy_applies_to_a_compatibility_award_at_settle() {
     );
 }
 
+/// A compatibility service awarding `CHECKED_DELTA_MICROCREDITS`, as
+/// `checked_compatibility_service` builds one, with `trace_credit` as its
+/// Trace Credit adapter.
+async fn checked_compatibility_service_over_adapter(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    trace_credit: Arc<dyn SettlementAdapter>,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let scorer = Arc::new(ReferencePerplexityScorer::new());
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())
+            .expect("build compatibility bundle package");
+    let index = IsolatedPipelineIndex::new();
+    let registry = SettlementAdapterRegistry::new(vec![trace_credit])
+        .expect("build settlement adapter registry");
+    let caps = PipelineCaps {
+        per_instrument_atomic_units: BTreeMap::from([(
+            InstrumentId::trace_credit().as_str().to_string(),
+            AtomicUnits::from_raw(u128::MAX),
+        )]),
+    };
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(dir),
+            package,
+            index.clone(),
+            index,
+            registry,
+            caps,
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(authority)
+        .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
+        .with_novelty_utility_checks(issuing_checks())
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// poldsam P-1: a Trace Credit leg an earlier Settle attempt dispatched
+/// (its adapter answered `Unavailable`, so the effect may have happened)
+/// and that `main`'s credit checks withhold on a later attempt is not
+/// completed as withheld with no receipt. It fails as
+/// `settlement_unreconciled`, with no further adapter call and no ledger
+/// row, the retry stays charged, and the run fails at Settle's budget with
+/// the leg kept for an operator to reconcile.
+#[tokio::test]
+async fn a_dispatched_leg_the_credit_checks_withhold_later_stays_unreconciled() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let authority = Arc::new(SwitchableAuthority(std::sync::Mutex::new(
+        SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy: Some(SubmissionAllowlists::default()),
+            require_policy: true,
+        },
+    )));
+    let outage = Arc::new(OutageThenRecordingAdapter {
+        inner: RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ),
+        failures_left: AtomicUsize::new(0),
+    });
+    let trace_credit = CountingSettlementAdapter::new(outage.clone());
+    let service = checked_compatibility_service_over_adapter(
+        &backend,
+        &dir,
+        authority.clone(),
+        trace_credit.clone(),
+    )
+    .await;
+    let tenant = format!("compat-unreconciled-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("{phase} runs"));
+    }
+    outage.fail_next_calls(1);
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(first.state, PipelineRunState::Retry);
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (leg.operation_state.as_str(), leg.dispatched_at.is_some()),
+        ("retry", true),
+        "the outage left the leg dispatched: {leg:?}"
+    );
+    assert_eq!(trace_credit.calls(), 1);
+
+    // The policy is gone by the next attempt: `main`'s checks withhold.
+    *authority.0.lock().unwrap() = SubmissionAuthority {
+        tenant: SubmissionAllowlists::default(),
+        policy: None,
+        require_policy: true,
+    };
+    force_due(&backend, &tenant, created.run_id).await;
+    let second = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs again");
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref(),
+            leg.external_receipt_hash.as_deref(),
+            leg.credit_event_id,
+        ),
+        (
+            "failed",
+            Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL),
+            None,
+            None
+        ),
+        "a dispatched leg is never completed as withheld: {leg:?}"
+    );
+    assert!(leg.dispatched_at.is_some());
+    assert_eq!(
+        (second.state, second.attempt_count),
+        (PipelineRunState::Retry, first.attempt_count + 1),
+        "the retry is charged"
+    );
+
+    let mut last = second;
+    while last.state == PipelineRunState::Retry {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs again");
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        )
+    );
+    let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        ("failed", Some(PIPELINE_SETTLEMENT_UNRECONCILED_LABEL)),
+        "the failed run keeps the leg for an operator: {leg:?}"
+    );
+    assert_eq!(
+        trace_credit.calls(),
+        1,
+        "the withheld leg is not dispatched again, not by the failure path either"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0
+    );
+}
+
 /// Ruling T15-8: a tenant policy's non-empty consent-scope allowlist must
 /// hold one of the submission's consent scopes, as `main`'s policy check
 /// requires (any one of them). A policy that allows model training as a use
@@ -18282,6 +18512,11 @@ async fn a_compatibility_award_needs_a_consent_scope_the_tenant_policy_allows() 
         assert_eq!(settled.state, PipelineRunState::Complete);
         let leg = trace_credit_settlement(&service, &tenant, created.run_id).await;
         let rows = count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await;
+        assert_eq!(
+            count_novelty_utility_rows_for_run(&backend, &tenant, created.run_id).await,
+            rows,
+            "every ledger row of a compatibility run is a NoveltyUtility event"
+        );
         let status = PipelineProductStore::new(backend.clone())
             .contributor_statuses(&tenant, RECEIPT_PRINCIPAL, &[env.submission_id])
             .await
@@ -19358,7 +19593,7 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
             tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
             allowed_use, purpose_hash, selection_policy_id, source_list_hash,
             state, export_manifest_id, completed_at
-         ) VALUES ($1,$2,$3,'exporter_sha256:test','model_training',$4,'pipeline_export_v1',
+         ) VALUES ($1,$2,$3,$9,'model_training',$4,'pipeline_export_v1',
                    $5,$6,$7,$8)",
         &[
             &run.tenant_id,
@@ -19369,6 +19604,7 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
             &(if complete { "complete" } else { "ready" }),
             &complete.then(uuid::Uuid::new_v4),
             &complete.then(chrono::Utc::now),
+            &EXPORTER,
         ],
     )
     .await
@@ -19397,6 +19633,194 @@ async fn insert_export_snapshot(run: &PipelineRunRecord, complete: bool) -> uuid
     .expect("insert the snapshot item");
     tx.commit().await.unwrap();
     snapshot_id
+}
+
+/// poldsam P-8 (V109): the database refuses a snapshot requester that is
+/// not `principal_sha256:` or `exporter_sha256:` and 64 lowercase hex
+/// digits, an export item whose outcome or view schema id is not a label,
+/// and an assessment whose resolved quarantine reasons are not a JSON array.
+#[tokio::test]
+async fn the_database_refuses_malformed_export_and_assessment_fields() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("schema-checks-{}", uuid::Uuid::new_v4());
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let hash = |seed: &str| format!("sha256:{}", hex::encode(Sha256::digest(seed.as_bytes())));
+    let refused = |error: tokio_postgres::Error, constraint: &str, case: &str| {
+        let db = error.as_db_error().expect("a database refusal");
+        assert_eq!(
+            db.code(),
+            &tokio_postgres::error::SqlState::CHECK_VIOLATION,
+            "{case}"
+        );
+        assert_eq!(db.constraint(), Some(constraint), "{case}");
+    };
+    let mut owner = owner_client().await;
+
+    const SNAPSHOT: &str = "INSERT INTO pipeline_export_snapshots (
+            tenant_id, snapshot_id, request_idempotency_key, requester_principal_ref,
+            allowed_use, purpose_hash, selection_policy_id, source_list_hash
+         ) VALUES ($1,$2,$3,$4,'model_training',$5,'pipeline_export_v1',$6)";
+    for requester in [
+        "principal_sha256:a".to_string(),
+        "exporter_sha256:exporttest".to_string(),
+        format!("principal_sha256:{}", "A".repeat(64)),
+        format!("principal_sha256:{}", "a".repeat(65)),
+        format!("reviewer_sha256:{}", "a".repeat(64)),
+    ] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                SNAPSHOT,
+                &[
+                    &tenant,
+                    &uuid::Uuid::new_v4(),
+                    &hash(&format!("key-{requester}")),
+                    &requester,
+                    &hash("purpose"),
+                    &hash("sources"),
+                ],
+            )
+            .await
+            .expect_err("the database refuses the requester");
+        refused(
+            error,
+            "pipeline_export_snapshots_requester_principal_ref_check",
+            &requester,
+        );
+        tx.rollback().await.unwrap();
+    }
+    let snapshot_id = uuid::Uuid::new_v4();
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        SNAPSHOT,
+        &[
+            &tenant,
+            &snapshot_id,
+            &hash("key-accepted"),
+            &format!("principal_sha256:{}", "a".repeat(64)),
+            &hash("purpose"),
+            &hash("sources"),
+        ],
+    )
+    .await
+    .expect("a full principal reference is accepted");
+    tx.commit().await.unwrap();
+
+    for (outcome_schema_id, view_schema_id, constraint) in [
+        (
+            "Bad Schema",
+            "pipeline_view",
+            "pipeline_export_snapshot_items_outcome_schema_id_shape",
+        ),
+        (
+            "pipeline_outcome",
+            "",
+            "pipeline_export_snapshot_items_view_schema_id_shape",
+        ),
+    ] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                "INSERT INTO pipeline_export_snapshot_items (
+                    tenant_id, snapshot_id, ordinal, run_id, submission_id, trace_id,
+                    registry_revision_id, source_object_ref_id, source_content_hash, bundle_id,
+                    outcome_schema_id, outcome_schema_version, authorized_view_schema_id,
+                    consent_scopes, allowed_uses
+                 ) VALUES ($1,$2,0,$3,$4,$5,$6,$7,$8,$9,$10,1,$11,'[]'::jsonb,'[]'::jsonb)",
+                &[
+                    &tenant,
+                    &snapshot_id,
+                    &run.run_id,
+                    &run.submission_id,
+                    &run.trace_id,
+                    &run.approved_revision_id.expect("an approved revision"),
+                    &run.approved_object_ref_id.expect("an approved object"),
+                    &run.approved_content_hash.clone().expect("an approved hash"),
+                    &run.bundle_id,
+                    &outcome_schema_id,
+                    &view_schema_id,
+                ],
+            )
+            .await
+            .expect_err("the database refuses the schema id");
+        refused(error, constraint, constraint);
+        tx.rollback().await.unwrap();
+    }
+
+    for reasons in [serde_json::json!({}), serde_json::json!("policy_review")] {
+        let tx = owner_tenant_tx(&mut owner, &tenant).await;
+        let error = tx
+            .execute(
+                "INSERT INTO pipeline_review_assessments (
+                    tenant_id, assessment_id, run_id, reviewer_principal_ref, recommendation,
+                    reason_code, resolved_quarantine_reasons, evidence_hash
+                 ) VALUES ($1,$2,$3,$4,'approve','review_test_assessment',$5,$6)",
+                &[
+                    &tenant,
+                    &uuid::Uuid::new_v4(),
+                    &run.run_id,
+                    &format!("reviewer_sha256:{}", "b".repeat(64)),
+                    &reasons,
+                    &hash("evidence"),
+                ],
+            )
+            .await
+            .expect_err("the database refuses reasons that are not an array");
+        refused(
+            error,
+            "pipeline_review_assessments_resolved_reasons_array",
+            &reasons.to_string(),
+        );
+        tx.rollback().await.unwrap();
+    }
+}
+
+/// poldsam P-9 (V109): the invalidation table's submission foreign key and
+/// the export item's run foreign key each have an index on the referencing
+/// columns.
+#[tokio::test]
+async fn the_invalidation_and_export_item_foreign_keys_are_indexed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let client = backend.trace_pool_for_test().get().await.unwrap();
+    for (table, index, columns) in [
+        (
+            "pipeline_index_invalidations",
+            "idx_pipeline_index_invalidations_submission",
+            "(tenant_id, submission_id)",
+        ),
+        (
+            "pipeline_export_snapshot_items",
+            "idx_pipeline_export_snapshot_items_run",
+            "(tenant_id, run_id)",
+        ),
+    ] {
+        let definition: Option<String> = client
+            .query_opt(
+                "SELECT indexdef FROM pg_indexes
+                  WHERE schemaname = current_schema() AND tablename = $1 AND indexname = $2",
+                &[&table, &index],
+            )
+            .await
+            .unwrap()
+            .map(|row| row.get(0));
+        let definition = definition.unwrap_or_else(|| panic!("{index} exists"));
+        assert!(
+            definition.ends_with(columns),
+            "{index} covers {columns}: {definition}"
+        );
+    }
 }
 
 /// The withdrawal invalidates every pipeline export snapshot and item that
@@ -19453,6 +19877,81 @@ async fn withdrawal_invalidates_pipeline_exports_and_reports_them_distributed() 
         );
     }
     tx.commit().await.unwrap();
+}
+
+/// poldsam P-13: not only a pipeline withdrawal invalidates a delivered
+/// (`complete`) pipeline export snapshot. `main`'s retention expiring or
+/// purging the submission (`follow_up_retention`) and `main`'s revocation of
+/// it (`follow_up_revocation`) each invalidate every snapshot that holds
+/// it, delivered or still `ready`, and the item, under the matching reason.
+#[tokio::test]
+async fn expiry_purge_and_revocation_invalidate_a_delivered_pipeline_export() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    for reason in ["expired", "purged", "revoked"] {
+        let tenant = format!("export-invalidation-{reason}-{}", uuid::Uuid::new_v4());
+        let (run, _) = run_to_settle_ready(&service, &tenant).await;
+        let delivered = insert_export_snapshot(&run, true).await;
+        let ready = insert_export_snapshot(&run, false).await;
+        match reason {
+            "expired" => store
+                .follow_up_retention(&tenant, run.submission_id, PipelineRetentionAction::Expired)
+                .await
+                .map(|_| ()),
+            "purged" => store
+                .follow_up_retention(&tenant, run.submission_id, PipelineRetentionAction::Purged)
+                .await
+                .map(|_| ()),
+            _ => store
+                .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+                .await
+                .map(|_| ()),
+        }
+        .unwrap_or_else(|error| panic!("{reason}: {error}"));
+
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        for (snapshot_id, kind) in [(delivered, "delivered"), (ready, "ready")] {
+            let row = tx
+                .query_one(
+                    "SELECT s.state, s.invalidated_at IS NOT NULL,
+                            i.invalidated_at IS NOT NULL, i.invalidation_reason
+                       FROM pipeline_export_snapshots s
+                       JOIN pipeline_export_snapshot_items i
+                         ON i.tenant_id = s.tenant_id AND i.snapshot_id = s.snapshot_id
+                      WHERE s.tenant_id = $1 AND s.snapshot_id = $2",
+                    &[&tenant, &snapshot_id],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, bool>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, Option<String>>(3),
+                ),
+                (
+                    "invalidated".to_string(),
+                    true,
+                    true,
+                    Some(reason.to_string())
+                ),
+                "{reason}: the {kind} snapshot"
+            );
+        }
+        tx.commit().await.unwrap();
+    }
 }
 
 /// Adds an account to `tenant_id` and links the receipt principal to it, so
@@ -21082,7 +21581,8 @@ async fn the_invalidation_pass_never_holds_two_pooled_connections() {
 
 /// The requester every export test creates snapshots as, in the shape the
 /// snapshot table requires of `requester_principal_ref`.
-const EXPORTER: &str = "exporter_sha256:exporttest";
+const EXPORTER: &str =
+    "exporter_sha256:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0";
 
 /// A `sha256:` hash of `seed`, the shape the store takes for a request key
 /// and a purpose (the route hashes the raw values).
@@ -24327,6 +24827,13 @@ async fn a_disabled_immutability_trigger_fails_the_audit_control() {
 /// - an immutability trigger made to call another function (one that
 ///   returns the row) fails it;
 /// - a `USING (true)` tenant policy fails the isolation control;
+/// - Zaki review 3, Z3-L5: an immutability trigger made to fire after the
+///   change, or once per statement, fails the audit control (`tgtype`), and
+///   an extra permissive policy beside the tenant policy (which PostgreSQL
+///   ORs with it) fails the isolation control;
+/// - multi-lens review C6: an extra permissive policy for another role
+///   fails the isolation control only for a role that has that role's
+///   privileges, not for a member that does not inherit them;
 /// - a role that bypasses row-level security (the owner superuser here)
 ///   fails the isolation control, whatever the tables' flags.
 #[tokio::test]
@@ -24356,6 +24863,25 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
              CREATE POLICY trace_corpus_tenant_isolation ON pipeline_runs
                  USING (true) WITH CHECK (true);",
         ),
+        (
+            "AFTER trigger",
+            "DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 AFTER UPDATE ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "statement trigger",
+            "DROP TRIGGER phase_outcomes_reject_delete ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_delete
+                 BEFORE DELETE ON phase_outcomes
+                 FOR EACH STATEMENT EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "extra permissive policy",
+            "CREATE POLICY pipeline_control_test_open ON pipeline_runs
+                 USING (true) WITH CHECK (true);",
+        ),
     ] {
         let tx = owner.transaction().await.unwrap();
         tx.batch_execute(change)
@@ -24365,13 +24891,37 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             .await
             .unwrap();
         let controls = pipeline_control_health(&tx, &tables).await.unwrap();
-        if case == "USING (true) policy" {
+        if case == "USING (true) policy" || case == "extra permissive policy" {
             assert!(!controls.tenant_isolation_passed, "{case}");
             assert!(controls.audit_immutability_passed, "{case}");
         } else {
             assert!(!controls.audit_immutability_passed, "{case}");
             assert!(controls.tenant_isolation_passed, "{case}");
         }
+        tx.rollback().await.unwrap();
+    }
+
+    // Multi-lens review C6: a permissive policy for another role opens the
+    // reads of a role that has that role's privileges, which is PostgreSQL's
+    // own rule. A member that does not inherit them (as the role that
+    // created the policy role is) keeps the control.
+    for (case, inherit, isolated) in [
+        ("membership that does not inherit", "NOINHERIT", true),
+        ("inherited membership", "INHERIT", false),
+    ] {
+        let tx = owner.transaction().await.unwrap();
+        tx.batch_execute(&format!(
+            "CREATE ROLE pipeline_control_test_policy_role NOLOGIN;
+             CREATE ROLE pipeline_control_test_reader NOLOGIN {inherit};
+             GRANT pipeline_control_test_policy_role TO pipeline_control_test_reader;
+             CREATE POLICY pipeline_control_test_role_open ON pipeline_runs
+                 FOR SELECT TO pipeline_control_test_policy_role USING (true);
+             SET LOCAL ROLE pipeline_control_test_reader"
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("{case}: {error}"));
+        let controls = pipeline_control_health(&tx, &tables).await.unwrap();
+        assert_eq!(controls.tenant_isolation_passed, isolated, "{case}");
         tx.rollback().await.unwrap();
     }
 
@@ -24607,6 +25157,161 @@ async fn a_payout_under_mains_dry_run_settlement_mode_confirms_without_the_adapt
     );
     assert_eq!(
         trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "confirmed"
+    );
+}
+
+/// Zaki review 3, Z3-L2: a line is confirmed only in the settlement mode
+/// that submitted it. A line the injected adapter submitted under `http`,
+/// with no confirmation yet, is not confirmed by the dry-run adapter after
+/// `main`'s mode flips to `dry_run`: the synthetic hash never replaces the
+/// real transaction hash, and the line waits for `http` to confirm it.
+#[tokio::test]
+async fn a_line_submitted_under_http_is_not_confirmed_under_dry_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
+    let tenant = format!("payout-mode-flip-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&http, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(http.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let transaction_hash = || async {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "SELECT status, near_transaction_hash FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (
+            row.get::<_, String>("status"),
+            row.get::<_, Option<String>>("near_transaction_hash"),
+        )
+    };
+    let submitted = transaction_hash().await;
+    assert_eq!(submitted.0, "submitted");
+
+    let dry_run = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    dry_run
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("the dry-run pass runs");
+    assert_eq!(
+        transaction_hash().await,
+        submitted,
+        "the http line keeps its real transaction hash and stays submitted"
+    );
+}
+
+/// Multi-lens review C3 (owner decision): a `submitted` line whose stored
+/// call has no `pipeline_submission_mode` key was submitted by code from
+/// before the key, which had no mode rule. It reads as submitted under
+/// `http`: the dry-run adapter does not confirm it and its transaction hash
+/// is unchanged, so a synthetic hash never replaces a real one, and `http`
+/// confirms it.
+#[tokio::test]
+async fn a_submitted_line_with_no_mode_key_is_confirmed_only_under_http() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let near = Arc::new(RecordingNearAdapter::new());
+    let http = payout_service_under(&backend, &dir, near.clone(), HTTP_NEAR_PAYOUT_CONTROLS).await;
+    let tenant = format!("payout-mode-no-key-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&http, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(http.process_payouts(&tenant, 32).await.unwrap(), 1);
+    // The line as the earlier code left it: submitted, with no mode key.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    assert_eq!(
+        tx.execute(
+            "UPDATE trace_near_credit_outbox
+                SET near_call_json = near_call_json - 'pipeline_submission_mode'
+              WHERE tenant_id = $1 AND status = 'submitted'
+                AND near_call_json ? 'pipeline_submission_mode'",
+            &[&tenant],
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
+    drop(owner);
+    let line = || async {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let row = tx
+            .query_one(
+                "SELECT status, near_transaction_hash FROM trace_near_credit_outbox
+                  WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        (
+            row.get::<_, String>("status"),
+            row.get::<_, Option<String>>("near_transaction_hash"),
+        )
+    };
+    let submitted = line().await;
+    assert_eq!(submitted.0, "submitted");
+
+    let dry_run = payout_service_under(
+        &backend,
+        &dir,
+        near.clone(),
+        PipelineNearPayoutControls {
+            settlement_mode: PipelineNearSettlementMode::DryRun,
+            require_adapter_auth: false,
+        },
+    )
+    .await;
+    dry_run
+        .process_payout(&tenant, run.run_id)
+        .await
+        .expect("the dry-run pass runs");
+    assert_eq!(
+        line().await,
+        submitted,
+        "the dry-run adapter does not confirm the line or change its transaction hash"
+    );
+
+    let idempotency_key = near.requests()[0].idempotency_key.clone();
+    let confirmed_hash = format!("sha256:{}", "a".repeat(64));
+    near.record_confirmation(
+        &idempotency_key,
+        confirmed_hash.clone(),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .unwrap();
+    http.process_payout(&tenant, run.run_id)
+        .await
+        .expect("the http pass runs");
+    assert_eq!(
+        line().await,
+        ("confirmed".to_string(), Some(confirmed_hash)),
+        "http confirms the line it reads as its own"
+    );
+    assert_eq!(
+        trace_credit_settlement(&http, &tenant, run.run_id)
             .await
             .payout_state,
         "confirmed"
@@ -25000,6 +25705,250 @@ async fn a_score_commit_refused_for_a_stale_lease_leaves_no_object() {
         count_files_under(dir.path()),
         2 + usize::from(scored.index_command_ref.is_some())
             + usize::from(scored.score_neighbor_ref.is_some()),
+        "only the retry's own Score objects"
+    );
+}
+
+/// An artifact store whose publish fails, as an outage does, for every
+/// object prepared under an object id that starts with
+/// `failing_object_id_prefix`, while `failing` is set. `prepare` gets the
+/// object id and `publish` only the prepared object, so the double
+/// remembers the keys it prepared for such ids. Every other call goes to
+/// `inner`.
+struct FailingWriteStore {
+    inner: Arc<dyn TraceArtifactStore>,
+    failing_object_id_prefix: &'static str,
+    failing: AtomicBool,
+    failing_object_keys: std::sync::Mutex<BTreeSet<String>>,
+}
+
+impl TraceArtifactStore for FailingWriteStore {
+    fn put_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        self.inner.put_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )
+    }
+
+    fn prepare_serialized_json(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+        serialized_json: &[u8],
+    ) -> anyhow::Result<PreparedSerializedJsonArtifact> {
+        let prepared = self.inner.prepare_serialized_json(
+            tenant_storage_ref,
+            artifact_kind,
+            object_id,
+            serialized_json,
+        )?;
+        if object_id.starts_with(self.failing_object_id_prefix) {
+            self.failing_object_keys
+                .lock()
+                .unwrap()
+                .insert(prepared.receipt().object_key.clone());
+        }
+        Ok(prepared)
+    }
+
+    fn publish_serialized_json(
+        &self,
+        prepared: &PreparedSerializedJsonArtifact,
+    ) -> anyhow::Result<EncryptedTraceArtifactReceipt> {
+        anyhow::ensure!(
+            !(self.failing.load(Ordering::SeqCst)
+                && self
+                    .failing_object_keys
+                    .lock()
+                    .unwrap()
+                    .contains(&prepared.receipt().object_key)),
+            "object store unavailable"
+        );
+        self.inner.publish_serialized_json(prepared)
+    }
+
+    fn read_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<EncryptedTraceArtifact> {
+        self.inner
+            .read_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json(expected_tenant_storage_ref, receipt)
+    }
+
+    fn read_json_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.inner.read_json_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+
+    fn delete_artifact(
+        &self,
+        expected_tenant_storage_ref: &str,
+        receipt: &EncryptedTraceArtifactReceipt,
+    ) -> anyhow::Result<bool> {
+        self.inner
+            .delete_artifact(expected_tenant_storage_ref, receipt)
+    }
+
+    // PR 4 (rebase 10, option D): a compatibility Score derives its object
+    // keys before its tenant lock, and the attempt sweep deletes and checks
+    // presence at a key; the double delegates all three.
+    fn serialized_json_object_key(
+        &self,
+        tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_id: &str,
+    ) -> anyhow::Result<String> {
+        self.inner
+            .serialized_json_object_key(tenant_storage_ref, artifact_kind, object_id)
+    }
+
+    fn delete_artifact_at_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        artifact_kind: TraceArtifactKind,
+        object_key: &str,
+    ) -> anyhow::Result<bool> {
+        self.inner.delete_artifact_at_object_key(
+            expected_tenant_storage_ref,
+            artifact_kind,
+            object_key,
+        )
+    }
+
+    fn artifact_present_by_object_key(
+        &self,
+        expected_tenant_storage_ref: &str,
+        expected_artifact_kind: TraceArtifactKind,
+        object_key: &str,
+        expected_ciphertext_sha256: &str,
+    ) -> anyhow::Result<Option<bool>> {
+        self.inner.artifact_present_by_object_key(
+            expected_tenant_storage_ref,
+            expected_artifact_kind,
+            object_key,
+            expected_ciphertext_sha256,
+        )
+    }
+}
+
+/// Finding 4, the last case of df1550dd: a Score whose second object write
+/// fails deletes the object it wrote before it. A compatibility Score
+/// publishes its index command and then its neighbour set; with the
+/// neighbour set's publish failing, the index command it had published
+/// goes at once (best effort, ahead of the attempt sweep, which owns the
+/// attempt's `staged` rows since PR 4). The failed write is the uncharged
+/// outage, and the retry publishes both objects and commits.
+#[tokio::test]
+async fn a_failed_score_write_deletes_the_object_written_before_it() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(FailingWriteStore {
+        inner: artifact_store(&dir),
+        failing_object_id_prefix: "pipeline-score-neighbors-",
+        failing: AtomicBool::new(true),
+        failing_object_keys: std::sync::Mutex::new(BTreeSet::new()),
+    });
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        store.clone(),
+        near_duplicate_config(),
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let tenant = format!("score-write-fails-{}", uuid::Uuid::new_v4());
+    let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(
+        &service,
+        &tenant,
+        "principal_sha256:score-write-fails",
+        &env,
+    )
+    .await;
+    let reviewed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review commits");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the source envelope and the approved object"
+    );
+
+    let failed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the failed Score attempt is recorded");
+    assert_eq!(
+        (
+            failed.state,
+            failed.last_error_label.as_deref(),
+            failed.next_phase,
+            failed.index_command_ref.as_deref(),
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+            Some(Phase::Score),
+            None,
+        )
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the index command written before the failed write is deleted"
+    );
+
+    store.failing.store(false, Ordering::SeqCst);
+    force_due(&backend, &tenant, run_id).await;
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the retry commits Score");
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        scored.index_command_ref.is_some() && scored.score_neighbor_ref.is_some(),
+        "the Score wrote both objects, so the failed attempt had written its first"
+    );
+    assert_eq!(
+        count_files_under(dir.path()),
+        4,
         "only the retry's own Score objects"
     );
 }
@@ -25592,6 +26541,466 @@ async fn a_claim_that_waited_on_an_assessments_run_lock_is_refused() {
     );
 }
 
+/// The `(reason_code, state)` of `run_id`'s index invalidation, or `None`
+/// when none is queued.
+async fn index_invalidation_of(
+    backend: &PgBackend,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> Option<(String, String)> {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_opt(
+            "SELECT reason_code, state FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    row.map(|row| (row.get(0), row.get(1)))
+}
+
+/// poldsam P-2: `main` marks a submission revoked or withdrawn in one
+/// transaction and runs the pipeline's follow-up in another, so a process
+/// that stops between the two loses the follow-up. The worker's sweep
+/// (`recover_lost_inoperable_follow_ups`) finds such a submission (a run
+/// with index work and no queued invalidation), at most its limit per call,
+/// and runs the follow-up under the matching reason; a recovered submission
+/// is not found again, and one whose follow-up ran is never found.
+#[tokio::test]
+async fn the_sweep_recovers_a_revocation_or_withdrawal_whose_follow_up_was_lost() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up";
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.state, PipelineRunState::Complete);
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    let (revoked, withdrawn, followed_up) = (&runs[0], &runs[1], &runs[2]);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in [revoked, followed_up] {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO trace_withdrawals (
+            tenant_id, submission_id, withdrawn_at, prior_status, distribution_reach
+         ) VALUES ($1, $2, NOW(), 'accepted', 'not_distributed')",
+        &[&tenant, &withdrawn.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(owner);
+    // The third revocation's follow-up ran; the other two were lost.
+    PgPipelineStore::new(backend.clone())
+        .follow_up_revocation(&tenant, followed_up.submission_id, principal)
+        .await
+        .unwrap();
+    for run in [revoked, withdrawn] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            None
+        );
+    }
+
+    let mut recovered = 0;
+    for expected in [1, 1, 0] {
+        let swept = service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 1)
+            .await
+            .unwrap();
+        assert_eq!(swept, expected, "one per call, then none");
+        recovered += swept;
+    }
+    assert_eq!(recovered, 2);
+    for (run, reason) in [(revoked, "revoked"), (withdrawn, "withdrawn")] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            Some((reason.to_string(), "pending".to_string())),
+            "{reason}"
+        );
+    }
+    assert_eq!(
+        service
+            .process_index_invalidations(&tenant, 32)
+            .await
+            .unwrap(),
+        3,
+        "the recovered invalidations are processed as any other"
+    );
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        0,
+        "a processed invalidation is not recovered again"
+    );
+}
+
+/// Multi-lens review C1: a run Settle excludes from the index has no index
+/// work, and a delivered export snapshot can still hold it. The sweep finds
+/// its revoked submission through the snapshot item that is not yet
+/// invalidated, and the follow-up invalidates the snapshot and the item; a
+/// recovered submission is not found again.
+#[tokio::test]
+async fn the_sweep_recovers_a_lost_follow_up_of_an_excluded_run_in_a_delivered_export() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-export-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        "principal_sha256:lost-follow-up-export",
+        &env,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+    assert_eq!(run.index_membership, "excluded");
+    assert_eq!(run.index_write_state, "none");
+    let snapshot_id = insert_export_snapshot(&run, true).await;
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        1,
+        "the delivered snapshot item names the submission"
+    );
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let snapshot = tx
+        .query_one(
+            "SELECT state, invalidated_at IS NOT NULL FROM pipeline_export_snapshots
+              WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(snapshot.get::<_, String>(0), "invalidated");
+    assert!(snapshot.get::<_, bool>(1));
+    let item = tx
+        .query_one(
+            "SELECT invalidated_at IS NOT NULL, invalidation_reason
+               FROM pipeline_export_snapshot_items
+              WHERE tenant_id = $1 AND snapshot_id = $2",
+            &[&tenant, &snapshot_id],
+        )
+        .await
+        .unwrap();
+    assert!(item.get::<_, bool>(0));
+    assert_eq!(item.get::<_, Option<String>>(1).as_deref(), Some("revoked"));
+    tx.commit().await.unwrap();
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        0,
+        "an invalidated item is not recovered again"
+    );
+}
+
+/// A test-only trigger that refuses each index invalidation of one
+/// submission, so that submission's follow-up fails. Created and dropped as
+/// the owner; scoped to one tenant and submission, so tests running beside
+/// it are untouched.
+struct InvalidationFault {
+    name: String,
+}
+
+impl InvalidationFault {
+    async fn install(tenant_id: &str, submission_id: uuid::Uuid) -> Self {
+        let name = format!("c2_fault_{}", uuid::Uuid::new_v4().simple());
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected invalidation failure';
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON pipeline_index_invalidations
+                     FOR EACH ROW
+                     WHEN (
+                         NEW.tenant_id = '{tenant_id}'
+                         AND NEW.submission_id = '{submission_id}'
+                     )
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the invalidation fault");
+        Self { name }
+    }
+
+    async fn remove(self) {
+        let name = self.name;
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "DROP TRIGGER {name} ON pipeline_index_invalidations;
+                 DROP FUNCTION {name}();"
+            ))
+            .await
+            .expect("remove the invalidation fault");
+    }
+}
+
+/// Multi-lens review C2: one follow-up that fails does not stop the sweep.
+/// The later submissions of the pass are recovered and their invalidation
+/// step is woken; the failed one is found again on the next pass.
+#[tokio::test]
+async fn the_sweep_goes_on_after_one_failed_follow_up() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-fault-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up-fault";
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    // The sweep takes the submissions in id order: the first one fails.
+    runs.sort_by_key(|run| run.submission_id);
+    let (failing, later) = (&runs[0], &runs[1]);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in [failing, later] {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(owner);
+    // Nothing woke the invalidation step before the sweep.
+    let _ = service.take_follow_ups(&tenant);
+
+    let fault = InvalidationFault::install(&tenant, failing.submission_id).await;
+    let swept = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+        .await;
+    fault.remove().await;
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, later.run_id).await,
+        Some(("revoked".to_string(), "pending".to_string())),
+        "the follow-up after the failed one ran in the same pass"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, failing.run_id).await,
+        None
+    );
+    assert_eq!(swept.expect("one follow-up succeeded"), 1);
+    assert!(
+        service.take_follow_ups(&tenant).index_invalidations,
+        "the recovered follow-up wakes the invalidation step"
+    );
+
+    assert_eq!(
+        service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .unwrap(),
+        1,
+        "the failed follow-up is recovered on the next pass"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, failing.run_id).await,
+        Some(("revoked".to_string(), "pending".to_string()))
+    );
+}
+
+/// Merge review M4: a listed tenant with no pipeline run has nothing to
+/// recover, and since PR 5 each replica lists a tenant before its first
+/// activation. For such a tenant the recovery returns 0 from one read of
+/// `pipeline_runs` and does not read the tenant's revoked and withdrawn
+/// submissions. The store here connects as a login that may read
+/// `pipeline_runs` and none of `main`'s tables, so a read of
+/// `trace_submissions` or `trace_withdrawals` is `permission denied`: the
+/// same store gets that for a tenant that has a run.
+#[tokio::test]
+async fn the_lost_follow_up_recovery_reads_no_submission_of_a_tenant_with_no_run() {
+    const RUNS_READER_LOGIN: &str = "trace_pipeline_runs_reader_test";
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .expect("runtime_backend read the same variable");
+    let mut owner = owner_client().await;
+    owner
+        .batch_execute(&format!(
+            "DO $$ BEGIN
+                 IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{RUNS_READER_LOGIN}') THEN
+                     CREATE ROLE {RUNS_READER_LOGIN} LOGIN;
+                 END IF;
+             END $$;
+             ALTER ROLE {RUNS_READER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
+             GRANT SELECT ON pipeline_runs TO {RUNS_READER_LOGIN};"
+        ))
+        .await
+        .expect("provision the login that reads only pipeline_runs");
+    let mut reader_url = reqwest::Url::parse(&url).expect("parse test URL");
+    reader_url
+        .set_username(RUNS_READER_LOGIN)
+        .expect("set the reader user");
+    let reader = PgPipelineStore::new(Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(reader_url.as_str(), 1))
+            .await
+            .expect("connect as the reader login"),
+    ));
+
+    // A legacy tenant: one revoked submission, no pipeline run.
+    let tenant = format!("recovery-no-run-{}", uuid::Uuid::new_v4());
+    let legacy = insert_submission_without_a_run(&owner_backend().await, &tenant).await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    assert_eq!(
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &legacy],
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    tx.commit().await.unwrap();
+    assert_eq!(
+        reader
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 32)
+            .await
+            .expect("no table of main's is read for a tenant with no pipeline run"),
+        0
+    );
+
+    // The same store reads the submissions of a tenant that has a run.
+    let with_run = format!("recovery-with-run-{}", uuid::Uuid::new_v4());
+    seed_run(&backend, &with_run, uuid::Uuid::new_v4()).await;
+    let refused = reader
+        .recover_lost_inoperable_follow_ups(&with_run, "pipeline_worker", 32)
+        .await
+        .expect_err("this login may not read the revoked and withdrawn submissions");
+    assert!(
+        matches!(
+            &refused,
+            DatabaseError::Postgres(error) if error.code()
+                == Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+        ),
+        "{refused:?}"
+    );
+}
+
+/// Zaki review 3, Z3-L4: one release of parked runs of inoperable
+/// submissions takes at most its limit, in run id order; the next takes the
+/// rest.
+#[tokio::test]
+async fn releasing_parked_runs_is_bounded_per_call() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("review-parked-bounded-{}", uuid::Uuid::new_v4());
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    for _ in 0..3 {
+        let parked = quarantined_and_parked(&service, &tenant).await;
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &parked.submission_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    drop(client);
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        service
+            .release_inoperable_parked_runs(&tenant, 2)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 /// Finding 9: a run parked in `awaiting_review` whose submission stops being
 /// operable while nobody claims or assesses it -- it expires, `main`'s
 /// retention purges it, `main` revokes it, or a withdrawal lands without
@@ -25647,7 +27056,7 @@ async fn the_worker_ends_a_parked_run_whose_submission_stopped_being_operable() 
 
         assert_eq!(
             service
-                .release_inoperable_parked_runs(&tenant)
+                .release_inoperable_parked_runs(&tenant, 32)
                 .await
                 .unwrap(),
             1,
@@ -25724,9 +27133,12 @@ async fn a_held_principals_compatibility_run_completes_with_its_ledger_row() {
     assert_eq!(leg.operation_state, "complete", "{leg:?}");
     assert!(leg.credit_event_id.is_some(), "{leg:?}");
     assert_eq!(
-        count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
-        1,
-        "the NoveltyUtility ledger row is written despite the hold"
+        (
+            count_credit_ledger_rows_for_run(&backend, &tenant, run.run_id).await,
+            count_novelty_utility_rows_for_run(&backend, &tenant, run.run_id).await,
+        ),
+        (1, 1),
+        "the NoveltyUtility ledger row, and no other, is written despite the hold"
     );
     let snapshot = create_snapshot(
         &PipelineProductStore::new(backend.clone()),
@@ -26193,9 +27605,10 @@ async fn startup_qualifies_every_bundle_a_tenant_may_run() {
 
 /// Finding 16, first bullet: the payout pays only a leg Score seeded for
 /// the batches Settle writes now -- a batch line under the account's
-/// settlement key, carrying the account's hold (`payout_eligible`). A
-/// `pending` leg without that marker (one the earlier V94 code seeded) is
-/// never paid, by the pass or by a direct `process_payout`.
+/// settlement key, carrying the account's hold (`payout_eligible`). A leg
+/// without that marker (one the earlier V94 code seeded, whose payout V109
+/// marks `disabled`) is never paid, by the pass or by a direct
+/// `process_payout`.
 #[tokio::test]
 async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
     let Some(backend) = runtime_backend(4).await else {
@@ -26217,10 +27630,15 @@ async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
     let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(leg.payout_state, "pending");
     assert!(leg.payout_eligible, "a leg this code seeds is marked");
+    // The leg as V109 leaves one the V94-era code seeded: unmarked, and its
+    // payout `disabled` rather than `pending` for good (Zaki review 3, Z3-M3;
+    // `v109_disables_the_payout_of_pending_legs_the_v94_code_seeded` runs
+    // the migration itself).
     let mut owner = owner_client().await;
     let tx = owner_tenant_tx(&mut owner, &tenant).await;
     tx.execute(
-        "UPDATE pipeline_run_settlements SET payout_eligible = FALSE
+        "UPDATE pipeline_run_settlements
+            SET payout_eligible = FALSE, payout_state = 'disabled'
           WHERE tenant_id = $1 AND run_id = $2",
         &[&tenant, &run.run_id],
     )
@@ -26235,6 +27653,13 @@ async fn a_pending_leg_seeded_before_the_keyed_batches_is_never_paid() {
         .expect("a direct payout of an unmarked leg changes nothing");
     assert!(near_outbox_rows(&backend, &tenant).await.is_empty());
     assert!(near.requests().is_empty());
+    assert_eq!(
+        trace_credit_settlement(&service, &tenant, run.run_id)
+            .await
+            .payout_state,
+        "disabled",
+        "the leg reads as a payout nothing will make"
+    );
 }
 
 /// Finding 16, second bullet (and addendum C-16): a Trace Credit leg that
@@ -27001,6 +28426,452 @@ async fn a_score_that_finds_the_tenant_lock_held_is_released_uncharged() {
     assert_eq!(scored.next_phase, Some(Phase::Settle));
 }
 
+/// Zaki review 3, Z3-L3: the pipeline's follow-up of `main`'s revocation
+/// records the tombstone, and invalidates the export items, under the
+/// caller's reason (`revoked`), not a fixed `withdrawn`.
+#[tokio::test]
+async fn a_revocation_follow_up_tombstones_under_its_own_reason() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("revocation-tombstone-{}", uuid::Uuid::new_v4());
+    let (run, _) = complete_indexed_run(&service, &tenant).await;
+    assert!(
+        service
+            .store()
+            .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+            .await
+            .unwrap(),
+        "the submission has a pipeline run"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let reasons: Vec<String> = tx
+        .query(
+            "SELECT reason FROM trace_tombstones WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(reasons, vec!["revoked".to_string()]);
+}
+
+/// Zaki review 3, Z3-L1: a compatibility Score reads the index commands of
+/// the tenant's runs waiting for Settle, and one it cannot read fails the
+/// Score closed (`index_unavailable`, uncharged): leaving it out could credit
+/// a duplicate twice. The read never selects a run whose command was
+/// removed on purpose -- its submission withdrawn, its revision's
+/// invalidation queued, or the run failed for good -- so deleting those
+/// commands' objects does not stop a later Score; deleting the command of a
+/// run still waiting for Settle does.
+#[tokio::test]
+async fn a_compatibility_score_reads_only_commands_still_to_apply() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // Every trace novel and every chunk inserted, so each run stores a
+    // command.
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.embed_insert_novelty_micros = 0;
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        config,
+        None,
+        allow_all_authority(),
+        issuing_checks(),
+        IsolatedPipelineIndex::new(),
+    )
+    .await;
+    let runs = PgPipelineStore::new(backend.clone());
+    let tenant = format!("compat-unapplied-guard-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let scored = || async {
+        let run_id = receive_envelope(
+            &service,
+            &tenant,
+            RECEIPT_PRINCIPAL,
+            &model_training_envelope(uuid::Uuid::new_v4()).await,
+        )
+        .await;
+        for phase in ["Review", "Score"] {
+            service
+                .process_run(&tenant, run_id)
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{phase} runs"));
+        }
+        let run = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
+        assert_eq!(run.next_phase, Some(Phase::Settle));
+        assert!(
+            run.index_command_ref.is_some(),
+            "the Score stored a command"
+        );
+        run
+    };
+    let delete_command = |run: &PipelineRunRecord| {
+        let (object_key, _) = run
+            .index_command_ref
+            .as_deref()
+            .unwrap()
+            .rsplit_once('#')
+            .unwrap();
+        std::fs::remove_file(artifact_file_path(
+            dir.path(),
+            tenant_ref.as_str(),
+            object_key,
+        ))
+        .unwrap();
+    };
+
+    let withdrawn = scored().await;
+    withdraw(&service, &tenant, withdrawn.submission_id).await;
+    let invalidated = scored().await;
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    PgPipelineStore::enqueue_index_invalidation_on_tx(&tx, &invalidated, "run_failed", None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let failed = scored().await;
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET state = 'failed', last_error_label = 'attempts_exhausted'
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &failed.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    for run in [&withdrawn, &invalidated, &failed] {
+        delete_command(run);
+    }
+    scored().await;
+
+    let waiting = runs
+        .get_run(&tenant, scored().await.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    delete_command(&waiting);
+    let next = receive_envelope(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    service.process_run(&tenant, next).await.unwrap();
+    service.process_run(&tenant, next).await.unwrap();
+    let blocked = runs.get_run(&tenant, next).await.unwrap().unwrap();
+    assert_eq!(
+        (blocked.state, blocked.last_error_label.as_deref()),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_INDEX_UNAVAILABLE_LABEL)
+        ),
+        "an unreadable command still to apply fails the Score closed, uncharged"
+    );
+}
+
+/// The reference scorer, counting its own calls, each after `delay`.
+struct DelayedCountingScorer {
+    inner: ReferencePerplexityScorer,
+    calls: AtomicUsize,
+    delay: std::time::Duration,
+}
+
+impl trace_commons_gate_api::PerplexityScorer for DelayedCountingScorer {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<trace_commons_gate_api::PerplexityResult> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        trace_commons_gate_api::PerplexityScorer::score(&self.inner, plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<trace_commons_gate_api::ChunkPerplexity> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        trace_commons_gate_api::PerplexityScorer::score_chunk(&self.inner, chunk)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedPerplexityScorer for DelayedCountingScorer {
+    fn dependency_identity(&self) -> &str {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::dependency_identity(&self.inner)
+    }
+    fn content_descriptor(&self) -> Vec<u8> {
+        trace_commons_gate_api::IdentifiedPerplexityScorer::content_descriptor(&self.inner)
+    }
+}
+
+/// A compatibility service over `scorer` with `lease_config`.
+fn counting_compatibility_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    scorer: Arc<DelayedCountingScorer>,
+    lease_config: PipelineLeaseConfig,
+) -> Arc<PipelineService> {
+    let embedder = Arc::new(ReferenceEmbedder::new());
+    let package = MinimalPolicyBundle::compatibility_package(
+        &near_duplicate_config(),
+        scorer.as_ref(),
+        embedder.as_ref(),
+    )
+    .expect("build compatibility bundle package");
+    let trace_credit = RecordingSettlementAdapter::new(
+        InstrumentId::trace_credit(),
+        "recording_trace_credit_test_only",
+        "none",
+    );
+    let index = IsolatedPipelineIndex::new();
+    Arc::new(
+        PipelineServiceBuilder::new(
+            backend.clone(),
+            artifact_store(dir),
+            package,
+            index.clone(),
+            index,
+            SettlementAdapterRegistry::new(vec![trace_credit as Arc<dyn SettlementAdapter>])
+                .expect("build settlement adapter registry"),
+            uncapped_caps(&[InstrumentId::trace_credit().as_str()]),
+        )
+        .with_scorer(scorer)
+        .with_embedder(embedder)
+        .with_authority(allow_all_authority())
+        .with_privacy(default_privacy_boundary())
+        .with_unqualified_routing(true)
+        .with_novelty_utility_checks(issuing_checks())
+        .with_lease_config(lease_config)
+        .build()
+        .expect("build pipeline service"),
+    )
+}
+
+/// Multi-lens review L2-5 (with the PR 4 review): a Score whose tenant lock
+/// another Score holds past the Score's one-second lease never calls its
+/// scorer (counted by the scorer itself: `score_evaluations` is counted
+/// before the lock).
+#[tokio::test]
+async fn a_score_behind_a_held_tenant_lock_never_calls_its_scorer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(DelayedCountingScorer {
+        inner: ReferencePerplexityScorer::new(),
+        calls: AtomicUsize::new(0),
+        delay: std::time::Duration::ZERO,
+    });
+    let service = counting_compatibility_service(
+        &backend,
+        &dir,
+        scorer.clone(),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+            chrono::Duration::seconds(300),
+        )
+        .unwrap(),
+    );
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &first).await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let holder = backend.trace_pool_for_test().get().await.unwrap();
+    holder
+        .execute(
+            "SELECT pg_advisory_lock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    let held = service.process_run(&tenant, run_id).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+    holder
+        .execute(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 1))",
+            &[&format!("pipeline-compatibility-score:{tenant}")],
+        )
+        .await
+        .unwrap();
+    assert!(held.is_some(), "the Score was claimed");
+    assert_eq!(
+        scorer.calls.load(Ordering::SeqCst),
+        0,
+        "the scorer was never called"
+    );
+}
+
+/// Multi-lens review L2-5: the Score commit's stamps (`phase_started_at`,
+/// `next_attempt_at`) use the database clock at the commit, not the start
+/// of the Score's transaction, which a compatibility Score opens before its
+/// scorer runs: after a slow scorer, Settle's phase starts when Score
+/// committed.
+#[tokio::test]
+async fn a_slow_score_commit_stamps_the_commit_time() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let scorer = Arc::new(DelayedCountingScorer {
+        inner: ReferencePerplexityScorer::new(),
+        calls: AtomicUsize::new(0),
+        delay: std::time::Duration::from_millis(1_200),
+    });
+    let service = counting_compatibility_service(
+        &backend,
+        &dir,
+        scorer.clone(),
+        PipelineLeaseConfig::default(),
+    );
+    let (tenant, first, _) = identical_receipts().await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &first).await;
+    service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    let before = chrono::Utc::now();
+    let scored = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Score runs");
+    assert!(scorer.calls.load(Ordering::SeqCst) > 0);
+    assert_eq!(scored.next_phase, Some(Phase::Settle));
+    assert!(
+        scored.phase_started_at >= before + chrono::Duration::milliseconds(1_000),
+        "Settle's phase starts at the Score commit, after the slow scorer: {} vs {before}",
+        scored.phase_started_at
+    );
+}
+
+/// A test-only trigger that delays the Score outcome insert of one tenant,
+/// so a Score commit runs past a short lease after its lease check. The
+/// commit holds the run row from that check on, so the lease renewal cannot
+/// extend the lease meanwhile. Created and dropped as the owner; scoped to
+/// one tenant, so tests running beside it are untouched.
+struct ScoreOutcomeDelay {
+    name: String,
+}
+
+impl ScoreOutcomeDelay {
+    async fn install(tenant_id: &str, seconds: f64) -> Self {
+        let name = format!("c12_delay_{}", uuid::Uuid::new_v4().simple());
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     PERFORM pg_sleep({seconds});
+                     RETURN NEW;
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON phase_outcomes
+                     FOR EACH ROW
+                     WHEN (NEW.tenant_id = '{tenant_id}' AND NEW.phase = 'score')
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the Score outcome delay");
+        Self { name }
+    }
+
+    /// `DROP TRIGGER` takes a weak table lock and then ACCESS EXCLUSIVE, and
+    /// the control-health test drops triggers of this table too
+    /// (`rewrite_stored_bundle_package` says how two such drops deadlock),
+    /// so this takes ACCESS EXCLUSIVE first.
+    async fn remove(self) {
+        let name = self.name;
+        owner_client()
+            .await
+            .batch_execute(&format!(
+                "BEGIN;
+                 LOCK TABLE phase_outcomes IN ACCESS EXCLUSIVE MODE;
+                 DROP TRIGGER {name} ON phase_outcomes;
+                 DROP FUNCTION {name}();
+                 COMMIT;"
+            ))
+            .await
+            .expect("remove the Score outcome delay");
+    }
+}
+
+/// Multi-lens review C12: a Score commit whose lease ends by the database
+/// clock after its lease check and before its run update is refused as a
+/// stale lease, as the Settle selection is, so the attempt's objects are
+/// deleted at once and not left for the attempt sweep. Here the outcome
+/// insert, between the two, takes longer than the one-second lease.
+#[tokio::test]
+async fn a_score_commit_whose_lease_ends_before_its_run_update_deletes_its_objects() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = score_lease_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+            chrono::Duration::seconds(300),
+        )
+        .unwrap(),
+        Arc::new(ReferenceEmbedder::new()),
+    )
+    .await;
+    let tenant = format!("score-lease-at-update-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let run_id = receive_envelope(&service, &tenant, RECEIPT_PRINCIPAL, &env).await;
+    let reviewed = service
+        .process_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "before Score, the source and the approved revision are stored"
+    );
+
+    let delay = ScoreOutcomeDelay::install(&tenant, 1.5).await;
+    let attempt = service.process_run(&tenant, run_id).await;
+    delay.remove().await;
+    attempt.expect("a stale lease is recorded, not raised");
+    let expired = service
+        .store()
+        .get_run(&tenant, run_id)
+        .await
+        .unwrap()
+        .expect("the run");
+
+    assert_eq!(expired.next_phase, Some(Phase::Score), "nothing committed");
+    assert_eq!(
+        count_files_under(dir.path()),
+        2,
+        "the object the stale Score attempt wrote is deleted at once"
+    );
+}
+
 /// Finding 12 on a pool of one: a compatibility Score reads its approved
 /// bytes before it opens the transaction that holds the tenant's Score
 /// lock, reads the unapplied index commands and commits on that same
@@ -27394,6 +29265,283 @@ async fn an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase() {
     let run = runs.get_run(&tenant, run_id).await.unwrap().unwrap();
     assert_eq!(run.state, PipelineRunState::Complete);
     assert_eq!(count_novelty_utility_rows(&backend, &tenant).await, 1);
+}
+
+/// Multi-lens review C5 (owner decision): a charged
+/// `artifact_integrity_failed` attempt is retried one hour later, not after
+/// the 50 ms backoff of the other charged labels. A store configuration
+/// fault looks like an integrity failure, and the attempt budget then covers
+/// hours in which an operator can correct it.
+fn assert_integrity_retry_waits_an_hour(run: &PipelineRunRecord) {
+    let wait = run.next_attempt_at - chrono::Utc::now();
+    assert!(
+        wait >= chrono::Duration::minutes(59) && wait <= chrono::Duration::minutes(61),
+        "the next attempt is one hour later, not {wait}"
+    );
+}
+
+/// Zaki's approval of #1143, ZA-2: a store read that finds the object
+/// missing is an integrity failure, not an outage. It is the charged
+/// `artifact_integrity_failed`, so Review's attempt budget ends the run with
+/// it, instead of an uncharged suspension retried hourly for good. Its
+/// attempts are one hour apart (multi-lens review C5), and the run fails
+/// only after the last one. (A transport failure stays uncharged:
+/// `an_artifact_store_outage_is_an_uncharged_suspension_in_every_phase`.)
+#[tokio::test]
+async fn a_missing_source_object_is_charged_and_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("integrity-missing-source-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let object_key: String = tx
+        .query_one(
+            "SELECT object_key FROM trace_object_refs
+              WHERE tenant_id = $1 AND object_ref_id = $2",
+            &[&tenant, &created.source_object_ref_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        pipeline_tenant_storage_ref(&tenant).as_str(),
+        &object_key,
+    ))
+    .unwrap();
+
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+            1
+        ),
+        "a missing object is charged"
+    );
+    assert_integrity_retry_waits_an_hour(&first);
+    let mut last = first;
+    for attempt in 2..=last.max_attempts {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs again");
+        if attempt < last.max_attempts {
+            assert_eq!(
+                (
+                    last.state,
+                    last.last_error_label.as_deref(),
+                    last.attempt_count
+                ),
+                (
+                    PipelineRunState::Retry,
+                    Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+                    attempt
+                ),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+}
+
+/// ZA-2 follow-up: an in-memory Google Cloud Storage client that records
+/// each key written, and whose fetches fail with an untyped error (an
+/// outage, as a 503 or a refused connection is) while `fetches_down` is set.
+#[derive(Default)]
+struct ProbeGcsClient {
+    inner: InMemoryGcsObjectClient,
+    keys: std::sync::Mutex<Vec<String>>,
+    fetches_down: AtomicBool,
+}
+
+impl GcsObjectClient for ProbeGcsClient {
+    fn put_object(
+        &self,
+        key: &str,
+        body: bytes::Bytes,
+        metadata: BTreeMap<String, String>,
+    ) -> anyhow::Result<()> {
+        self.keys.lock().unwrap().push(key.to_string());
+        self.inner.put_object(key, body, metadata)
+    }
+
+    fn get_object(&self, key: &str) -> anyhow::Result<GcsObjectFetch> {
+        anyhow::ensure!(
+            !self.fetches_down.load(Ordering::SeqCst),
+            "GcsGetFailed: 503 backend unavailable"
+        );
+        self.inner.get_object(key)
+    }
+
+    fn delete_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.delete_object(key)
+    }
+
+    fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.restore_deleted_object(key)
+    }
+}
+
+/// Zaki's approval of #1143, ZA-2 follow-up: on the Google Cloud Storage
+/// store, a fetch the bucket answers with "not found" is an integrity
+/// failure, charged as `artifact_integrity_failed`, so Review's attempt
+/// budget ends the run, with its attempts one hour apart; any other fetch
+/// failure stays the uncharged `artifact_store_unavailable`.
+#[tokio::test]
+async fn a_missing_gcs_object_is_charged_and_any_other_gcs_fetch_failure_is_not() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let master_key = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let crypto = SecretsCrypto::new(SecretString::from(master_key.clone())).unwrap();
+    let kek = LocalMasterKeyWrapper::new(
+        SecretsCrypto::new(SecretString::from(master_key)).unwrap(),
+        "pipeline-runtime-gcs-test",
+    );
+    let client = Arc::new(ProbeGcsClient::default());
+    let store: Arc<dyn TraceArtifactStore> = Arc::new(ServiceOwnedTraceArtifactStore::new(
+        TraceArtifactProviderConfig::service_owned_remote("pipeline-runtime-gcs").unwrap(),
+        crypto,
+        kek,
+        GcsRemoteTraceArtifactProvider::new(
+            Arc::clone(&client),
+            "pipeline-runtime-gcs-bucket",
+            "pipeline-runtime-gcs",
+        ),
+    ));
+    let (service, _, _) = test_service(backend.clone(), store, minimal_config(true), None).await;
+    let tenant = format!("integrity-missing-gcs-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("receipt creates a run")
+    };
+    let written = client.keys.lock().unwrap().clone();
+    assert!(!written.is_empty(), "the receipt wrote its source object");
+
+    client.fetches_down.store(true, Ordering::SeqCst);
+    let outage = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        (
+            outage.state,
+            outage.last_error_label.as_deref(),
+            outage.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_STORE_UNAVAILABLE_LABEL),
+            0
+        ),
+        "a fetch that fails for another reason is uncharged"
+    );
+    client.fetches_down.store(false, Ordering::SeqCst);
+
+    for object in &written {
+        assert!(client.inner.delete_object(object).unwrap());
+    }
+    force_due(&backend, &tenant, created.run_id).await;
+    let first = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs again");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+            1
+        ),
+        "a missing object is charged"
+    );
+    assert_integrity_retry_waits_an_hour(&first);
+    let mut last = first;
+    for attempt in 2..=last.max_attempts {
+        force_due(&backend, &tenant, created.run_id).await;
+        last = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs again");
+        if attempt < last.max_attempts {
+            assert_eq!(
+                (
+                    last.state,
+                    last.last_error_label.as_deref(),
+                    last.attempt_count
+                ),
+                (
+                    PipelineRunState::Retry,
+                    Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+                    attempt
+                ),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
 }
 
 /// `sha256:` plus lowercase hex, matching

@@ -1693,6 +1693,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_attempt_artifacts",
         include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
+    // V109: the versioned pipeline's follow-ups after #1143 -- the legacy
+    // V94 payouts, and the schema checks and indexes V105 and V106 left out.
+    (
+        109,
+        "versioned_pipeline_followups",
+        include_str!("../../../../migrations/V109__versioned_pipeline_followups.sql"),
+    ),
     // V110 (PR 5) adds each tenant's committed routing record, the immutable
     // activation event history, and the permanent per-submission receipt
     // owner, which the upload route reads before it chooses the legacy or the

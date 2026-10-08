@@ -62,15 +62,15 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
-    PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceInstrumentStatusUpdate,
-    TracePipelineStatusUpdate, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ConsentMetadata, ConsentScope, DecimalAtomicUnits, EmbeddingAnalysisMetadata, InstrumentAmount,
+    PiiClassifyPolicy, PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels,
+    ResidualPiiRisk, ResidualRiskCondition, SourceSessionIdentity,
+    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
+    TraceInstrumentStatusUpdate, TracePipelineStatusUpdate, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -14545,6 +14545,11 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
 /// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
 const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
 
+/// The 409 label of a `main` route that refuses a submission a pipeline run
+/// owns: the gate evaluate route (Zaki review 1, M-f), and the legacy review
+/// decision and lease routes (Zaki review 3, Z3-L8).
+const PIPELINE_RUN_OWNS_SUBMISSION: &str = "pipeline_run_owns_submission";
+
 /// Zaki review 1, round 2, N-3: an upload of a submission id that a
 /// pipeline run owns never reaches `main`'s legacy upsert, whatever path it
 /// took (with or without account admission, static-token tenants
@@ -17269,7 +17274,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
             .iter()
             .map(|instrument| TraceInstrumentStatusUpdate {
                 instrument_id: instrument.instrument_id.clone(),
-                atomic_units: instrument.atomic_units.to_string(),
+                atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(
+                    instrument.atomic_units.get(),
+                )),
                 operation_state: instrument.operation_state.clone(),
                 internal_settlement_state: instrument.internal_settlement_state.clone(),
                 payout_rail: instrument.payout_rail.clone(),
@@ -22961,6 +22968,13 @@ async fn reconcile_source_session_withdrawals(
             // tombstone and before the bytes, and is idempotent, so a retried
             // completion repeats nothing (Zaki review 1, round 2: #1155's
             // consumer sweep).
+            //
+            // poldsam P-3: the order is deliberate. A follow-up that fails
+            // returns here, before `complete_trace_withdrawal`, so `main`'s
+            // content deletion of this version waits for the reconciler's
+            // next pass. The other order would lose the follow-up: the
+            // reconciler retries only versions that are still incomplete,
+            // and a version whose bytes were deleted is complete.
             if let Some(pipeline) = state.pipeline_service.as_ref() {
                 pipeline
                     .follow_up_withdrawal(
@@ -24193,7 +24207,7 @@ async fn review_quarantine_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -24313,7 +24327,7 @@ async fn review_quarantine_rescrub_batch_handler(
         .as_deref()
         .unwrap_or("operator_quarantine_rescrub_batch");
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let requested: Option<BTreeSet<Uuid>> =
@@ -24564,7 +24578,7 @@ async fn review_routing_summary_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let now = Utc::now();
@@ -42895,6 +42909,7 @@ async fn apply_review_decision(
     body: &TraceReviewDecisionRequest,
     reason: &str,
 ) -> ApiResult<TraceSubmissionReceipt> {
+    refuse_a_pipeline_submission(state, &tenant.tenant_id, submission_id).await?;
     let ReviewDecisionRecord {
         mut record,
         mut canonical_summary_hash,
@@ -43130,6 +43145,7 @@ async fn claim_review_lease_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
+    refuse_a_pipeline_submission(state.as_ref(), &tenant.tenant_id, submission_id).await?;
     let ttl_seconds = validate_review_lease_ttl_seconds(body.lease_ttl_seconds)?;
     let now = Utc::now();
     let lease_expires_at = now + Duration::seconds(ttl_seconds);
@@ -43530,28 +43546,37 @@ async fn pipeline_review_claim_handler(
     };
     // Zaki review 1, minor item M-a: the audit row `main`'s review lease
     // claim appends, hash-only and label-only.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_lease(
+    //
+    // poldsam P-7: the claim is committed by now. A failed append must not
+    // answer 500 and keep the lease token from the reviewer who holds the
+    // claim: it is logged hash-only and the committed claim is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            StorageTraceReviewLeaseAuditAction::Claim,
-            Some(claim.lease_expires_at),
-            None,
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewLease {
-            action: StorageTraceReviewLeaseAuditAction::Claim,
-            lease_expires_at: Some(claim.lease_expires_at),
-            review_due_at: None,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_lease(
+                &tenant,
+                submission_id,
+                StorageTraceReviewLeaseAuditAction::Claim,
+                Some(claim.lease_expires_at),
+                None,
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewLease {
+                action: StorageTraceReviewLeaseAuditAction::Claim,
+                lease_expires_at: Some(claim.lease_expires_at),
+                review_due_at: None,
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "claim", &error);
+    }
     Ok(Json(PipelineReviewClaimResponse {
         lease_token: claim.lease_token,
         lease_expires_at: claim.lease_expires_at,
@@ -43591,6 +43616,27 @@ async fn pipeline_run_submission_record(
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
     Ok(Some(record))
+}
+
+/// poldsam P-7: a pipeline review route's audit append failed after its
+/// claim or assessment committed. Hash-only: the tenant's storage
+/// reference, a hash of the run id, the route's label and the error's hash.
+/// An operator finds the decision in `pipeline_review_assessments` (or the
+/// claim in `pipeline_review_claims`); the audit trail has no row for it.
+fn log_pipeline_review_audit_append_failure(
+    tenant_id: &str,
+    run_id: Uuid,
+    route: &'static str,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        error_class = "pipeline_review_audit_append_failed",
+        tenant_storage_ref = %tenant_storage_ref(tenant_id),
+        run_ref_hash = %sha256_prefixed(&run_id.to_string()),
+        route,
+        error_hash = %safe_runtime_error_hash(error),
+        "pipeline review audit append failed; the committed result was answered"
+    );
 }
 
 /// The submission a pipeline run belongs to, for the review routes' audit
@@ -43687,6 +43733,10 @@ async fn pipeline_review_assessment_handler(
             "review decision",
         )?;
     }
+    // The audit row's labels, formed before the commit, so nothing that can
+    // fail without an append stands between the commit and the answer.
+    let review_status = storage_corpus_status(resulting_status);
+    let decision_label = serde_storage_string(&review_status).map_err(internal_error)?;
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -43695,28 +43745,37 @@ async fn pipeline_review_assessment_handler(
     // Zaki review 1, minor item M-a: the audit row `main`'s review decision
     // appends: the reason as a hash, and labels only in the metadata. The
     // status is the one the recommendation leads to once Review runs.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    let review_status = storage_corpus_status(resulting_status);
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_decision(
+    //
+    // poldsam P-7: the assessment is committed by now. A failed append must
+    // not answer 500: a retry would get 409 (the run already has its
+    // assessment) and the reviewer would never see the committed result. It
+    // is logged hash-only and the committed assessment is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            resulting_status,
-            Some(&trace_free_text_audit_reason(&reason_label)),
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewDecision {
-            decision: serde_storage_string(&review_status).map_err(internal_error)?,
-            resulting_status: review_status,
-            reason_code: Some(reason_label),
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_decision(
+                &tenant,
+                submission_id,
+                resulting_status,
+                Some(&trace_free_text_audit_reason(&reason_label)),
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewDecision {
+                decision: decision_label,
+                resulting_status: review_status,
+                reason_code: Some(reason_label.clone()),
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "assessment", &error);
+    }
     Ok(Json(PipelineReviewAssessmentResponse {
         assessment_id: assessment.assessment_id,
     }))
@@ -43751,7 +43810,7 @@ async fn prioritized_available_review_lease_candidates(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Uuid>> {
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state, tenant).await?;
+        read_mains_reviewer_metadata_view(state, tenant).await?;
     let mut records = records
         .into_iter()
         .filter(|record| record.status == TraceCorpusStatus::Quarantined)
@@ -55232,7 +55291,7 @@ async fn active_learning_review_queue_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
+        read_mains_reviewer_metadata_view(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -58777,20 +58836,10 @@ async fn gate_evaluate_worker_handler(
     require_vector_operator(&tenant)?;
     // Zaki review 1, minor item M-f: a submission the versioned pipeline
     // scores and credits is not evaluated here, so this path cannot award it
-    // a second `NoveltyUtility` credit under another idempotency key. Without
-    // a pipeline runtime there are no pipeline runs to find.
-    if let Some(pipeline) = state.pipeline_service.as_ref()
-        && pipeline
-            .store()
-            .submission_has_pipeline_run(&tenant.tenant_id, body.submission_id)
-            .await
-            .map_err(internal_error)?
-    {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "pipeline_run_owns_submission",
-        ));
-    }
+    // a second `NoveltyUtility` credit under another idempotency key. The
+    // check reads the database, so a process with no pipeline runtime
+    // refuses a pipeline submission too.
+    refuse_a_pipeline_submission(state.as_ref(), &tenant.tenant_id, body.submission_id).await?;
 
     let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await
@@ -61813,27 +61862,76 @@ async fn read_reviewer_metadata_view(
     })
 }
 
+/// `view` without the submissions of `tenant` that have a pipeline run
+/// (Zaki review 1, round 2, finding 18, and Zaki review 3, Z3-L8). The
+/// pipeline reviews, exports and pays them itself, and their stored body is
+/// a pipeline artifact `main`'s envelope reads do not decode, so `main`'s
+/// replay export and its legacy review queues and leases leave them out. A
+/// no-op with no pipeline store.
+async fn without_pipeline_submissions(
+    state: &AppState,
+    tenant: &TenantAuth,
+    mut view: TraceCommonsMetadataView,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    if let Some(store) = state.pipeline_store.as_ref() {
+        let pipeline_submission_ids = store
+            .pipeline_submission_ids(&tenant.tenant_id)
+            .await
+            .context("failed to list pipeline submissions")?;
+        view.records
+            .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+        view.derived
+            .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+    }
+    Ok(view)
+}
+
+/// `main`'s reviewer view without the submissions that have a pipeline run
+/// (`without_pipeline_submissions`). Only a view read from the database is
+/// filtered, as in the replay export: the pipeline writes no file record,
+/// so a view read from files holds none of its submissions and needs no
+/// read of the pipeline's tables.
+async fn read_mains_reviewer_metadata_view(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    let view = read_reviewer_metadata_view(state, tenant).await?;
+    if !state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        return Ok(view);
+    }
+    without_pipeline_submissions(state, tenant, view).await
+}
+
+/// Refuses, with `409 pipeline_run_owns_submission`, a `main` route's action
+/// on a submission a pipeline run owns, whose review or decision is the
+/// pipeline's (Zaki review 3, Z3-L8). Nothing to refuse with no pipeline
+/// store.
+async fn refuse_a_pipeline_submission(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> ApiResult<()> {
+    if let Some(store) = state.pipeline_store.as_ref()
+        && store
+            .submission_has_pipeline_run(tenant_id, submission_id)
+            .await
+            .map_err(internal_error)?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            PIPELINE_RUN_OWNS_SUBMISSION,
+        ));
+    }
+    Ok(())
+}
+
 async fn read_replay_export_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
-        // Zaki review 1, round 2, finding 18: a submission with a pipeline
-        // run is exported through pipeline snapshots, and its stored body is
-        // a pipeline artifact `main`'s replay export does not read, so it is
-        // not a replay export source.
-        let mut view = read_reviewer_metadata_view_from_db(state, tenant).await?;
-        if let Some(store) = state.pipeline_store.as_ref() {
-            let pipeline_submission_ids = store
-                .pipeline_submission_ids(&tenant.tenant_id)
-                .await
-                .context("failed to list pipeline submissions for replay export")?;
-            view.records
-                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
-            view.derived
-                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
-        }
-        return Ok(view);
+        let view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+        return without_pipeline_submissions(state, tenant, view).await;
     }
 
     Ok(TraceCommonsMetadataView {
