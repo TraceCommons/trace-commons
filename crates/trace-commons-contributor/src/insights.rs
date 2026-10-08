@@ -35,6 +35,7 @@ pub mod turn_series;
 pub mod usage;
 pub mod usage_evidence;
 pub mod week_glance;
+pub mod week_patterns;
 pub mod week_rollup;
 pub mod what_if;
 #[cfg(windows)]

@@ -308,7 +308,7 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
 }
 
 /// Weeks holding a dated record of any saved session, newest first.
-fn dated_weeks(sessions: &[SessionInput], tz: &FixedOffset) -> Vec<NaiveDate> {
+pub(crate) fn dated_weeks(sessions: &[SessionInput], tz: &FixedOffset) -> Vec<NaiveDate> {
     let mut weeks = BTreeSet::new();
     let mut add = |at: &DateTime<Utc>| {
         weeks.insert(local_week_start(at, tz));

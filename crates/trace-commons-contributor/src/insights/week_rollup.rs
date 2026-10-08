@@ -612,6 +612,41 @@ pub fn week_rollup<Tz: TimeZone>(
     }
 }
 
+/// Per session, in input order: for a Claude session the ordinals of the
+/// turns this week counts, which are its turns dated in the week and not
+/// already counted in an earlier snapshot. `None` for any other session, and
+/// for a Claude snapshot excluded as a reimport overlap or with no such turn.
+/// The Patterns figures read tool calls on these turns only, so a reimported
+/// turn's calls are counted once, like its tokens.
+pub fn counted_claude_turns<Tz: TimeZone>(
+    sessions: &[SessionInput],
+    week_start: NaiveDate,
+    tz: &Tz,
+) -> Vec<Option<BTreeSet<u32>>> {
+    let week_start = monday_of(week_start);
+    prepare(sessions)
+        .into_iter()
+        .map(|prepared| {
+            if prepared.reimport_overlap
+                || !matches!(prepared.input.body, SessionBody::Claude { .. })
+            {
+                return None;
+            }
+            let counted: BTreeSet<u32> = prepared
+                .kept_turns
+                .iter()
+                .filter(|turn| {
+                    turn.at
+                        .as_ref()
+                        .is_some_and(|at| local_week_start(at, tz) == week_start)
+                })
+                .map(|turn| turn.ordinal)
+                .collect();
+            (!counted.is_empty()).then_some(counted)
+        })
+        .collect()
+}
+
 /// Whether a week may be compared with another: feed T only, known sessions
 /// at least [`COMPARABLE_COVERAGE`] of all, and at least
 /// [`COMPARABLE_MIN_SESSIONS`] sessions.

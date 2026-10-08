@@ -272,8 +272,17 @@ fn edit_fail_edit(calls: &[ToolCallRecord]) -> PatternFigure {
 }
 
 fn long_context(series: &UsageSeries) -> LongContextFigure {
+    long_context_where(series, |_| true)
+}
+
+/// Long-context input on the turns `counted` admits, each against the turn
+/// before it in the whole series.
+fn long_context_where(series: &UsageSeries, counted: impl Fn(u32) -> bool) -> LongContextFigure {
     let mut figure = LongContextFigure::default();
     for pair in series.turns.windows(2) {
+        if !counted(pair[1].ordinal) {
+            continue;
+        }
         match (pair[0].context(), pair[1].context()) {
             (Some(previous), Some(current)) => {
                 if previous >= LONG_CONTEXT_TOKENS {
@@ -285,6 +294,30 @@ fn long_context(series: &UsageSeries) -> LongContextFigure {
         }
     }
     figure
+}
+
+/// The four figures for the part of a session one week counts: tool calls on
+/// the `counted` turns only, and long-context input on those turns only.
+/// Context shrinks are read from every turn, so a shrink just before the
+/// week still splits a repeated read in it. A pattern that starts before the
+/// counted turns is counted only from the calls it makes on them.
+pub fn session_patterns_on_turns(
+    series: &UsageSeries,
+    counted: &std::collections::BTreeSet<u32>,
+) -> SessionPatterns {
+    let calls = UsageSeries {
+        turns: series.turns.clone(),
+        tool_calls: series
+            .tool_calls
+            .iter()
+            .filter(|call| counted.contains(&call.turn_ordinal))
+            .cloned()
+            .collect(),
+        truncated: series.truncated,
+    };
+    let mut found = session_patterns(&calls);
+    found.long_context = long_context_where(series, |ordinal| counted.contains(&ordinal));
+    found
 }
 
 /// A week's re-read files: merged by keyed digest in first-seen order across
@@ -677,6 +710,45 @@ mod tests {
         let merged = merge_reread_files([&one, &two]);
         let summary: Vec<_> = merged.iter().map(|f| (f.path_key.0[0], f.reads)).collect();
         assert_eq!(summary, vec![(4, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn a_week_counts_tool_calls_on_its_own_turns_only() {
+        let series = UsageSeries {
+            turns: vec![ctx(0, 1_000), ctx(1, 1_000), ctx(2, 1_000)],
+            tool_calls: vec![
+                on_turn(read(1, 8), 0),
+                on_turn(read(1, 8), 1),
+                on_turn(bash(3, Some(true)), 2),
+                on_turn(bash(3, Some(true)), 2),
+            ],
+            truncated: false,
+        };
+        let all: std::collections::BTreeSet<u32> = [0, 1, 2].into();
+        assert_eq!(
+            session_patterns_on_turns(&series, &all),
+            session_patterns(&series)
+        );
+        let later = session_patterns_on_turns(&series, &[1, 2].into());
+        // The first read was on a turn this week does not count.
+        assert_eq!(later.repeated_reads.count, 0);
+        assert_eq!(later.retried_calls.count, 1);
+    }
+
+    #[test]
+    fn a_week_counts_long_context_on_its_own_turns_against_the_turn_before() {
+        let series = UsageSeries {
+            turns: vec![ctx(0, 250_000), ctx(1, 260_000), ctx(2, 270_000)],
+            tool_calls: vec![],
+            truncated: false,
+        };
+        // Turn 1's predecessor is not counted, but its context still sets
+        // whether turn 1 is in the long-context range.
+        let found = session_patterns_on_turns(&series, &[1].into());
+        assert_eq!(found.long_context.turns, 1);
+        assert_eq!(found.long_context.tokens, 260_000);
+        let none = session_patterns_on_turns(&series, &[0].into());
+        assert_eq!(none.long_context, LongContextFigure::default());
     }
 
     #[test]

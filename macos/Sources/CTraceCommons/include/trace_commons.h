@@ -2139,6 +2139,10 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * {card:tokens|cache_share|sessions,week_start?,tz} read saved snapshots by
  * their own recorded dates. tz is the UTC offset in seconds east; a bad one
  * is insights_tz_invalid. Reads create no absent store; no week comparison.
+ * Patterns (feed S): patterns {week_start?,weeks?,tz} returns four cards
+ * with weekly bars (an absent week is null, never 0) and the re-read table as
+ * letters plus extensions; weeks is 1-6, else insights_weeks_invalid.
+ * pattern_sessions {pattern,week_start?,tz} lists one card's sessions.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;

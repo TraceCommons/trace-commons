@@ -37,6 +37,14 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// `tz` is the UTC offset in seconds east, refused as `insights_tz_invalid`
 /// beyond 18 hours. Sessions are dated by their own records, never the import
 /// time; nothing is compared with another week. Reads create no absent store.
+/// Patterns over saved snapshots (feed S): `{"type":"patterns","week_start":
+/// "2026-10-05","weeks":6,"tz":3600}` returns the four cards (token figure,
+/// count, weekly bars where an absent week is `null`, never 0) and the
+/// re-read table as letters and extensions; `weeks` is 1 to 6 (default 6),
+/// refused as `insights_weeks_invalid`. `{"type":"pattern_sessions","pattern":
+/// "repeated_reads|retried_calls|edit_fail_edit|long_context","week_start":
+/// "2026-10-05","tz":3600}` lists the sessions behind one card. Neither
+/// compares weeks under feed S, and neither returns a path or a digest.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -405,6 +413,54 @@ mod tests {
             )
             .unwrap_err(),
             "insights-request-invalid"
+        );
+    }
+
+    #[test]
+    fn patterns_cross_the_abi_typed_and_codex_only_weeks_are_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        let patterns = || serde_json::json!({"type":"patterns","week_start":"2026-09-09","tz":0});
+        let empty = json_call(&store, patterns()).unwrap();
+        assert_eq!(empty["type"], "patterns");
+        assert_eq!(empty["patterns"]["cards"].as_array().unwrap().len(), 4);
+        assert!(!store.exists());
+
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"codex","file":source,"save":true}),
+        )
+        .unwrap();
+        let read = json_call(&store, patterns()).unwrap();
+        let read = &read["patterns"];
+        assert_eq!(read["sessions"], 1);
+        assert_eq!(read["claude_sessions"], 0);
+        assert_eq!(read["claude_only"], true);
+        // Codex records no tool calls: unknown, never zero.
+        for card in read["cards"].as_array().unwrap() {
+            assert!(card["tokens"].is_null(), "{card}");
+            assert_eq!(card["change_unavailable"], "needs_counter_pass");
+        }
+        assert!(!read.to_string().contains("PRIVATE_SESSION_ID"));
+
+        let sessions = json_call(
+            &store,
+            serde_json::json!({"type":"pattern_sessions","pattern":"repeated_reads","week_start":"2026-09-09","tz":0}),
+        )
+        .unwrap();
+        assert_eq!(
+            sessions["pattern_sessions"]["sessions"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"patterns","weeks":9,"tz":0})
+            )
+            .unwrap_err(),
+            "insights_weeks_invalid"
         );
     }
 

@@ -562,6 +562,23 @@ pub enum LocalInsightsOperation {
         week_start: Option<chrono::NaiveDate>,
         tz: i32,
     },
+    /// Feed S "Where tokens went": the four Patterns cards, each with up to
+    /// `weeks` weekly bars (default and most: six), and the re-read table.
+    /// A read: an absent store is not created.
+    Patterns {
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        #[serde(default)]
+        weeks: Option<usize>,
+        tz: i32,
+    },
+    /// The saved sessions behind one Patterns card in one week.
+    PatternSessions {
+        pattern: super::patterns::PatternKind,
+        #[serde(default)]
+        week_start: Option<chrono::NaiveDate>,
+        tz: i32,
+    },
 }
 
 /// Fixed labels for a malformed analytics read.
@@ -569,12 +586,15 @@ pub enum LocalInsightsOperation {
 pub enum AnalyticsRequestError {
     /// `tz` is not a UTC offset within 18 hours.
     TzInvalid,
+    /// `weeks` is zero or more than the bars a card draws.
+    WeeksInvalid,
 }
 
 impl std::fmt::Display for AnalyticsRequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::TzInvalid => "insights_tz_invalid",
+            Self::WeeksInvalid => "insights_weeks_invalid",
         })
     }
 }
@@ -699,6 +719,12 @@ pub enum LocalInsightsResponse {
     CardInputs {
         inputs: Box<super::week_glance::CardInputs>,
     },
+    Patterns {
+        patterns: Box<super::week_patterns::WeekPatterns>,
+    },
+    PatternSessions {
+        pattern_sessions: Box<super::week_patterns::PatternSessions>,
+    },
 }
 
 /// Resolve only local Insights storage; never resolve enrollment configuration.
@@ -748,6 +774,27 @@ fn saved_week(
         Some(store) => week_glance(&store, week_start, tz),
         None => Ok(compute(&[], week_start, tz)),
     }
+}
+
+/// The saved snapshots and the request's week and offset, for the Patterns
+/// reads. An absent store is read as empty and is not created.
+fn saved_reports(
+    store_dir: Option<&std::path::Path>,
+    week_start: Option<chrono::NaiveDate>,
+    tz: i32,
+) -> Result<(
+    Vec<super::LocalInsight>,
+    chrono::NaiveDate,
+    chrono::FixedOffset,
+)> {
+    let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+    let week_start =
+        week_start.unwrap_or_else(|| chrono::Utc::now().with_timezone(&tz).date_naive());
+    let reports = match existing_store(store_dir)? {
+        Some(store) => store.list()?,
+        None => Vec::new(),
+    };
+    Ok((reports, week_start, tz))
 }
 
 /// Recompute the store's cached weeks after a snapshot mutation, before the
@@ -1149,6 +1196,37 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 inputs: Box::new(super::week_glance::card_inputs(&glance, card)),
             }
         }
+        LocalInsightsOperation::Patterns {
+            week_start,
+            weeks,
+            tz,
+        } => {
+            use super::analytics_constants::PATTERN_BAR_WEEKS;
+            let weeks = weeks.unwrap_or(PATTERN_BAR_WEEKS);
+            if weeks == 0 || weeks > PATTERN_BAR_WEEKS {
+                return Err(AnalyticsRequestError::WeeksInvalid.into());
+            }
+            let (reports, week_start, tz) =
+                saved_reports(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::Patterns {
+                patterns: Box::new(super::week_patterns::saved_patterns(
+                    &reports, week_start, tz, weeks,
+                )),
+            }
+        }
+        LocalInsightsOperation::PatternSessions {
+            pattern,
+            week_start,
+            tz,
+        } => {
+            let (reports, week_start, tz) =
+                saved_reports(request.store_dir.as_deref(), week_start, tz)?;
+            LocalInsightsResponse::PatternSessions {
+                pattern_sessions: Box::new(super::week_patterns::saved_pattern_sessions(
+                    &reports, pattern, week_start, tz,
+                )),
+            }
+        }
     })
 }
 
@@ -1406,6 +1484,153 @@ mod tests {
         for state in ["known", "partial", "unknown"] {
             assert!(copy.contains_key(&format!("analytics_state_{state}")));
         }
+    }
+
+    #[test]
+    fn pattern_reads_on_an_absent_store_are_typed_unknown_and_create_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("never-created");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": directory, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        let patterns: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "patterns", "week_start": "2026-10-08", "tz": 3600
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(patterns["type"], "patterns");
+        let patterns = &patterns["patterns"];
+        assert_eq!(patterns["feed"], "saved");
+        assert_eq!(patterns["week_start"], "2026-10-05");
+        assert_eq!(patterns["claude_sessions"], 0);
+        assert_eq!(patterns["reread_files"], serde_json::json!([]));
+        let kinds: Vec<&str> = patterns["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|card| card["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "repeated_reads",
+                "retried_calls",
+                "edit_fail_edit",
+                "long_context"
+            ]
+        );
+        for card in patterns["cards"].as_array().unwrap() {
+            // No Claude session: unknown, never zero.
+            assert!(card["tokens"].is_null(), "{card}");
+            assert_eq!(card["change_unavailable"], "needs_counter_pass");
+            assert_eq!(card["weeks"].as_array().unwrap().len(), 6);
+        }
+        let sessions: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "pattern_sessions", "pattern": "retried_calls", "tz": 0
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sessions["type"], "pattern_sessions");
+        assert_eq!(sessions["pattern_sessions"]["pattern"], "retried_calls");
+        assert_eq!(
+            sessions["pattern_sessions"]["sessions"],
+            serde_json::json!([])
+        );
+        assert!(!directory.exists());
+
+        for (bad, error) in [
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "weeks": 7}),
+                "insights_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "weeks": 0}),
+                "insights_weeks_invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 19 * 3600}),
+                "insights_tz_invalid",
+            ),
+            (
+                serde_json::json!({"type": "pattern_sessions", "pattern": "spend", "tz": 0}),
+                "insights-request-invalid",
+            ),
+            (
+                serde_json::json!({"type": "patterns", "tz": 0, "file": "/tmp/x"}),
+                "insights-request-invalid",
+            ),
+        ] {
+            assert_eq!(call(bad).unwrap_err().to_string(), error);
+        }
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn patterns_read_a_saved_claude_session_by_its_own_dates_and_leak_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let file = root.path().join("claude.jsonl");
+        std::fs::write(
+            &file,
+            include_bytes!("../../fixtures/insights/claude-turn-series/session.jsonl"),
+        )
+        .unwrap();
+        let call = |operation: serde_json::Value| -> serde_json::Value {
+            serde_json::from_str(
+                &dispatch_json(
+                    serde_json::json!({"store_dir": store, "operation": operation})
+                        .to_string()
+                        .as_bytes(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let saved = call(serde_json::json!({
+            "type": "analyze", "source": "claude_code", "file": file, "save": true
+        }));
+        let id = saved["insight"]["id"].clone();
+        let read = call(serde_json::json!({
+            "type": "patterns", "week_start": "2026-09-16", "tz": 0, "weeks": 3
+        }));
+        let patterns = &read["patterns"];
+        assert_eq!(patterns["week_start"], "2026-09-14");
+        assert_eq!(patterns["claude_sessions"], 1);
+        assert_eq!(patterns["claude_only"], false);
+        assert_eq!(patterns["long_context_threshold"], 200_000);
+        assert_eq!(patterns["weeks"], serde_json::json!(["2026-09-14"]));
+        assert_ne!(patterns["generation"], 0);
+        for card in patterns["cards"].as_array().unwrap() {
+            // Counted: a figure, possibly zero, never unknown.
+            assert!(card["count"].is_u64(), "{card}");
+            assert_eq!(card["weeks"].as_array().unwrap().len(), 3);
+        }
+        let wire = read.to_string();
+        for private in ["PRIVATE", "msg_", "toolu_", "/Users", "path_key"] {
+            assert!(!wire.contains(private), "{private}");
+        }
+        let sessions = call(serde_json::json!({
+            "type": "pattern_sessions", "pattern": "long_context",
+            "week_start": "2026-09-14", "tz": 0
+        }));
+        let sessions = &sessions["pattern_sessions"];
+        assert_eq!(sessions["generation"], patterns["generation"]);
+        for row in sessions["sessions"].as_array().unwrap() {
+            assert_eq!(row["session_ref"], id);
+        }
+        // A week with no saved session is unknown, not zero.
+        let empty = call(serde_json::json!({
+            "type": "patterns", "week_start": "2026-10-05", "tz": 0
+        }));
+        assert!(empty["patterns"]["cards"][0]["tokens"].is_null());
     }
 
     #[test]

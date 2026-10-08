@@ -99,6 +99,11 @@ pub const LEVER_DISMISSALS_TO_DISABLE: usize = 3;
 /// run of weeks is counted and no ring is drawn. Owner decision D1, open.
 pub const WEEKLY_MARKS: usize = 6;
 
+/// Weekly bars each Patterns card draws, oldest first, ending at the week on
+/// screen. A week with no figure is a gap, never a zero bar, and no run of
+/// weeks is counted. Owner decisions D1 and D10, open.
+pub const PATTERN_BAR_WEEKS: usize = 6;
+
 /// Whether any advice sentence, what-if card or context tip may be shown.
 /// The engine computes what-if regardless; no surface reads it while this is
 /// false. Owner decision D2, open.
@@ -261,6 +266,7 @@ mod tests {
     #[test]
     fn weekly_marks_not_streaks() {
         assert_eq!(WEEKLY_MARKS, 6);
+        assert_eq!(PATTERN_BAR_WEEKS, 6);
     }
 
     #[test]
