@@ -30,10 +30,8 @@ enum JoinLookUpOutcome: Equatable {
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinScreenLayout {
-    /// The extra space above the invite card (under the body) and above the
-    /// no-sharing card (under the account cards), on top of the frame's own
-    /// gaps (owner, 2026-10-08): `s8` + this under the body, `s6` + this
-    /// between the cards.
+    /// The extra space above the invite card (under the body), on top of the
+    /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
     static let extraGap = GlassTokens.Space.s4
 
     /// Contributing needs an account; without one, setup is watching only.
@@ -439,6 +437,9 @@ struct JoinScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
+            // About taking the action, so directly above the action bar, not
+            // in the cards (owner ruling, 2026-10-08).
+            actionNote: copy.join.noSharing,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
                 isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state),
@@ -457,14 +458,6 @@ struct JoinScreen: View {
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            // Plain text below the last sign-in card, in no card of its own
-            // (owner, 2026-10-08), set apart from the cards by the extra gap.
-            Text(copy.join.noSharing)
-                .glassType(GlassTokens.TypeScale.label)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, JoinScreenLayout.extraGap)
         }
     }
 

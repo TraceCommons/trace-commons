@@ -24,7 +24,8 @@ public enum GlassButtonKind: Sendable, Equatable {
 /// In a window's action bar -- the footer row that holds the primary CTA,
 /// in a window, a sheet or a modal -- every button is the primary CTA's
 /// size. Only inline buttons, inside cards, rows, fields, popovers and
-/// toolbars, take the smaller size.
+/// toolbars, take the smaller size. Text about taking the bar's action sits
+/// directly above the bar (`GlassActionBar`).
 public enum GlassButtonSize: Sendable, Equatable {
     /// Everywhere but an action bar: each kind's own compact size (the glass
     /// and destructive pills are `size.controlLarge`, the label type, 12pt

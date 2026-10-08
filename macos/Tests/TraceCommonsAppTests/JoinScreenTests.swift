@@ -911,10 +911,10 @@ final class JoinScreenTests: XCTestCase {
                 .contains("guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }"))
     }
 
-    /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, the
-    /// no-sharing line sits in the same card as the invite and account
-    /// cards, and an extra gap sets the cards apart from the body and the
-    /// no-sharing card apart from the account cards.
+    /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, an
+    /// extra gap sets the cards apart from the body, and the no-sharing line
+    /// is an action note: directly above the action bar through the frame's
+    /// slot, not in the cards (owner ruling, 2026-10-08).
     func test_joinLaysOutItsBodyAndCardsAsRuled() throws {
         let source = try Self.source()
         // Two paragraphs, not one run of concatenated text.
@@ -926,22 +926,25 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body.weight(.bold))"))
         XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
 
-        // The no-sharing line is plain text below the last sign-in card,
-        // in no card (owner, 2026-10-08).
+        // The no-sharing line is the frame's action note, in no card and
+        // not in the scrolling content (owner ruling, 2026-10-08).
         XCTAssertFalse(source.contains("GlassCard(quiet: true)"))
-        let noSharing = try XCTUnwrap(source.range(of: "Text(copy.join.noSharing)"))
-        let before = String(source[..<noSharing.lowerBound].suffix(200))
-        XCTAssertFalse(before.contains("GlassCard {"), before)
+        XCTAssertFalse(source.contains("Text(copy.join.noSharing)"), "drawn in the content")
+        XCTAssertEqual(source.components(separatedBy: "copy.join.noSharing").count - 1, 1)
+        XCTAssertTrue(source.contains("actionNote: copy.join.noSharing,"))
+        let frameCall = try XCTUnwrap(source.range(of: "FirstRunFrame("))
+        let content = try XCTUnwrap(source.range(of: "} content: {", range: frameCall.upperBound..<source.endIndex))
+        let note = try XCTUnwrap(source.range(of: "actionNote: copy.join.noSharing"))
+        XCTAssertLessThan(frameCall.lowerBound, note.lowerBound)
+        XCTAssertLessThan(note.lowerBound, content.lowerBound, "an argument of the frame, not content")
 
-        // The extra gap, a spacing token, above the invite card and above
-        // the no-sharing card, and nowhere else.
+        // The extra gap, a spacing token, above the invite card, and
+        // nowhere else.
         XCTAssertEqual(JoinScreenLayout.extraGap, GlassTokens.Space.s4)
-        XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 2)
+        XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 1)
         let invite = try XCTUnwrap(source.range(of: "inviteCard\n                .padding(.top, JoinScreenLayout.extraGap)"))
         let passkey = try XCTUnwrap(source.range(of: "passkeyCard\n            nearAICard"))
         XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
-        let afterNoSharing = String(source[noSharing.upperBound...].prefix(400))
-        XCTAssertTrue(afterNoSharing.contains(".padding(.top, JoinScreenLayout.extraGap)"))
     }
 
     /// Every word on Join is the core's: the file holds no literal of two or

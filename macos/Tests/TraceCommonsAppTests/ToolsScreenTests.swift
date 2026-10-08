@@ -337,7 +337,7 @@ final class ToolsScreenTests: XCTestCase {
         // footer.
         let frame = try Self.source("FirstRunFrame.swift")
         let scroll = try XCTUnwrap(frame.range(of: "ScrollView {"))
-        let pinnedSlot = try XCTUnwrap(frame.range(of: "                pinned\n                footerRow"))
+        let pinnedSlot = try XCTUnwrap(frame.range(of: "                pinned\n                GlassActionBar("))
         XCTAssertLessThan(scroll.lowerBound, pinnedSlot.lowerBound)
     }
 

@@ -7,7 +7,9 @@ import TCShellCore
 struct FirstRunFooter {
     let title: String
     let isEnabled: Bool
-    /// The caption on the footer's leading side, when the screen has one.
+    /// A note about the action in its current state (Join's "what Skip
+    /// means"), when the screen has one. It sits above the action bar, after
+    /// the frame's `actionNote` (owner ruling, 2026-10-08).
     let note: String?
     /// The action is running: the button carries a spinner (Ron's Start
     /// sharing).
@@ -105,6 +107,15 @@ enum FirstRunFrameLayout {
 
     /// The disabled Continue explains itself only on the tool screens, where
     /// the reason is an unanswered tool; elsewhere the reason differs.
+    /// The notes above the action bar, top to bottom: the screen's standing
+    /// note about its action, then the footer's note for the action's
+    /// current state (owner ruling, 2026-10-08: text about taking the
+    /// primary action sits directly above the action bar, not in the
+    /// scrolling content).
+    static func actionNotes(actionNote: String?, footer: FirstRunFooter) -> [String] {
+        [actionNote, footer.note].compactMap { $0 }.filter { !$0.isEmpty }
+    }
+
     static func showsAnswerEveryTool(_ state: FirstRunState, footer: FirstRunFooter) -> Bool {
         guard !footer.isEnabled else { return false }
         return state.step == .folders || state.step == .tools
@@ -125,18 +136,22 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
     @Binding private var state: FirstRunState
     private let isCommitting: Bool
     private let notice: String?
+    private let actionNote: String?
     private let footer: FirstRunFooter
     private let header: Header
     private let content: Content
     private let pinned: Pinned
 
     /// `pinned` sits under the scrolling cards and above the footer, always
-    /// in view (the tool screens' add tile, owner 2026-10-08).
+    /// in view (the tool screens' add tile, owner 2026-10-08). `actionNote`
+    /// is the screen's text about taking its primary action, drawn directly
+    /// above the action bar (owner ruling, 2026-10-08).
     init(
         copy: FirstRunCopy,
         state: Binding<FirstRunState>,
         isCommitting: Bool = false,
         notice: String? = nil,
+        actionNote: String? = nil,
         footer: FirstRunFooter,
         @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content,
@@ -146,6 +161,7 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
         self._state = state
         self.isCommitting = isCommitting
         self.notice = notice
+        self.actionNote = actionNote
         self.footer = footer
         self.header = header()
         self.content = content()
@@ -173,7 +189,9 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 pinned
-                footerRow
+                GlassActionBar(notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer)) {
+                    footerRow
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -193,11 +211,6 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                     state = FirstRunNavigation.back(state)
                 }
                 .buttonStyle(GlassButtonStyle(.glass, size: .bar))
-            }
-            if let note = footer.note {
-                Text(note)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
             }
             Spacer(minLength: 0)
             if FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting) {
@@ -230,12 +243,13 @@ extension FirstRunFrame where Pinned == EmptyView {
         state: Binding<FirstRunState>,
         isCommitting: Bool = false,
         notice: String? = nil,
+        actionNote: String? = nil,
         footer: FirstRunFooter,
         @ViewBuilder header: () -> Header,
         @ViewBuilder content: () -> Content
     ) {
         self.init(
-            copy: copy, state: state, isCommitting: isCommitting, notice: notice, footer: footer, header: header,
-            content: content, pinned: { EmptyView() })
+            copy: copy, state: state, isCommitting: isCommitting, notice: notice, actionNote: actionNote,
+            footer: footer, header: header, content: content, pinned: { EmptyView() })
     }
 }

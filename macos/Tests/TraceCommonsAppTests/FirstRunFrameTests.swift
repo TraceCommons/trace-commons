@@ -137,6 +137,33 @@ final class FirstRunFrameTests: XCTestCase {
         }
     }
 
+    /// Owner ruling, 2026-10-08: text about taking the primary action sits
+    /// directly above the action bar, in the one TCDesign placement, after
+    /// the scrolling content and the pinned row; the footer row draws none.
+    func test_actionNotesSitDirectlyAboveTheActionBar() throws {
+        let footer = FirstRunFooter(title: "", isEnabled: true, note: "state", action: {})
+        XCTAssertEqual(FirstRunFrameLayout.actionNotes(actionNote: "standing", footer: footer), ["standing", "state"])
+        XCTAssertEqual(
+            FirstRunFrameLayout.actionNotes(actionNote: nil, footer: FirstRunFooter(title: "", isEnabled: true, action: {})), [])
+        XCTAssertEqual(FirstRunFrameLayout.actionNotes(actionNote: "", footer: footer), ["state"])
+
+        let source = try Self.source()
+        let body = try XCTUnwrap(source.range(of: "var body: some View {"))
+        let rest = source[body.upperBound...]
+        let scroll = try XCTUnwrap(rest.range(of: "ScrollView {"))
+        let pinned = try XCTUnwrap(rest.range(of: "                pinned\n"))
+        let bar = try XCTUnwrap(rest.range(
+            of: "GlassActionBar(notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer)) {\n"
+                + "                    footerRow\n"))
+        XCTAssertLessThan(scroll.lowerBound, pinned.lowerBound)
+        XCTAssertLessThan(pinned.lowerBound, bar.lowerBound)
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let end = try XCTUnwrap(source.range(of: "extension FirstRunFrame where", range: row.upperBound..<source.endIndex))
+        let rowBody = String(source[row.upperBound..<end.lowerBound])
+        XCTAssertFalse(rowBody.contains("footer.note"), "the footer row draws no note of its own")
+        XCTAssertEqual(rowBody.components(separatedBy: "Text(").count - 1, 1, "only Continue's own label")
+    }
+
     /// Ron's Continue carries "Answer every tool above to continue" as its
     /// disabled help on the tool screens only; elsewhere the reason differs.
     func test_answerEveryToolIsTheDisabledHelpOnToolScreensOnly() {
