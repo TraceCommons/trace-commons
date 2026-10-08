@@ -63,6 +63,7 @@ pub mod versioned_pipeline;
 pub mod versioned_pipeline_activation;
 pub mod versioned_pipeline_authority;
 pub mod versioned_pipeline_bundle;
+pub mod versioned_pipeline_comparison;
 pub mod versioned_pipeline_compat;
 pub mod versioned_pipeline_credit;
 pub mod versioned_pipeline_index;
