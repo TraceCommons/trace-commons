@@ -898,14 +898,28 @@ them, at the next boot with the migrator URL or by hand; the result is the
 same in both orders.
 
 Each statement locks its table until the commit. That costs nothing while
-the pipeline tables are empty, which they are until a tenant is activated.
-On a database with an activated tenant, the build that still runs waits for
-these locks in its Settle, payout, review assessment, export and
+the pipeline tables are empty, which they are until a tenant's uploads go to
+the pipeline. An activation sends them there. So does a process started with
+`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES` (the test-only rule of
+[pipeline-activation.md](pipeline-activation.md)), and so did a build with a
+pipeline runtime from before the routing row, which routed by its receipts
+list alone. On a database that has pipeline rows, the build that still runs
+waits for these locks in its Settle, payout, review assessment, export and
 invalidation statements until V109 commits: the time of one read of each of
 the five tables (`pipeline_run_settlements`, `pipeline_export_snapshots`,
 `pipeline_export_snapshot_items`, `pipeline_review_assessments`,
 `pipeline_index_invalidations`). A row that fails one of the four checks
 makes V109 roll back; the routes write no such row.
+
+A wait is not the only result. V109 locks `pipeline_export_snapshots` before
+`pipeline_export_snapshot_items`. A withdrawal, and a revocation or
+withdrawal follow-up (a route, retention maintenance, or the pipeline
+worker), locks the items before the snapshots. One of these that runs at the
+same time can deadlock with V109, and PostgreSQL then stops one of the two.
+If it stops V109, nothing was applied: start that boot, or the `psql`
+command, again. If it stops the other one, that request or pass fails and
+is tried again. To prevent the deadlock, stop the ingest processes of the
+running build before you apply V109.
 
 A test or lab database that kept the rows of the #1143 runtime suite fails
 the new requester check (those fixtures hold a requester such as
