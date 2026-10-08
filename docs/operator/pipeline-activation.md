@@ -365,6 +365,18 @@ tables", "V107 and V108: qualification and attempt artifact tables", and "V110
 to V113: activation, policy interventions, the activation gate, and the
 rebuild fence").
 
+V109 adds no table and changes no grant. It marks the payout of a leg
+seeded `pending` by V94-era code `disabled` (see "NEAR payout"), and adds
+four checks: an export snapshot's requester is `principal_sha256:` or
+`exporter_sha256:` and 64 lowercase hex digits, an export item's outcome and
+view schema ids are labels, and an assessment's resolved quarantine reasons
+are a JSON array. The code already writes only such values. It also
+indexes two foreign keys that had no index on the referencing side: the
+index invalidations by submission and the export items by run. Apply V109
+by hand only with `psql --single-transaction -v ON_ERROR_STOP=1`: it lifts
+forced row security on `pipeline_run_settlements` for one statement
+([deployment.md](deployment.md), "V109: pipeline follow-ups").
+
 ## Activate, roll back, contain, deactivate
 
 These nine routes qualify a bundle and move a tenant between the legacy path
@@ -1328,18 +1340,6 @@ The rehearsal runs the legacy work through the legacy routes and reads the
 report at each step:
 `tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero`
 (see "Rehearse the switch").
-
-V109 adds no table and changes no grant. It marks the payout of a leg
-seeded `pending` by V94-era code `disabled` (see "NEAR payout"), and adds
-four checks: an export snapshot's requester is `principal_sha256:` or
-`exporter_sha256:` and 64 lowercase hex digits, an export item's outcome and
-view schema ids are labels, and an assessment's resolved quarantine reasons
-are a JSON array. The code already writes only such values. It also
-indexes two foreign keys that had no index on the referencing side: the
-index invalidations by submission and the export items by run. Apply V109
-by hand only with `psql --single-transaction -v ON_ERROR_STOP=1`: it lifts
-forced row security on `pipeline_run_settlements` for one statement
-([deployment.md](deployment.md), "V109: pipeline follow-ups").
 
 ## Fail-closed dependency qualification
 
