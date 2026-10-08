@@ -111,6 +111,42 @@ pub struct SessionPatterns {
     pub long_context: LongContextFigure,
 }
 
+/// The four pattern kinds, in their fixed display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PatternKind {
+    RepeatedReads,
+    RetriedCalls,
+    /// Inferred from the order of tool calls (owner decision D9).
+    EditFailEdit,
+    LongContext,
+}
+
+impl PatternKind {
+    pub const ALL: [PatternKind; 4] = [
+        Self::RepeatedReads,
+        Self::RetriedCalls,
+        Self::EditFailEdit,
+        Self::LongContext,
+    ];
+}
+
+impl SessionPatterns {
+    /// A kind's token figure: a rounded result-size estimate for the tool
+    /// patterns, counted input for long context. `None` when unknown or held.
+    pub fn figure(&self, kind: PatternKind) -> Option<u64> {
+        match kind {
+            PatternKind::RepeatedReads => self.repeated_reads.estimated_tokens(),
+            PatternKind::RetriedCalls => self.retried_calls.estimated_tokens(),
+            PatternKind::EditFailEdit => self
+                .edit_fail_edit
+                .as_ref()
+                .and_then(PatternFigure::estimated_tokens),
+            PatternKind::LongContext => self.long_context.tokens(),
+        }
+    }
+}
+
 /// The four Patterns figures for one session.
 pub fn session_patterns(series: &UsageSeries) -> SessionPatterns {
     let shrinks = shrink_turns(&usage_markers(&series.turns));
@@ -641,5 +677,32 @@ mod tests {
         let merged = merge_reread_files([&one, &two]);
         let summary: Vec<_> = merged.iter().map(|f| (f.path_key.0[0], f.reads)).collect();
         assert_eq!(summary, vec![(4, 1), (2, 3)]);
+    }
+
+    #[test]
+    fn pattern_kinds_have_a_fixed_order() {
+        assert_eq!(
+            PatternKind::ALL,
+            [
+                PatternKind::RepeatedReads,
+                PatternKind::RetriedCalls,
+                PatternKind::EditFailEdit,
+                PatternKind::LongContext,
+            ]
+        );
+    }
+
+    #[test]
+    fn figure_reads_each_kind_and_keeps_unknown_unknown() {
+        let found = session_patterns(&series(vec![read(1, 40_000), read(1, 40_000)]));
+        assert_eq!(found.figure(PatternKind::RepeatedReads), Some(10_000));
+        assert_eq!(found.figure(PatternKind::RetriedCalls), Some(10_000));
+        assert_eq!(found.figure(PatternKind::EditFailEdit), Some(0));
+        assert_eq!(found.figure(PatternKind::LongContext), Some(0));
+        let unsized_reads = session_patterns(&series(vec![
+            call(ToolKind::Read, 1, Some(1), None),
+            call(ToolKind::Read, 1, Some(1), None),
+        ]));
+        assert_eq!(unsized_reads.figure(PatternKind::RepeatedReads), None);
     }
 }
