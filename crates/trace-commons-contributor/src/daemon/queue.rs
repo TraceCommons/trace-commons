@@ -2132,6 +2132,42 @@ impl Queue {
         }
     }
 
+    /// Record backfilled local-estimate features (OWNER DECISION E13) on a
+    /// waiting entry that has none, only while its content is still the
+    /// bytes `session_hash` names. Returns whether anything was recorded.
+    ///
+    /// The hash check is what keeps features of new bytes off an entry
+    /// minted for old ones: a session that moved is the watcher's to
+    /// supersede, and its replacement is minted with its own.
+    pub fn backfill_estimate_features(
+        &mut self,
+        entry_id: Uuid,
+        session_hash: &str,
+        features: trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending
+            || e.submission_id.is_some()
+            || e.estimate_features.is_some()
+            || e.session_hash != session_hash
+        {
+            return false;
+        }
+        e.estimate_features = Some(features);
+        true
+    }
+
+    /// Strip every entry's features, as on a queue written before the
+    /// field existed.
+    #[cfg(test)]
+    pub fn clear_estimate_features_for_test(&mut self) {
+        for e in &mut self.entries {
+            e.estimate_features = None;
+        }
+    }
+
     pub fn set_submission_id(&mut self, entry_id: Uuid, submission_id: Uuid) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.submission_id = Some(submission_id);

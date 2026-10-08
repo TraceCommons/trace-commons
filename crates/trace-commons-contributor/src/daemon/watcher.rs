@@ -226,6 +226,8 @@ fn tick_over(
         prune_cwd_cache(shared, &discovered);
     }
 
+    backfill_estimate_features(shared, &discovered, &mut out);
+
     let held_by_project = std::mem::take(&mut out.gate_blocked_by_project);
     let report = finish_pass(shared, out, true)?;
     report_gate(shared, &ctx.gate, &report);
@@ -1841,6 +1843,80 @@ fn new_entry(
         // Not yet scrubbed: nothing has previewed this offer. Never zero,
         // which would read as "nothing matched". See `second_look::Scrub`.
         scrub: None,
+    }
+}
+
+/// How many waiting entries without local-estimate features one full pass
+/// re-reads to give them some.
+///
+/// OWNER DECISION E13: 4 per pass, never while a preview builds.
+pub const ESTIMATE_BACKFILL_PER_PASS: usize = 4;
+
+/// Give waiting entries minted before `estimate_features` existed their
+/// features (nudge value addendum, 4.4; OWNER DECISION E13).
+///
+/// At most [`ESTIMATE_BACKFILL_PER_PASS`] per full pass, oldest first, and
+/// none while a preview builds or waits to: a preview is a person waiting,
+/// and this is not. Each is re-read through the adapter this pass's own
+/// discovery found it under, the load a re-offer makes, and its features
+/// are recorded only while its content is still the bytes it was minted
+/// for (`Queue::backfill_estimate_features`). One the pass cannot read, or
+/// whose bytes moved, is remembered in memory and not tried again by this
+/// daemon. Nothing is logged.
+fn backfill_estimate_features(
+    shared: &DaemonShared,
+    discovered: &[(&dyn TraceSource, Vec<SessionRef>)],
+    out: &mut PassOutcome,
+) {
+    if shared.preview_building() {
+        return;
+    }
+    let candidates: Vec<(uuid::Uuid, PathBuf, String)> = {
+        let queue = shared.queue.lock().expect("queue lock");
+        let tried = shared.backfill_tried.lock().expect("backfill lock");
+        let mut waiting: Vec<&QueueEntry> = queue
+            .pending()
+            .into_iter()
+            .filter(|e| {
+                e.estimate_features.is_none()
+                    && e.submission_id.is_none()
+                    && !tried.contains(&e.entry_id)
+            })
+            .collect();
+        waiting.sort_by_key(|e| (e.discovered_at, e.entry_id));
+        waiting
+            .into_iter()
+            .take(ESTIMATE_BACKFILL_PER_PASS)
+            .map(|e| (e.entry_id, e.path.clone(), e.session_hash.clone()))
+            .collect()
+    };
+    for (entry_id, path, session_hash) in candidates {
+        // A preview asked for while this pass was loading goes first.
+        if shared.preview_building() {
+            return;
+        }
+        let features = discovered
+            .iter()
+            .find_map(|(source, refs)| refs.iter().find(|r| r.path == path).map(|r| (*source, r)))
+            .and_then(|(source, session_ref)| source.load(session_ref).ok())
+            .filter(|transcript| transcript.session_hash == session_hash)
+            .map(|transcript| super::queue::estimate_features_of(&transcript));
+        let recorded = features.is_some_and(|features| {
+            shared
+                .queue
+                .lock()
+                .expect("queue lock")
+                .backfill_estimate_features(entry_id, &session_hash, features)
+        });
+        if recorded {
+            out.changed = true;
+        } else {
+            shared
+                .backfill_tried
+                .lock()
+                .expect("backfill lock")
+                .insert(entry_id);
+        }
     }
 }
 
@@ -6870,6 +6946,143 @@ mod tests {
             fresh_features.content_bytes > first_features.content_bytes,
             "{fresh_features:?} vs {first_features:?}"
         );
+    }
+
+    /// Six waiting sessions, settled, then stripped of their features as an
+    /// entry queued before the field existed would be.
+    async fn six_without_features() -> WatcherFixture {
+        let f = WatcherFixture::new();
+        for i in 1..=6_u8 {
+            let name = format!("{i}{i}{i}{i}{i}{i}{i}{i}-1111-1111-1111-111111111111");
+            f.write_session("proj", &name, 0);
+        }
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .clear_estimate_features_for_test();
+        f
+    }
+
+    fn with_features(f: &WatcherFixture) -> usize {
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .pending()
+            .iter()
+            .filter(|e| e.estimate_features.is_some())
+            .count()
+    }
+
+    /// OWNER DECISION E13: entries without features are backfilled at most
+    /// `ESTIMATE_BACKFILL_PER_PASS` per pass, each re-read through its own
+    /// adapter, so a large old queue costs a few loads a pass, not all of
+    /// them at once.
+    #[tokio::test]
+    async fn backfill_loads_at_most_the_bound_per_pass() {
+        let f = six_without_features().await;
+        assert_eq!(with_features(&f), 0);
+        assert_eq!(f.shared.queue.lock().unwrap().pending().len(), 6);
+
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), ESTIMATE_BACKFILL_PER_PASS);
+        assert_eq!(with_features(&f), ESTIMATE_BACKFILL_PER_PASS);
+
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:01:00Z"), &c);
+        assert_eq!(count(&c), 6 - ESTIMATE_BACKFILL_PER_PASS);
+        assert_eq!(with_features(&f), 6);
+
+        // Nothing left to backfill: an unchanged queue is not re-read.
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:02:00Z"), &c);
+        assert_eq!(count(&c), 0);
+
+        // The backfilled features are the ones a fresh mint records, and
+        // they persist with the queue.
+        let reloaded = crate::daemon::queue::Queue::load(&f.shared.store).unwrap();
+        assert_eq!(
+            reloaded
+                .pending()
+                .iter()
+                .filter(|e| e.estimate_features.is_some())
+                .count(),
+            6
+        );
+    }
+
+    /// Never while a preview builds or waits to: the preview has the
+    /// machine first (OWNER DECISION E13).
+    #[tokio::test]
+    async fn backfill_waits_while_a_preview_builds() {
+        let f = six_without_features().await;
+        let entry_id = f.shared.queue.lock().unwrap().pending()[0].entry_id;
+        f.shared.previews.request(
+            entry_id,
+            crate::daemon::preview_scheduler::PreviewKey::for_entry(
+                std::path::Path::new("/tmp/previewing.jsonl"),
+                1,
+                "fingerprint".to_string(),
+            ),
+            1,
+        );
+        let c = loads();
+        f.tick_counted(at("2030-01-02T00:00:00Z"), &c);
+        assert_eq!(count(&c), 0, "queued preview");
+        let job = f.shared.previews.take_next().unwrap();
+        f.tick_counted(at("2030-01-02T00:01:00Z"), &c);
+        assert_eq!(count(&c), 0, "running preview");
+        assert_eq!(with_features(&f), 0);
+        f.shared.previews.finish(
+            &job,
+            crate::daemon::preview_scheduler::PreviewOutcome::Failed {
+                code: "test",
+                label: "test",
+            },
+        );
+
+        // A preview built directly, outside the scheduler, holds it too.
+        {
+            let _building = f.shared.preview_build_started();
+            f.tick_counted(at("2030-01-02T00:02:00Z"), &c);
+            assert_eq!(count(&c), 0, "direct preview");
+        }
+        f.tick_counted(at("2030-01-02T00:03:00Z"), &c);
+        assert_eq!(count(&c), ESTIMATE_BACKFILL_PER_PASS);
+    }
+
+    /// A session whose bytes moved since the entry was minted is not given
+    /// features from the new bytes: the watcher's own path supersedes it,
+    /// and the replacement is minted with its own.
+    #[tokio::test]
+    async fn backfill_never_attaches_features_of_other_bytes() {
+        let f = WatcherFixture::new();
+        let name = "11111111-1111-1111-1111-111111111111";
+        let path = f.write_session("proj", name, 0);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+        let old_hash = f.shared.queue.lock().unwrap().pending()[0]
+            .session_hash
+            .clone();
+        f.shared
+            .queue
+            .lock()
+            .unwrap()
+            .clear_estimate_features_for_test();
+        f.append_to_session(&path, "proj", name);
+        let c = loads();
+        f.settle_counted(at("2030-01-02T00:00:00Z"), &c);
+        let queue = f.shared.queue.lock().unwrap();
+        let old = queue
+            .all()
+            .iter()
+            .find(|e| e.session_hash == old_hash)
+            .unwrap();
+        assert!(old.estimate_features.is_none());
+        assert_eq!(old.state, QueueState::Superseded);
+        assert!(queue.pending()[0].estimate_features.is_some());
     }
 
     #[tokio::test]

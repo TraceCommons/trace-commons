@@ -997,6 +997,25 @@ pub struct DaemonShared {
     /// account-scoped, so `unenroll` leaves it. A leaf lock: read by cloning
     /// before any other lock here is taken.
     pub(crate) estimate_table: Mutex<EstimateTableSlot>,
+    /// Previews being built outside [`Self::previews`]: the preview sheet,
+    /// a card and a witness review, each counted for as long as it builds
+    /// (see [`Self::preview_build_started`]). With the scheduler's own
+    /// queue it answers [`Self::preview_building`].
+    preview_builds: std::sync::atomic::AtomicUsize,
+    /// Waiting entries the local-estimate backfill tried and could not
+    /// give features (their session gone or unreadable), so a pass does not
+    /// spend its bound on them again. In memory only: a restart tries them
+    /// once more.
+    pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
+}
+
+/// Counts one preview build on [`DaemonShared`] for as long as it lives.
+pub(crate) struct PreviewBuildGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for PreviewBuildGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// `credit_estimate.basis` while the built-in table is in force.
@@ -1331,6 +1350,8 @@ impl DaemonShared {
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             mission_catalogue: Mutex::new(None),
             estimate_table: Mutex::new(EstimateTableSlot::built_in()),
+            preview_builds: std::sync::atomic::AtomicUsize::new(0),
+            backfill_tried: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -2028,6 +2049,22 @@ impl DaemonShared {
 
     fn logged_in(&self) -> bool {
         super::uploader::enrollment_is_live(&self.store)
+    }
+
+    /// Count a preview built outside the scheduler until the guard drops.
+    pub(crate) fn preview_build_started(&self) -> PreviewBuildGuard<'_> {
+        self.preview_builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        PreviewBuildGuard(&self.preview_builds)
+    }
+
+    /// Whether any preview is building or waiting to, through the scheduler
+    /// or directly.
+    pub(crate) fn preview_building(&self) -> bool {
+        self.preview_builds
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            || self.previews.is_building()
     }
 
     /// Whether the daemon is currently paused, accounting for a timed pause
@@ -6738,6 +6775,9 @@ async fn handle_witness_preview_request_inner(
     } else {
         None
     };
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
@@ -6874,6 +6914,9 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
         let s = shared.settings.lock().expect("settings lock");
         s.ironwire_attested_bodies
     };
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     match super::preview::build_preview_card(
         cfg.as_ref(),
         near_ai,
@@ -7133,6 +7176,9 @@ async fn build_and_pin_preview(
         );
         return Ok(built);
     }
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
         cfg,
