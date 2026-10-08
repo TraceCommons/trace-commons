@@ -477,6 +477,11 @@ impl MissionJoin {
                 let policy = shared.policy.lock().expect("policy lock");
                 entry_folders
                     .into_iter()
+                    // Never means nothing in the folder is read, the files
+                    // at its root included: the same `resolve` gate as
+                    // `readable_sessions`. An entry queued before its folder
+                    // went Never is still waiting.
+                    .filter(|f| policy.resolve(f) != ProjectMode::Ignore)
                     .map(|f| {
                         let root = language_root(&policy, &f);
                         (f, root)
@@ -1400,6 +1405,65 @@ mod tests {
         assert_eq!(fit_of(&listed, "sha256:ask"), Some(1), "{listed}");
         assert_eq!(fit_of(&listed, "sha256:codex"), Some(0), "adapter off");
         assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "Never folder");
+    }
+
+    /// A waiting entry in a Never folder must not have its folder probed
+    /// for language markers: Never means nothing in that folder is read,
+    /// and that includes checking which files exist at its root. The entry
+    /// can still be waiting because the folder was set to Never after it
+    /// was queued. `never-repo` holds a `pyproject.toml`, so a probe would
+    /// leave `python` in the slot's language cache.
+    #[test]
+    fn a_never_folders_waiting_entry_is_not_language_probed() {
+        let (_dir, s, work) = seeded();
+        let never = key_under(&work, "never-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:never",
+            &never,
+            "/s/claude-never.jsonl",
+        );
+        receive(&s, catalogue());
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
+        let cached = s
+            .mission_catalogue
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("live catalogue")
+            .folder_languages
+            .clone();
+        assert!(
+            !cached.contains_key(&never),
+            "Never folder was probed: {cached:?}"
+        );
+    }
+
+    /// The same under a Never contribution override: every folder is Never,
+    /// so no waiting entry's folder is probed.
+    #[test]
+    fn no_waiting_entry_is_language_probed_under_a_never_override() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(&s, "codex", "sha256:codex", &ask, "/s/codex-ask.jsonl");
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
+            .unwrap();
+        receive(&s, catalogue());
+        list_pending(&s);
+        let cached = s
+            .mission_catalogue
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("live catalogue")
+            .folder_languages
+            .clone();
+        assert!(cached.is_empty(), "probed under Never: {cached:?}");
     }
 
     /// Under a Never contribution override nothing is read, so every entry
