@@ -387,7 +387,17 @@ mod tests {
             analyzed["insight"]["model_observations"]["source_format"],
             "claude_code"
         );
-        assert!(analyzed["insight"]["usage_evidence"].is_null());
+        // Claude usage evidence is saved, and unknown here: the source has
+        // no assistant record. It is never a zero.
+        assert_eq!(
+            analyzed["insight"]["usage_evidence"]["source"],
+            "claude_code"
+        );
+        assert_eq!(
+            analyzed["insight"]["usage_evidence"]["aggregate_unavailable_reason"],
+            "no_usage"
+        );
+        assert!(analyzed["insight"]["usage_evidence"]["aggregate_counts"].is_null());
         assert!(analyzed["insight"]["task_attribution"].is_null());
         let listed = json_call(&store, serde_json::json!({"type":"list"})).unwrap();
         assert_eq!(listed["insights"][0]["source_format"], "claude_code");

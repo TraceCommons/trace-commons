@@ -362,6 +362,14 @@ impl DigestKeyStore for InMemoryDigestKeyStore {
 const DOMAIN_MSG: &[u8] = b"trace-commons/insights/msg_key/v1\0";
 const DOMAIN_ARGS: &[u8] = b"trace-commons/insights/args_key/v1\0";
 const DOMAIN_PATH: &[u8] = b"trace-commons/insights/path_key/v1\0";
+const DOMAIN_FINGERPRINT: &[u8] = b"trace-commons/insights/key_fingerprint/v1\0";
+
+/// A keyed digest that names `key` without revealing it. Stored beside rows
+/// so a reader can tell digests made under another key (a new device, a
+/// cleared keychain) from digests of different messages, files or arguments.
+pub fn key_fingerprint(key: &DigestKey) -> KeyedDigest {
+    keyed(key, DOMAIN_FINGERPRINT, &[])
+}
 
 /// Keyed digest of a provider message ID.
 pub fn msg_key(key: &DigestKey, message_id: &str) -> KeyedDigest {
@@ -539,6 +547,17 @@ mod tests {
         assert_ne!(msg, path);
         assert_ne!(msg, args);
         assert_ne!(path, args);
+    }
+
+    /// Rows made under different keys never match. The fingerprint lets a
+    /// reader tell that apart from "different messages" without the key.
+    #[test]
+    fn key_fingerprint_names_the_key_without_revealing_it() {
+        assert_eq!(key_fingerprint(&key(1)), key_fingerprint(&key(1)));
+        assert_ne!(key_fingerprint(&key(1)), key_fingerprint(&key(2)));
+        assert_ne!(key_fingerprint(&key(1)), msg_key(&key(1), ""));
+        assert_ne!(key_fingerprint(&key(1)), path_key(&key(1), ""));
+        assert_ne!(key_fingerprint(&key(1)).0, [1u8; 32]);
     }
 
     #[test]

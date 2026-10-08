@@ -118,6 +118,22 @@ pub const CODEX_PER_TURN_SERIES: bool = false;
 /// excluded as `reimport_overlap`. Owner decision D15, open.
 pub const DEDUPE_TURNS_BY_MSG_KEY: bool = true;
 
+/// Where the key behind every keyed digest (message, path and argument
+/// digests) is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestKeyCustody {
+    /// The OS keychain, separate from the store, so a copied store directory
+    /// is not enough to confirm a guessed path or command.
+    OsKeychain,
+    /// A 0600 key file inside the store directory. Weaker; works where no
+    /// keychain is available.
+    KeyFileInStore,
+}
+
+/// Digest key custody. Owner decision D16, open; the recommended default is
+/// the OS keychain.
+pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
+
 /// Whether ledger `cost_usd` or list prices may reach an Insights figure.
 /// Owner decision D5, open.
 pub const LEDGER_MONEY_IN_INSIGHTS: bool = false;
@@ -199,6 +215,7 @@ mod tests {
         const { assert!(!CODEX_PER_TURN_SERIES) };
         const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
         const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
+        assert_eq!(DIGEST_KEY_CUSTODY, DigestKeyCustody::OsKeychain);
     }
 
     #[test]

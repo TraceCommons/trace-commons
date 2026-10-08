@@ -48,6 +48,17 @@ coordinates, missing/invalid/omitted counts, and its source digest. Older
 snapshots remain unknown until explicitly reimported. Declarations do not
 verify serving identity or allocate work to a model.
 
+Since store version 13, a Claude Code snapshot also carries usage evidence
+(per-message counters, with the 5-minute and 1-hour cache-write split),
+recorded-timestamp evidence, and, when it is saved, a per-turn series
+(`turn_series`): one row of counters per API response and one row per tool
+call. The series holds counts, sizes, dates, declared model labels and keyed
+digests only; no path, body, command, or message, tool or session ID is
+stored in readable form. The digest key is kept in the OS keychain, apart
+from the store. A Claude snapshot saved before version 13 has none of these
+and stays unknown until it is reimported. A record whose counters are not
+all stated is unknown, never zero.
+
 Saved snapshots can link an explicitly selected local repository and full
 commit object ID, or import a selected structured test-report JSON file. The
 import control explains the accepted fields. Git inspection and imported

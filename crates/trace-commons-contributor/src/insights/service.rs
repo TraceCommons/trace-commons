@@ -1511,7 +1511,9 @@ mod tests {
                 "type":"assistant", "message":{
                     "id":"message-1", "model":"fixture", "content":"PRIVATE_BODY",
                     "usage":{"input_tokens":12,"cache_read_input_tokens":3,
-                        "cache_creation_input_tokens":4,"output_tokens":5}
+                        "cache_creation_input_tokens":4,"output_tokens":5,
+                        "cache_creation":{"ephemeral_5m_input_tokens":4,
+                            "ephemeral_1h_input_tokens":0}}
                 }
             })
             .to_string(),

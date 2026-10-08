@@ -2414,6 +2414,7 @@ mod tests {
         let insight = LocalInsight {
             task_attribution: None,
             claude_task_attribution: None,
+            turn_series: None,
             id: "fixture".into(),
             source_format: SourceFormat::Codex,
             boundary: trace_commons_contributor::insights::EpisodeBoundary::SessionProxy,
