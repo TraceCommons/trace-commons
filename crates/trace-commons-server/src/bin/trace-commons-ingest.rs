@@ -4637,7 +4637,7 @@ impl AppState {
         let near_attestation_key_report_client =
             near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
 
-        Ok(Self {
+        let state = Self {
             root,
             near_attestation_client,
             near_attestation_key_report_client,
@@ -4825,7 +4825,24 @@ impl AppState {
             dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(test)]
             near_access_key_checker_override: None,
-        })
+        };
+        // Spec A-D11: a production runtime that passed every startup refusal
+        // emits `pipeline_production_adapters` when the operator set the
+        // `TRACE_COMMONS_PIPELINE_CHECK_*` variables for this boot.
+        if let (Some(service), Some(components)) = (
+            state.pipeline_service.as_deref(),
+            pipeline_gate_components.as_deref(),
+        ) {
+            production_assembly::emit_production_adapters_check(
+                production_assembly::PipelineCheckVars::from_env(),
+                DEPLOYED_CODE_REVISION_HASH,
+                service,
+                components,
+                pipeline_activation::infrastructure_profile_from_state(&state),
+                state.near_settlement_mode.as_label(),
+            )?;
+        }
+        Ok(state)
     }
 }
 

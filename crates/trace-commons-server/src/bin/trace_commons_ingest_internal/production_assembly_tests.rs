@@ -1500,3 +1500,229 @@ fn pipeline_index_root_is_required_and_separate() {
         PathBuf::from("/var/lib/trace-commons-pipeline-index")
     );
 }
+
+fn production_infrastructure()
+-> trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile {
+    use trace_commons_server::versioned_pipeline_qualification::ProductionAdapterKind;
+    trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile {
+        authoritative_metadata: ProductionAdapterKind::Production,
+        artifact_store: ProductionAdapterKind::Production,
+        key_wrapper: ProductionAdapterKind::Production,
+        authentication: ProductionAdapterKind::Production,
+        plaintext_fallback: false,
+        best_effort_database_mirror: false,
+        static_bearer_authentication: false,
+        hs256_bridge_authentication: false,
+        unversioned_policy_dependencies: false,
+        live_external_payout_enabled: false,
+    }
+}
+
+fn revision() -> String {
+    format!("sha256:{}", "c".repeat(64))
+}
+
+fn emit_vars(dir: &std::path::Path, code_revision: &str) -> PipelineCheckVars {
+    PipelineCheckVars {
+        dir: Some(dir.to_string_lossy().into_owned()),
+        run_id: Some("qproduction".to_string()),
+        code_revision_hash: Some(code_revision.to_string()),
+    }
+}
+
+fn read_json(path: std::path::PathBuf) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// Spec 4.2 item 12 (A-D11): the startup path emits
+/// `pipeline_production_adapters` once, naming the default package, with
+/// label-and-digest-only evidence whose hash recomputes; a second boot does
+/// not refuse; a revision other than the build's refuses the start; a
+/// missing privacy backend or development infrastructure emits `fail` with
+/// the blockers.
+#[tokio::test]
+async fn production_adapters_check_is_emitted_once_with_its_evidence() {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        PipelineCheckStatus, evidence_hash, package_digests,
+    };
+    let components = test_components(classifying_privacy());
+    let service = Boot {
+        components: Some(components.clone()),
+        ..Boot::production()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .unwrap();
+
+    // Not requested: nothing written, the start continues.
+    let quiet = tempfile::tempdir().unwrap();
+    assert_eq!(
+        emit_production_adapters_check(
+            PipelineCheckVars::default(),
+            Some(&revision()),
+            &service,
+            &components,
+            production_infrastructure(),
+            "disabled",
+        )
+        .unwrap(),
+        ProductionAdaptersEmit::NotRequested
+    );
+    assert_eq!(std::fs::read_dir(quiet.path()).unwrap().count(), 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let emit = |vars: PipelineCheckVars, deployed: Option<&str>| {
+        emit_production_adapters_check(
+            vars,
+            deployed,
+            &service,
+            &components,
+            production_infrastructure(),
+            "disabled",
+        )
+    };
+    assert_eq!(
+        emit(emit_vars(dir.path(), &revision()), Some(&revision())).unwrap(),
+        ProductionAdaptersEmit::Emitted(PipelineCheckStatus::Pass)
+    );
+    let result = read_json(dir.path().join("pipeline_production_adapters.result.json"));
+    let evidence = read_json(
+        dir.path()
+            .join("pipeline_production_adapters.evidence.json"),
+    );
+    let digests = package_digests(service.default_package()).unwrap();
+    assert_eq!(result["status"], "pass");
+    assert_eq!(result["run_id"], "qproduction");
+    assert_eq!(result["code_revision_hash"], revision());
+    assert_eq!(result["package_hash"], digests.package_hash);
+    assert_eq!(result["dependency_digest"], digests.dependency_digest);
+    assert_eq!(result["safe_blockers"], serde_json::json!([]));
+    assert_eq!(result["evidence_hash"], evidence_hash(&evidence).unwrap());
+
+    let profile = trace_commons_server::versioned_pipeline_qualification::ProductionDependencyProfile::for_bundle(
+        &service,
+        service.default_package(),
+        production_infrastructure(),
+    )
+    .unwrap();
+    let scorer_hash = scorer_descriptor(&scorer_env()).hash();
+    let embedder_hash = components.embedder_descriptor.hash();
+    assert_eq!(
+        evidence,
+        serde_json::json!({
+            "schema": "trace_commons.pipeline_production_adapters.v1",
+            "runtime_identity_digest": profile.runtime_identity_digest().unwrap(),
+            "scorer": {"identity": "near_ai_perplexity_scorer", "descriptor_hash": scorer_hash, "qualified": true},
+            "embedder": {"identity": "fastembed_text_embedder", "descriptor_hash": embedder_hash, "output_dim": 2, "qualified": true},
+            "index_reader": {"identity": "usearch_pipeline_index_reader", "qualified": true},
+            "index_writer": {"identity": "usearch_pipeline_index_writer", "qualified": true},
+            "index_root_shared_with_legacy": false,
+            "settlement_adapters": {"trace_credit": {"identity": "internal_trace_credit_ledger", "payout_rail": "none", "qualified": true}},
+            "payout_enabled": false,
+            "near_settlement_mode": "disabled",
+            "authority": {"qualified": true, "tenant_policy_count": 0},
+            "privacy": {"backend": "near_ai", "classifies_prose_pii": true, "qualified": true},
+            "compatibility_configuration_qualifiable": true,
+            "infrastructure_blockers": [],
+            "bundle_blockers": [],
+        })
+    );
+    let text = evidence.to_string();
+    for clear in ["Qwen", "bge", "scorer.invalid", "key-one", "tenant-"] {
+        assert!(!text.contains(clear), "{clear} in {text}");
+    }
+
+    // A second boot: logged, not refused, and the first result stands.
+    let first = std::fs::read(dir.path().join("pipeline_production_adapters.result.json")).unwrap();
+    assert_eq!(
+        emit(emit_vars(dir.path(), &revision()), Some(&revision())).unwrap(),
+        ProductionAdaptersEmit::AlreadyEmitted
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("pipeline_production_adapters.result.json")).unwrap(),
+        first
+    );
+
+    // A revision other than the build's, or a build with none: refused.
+    let other = tempfile::tempdir().unwrap();
+    let other_revision = format!("sha256:{}", "d".repeat(64));
+    for deployed in [Some(other_revision.as_str()), None] {
+        assert_eq!(
+            emit(emit_vars(other.path(), &revision()), deployed)
+                .unwrap_err()
+                .to_string(),
+            "pipeline_check_revision_mismatch"
+        );
+    }
+    // A partial environment: refused, as `PipelineCheckEmitter` refuses it.
+    assert_eq!(
+        emit(
+            PipelineCheckVars {
+                run_id: None,
+                ..emit_vars(other.path(), &revision())
+            },
+            Some(&revision())
+        )
+        .unwrap_err()
+        .to_string(),
+        "pipeline_check_environment_incomplete"
+    );
+    assert_eq!(std::fs::read_dir(other.path()).unwrap().count(), 0);
+
+    // No privacy backend: `fail`, naming why.
+    let without = test_components(None);
+    let unqualified = Boot {
+        components: Some(without.clone()),
+        production_required: false,
+        allow_test_dependencies: true,
+        ..Boot::production()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .unwrap();
+    let failing = tempfile::tempdir().unwrap();
+    let mut development = production_infrastructure();
+    development.artifact_store =
+        trace_commons_server::versioned_pipeline_qualification::ProductionAdapterKind::Development;
+    assert_eq!(
+        emit_production_adapters_check(
+            emit_vars(failing.path(), &revision()),
+            Some(&revision()),
+            &unqualified,
+            &without,
+            development,
+            "http",
+        )
+        .unwrap(),
+        ProductionAdaptersEmit::Emitted(PipelineCheckStatus::Fail)
+    );
+    let result = read_json(
+        failing
+            .path()
+            .join("pipeline_production_adapters.result.json"),
+    );
+    let evidence = read_json(
+        failing
+            .path()
+            .join("pipeline_production_adapters.evidence.json"),
+    );
+    assert_eq!(result["status"], "fail");
+    assert_eq!(
+        result["safe_blockers"],
+        serde_json::json!([
+            "artifact_store_not_production",
+            "pipeline_privacy_filter_required",
+            "runtime_privacy_not_production",
+        ])
+    );
+    assert_eq!(evidence["privacy"]["backend"], "none");
+    assert_eq!(evidence["near_settlement_mode"], "http");
+    assert_eq!(
+        evidence["bundle_blockers"],
+        serde_json::json!(["runtime_privacy_not_production"])
+    );
+    assert_eq!(
+        evidence["infrastructure_blockers"],
+        serde_json::json!(["artifact_store_not_production"])
+    );
+}

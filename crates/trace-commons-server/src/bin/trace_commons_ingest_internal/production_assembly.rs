@@ -705,6 +705,229 @@ pub(crate) async fn build_near_ai_gate_service_with_pipeline_components(
     anyhow::bail!(PIPELINE_RUNTIME_PRODUCTION_REQUIRES_NEAR_AI_SCORER_LABEL)
 }
 
+/// The check the production assembly's startup emits (spec A-D11).
+pub(crate) const PRODUCTION_ADAPTERS_CHECK_ID: &str = "pipeline_production_adapters";
+const PRODUCTION_ADAPTERS_EVIDENCE_SCHEMA: &str = "trace_commons.pipeline_production_adapters.v1";
+pub(crate) const PIPELINE_CHECK_REVISION_MISMATCH_LABEL: &str = "pipeline_check_revision_mismatch";
+
+/// The three `TRACE_COMMONS_PIPELINE_CHECK_*` variables, as read.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PipelineCheckVars {
+    pub(crate) dir: Option<String>,
+    pub(crate) run_id: Option<String>,
+    pub(crate) code_revision_hash: Option<String>,
+}
+
+impl PipelineCheckVars {
+    pub(crate) fn from_env() -> Self {
+        // The variables `PipelineCheckEmitter::from_env` reads.
+        Self {
+            dir: std::env::var("TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR").ok(),
+            run_id: std::env::var("TRACE_COMMONS_PIPELINE_CHECK_RUN_ID").ok(),
+            code_revision_hash: std::env::var("TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH")
+                .ok(),
+        }
+    }
+}
+
+/// What the startup emit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProductionAdaptersEmit {
+    /// No `TRACE_COMMONS_PIPELINE_CHECK_*` variable is set.
+    NotRequested,
+    /// A result was written with this status.
+    Emitted(trace_commons_server::versioned_pipeline_qualification::PipelineCheckStatus),
+    /// The directory already holds this check's result; it stands.
+    AlreadyEmitted,
+}
+
+/// Emits `pipeline_production_adapters` from the startup path (spec A-D11),
+/// once the production runtime has passed every startup refusal. Only the
+/// deployed host can pass it: the infrastructure profile is production only
+/// with the GCS store, the Cloud KMS key wrapper and managed EdDSA tokens.
+///
+/// - No variable set: nothing happens. A partial or malformed set refuses
+///   the start with `PipelineCheckEmitter`'s label (never `emit_from_env`,
+///   which panics).
+/// - The variables' revision must be the build's
+///   (`DEPLOYED_CODE_REVISION_HASH`), else `pipeline_check_revision_mismatch`
+///   refuses the start: a result names the revision that produced it.
+/// - A result already in the directory is logged
+///   (`pipeline_production_adapters_already_emitted`) and the start
+///   continues.
+/// - `pass` exactly when the default bundle's dependencies, the
+///   infrastructure, the privacy boundary's prose-PII classification and the
+///   package's production markers have no blocker; otherwise `fail` with
+///   those blockers. It names the default package (spec R-1).
+pub(crate) fn emit_production_adapters_check(
+    vars: PipelineCheckVars,
+    deployed_code_revision: Option<&str>,
+    service: &PipelineService,
+    components: &PipelineGateComponents,
+    infrastructure: trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
+    near_settlement_mode: &str,
+) -> anyhow::Result<ProductionAdaptersEmit> {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        PipelineCheckEmitter, PipelineCheckStatus,
+    };
+    let dir = vars.dir.clone();
+    let requested_revision = vars.code_revision_hash.clone();
+    let Some(emitter) =
+        PipelineCheckEmitter::from_vars(vars.dir, vars.run_id, vars.code_revision_hash)
+            .map_err(|label| anyhow::anyhow!(label))?
+    else {
+        return Ok(ProductionAdaptersEmit::NotRequested);
+    };
+    anyhow::ensure!(
+        deployed_code_revision.is_some() && deployed_code_revision == requested_revision.as_deref(),
+        PIPELINE_CHECK_REVISION_MISMATCH_LABEL
+    );
+    let dir = PathBuf::from(dir.unwrap_or_default());
+    if dir
+        .join(format!("{PRODUCTION_ADAPTERS_CHECK_ID}.result.json"))
+        .exists()
+    {
+        tracing::warn!("pipeline_production_adapters_already_emitted");
+        return Ok(ProductionAdaptersEmit::AlreadyEmitted);
+    }
+    let (blockers, evidence) =
+        production_adapters_observation(service, components, infrastructure, near_settlement_mode)?;
+    let status = if blockers.is_empty() {
+        PipelineCheckStatus::Pass
+    } else {
+        PipelineCheckStatus::Fail
+    };
+    let blocker_refs = blockers.iter().map(String::as_str).collect::<Vec<_>>();
+    emitter
+        .emit(
+            PRODUCTION_ADAPTERS_CHECK_ID,
+            status,
+            Some(service.default_package()),
+            &blocker_refs,
+            evidence,
+        )
+        .map_err(|label| anyhow::anyhow!(label))?;
+    tracing::info!(
+        status = if status == PipelineCheckStatus::Pass {
+            "pass"
+        } else {
+            "fail"
+        },
+        "pipeline_production_adapters_emitted"
+    );
+    Ok(ProductionAdaptersEmit::Emitted(status))
+}
+
+/// The blockers (sorted, labels only) and the evidence (labels, digests and
+/// counts only: no URL, key, tenant id or model name in clear) of
+/// `pipeline_production_adapters`.
+fn production_adapters_observation(
+    service: &PipelineService,
+    components: &PipelineGateComponents,
+    infrastructure: trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
+    near_settlement_mode: &str,
+) -> anyhow::Result<(Vec<String>, serde_json::Value)> {
+    use trace_commons_server::versioned_pipeline_qualification::{
+        ProductionDependencyProfile, is_safe_label, validate_production_package,
+    };
+    let package = service.default_package();
+    let bundle = service
+        .bundle_qualification(package)
+        .map_err(|label| anyhow::anyhow!(label))?;
+    let bundle_blockers = bundle
+        .blockers()
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let profile = ProductionDependencyProfile::new(bundle.clone(), infrastructure);
+    let infrastructure_blockers = profile
+        .blockers()
+        .into_iter()
+        .skip(bundle_blockers.len())
+        .collect::<Vec<_>>();
+    let runtime_identity_digest = profile
+        .runtime_identity_digest()
+        .map_err(|label| anyhow::anyhow!(label))?;
+
+    let mut blockers = bundle_blockers.clone();
+    blockers.extend(infrastructure_blockers.iter().cloned());
+    let classifies_prose_pii = service.privacy_classifies_prose_pii();
+    if !classifies_prose_pii {
+        blockers.push("pipeline_privacy_filter_required".to_string());
+    }
+    if components.index_root_shared_with_legacy {
+        blockers.push(PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL.to_string());
+    }
+    if let Err(label) = validate_production_package(package) {
+        blockers.push(if is_safe_label(&label) {
+            label
+        } else {
+            "pipeline_package_not_production".to_string()
+        });
+    }
+    blockers.sort();
+    blockers.dedup();
+
+    let settlement_adapters = bundle
+        .settlement_adapters
+        .iter()
+        .map(|(instrument, check)| {
+            (
+                instrument.clone(),
+                serde_json::json!({
+                    "identity": check.identity,
+                    "payout_rail": if check.identity == INTERNAL_TRACE_CREDIT_ADAPTER_IDENTITY {
+                        "none"
+                    } else {
+                        "unrecorded"
+                    },
+                    "qualified": check.production_qualified,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let evidence = serde_json::json!({
+        "schema": PRODUCTION_ADAPTERS_EVIDENCE_SCHEMA,
+        "runtime_identity_digest": runtime_identity_digest,
+        "scorer": {
+            "identity": bundle.scorer.identity,
+            "descriptor_hash": components.scorer_descriptor.hash(),
+            "qualified": bundle.scorer.production_qualified,
+        },
+        "embedder": {
+            "identity": bundle.embedder.identity,
+            "descriptor_hash": components.embedder_descriptor.hash(),
+            "output_dim": components.embedder_descriptor.output_dim,
+            "qualified": bundle.embedder.production_qualified,
+        },
+        "index_reader": {
+            "identity": bundle.index_reader.identity,
+            "qualified": bundle.index_reader.production_qualified,
+        },
+        "index_writer": {
+            "identity": bundle.index_writer.identity,
+            "qualified": bundle.index_writer.production_qualified,
+        },
+        "index_root_shared_with_legacy": components.index_root_shared_with_legacy,
+        "settlement_adapters": settlement_adapters,
+        "payout_enabled": service.payout_enabled(),
+        "near_settlement_mode": near_settlement_mode,
+        "authority": {
+            "qualified": bundle.authority,
+            "tenant_policy_count": components.tenant_policy_count,
+        },
+        "privacy": {
+            "backend": components.privacy_backend.map_or("none", |backend| backend.label()),
+            "classifies_prose_pii": classifies_prose_pii,
+            "qualified": bundle.privacy,
+        },
+        "compatibility_configuration_qualifiable": bundle.configuration_qualifiable,
+        "infrastructure_blockers": infrastructure_blockers,
+        "bundle_blockers": bundle_blockers,
+    });
+    Ok((blockers, evidence))
+}
+
 /// Where the pipeline's own vector index lives (spec A-D6). Required under
 /// the production selection, and never the legacy novelty or dedup root.
 pub(crate) const TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT: &str =
