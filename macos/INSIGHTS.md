@@ -5,7 +5,13 @@ and notification setup begin only after selecting another destination, once
 per app launch. Their existing roots, onboarding, and activation checks still
 apply. Returning to Insights does not stop services already activated.
 
-Choose a Codex rollout or trajectory file to analyze it locally. Analysis is
+The window has tabs. **Overview** (the default) shows one local week of the
+snapshots you saved, and **Analyze** holds the whole screen described below.
+**Spend** is shown disabled with a "Later" chip; Patterns and Sessions are
+not drawn until their slices land.
+
+Choose a Codex rollout, Claude Code session or trajectory file to analyze it
+locally. Analysis is
 temporary; **Re-read and save** reads the selected file again and saves derived
 observations to the same local store as the CLI. Saved snapshots update only
 on explicit import. Deleting a snapshot keeps the original file. Assessments
@@ -23,9 +29,21 @@ detail and reports failure. A failed summary refresh removes the stale summary.
 
 The screen displays Rust-provided observations, coverage, provider/rubric
 attribution, and source-digest evidence. It does not calculate independent
-metrics, discover files, enroll contributors, or upload traces. Native usage
-accounting, model comparisons, coaching, and event-level explanations are not
-part of this screen yet.
+metrics, discover files, enroll contributors, or upload traces.
+
+Overview reads `week_overview` and, for each card's drill-down,
+`card_inputs` from the same local service. It counts only sessions you
+analyzed and saved (feed S), dated by their own recorded timestamps, never by
+when they were imported, in the local ISO week (Monday to Sunday) at the
+shell's current UTC offset. Claude Code and Codex tokens are separate lines
+and are never summed; Codex is the change between its first and last
+counters. A session without usage counters is counted as unknown, never as
+zero, and the coverage line says how many. Week-to-week figures ("vs last
+week", "Your best week") need watched-folder counting and read as a dash
+here. By model keeps the core's fixed order (alphabetical, unknown last); By
+project is not available for analyzed files. Every word is the core's
+`ui_copy()` analytics table, marked DRAFT pending approval; every figure is
+the core's. Advice, what-if estimates and costs are not shown.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening

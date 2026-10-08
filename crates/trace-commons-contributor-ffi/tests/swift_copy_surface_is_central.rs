@@ -1039,6 +1039,31 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCCoreCopy.swift",
         "tc_automatic_contribution_copy_json",
     ),
+    // Insights: the tab container and the Analyze tab read the core's
+    // vocabulary; the Overview tab fills the core's analytics words with the
+    // core's figures (`InsightsOverviewWords`), read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights tabs and the Analyze tab",
+        "TraceCommonsApp/Views/InsightsView.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
+    (
+        "Insights week overview and drill-down reads",
+        "TraceCommonsApp/InsightsModel.swift",
+        "TCInsights.call(",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights Overview words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsOverviewWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still

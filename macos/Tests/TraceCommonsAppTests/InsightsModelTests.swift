@@ -169,3 +169,151 @@ extension InsightsModelTests {
         model.close()
     }
 }
+
+/// The Overview tab's model and words: every figure is the core's, an
+/// unknown figure is a dash, and nothing is re-sorted by value.
+final class InsightsOverviewTests: XCTestCase {
+    static let words: [String: String] = [
+        "analytics_unavailable": "\u{2014}",
+        "analytics_coverage_line": "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
+        "analytics_feed_saved": "FEED_SAVED",
+        "analytics_feed_comparisons_need_counter_pass": "NEEDS_T",
+        "analytics_unknown_label": "UNKNOWN_LABEL",
+        "analytics_source_codex": "CODEX_LINE",
+        "analytics_reason_no_usage_counters": "NO_COUNTERS",
+        "analytics_state_unknown": "STATE_UNKNOWN",
+        "analytics_largest": "Largest: {t} tokens",
+    ]
+
+    static let overviewJSON = """
+    {"type":"week_overview","overview":{
+      "feed":"saved","generation":18446744073709551615,
+      "week_start":"2026-09-07","week_end":"2026-09-13","tz":0,
+      "coverage":{"known":1,"partial":1,"unknown":2,"reasons":{"no_usage_counters":2}},
+      "undated_sessions":0,"sessions":4,
+      "sources":[
+        {"source":"claude_code","sessions":3,"tokens":null,"cache_share":null,
+         "largest_session":null,"change":"needs_counter_pass","best_week":"needs_counter_pass"},
+        {"source":"codex","sessions":1,"tokens":0,
+         "cache_share":{"numerator":20,"denominator":50,"permille":400},
+         "largest_session":{"session_ref":"abc","tokens":0},
+         "change":"needs_counter_pass","best_week":"needs_counter_pass"}],
+      "by_day":null,"codex_interval_tokens":0,
+      "by_model":[{"label":"alpha","tokens":5},{"label":"zeta","tokens":900},{"label":null,"tokens":7000}],
+      "by_tool":[{"source":"claude_code","tokens":null},{"source":"codex","tokens":0}],
+      "by_project":"not_available_for_analyzed_files",
+      "weeks":["2026-09-07"]}}
+    """
+
+    func overview() throws -> InsightsWeekOverview {
+        try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.overviewJSON.utf8)).overview)
+    }
+
+    func testUnknownIsADashAndAMeasuredZeroStaysZero() throws {
+        let week = try overview()
+        let copy = Self.words
+        XCTAssertEqual(InsightsOverviewWords.figure(week.sources[0].tokens, copy: copy), "\u{2014}")
+        XCTAssertEqual(InsightsOverviewWords.figure(week.sources[1].tokens, copy: copy), "0")
+        XCTAssertEqual(InsightsOverviewWords.share(week.sources[0].cache_share, copy: copy), "\u{2014}")
+        XCTAssertEqual(InsightsOverviewWords.share(week.sources[1].cache_share, copy: copy), "40")
+        // Feed S compares nothing: the change and the best week are dashes.
+        XCTAssertEqual(InsightsOverviewWords.change(week.sources[1], copy: copy), "\u{2014}")
+        XCTAssertEqual(InsightsOverviewWords.bestWeek(week.sources[1], copy: copy), "\u{2014}")
+        XCTAssertEqual(InsightsOverviewWords.sourceLine("codex", copy: copy), "CODEX_LINE")
+    }
+
+    func testCoverageAndFeedLinesAreTheCoresWordsFilled() throws {
+        let week = try overview()
+        XCTAssertEqual(InsightsOverviewWords.coverageLine(week.coverage, copy: Self.words),
+                       "Usage known for 1 of 4 sessions \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
+        XCTAssertEqual(InsightsOverviewWords.feedLines(week.feed, copy: Self.words), ["FEED_SAVED", "NEEDS_T"])
+        XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [])
+        XCTAssertEqual(InsightsOverviewWords.reason("no_usage_counters", copy: Self.words), "NO_COUNTERS")
+        XCTAssertEqual(InsightsOverviewWords.state("unknown", copy: Self.words), "STATE_UNKNOWN")
+        XCTAssertEqual(InsightsOverviewWords.fill("Largest: {t} tokens", ["t": "9"]), "Largest: 9 tokens")
+    }
+
+    func testModelRowsKeepTheCoresOrderWhateverTheirFigures() throws {
+        let week = try overview()
+        let rows = InsightsOverviewWords.modelRows(week, copy: Self.words)
+        XCTAssertEqual(rows.map(\.label), ["alpha", "zeta", "UNKNOWN_LABEL"])
+    }
+
+    @MainActor
+    func testOverviewModelAsksForTheWeekInTheLocalOffsetAndDrillsDown() async throws {
+        let recorder = OverviewRecorder()
+        let model = InsightsOverviewModel(service: { try await recorder.call($0) })
+        model.open()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.overview?.week_start, "2026-09-07")
+        var requests = await recorder.requests
+        XCTAssertEqual(requests.map(\.operation.type), ["week_overview"])
+        XCTAssertNil(requests[0].operation.week_start)
+        XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
+
+        model.showInputs("cache_share")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        requests = await recorder.requests
+        XCTAssertEqual(requests.last?.operation.type, "card_inputs")
+        XCTAssertEqual(requests.last?.operation.card, "cache_share")
+        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-07")
+        XCTAssertEqual(model.inputs?.card, "cache_share")
+        XCTAssertEqual(model.inputs?.sessions.first?.tokens, nil)
+
+        model.selectWeek("2026-08-31")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        requests = await recorder.requests
+        XCTAssertEqual(requests.last?.operation.week_start, "2026-08-31")
+        XCTAssertNil(model.inputs, "a new week closes the old drill-down")
+
+        await recorder.fail()
+        model.reload()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.overview, "a failed read never keeps the old figures")
+        XCTAssertTrue(model.failed)
+        model.close()
+    }
+
+    @MainActor
+    func testOverviewOverTheRealCoreReadsAnAbsentStoreWithoutCreatingIt() async throws {
+        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = InsightsOverviewModel(service: { request in
+            try await Task.detached {
+                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
+            }.value
+        })
+        model.open()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.failed)
+        XCTAssertEqual(model.overview?.feed, "saved")
+        XCTAssertEqual(model.overview?.sessions, 0)
+        XCTAssertEqual(model.overview?.by_project, "not_available_for_analyzed_files")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
+        model.close()
+    }
+}
+
+private actor OverviewRecorder {
+    var requests: [InsightsRequest] = []
+    private var failing = false
+    func fail() { failing = true }
+    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+        requests.append(request)
+        if failing { throw InsightsError.service("insights-operation-failed") }
+        let json: String
+        if request.operation.type == "card_inputs" {
+            json = """
+            {"type":"card_inputs","inputs":{"card":"\(request.operation.card ?? "")","feed":"saved",
+             "generation":1,"week_start":"2026-09-07","tz":0,"sources":[],
+             "coverage":{"known":0,"partial":0,"unknown":1,"reasons":{}},
+             "sessions":[{"session_ref":"abc","source":"claude_code","tokens":null,"cache_share":null,
+               "state":"unknown","reasons":["no_usage_counters"]}]}}
+            """
+        } else {
+            json = InsightsOverviewTests.overviewJSON.replacingOccurrences(
+                of: "\"2026-09-07\",\"week_end\"",
+                with: "\"\(request.operation.week_start ?? "2026-09-07")\",\"week_end\"")
+        }
+        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+    }
+}

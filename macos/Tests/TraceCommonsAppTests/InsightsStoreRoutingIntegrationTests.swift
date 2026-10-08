@@ -73,8 +73,10 @@ final class InsightsStoreRoutingIntegrationTests: XCTestCase {
         let tasks = ComparisonTasksModel(service: service)
         let specifications = ComparisonSpecificationsModel(service: service)
         let size = CGSize(width: 1_180, height: 3_200)
+        // The Analyze tab holds the screen this test reads.
         let content = InsightsView(storeSelection: selection, storeCopy: copy, model: insights,
-                                   comparisonModel: tasks, specificationModel: specifications)
+                                   comparisonModel: tasks, specificationModel: specifications,
+                                   initialTab: .analyze)
             .frame(width: size.width, height: size.height, alignment: .topLeading)
             .background(Color(nsColor: .windowBackgroundColor))
         let hosting = NSHostingView(rootView: content)

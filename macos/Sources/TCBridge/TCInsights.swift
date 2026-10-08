@@ -79,6 +79,11 @@ public struct InsightsRequest: Encodable, Sendable {
         public var input: ComparisonSpecificationDraftInput?
         public var specification_id: String?
         public var audit_digest: String?
+        /// `week_overview` and `card_inputs`: any date in the local week
+        /// (`yyyy-MM-dd`), the UTC offset in seconds east, and the card.
+        public var week_start: String?
+        public var tz: Int32?
+        public var card: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
@@ -87,7 +92,8 @@ public struct InsightsRequest: Encodable, Sendable {
                     context: ComparisonTaskContextInput? = nil,
                     displayedMaterialDigest: String? = nil,
                     input: ComparisonSpecificationDraftInput? = nil,
-                    specificationID: String? = nil, auditDigest: String? = nil) {
+                    specificationID: String? = nil, auditDigest: String? = nil,
+                    weekStart: String? = nil, tz: Int32? = nil, card: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
@@ -97,6 +103,7 @@ public struct InsightsRequest: Encodable, Sendable {
             self.context = context; self.displayed_material_digest = displayedMaterialDigest
             self.input = input
             self.specification_id = specificationID; self.audit_digest = auditDigest
+            self.week_start = weekStart; self.tz = tz; self.card = card
         }
     }
 }
@@ -123,12 +130,15 @@ public struct InsightsResponse: Decodable, Sendable {
     public let specification: ComparisonSpecification?
     public let specifications: [ComparisonSpecification]?
     public let comparisonResult: DescriptiveComparisonResult?
+    public let overview: InsightsWeekOverview?
+    public let inputs: InsightsCardInputs?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
     public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
         case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
         case detail, result, text, task, tasks, specification, specifications
+        case overview, inputs
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -160,6 +170,8 @@ public struct InsightsResponse: Decodable, Sendable {
         tasks = try values.decodeIfPresent([ComparisonTaskDetail].self, forKey: .tasks)
         specification = try values.decodeIfPresent(ComparisonSpecification.self, forKey: .specification)
         specifications = try values.decodeIfPresent([ComparisonSpecification].self, forKey: .specifications)
+        overview = try values.decodeIfPresent(InsightsWeekOverview.self, forKey: .overview)
+        inputs = try values.decodeIfPresent(InsightsCardInputs.self, forKey: .inputs)
     }
 }
 

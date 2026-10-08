@@ -8,6 +8,8 @@ struct InsightsView: View {
     @State private var model: InsightsModel
     @State private var comparisonModel: ComparisonTasksModel
     @State private var specificationModel: ComparisonSpecificationsModel
+    @State private var overviewModel: InsightsOverviewModel
+    @State private var tab: InsightsTab
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
     @State private var choosingFile = false
@@ -30,12 +32,16 @@ struct InsightsView: View {
                     storeCopy: [String: String]?,
                     model: InsightsModel,
                     comparisonModel: ComparisonTasksModel,
-                    specificationModel: ComparisonSpecificationsModel) {
+                    specificationModel: ComparisonSpecificationsModel,
+                    overviewModel: InsightsOverviewModel? = nil,
+                    initialTab: InsightsTab = .overview) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
         _comparisonModel = State(initialValue: comparisonModel)
         _specificationModel = State(initialValue: specificationModel)
+        _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
+        _tab = State(initialValue: initialTab)
     }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
@@ -55,10 +61,55 @@ struct InsightsView: View {
             .padding(24)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
-            content
+            tabs
         }
     }
 
+    /// The tab container. Tabs whose slice has not landed (Patterns,
+    /// Sessions) are not drawn; Spend is shown disabled with its Later chip.
+    /// The models open and close with the container, not with a tab.
+    private var tabs: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: GlassTokens.Space.s6) {
+                GlassSegmentedTabs(model.text("title"), selection: $tab, segments: [
+                    GlassSegment(model.text("analytics_tab_overview"), value: InsightsTab.overview),
+                    GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
+                ])
+                .frame(maxWidth: 260)
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Text(model.text("analytics_tab_spend")).foregroundStyle(GlassColor.textTertiary)
+                    GlassChip(glass: model.text("analytics_later"), muted: true)
+                }
+                .accessibilityElement(children: .combine)
+                Spacer()
+            }
+            .padding(.horizontal, 24).padding(.top, 16)
+            switch tab {
+            case .overview: InsightsOverviewTab(model: overviewModel, copy: model.copy)
+            case .analyze: content
+            }
+        }
+        .onAppear { model.open() }
+        .onAppear { comparisonModel.open() }
+        .onAppear { specificationModel.open() }
+        .onAppear { overviewModel.open() }
+        .onChange(of: comparisonTaskVersions) { _, _ in
+            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
+        }
+        .onChange(of: model.snapshots.map(\.id)) { _, _ in
+            updateSpecificationSources()
+            overviewModel.reload()
+        }
+        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
+            comparisonModel.upstreamEvidenceChanged()
+            specificationModel.upstreamEvidenceChanged()
+        }
+        .onDisappear {
+            model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
+        }
+    }
+
+    /// The Analyze tab: the whole screen as it was before the tabs.
     private var content: some View {
         ScrollViewReader { proxy in
             ScrollView {
@@ -159,18 +210,6 @@ struct InsightsView: View {
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.data]) { result in
             if case .success(let file) = result { model.analyze(file: file, source: source) }
         }
-        .onAppear { model.open() }
-        .onAppear { comparisonModel.open() }
-        .onAppear { specificationModel.open() }
-        .onChange(of: comparisonTaskVersions) { _, _ in
-            specificationModel.sourceEvidenceChanged(tasks: comparisonModel.tasks, snapshots: model.snapshots)
-        }
-        .onChange(of: model.snapshots.map(\.id)) { _, _ in updateSpecificationSources() }
-        .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
-            comparisonModel.upstreamEvidenceChanged()
-            specificationModel.upstreamEvidenceChanged()
-        }
-        .onDisappear { model.close(); comparisonModel.close(); specificationModel.close() }
     }
     private func refusalMessage(_ refusal: InsightsStoreSelection.Refusal) -> String {
         switch refusal {
@@ -249,6 +288,9 @@ struct InsightDetail: View {
         }.textSelection(.enabled)
     }
 }
+
+/// The Insights window's tabs that have landed.
+enum InsightsTab: Hashable { case overview, analyze }
 
 /// The assessment choices, by their wire values; their words are the
 /// copy table's `category_` and `outcome_` entries.

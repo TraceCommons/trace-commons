@@ -5,7 +5,8 @@ import TCBridge
 @Observable @MainActor
 final class InsightsModel {
     typealias Service = @Sendable (InsightsRequest) async throws -> InsightsResponse
-    private let service: Service
+    /// Shared with the sibling tab models, so every tab reads the same store.
+    let service: Service
     private var task: Task<Void, Never>?
     private var episodeTask: Task<Void, Never>?
     private var cardTask: Task<Void, Never>?
@@ -539,5 +540,159 @@ final class InsightsModel {
                 self.episodeBusy = false
             }
         }
+    }
+}
+
+/// The Overview tab's state: one saved week (feed S) and, when asked, what
+/// makes up one card's figure. Every figure is the core's; a failed read
+/// clears the figures rather than keep stale ones.
+@Observable @MainActor
+final class InsightsOverviewModel {
+    private let service: InsightsModel.Service
+    private var task: Task<Void, Never>?
+    private var token = UUID()
+    private var active = false
+    private(set) var busy = false
+    private(set) var failed = false
+    private(set) var overview: InsightsWeekOverview?
+    private(set) var inputs: InsightsCardInputs?
+    /// The week asked for; `nil` is the current week.
+    private(set) var requestedWeek: String?
+
+    init(service: @escaping InsightsModel.Service) { self.service = service }
+
+    /// The shell's current UTC offset, which buckets the week's days.
+    static var offset: Int32 { Int32(TimeZone.current.secondsFromGMT()) }
+
+    func open() { active = true; load() }
+    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false; inputs = nil }
+    func reload() { load() }
+    func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
+
+    /// Read the drill-down for `card` (`tokens`, `cache_share` or `sessions`)
+    /// in the week on screen.
+    func showInputs(_ card: String) {
+        guard active, let week = overview?.week_start else { return }
+        run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
+            guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
+            model.inputs = inputs
+        }
+    }
+    func hideInputs() { inputs = nil }
+
+    private func load() {
+        guard active else { return }
+        inputs = nil
+        run(.init("week_overview", weekStart: requestedWeek, tz: Self.offset)) { model, response in
+            guard let overview = response.overview else { throw InsightsError.invalidResponse }
+            model.overview = overview
+        }
+    }
+
+    private func run(_ operation: InsightsRequest.Operation,
+                     apply: @escaping @MainActor (InsightsOverviewModel, InsightsResponse) throws -> Void) {
+        task?.cancel()
+        token = UUID(); let current = token
+        busy = true; failed = false
+        let service = service
+        task = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                guard response.type == operation.type else { throw InsightsError.invalidResponse }
+                try apply(self, response)
+                self.busy = false
+            } catch {
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                self.overview = nil; self.inputs = nil
+                self.failed = true; self.busy = false
+            }
+        }
+    }
+}
+
+/// The core's analytics words, filled. Nothing here composes a sentence: a
+/// template's `{name}` holes take numbers the core computed.
+enum InsightsOverviewWords {
+    static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+
+    static func fill(_ template: String, _ values: [String: String]) -> String {
+        values.reduce(template) { result, hole in
+            result.replacingOccurrences(of: "{" + hole.key + "}", with: hole.value)
+        }
+    }
+
+    /// The figure, or the dash for unknown. A measured zero stays zero.
+    static func figure(_ value: UInt64?, copy: [String: String]) -> String {
+        guard let value else { return text("analytics_unavailable", copy) }
+        return value.formatted(.number.notation(.compactName))
+    }
+
+    /// Whole percent from the core's per mille, rounded half up.
+    static func share(_ share: InsightsShareFigure?, copy: [String: String]) -> String {
+        guard let share else { return text("analytics_unavailable", copy) }
+        return String((share.permille + 5) / 10)
+    }
+
+    /// "vs last week". The core sends a figure only under feed T; any
+    /// unavailable reason is the dash.
+    static func change(_ source: InsightsWeekSource, copy: [String: String]) -> String {
+        text("analytics_unavailable", copy)
+    }
+
+    static func bestWeek(_ source: InsightsWeekSource, copy: [String: String]) -> String {
+        text("analytics_unavailable", copy)
+    }
+
+    static func sourceLine(_ source: String, copy: [String: String]) -> String {
+        text("analytics_source_" + source, copy)
+    }
+
+    static func harness(_ source: String?, copy: [String: String]) -> String {
+        guard let source else { return text("analytics_unavailable", copy) }
+        return text(source, copy)
+    }
+
+    static func coverageLine(_ coverage: InsightsWeekCoverage, copy: [String: String]) -> String {
+        fill(text("analytics_coverage_line", copy), [
+            "k": String(coverage.known), "n": String(coverage.sessions),
+            "p": String(coverage.partial), "u": String(coverage.unknown),
+        ])
+    }
+
+    /// Which feed is showing. Feed S also says that weeks are not compared.
+    static func feedLines(_ feed: String, copy: [String: String]) -> [String] {
+        switch feed {
+        case "saved":
+            return [text("analytics_feed_saved", copy), text("analytics_feed_comparisons_need_counter_pass", copy)]
+        default:
+            return []
+        }
+    }
+
+    static func reason(_ wire: String, copy: [String: String]) -> String { text("analytics_reason_" + wire, copy) }
+    static func state(_ wire: String, copy: [String: String]) -> String { text("analytics_state_" + wire, copy) }
+
+    struct ModelRow: Identifiable, Equatable {
+        let id: Int
+        let label: String
+        let tokens: UInt64
+    }
+
+    /// By model, in the core's fixed order. Never sorted by value here.
+    static func modelRows(_ overview: InsightsWeekOverview, copy: [String: String]) -> [ModelRow] {
+        overview.by_model.enumerated().map { index, row in
+            ModelRow(id: index, label: row.label ?? text("analytics_unknown_label", copy), tokens: row.tokens)
+        }
+    }
+
+    /// The week's dates, Monday to Sunday, in the user's locale.
+    static func weekRange(start: String, end: String) -> String {
+        let parse = Date.ISO8601FormatStyle().year().month().day()
+        guard let first = try? Date(start, strategy: parse), let last = try? Date(end, strategy: parse) else {
+            return start
+        }
+        let style = Date.FormatStyle(timeZone: TimeZone(secondsFromGMT: 0) ?? .current).month(.abbreviated).day()
+        return first.formatted(style) + " \u{2013} " + last.formatted(style)
     }
 }
