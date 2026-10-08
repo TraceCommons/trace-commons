@@ -3732,6 +3732,16 @@ own 24 hours.
 - `cost.priced_micros` is the ledger's price in millionths of a dollar. It is
   **priced, not billed** -- work a plan already paid for is priced at the
   meter -- and must not be drawn as money spent. `known: false` is not zero.
+- `tokens` (additive, Insights feed L) is present **only while the
+  `insights_ledger_feed` setting is on** (owner decision D3, open); with it
+  off, and from an older daemon, the key is absent. When present it is
+  `{input, cache_read, cache_write, output}`, the ledger's four counts for the
+  call as recorded, each a non-negative integer or `null` when the proxy
+  recorded none (or a value out of range). `null` is not zero. `input` is the
+  facade's own figure: on `family: "anthropic"` it excludes the cache, on
+  `family: "openai"` it includes `cache_read`. A shell does not sum or
+  normalize them; Insights figures come from `insights_glance`. They are not
+  cost, and nothing prices them.
 
 `proof` is IronWire's own label for the row (`RoutedExchange.proof`),
 passed through unchanged -- the stored verdict of IronWire's receipt check,
