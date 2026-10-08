@@ -697,6 +697,10 @@ extension DaemonData {
         /// daemon runs the counter pass for `insights_week` (owner decision
         /// D4, open; off by default).
         public let insightsCounterPass: Bool?
+        /// The weekly summary card's only switch (owner decisions D1 and D4,
+        /// open; on by default). The Insights window passes it to the core's
+        /// `comparisons`; `nil` from a daemon that predates it.
+        public let insightsRecapCardEnabled: Bool?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -722,6 +726,7 @@ extension DaemonData {
             case insightsLedgerFeed = "insights_ledger_feed"
             case insightsContextThreshold = "insights_context_threshold"
             case insightsCounterPass = "insights_counter_pass"
+            case insightsRecapCardEnabled = "insights_recap_card_enabled"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
@@ -1714,19 +1719,46 @@ extension DaemonData {
         public let unavailable: String?
         public let changeVsLastWeek: [InsightsWeekChange]?
         public let rollup: InsightsWeekRollup?
+        /// The core's own Overview, Patterns and weekly-figures shapes, kept
+        /// as the JSON they came as: the app decodes them with the same
+        /// `TCBridge` types the in-process feed S reads use, and passes
+        /// `history` to the core's `comparisons` unchanged. Absent from a
+        /// daemon that predates them.
+        public let overview: CoreJSON?
+        public let patterns: CoreJSON?
+        public let history: CoreJSON?
+        /// `insights_recap_card_enabled`, passed to `comparisons`.
+        public let recapCardEnabled: Bool?
 
-        /// Enabled, readable, from the counter pass, and carrying a rollup.
+        /// Enabled, readable, from the counter pass, and carrying a rollup and
+        /// the core's Overview for it.
         public var showsCounterPass: Bool {
-            enabled && readable == true && feed == "counter_pass" && rollup != nil
+            enabled && readable == true && feed == "counter_pass" && rollup != nil && overview != nil
         }
 
         public enum CodingKeys: String, CodingKey {
             case enabled, feed, readable, reason, comparable, unavailable, rollup
+            case overview, patterns, history
+            case recapCardEnabled = "recap_card_enabled"
             case updatedAt = "updated_at"
             case sessionsStored = "sessions_stored"
             case isoWeek = "iso_week"
             case weekStart = "week_start"
             case changeVsLastWeek = "change_vs_last_week"
+        }
+    }
+
+    /// A part of a reply kept whole, as JSON bytes, for a layer that decodes
+    /// it with the core's own types. Integers stay integers.
+    public struct CoreJSON: Codable, Equatable, Sendable {
+        public let data: Data
+
+        public init(from decoder: Decoder) throws {
+            data = try JSONEncoder().encode(JSONValue(from: decoder))
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            try JSONDecoder().decode(JSONValue.self, from: data).encode(to: encoder)
         }
     }
 

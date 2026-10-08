@@ -355,6 +355,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
+    public func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
     // MARK: History and credit
 
     public func listHistory(limit: Int) async throws -> [DaemonData.HistoryRow] {

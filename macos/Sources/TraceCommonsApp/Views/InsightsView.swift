@@ -11,7 +11,11 @@ struct InsightsView: View {
     @State private var overviewModel: InsightsOverviewModel
     @State private var patternsModel: InsightsPatternsModel
     @State private var sessionsModel: InsightsSessionsModel
+    @State private var comparisonsModel: InsightsComparisonsModel
     @State private var tab: InsightsTab
+    /// "Turn off" on the weekly summary card: the daemon's setting, its only
+    /// switch. `nil` without a daemon.
+    private let turnOffRecapCard: (@Sendable () async throws -> Void)?
     private let storeSelection: InsightsStoreSelection
     private let storeCopy: [String: String]
     @State private var choosingFile = false
@@ -27,10 +31,14 @@ struct InsightsView: View {
         let weekReader: InsightsModel.WeekReader? = daemon.map { client in
             { isoWeek in try await client.insightsWeek(isoWeek: isoWeek) }
         }
+        let turnOff: (@Sendable () async throws -> Void)? = daemon.map { client in
+            { _ = try await client.setInsightsRecapCard(false) }
+        }
         self.init(storeSelection: storeSelection, storeCopy: storeCopy,
                   model: InsightsModel(service: service, weekReader: weekReader),
                   comparisonModel: ComparisonTasksModel(service: service),
-                  specificationModel: ComparisonSpecificationsModel(service: service))
+                  specificationModel: ComparisonSpecificationsModel(service: service),
+                  turnOffRecapCard: turnOff)
     }
 
     /// The same view over models the caller built, so a caller that renders
@@ -42,7 +50,8 @@ struct InsightsView: View {
                     comparisonModel: ComparisonTasksModel,
                     specificationModel: ComparisonSpecificationsModel,
                     overviewModel: InsightsOverviewModel? = nil,
-                    initialTab: InsightsTab = .overview) {
+                    initialTab: InsightsTab = .overview,
+                    turnOffRecapCard: (@Sendable () async throws -> Void)? = nil) {
         self.storeSelection = storeSelection
         self.storeCopy = storeCopy ?? [:]
         _model = State(initialValue: model)
@@ -51,7 +60,9 @@ struct InsightsView: View {
         _overviewModel = State(initialValue: overviewModel ?? InsightsOverviewModel(service: model.service))
         _patternsModel = State(initialValue: InsightsPatternsModel(service: model.service))
         _sessionsModel = State(initialValue: InsightsSessionsModel(service: model.service))
+        _comparisonsModel = State(initialValue: InsightsComparisonsModel(service: model.service))
         _tab = State(initialValue: initialTab)
+        self.turnOffRecapCard = turnOffRecapCard
     }
 
     /// The line naming a custom store, exactly as the view renders it; `nil`
@@ -96,8 +107,19 @@ struct InsightsView: View {
             }
             .padding(.horizontal, 24).padding(.top, 16)
             switch tab {
-            case .overview: InsightsOverviewTab(model: overviewModel, copy: model.copy)
-            case .patterns: InsightsPatternsTab(model: patternsModel, copy: model.copy)
+            case .overview:
+                InsightsOverviewTab(
+                    model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
+                    notice: model.counterPassNoticeKey.map(model.text),
+                    selectWeek: selectWeek,
+                    openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
+                    turnOffRecap: turnOffRecapCard.map { turnOff in
+                        { Task { try? await turnOff(); await model.loadWeek() } }
+                    },
+                    showReads: { tab = .patterns })
+            case .patterns:
+                InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
+                                    selectWeek: selectWeek)
             case .sessions:
                 InsightsSessionsTab(model: sessionsModel, snapshotIDs: model.snapshots.map(\.id), copy: model.copy)
             case .analyze: content
@@ -118,14 +140,35 @@ struct InsightsView: View {
             patternsModel.reload()
             sessionsModel.sync(snapshotIDs: model.snapshots.map(\.id))
         }
+        .onChange(of: model.counterWeek) { _, week in showCounterWeek(week) }
         .onChange(of: model.comparisonInvalidationGeneration) { _, _ in
             comparisonModel.upstreamEvidenceChanged()
             specificationModel.upstreamEvidenceChanged()
         }
         .onDisappear {
             model.close(); comparisonModel.close(); specificationModel.close(); overviewModel.close()
-            patternsModel.close(); sessionsModel.close()
+            patternsModel.close(); sessionsModel.close(); comparisonsModel.clear()
         }
+    }
+
+    /// Put a week on screen in the feed showing: the daemon's for feed T,
+    /// the saved snapshots' for feed S. Never both.
+    private func selectWeek(_ weekStart: String) {
+        if model.weekFeed == .counterPass, let iso = InsightsOverviewWords.isoWeek(weekStart) {
+            Task { await model.loadWeek(isoWeek: iso) }
+        } else {
+            overviewModel.selectWeek(weekStart); patternsModel.selectWeek(weekStart)
+        }
+    }
+
+    /// Feed T's week replaces the saved week in both tabs, and its weekly
+    /// figures go to the core for goals, the lever and the summary card;
+    /// `nil` (feed S) takes all of it away.
+    private func showCounterWeek(_ week: DaemonData.InsightsWeek?) {
+        overviewModel.showCounter(week?.coreOverview)
+        patternsModel.showCounter(week?.corePatterns)
+        comparisonsModel.load(counterWeeks: week?.coreHistory, weekStart: week?.weekStart,
+                              recapCardEnabled: week?.recapCardEnabled ?? false)
     }
 
     /// The Analyze tab: the whole screen as it was before the tabs.

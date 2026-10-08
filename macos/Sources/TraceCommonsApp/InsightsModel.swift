@@ -608,6 +608,9 @@ final class InsightsOverviewModel {
     private(set) var busy = false
     private(set) var failed = false
     private(set) var overview: InsightsWeekOverview?
+    /// The daemon's week (feed T), in the same shape. While it is set it is
+    /// the only week shown; the saved week is never mixed in.
+    private(set) var counter: InsightsWeekOverview?
     private(set) var inputs: InsightsCardInputs?
     /// The week asked for; `nil` is the current week.
     private(set) var requestedWeek: String?
@@ -617,6 +620,15 @@ final class InsightsOverviewModel {
     /// The shell's current UTC offset, which buckets the week's days.
     static var offset: Int32 { Int32(TimeZone.current.secondsFromGMT()) }
 
+    /// The week on screen: feed T when the daemon sent one, feed S otherwise.
+    var shown: InsightsWeekOverview? { counter ?? overview }
+
+    /// Show the daemon's week, or `nil` to go back to the saved week. The
+    /// saved week's drill-down closes either way.
+    func showCounter(_ week: InsightsWeekOverview?) {
+        counter = week; inputs = nil
+    }
+
     func open() { active = true; load() }
     func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false; inputs = nil }
     func reload() { load() }
@@ -625,7 +637,9 @@ final class InsightsOverviewModel {
     /// Read the drill-down for `card` (`tokens`, `cache_share` or `sessions`)
     /// in the week on screen.
     func showInputs(_ card: String) {
-        guard active, let week = overview?.week_start else { return }
+        // Feed T rows carry no session reference, so only the saved week
+        // drills down.
+        guard active, counter == nil, let week = overview?.week_start else { return }
         run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
             guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
             model.inputs = inputs
@@ -690,15 +704,30 @@ enum InsightsOverviewWords {
         return String((share.permille + 5) / 10)
     }
 
+    /// Whole percent from a per mille, rounded half up.
+    static func percent(_ permille: UInt64) -> String { String((permille + 5) / 10) }
+
     /// "vs last week". The core sends a figure only under feed T; any
     /// unavailable reason is the dash.
     static func change(_ source: InsightsWeekSource, copy: [String: String]) -> String {
-        text("analytics_unavailable", copy)
+        changeLine(source.change_permille, copy: copy)
     }
 
-    static func bestWeek(_ source: InsightsWeekSource, copy: [String: String]) -> String {
-        text("analytics_unavailable", copy)
+    /// "▼ {p}% vs last week" / "▲ {p}% vs last week", or the dash.
+    static func changeLine(_ permille: Int64?, copy: [String: String]) -> String {
+        guard let permille else { return text("analytics_unavailable", copy) }
+        let key = permille < 0 ? "analytics_change_down" : "analytics_change_up"
+        return fill(text(key, copy), ["p": percent(permille.magnitude)])
     }
+
+    /// "Your best week · previous best {q}%", or the dash.
+    static func bestWeek(_ source: InsightsWeekSource, copy: [String: String]) -> String {
+        guard let best = source.best else { return text("analytics_unavailable", copy) }
+        return fill(text("analytics_best_week", copy), ["q": percent(best.previous_best_permille)])
+    }
+
+    /// Where the previous best sits on the share bar; `nil` without one.
+    static func bestTick(_ source: InsightsWeekSource) -> UInt64? { source.best?.previous_best_permille }
 
     static func sourceLine(_ source: String, copy: [String: String]) -> String {
         text("analytics_source_" + source, copy)
@@ -721,9 +750,22 @@ enum InsightsOverviewWords {
         switch feed {
         case "saved":
             return [text("analytics_feed_saved", copy), text("analytics_feed_comparisons_need_counter_pass", copy)]
+        case "counter_pass":
+            return [text("analytics_feed_counter_pass", copy)]
         default:
             return []
         }
+    }
+
+    /// `yyyy-MM-dd` (a Monday) as the ISO week `insights_week` takes.
+    static func isoWeek(_ weekStart: String) -> String? {
+        let parse = Date.ISO8601FormatStyle().year().month().day()
+        guard let day = try? Date(weekStart, strategy: parse) else { return nil }
+        var calendar = Calendar(identifier: .iso8601)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        let parts = calendar.dateComponents([.yearForWeekOfYear, .weekOfYear], from: day)
+        guard let year = parts.yearForWeekOfYear, let week = parts.weekOfYear else { return nil }
+        return String(format: "%04d-W%02d", year, week)
     }
 
     static func reason(_ wire: String, copy: [String: String]) -> String { text("analytics_reason_" + wire, copy) }
@@ -763,8 +805,18 @@ final class InsightsPatternsModel {
     private(set) var busy = false
     private(set) var failed = false
     private(set) var patterns: InsightsWeekPatterns?
+    /// The daemon's week (feed T), in the same shape; while it is set it is
+    /// the only week shown.
+    private(set) var counter: InsightsWeekPatterns?
     /// The sessions behind one card, while its list is open.
     private(set) var sessions: InsightsPatternSessions?
+
+    /// The week on screen: feed T when the daemon sent one, feed S otherwise.
+    var shown: InsightsWeekPatterns? { counter ?? patterns }
+
+    func showCounter(_ week: InsightsWeekPatterns?) {
+        counter = week; sessions = nil
+    }
     /// The week asked for; `nil` is the current week.
     private(set) var requestedWeek: String?
 
@@ -777,7 +829,7 @@ final class InsightsPatternsModel {
 
     /// Read the sessions behind the card of `kind` in the week on screen.
     func showSessions(_ kind: String) {
-        guard active, let week = patterns?.week_start else { return }
+        guard active, counter == nil, let week = patterns?.week_start else { return }
         run(.init("pattern_sessions", weekStart: week, tz: InsightsOverviewModel.offset, pattern: kind)) { model, response in
             guard let found = response.pattern_sessions, found.pattern == kind else { throw InsightsError.invalidResponse }
             model.sessions = found
@@ -1074,5 +1126,247 @@ enum InsightsSessionsWords {
         default: break
         }
         return lines
+    }
+}
+
+/// The daemon's week (feed T) in the core's own shapes: the same `TCBridge`
+/// types the saved week decodes into, so one view draws either feed.
+extension DaemonData.InsightsWeek {
+    private func core<T: Decodable>(_ part: DaemonData.CoreJSON?, as type: T.Type) -> T? {
+        part.flatMap { try? JSONDecoder().decode(T.self, from: $0.data) }
+    }
+    var coreOverview: InsightsWeekOverview? { core(overview, as: InsightsWeekOverview.self) }
+    var corePatterns: InsightsWeekPatterns? { core(patterns, as: InsightsWeekPatterns.self) }
+    /// The kept weeks, passed to the core's `comparisons` unchanged.
+    var coreHistory: [InsightsWeekFigures]? { core(history, as: [InsightsWeekFigures].self) }
+}
+
+/// Goals, the lever of the week and the weekly summary card (feed T only).
+/// The core marks the goals it stores against the daemon's weekly figures,
+/// which this model passes through unchanged; nothing is compared here.
+@Observable @MainActor
+final class InsightsComparisonsModel {
+    private let service: InsightsModel.Service
+    private var task: Task<Void, Never>?
+    private var token = UUID()
+    private(set) var busy = false
+    private(set) var failed = false
+    private(set) var comparisons: InsightsComparisons?
+    private var counterWeeks: [InsightsWeekFigures]?
+    private var weekStart: String?
+    private var recapCardEnabled = false
+
+    init(service: @escaping InsightsModel.Service) { self.service = service }
+
+    /// Read for the daemon's week; `nil` weeks (feed S) clears everything,
+    /// because nothing is compared under feed S.
+    func load(counterWeeks: [InsightsWeekFigures]?, weekStart: String?, recapCardEnabled: Bool) {
+        self.counterWeeks = counterWeeks; self.weekStart = weekStart
+        self.recapCardEnabled = recapCardEnabled
+        guard counterWeeks != nil else { clear(); return }
+        reload()
+    }
+
+    func clear() {
+        token = UUID(); task?.cancel(); task = nil
+        comparisons = nil; busy = false; failed = false
+    }
+
+    func reload() {
+        guard let counterWeeks else { return }
+        run(.init("comparisons", weekStart: weekStart, tz: InsightsOverviewModel.offset,
+                  counterWeeks: counterWeeks, recapCardEnabled: recapCardEnabled))
+    }
+
+    func addGoal(_ goal: InsightsGoal) { write(.init("goal_set", goal: goal)) }
+    func deleteGoal(_ id: String) { write(.init("goal_delete", id: id)) }
+
+    /// "Not useful" on the lever shown, for the week shown.
+    func notUseful() {
+        guard let found = comparisons, let pick = found.lever.pick else { return }
+        write(.init("lever_feedback", weekStart: found.week_start, kind: pick.kind, action: "not_useful"))
+    }
+
+    /// "Open recap": the card is not shown again. Returns the closed week to
+    /// put on screen.
+    func openRecap() -> String? {
+        guard let week = comparisons?.recap?.week_start else { return nil }
+        write(.init("recap_opened", weekStart: week))
+        return week
+    }
+
+    private func write(_ operation: InsightsRequest.Operation) {
+        guard counterWeeks != nil else { return }
+        let service = service
+        let current = UUID(); token = current
+        task?.cancel(); busy = true
+        task = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.token == current, !Task.isCancelled else { return }
+                guard response.type == operation.type, response.state != nil else {
+                    throw InsightsError.invalidResponse
+                }
+                self.busy = false
+                self.reload()
+            } catch {
+                guard let self, self.token == current, !Task.isCancelled else { return }
+                self.busy = false; self.failed = true
+            }
+        }
+    }
+
+    private func run(_ operation: InsightsRequest.Operation) {
+        let service = service
+        let current = UUID(); token = current
+        task?.cancel(); busy = true; failed = false
+        task = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.token == current, !Task.isCancelled else { return }
+                guard response.type == operation.type, let found = response.comparisons else {
+                    throw InsightsError.invalidResponse
+                }
+                self.comparisons = found; self.busy = false
+            } catch {
+                guard let self, self.token == current, !Task.isCancelled else { return }
+                // A failed read never keeps an earlier week's marks.
+                self.comparisons = nil; self.failed = true; self.busy = false
+            }
+        }
+    }
+}
+
+/// The core's goal, lever and summary-card words, filled with the core's
+/// figures. Nothing here composes a sentence or compares a figure.
+enum InsightsComparisonsWords {
+    private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
+    private static let fill = InsightsOverviewWords.fill
+
+    /// The goal kinds, in the core's order, and their words.
+    static let goalKinds = ["cache_share_at_least", "repeated_reads_under", "long_context_under", "weekly_tokens_under"]
+    private static let goalKeys = [
+        "cache_share_at_least": "analytics_goal_cache_share",
+        "repeated_reads_under": "analytics_goal_repeated_reads",
+        "long_context_under": "analytics_goal_long_context",
+        "weekly_tokens_under": "analytics_goal_weekly_tokens",
+    ]
+
+    /// Whether a kind names one harness.
+    static func goalNeedsSource(_ kind: String) -> Bool {
+        kind == "cache_share_at_least" || kind == "weekly_tokens_under"
+    }
+
+    /// The goal's line, its harness first when it names one.
+    static func goal(_ goal: InsightsGoal, copy: [String: String]) -> String {
+        let line = fill(text(goalKeys[goal.kind] ?? "", copy), [
+            "p": goal.permille.map(InsightsOverviewWords.percent) ?? dash(copy),
+            "t": InsightsOverviewWords.figure(goal.tokens, copy: copy),
+        ])
+        guard let source = goal.source else { return line }
+        return InsightsOverviewWords.harness(source, copy: copy) + " \u{b7} " + line
+    }
+
+    /// A goal from what the user typed: a whole percent for a share, a token
+    /// count otherwise. `nil` when the number is not one.
+    static func newGoal(kind: String, source: String, number: String) -> InsightsGoal? {
+        guard let value = UInt64(number.trimmingCharacters(in: .whitespaces)), value > 0 else { return nil }
+        let harness = goalNeedsSource(kind) ? source : nil
+        if kind == "cache_share_at_least" {
+            guard value <= 100 else { return nil }
+            return InsightsGoal(kind: kind, source: harness, permille: value * 10)
+        }
+        return InsightsGoal(kind: kind, source: harness, tokens: value)
+    }
+
+    /// One weekly mark: met, not met, or the dash for a week with no figure.
+    static func mark(_ wire: String, copy: [String: String]) -> String {
+        switch wire {
+        case "met": return text("analytics_goal_met", copy)
+        case "not_met": return text("analytics_goal_not_met", copy)
+        default: return dash(copy)
+        }
+    }
+
+    /// The figure the goal is judged on, in its own unit.
+    static func goalFigure(_ view: InsightsGoalView, copy: [String: String]) -> String {
+        guard let figure = view.figure else { return dash(copy) }
+        return view.goal.kind == "cache_share_at_least"
+            ? InsightsOverviewWords.percent(figure) + "%" : InsightsOverviewWords.figure(figure, copy: copy)
+    }
+
+    /// "Down from {x} last week." / "Up from {x} last week."; `nil` when the
+    /// same, or when either week is not comparable.
+    static func goalChange(_ view: InsightsGoalView, copy: [String: String]) -> String? {
+        guard let change = view.marks?.change else { return nil }
+        let from = view.goal.kind == "cache_share_at_least"
+            ? InsightsOverviewWords.percent(change.from) + "%" : InsightsOverviewWords.figure(change.from, copy: copy)
+        switch change.direction {
+        case "down": return fill(text("analytics_goal_down_from", copy), ["x": from])
+        case "up": return fill(text("analytics_goal_up_from", copy), ["x": from])
+        default: return nil
+        }
+    }
+
+    /// The lever's observation. Repeated reads have their own line; any
+    /// other kind shows its card's name and figure. No advice (owner
+    /// decision D2, open).
+    static func leverLines(_ pick: InsightsLeverView, copy: [String: String]) -> [String] {
+        let tokens = InsightsOverviewWords.figure(pick.tokens, copy: copy)
+        if pick.kind == "repeated_reads" {
+            return [fill(text("analytics_lever_line", copy), [
+                "f": pick.files.map(String.init) ?? dash(copy),
+                "r": pick.count.map(String.init) ?? dash(copy),
+                "t": tokens,
+            ])]
+        }
+        return [InsightsPatternsWords.title(pick.kind, copy: copy), tokens]
+    }
+
+    /// The summary card's title.
+    static func recapTitle(_ recap: InsightsRecap, copy: [String: String]) -> String {
+        fill(text("analytics_your_week", copy), [
+            "range": InsightsOverviewWords.weekRange(start: recap.week_start, end: recap.week_end),
+        ])
+    }
+
+    /// "{n} sessions · {p}% fewer|more tokens than last week", per harness;
+    /// `nil` when last week cannot be compared.
+    static func recapChange(_ source: InsightsRecapSource, sessions: UInt32, copy: [String: String]) -> String? {
+        guard let permille = source.change_permille else { return nil }
+        let key = permille < 0 ? "analytics_recap_fewer" : "analytics_recap_more"
+        return fill(text(key, copy), ["n": String(sessions), "p": InsightsOverviewWords.percent(permille.magnitude)])
+    }
+
+    /// One item's line, by its rule; `nil` for a kind this build does not know.
+    static func recapItem(_ item: InsightsRecapItem, copy: [String: String]) -> String? {
+        switch item.kind {
+        case "best_cache_week":
+            guard let now = item.permille, let before = item.previous_best_permille else { return nil }
+            return fill(text("analytics_recap_best_cache", copy), [
+                "p": InsightsOverviewWords.percent(now), "q": InsightsOverviewWords.percent(before),
+            ])
+        case "goal":
+            guard let goal = item.goal, let met = item.met else { return nil }
+            return fill(text(met ? "analytics_recap_goal_met" : "analytics_recap_goal_not_met", copy),
+                        ["goal": Self.goal(goal, copy: copy)])
+        case "pattern_up":
+            guard let pattern = item.pattern, let up = item.up_permille else { return nil }
+            return fill(text("analytics_recap_pattern_up", copy), [
+                "pattern": InsightsPatternsWords.title(pattern, copy: copy), "p": InsightsOverviewWords.percent(up),
+            ])
+        default:
+            return nil
+        }
+    }
+
+    /// "{n} sessions passed your {threshold} threshold.", only when the user
+    /// has set a threshold.
+    static func recapThreshold(_ recap: InsightsRecap, copy: [String: String]) -> String? {
+        guard let past = recap.past_threshold else { return nil }
+        return fill(text("analytics_recap_threshold", copy), [
+            "n": String(past.sessions), "threshold": InsightsOverviewWords.figure(past.threshold, copy: copy),
+        ])
     }
 }

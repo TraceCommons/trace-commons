@@ -1084,6 +1084,24 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
+    // Feed T: the lever of the week and the weekly summary card on the
+    // Overview, and "Your goals" on Patterns, fill the core's words with the
+    // core's `comparisons` (`InsightsComparisonsWords`), read through the
+    // model's `tc_insights_call`.
+    (
+        "Insights lever and weekly summary words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
+    (
+        "Insights goals words",
+        "TraceCommonsApp/Views/InsightsPatternsTab.swift",
+        "InsightsComparisonsWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
 ];
 
 /// Bridge functions for surfaces macOS has not built yet. Each must still

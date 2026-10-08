@@ -207,6 +207,10 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("set_settings", params: ["local_notifications": on], as: DaemonData.Settings.self)
     }
 
+    public func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings {
+        try await call("set_settings", params: ["insights_recap_card_enabled": on], as: DaemonData.Settings.self)
+    }
+
     public func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings {
         var value: [String: Any] = ["mode": schedule.mode]
         if let hour = schedule.hour { value["hour"] = hour }

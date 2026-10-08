@@ -3,21 +3,28 @@ import SwiftUI
 import TCBridge
 import TCDesign
 
-/// Patterns ("Where tokens went") over the saved snapshots (feed S). Every
-/// word is the core's analytics copy, every figure the core's. A week with no
-/// figure is a gap in the bars, never a zero bar; files are letters with an
-/// extension, never a path; and nothing is compared with another week under
-/// feed S, so the change reads as the dash.
+/// Patterns ("Where tokens went") over one feed at a time: the daemon's
+/// counter pass (feed T) when it sent a week, the saved snapshots (feed S)
+/// otherwise. Every word is the core's analytics copy, every figure the
+/// core's. A week with no figure is a gap in the bars, never a zero bar;
+/// files are letters with an extension, never a path. Only feed T compares
+/// weeks and carries "Your goals"; under feed S the change reads as the dash.
 struct InsightsPatternsTab: View {
     let model: InsightsPatternsModel
+    let comparisons: InsightsComparisonsModel
     let copy: [String: String]
+    /// Put a week on screen; the window routes it to the feed showing.
+    var selectWeek: (String) -> Void = { _ in }
+    @State private var goalKind = InsightsComparisonsWords.goalKinds[0]
+    @State private var goalSource = "claude_code"
+    @State private var goalNumber = ""
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
-                if let patterns = model.patterns {
+                if let patterns = model.shown {
                     header(patterns)
                     HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
                         ForEach(patterns.cards) { card in
@@ -31,6 +38,9 @@ struct InsightsPatternsTab: View {
                         InsightsPatternSessionsView(found: sessions, copy: copy)
                     }
                     rereadTable(patterns)
+                    if patterns.feed == "counter_pass", let found = comparisons.comparisons {
+                        goals(found)
+                    }
                 } else if model.failed {
                     Text(text("analytics_unavailable")).insightsError()
                 }
@@ -48,7 +58,7 @@ struct InsightsPatternsTab: View {
                 Text(text("analytics_where_tokens_went")).insightsTitle()
                 GlassSelect(text("analytics_this_week"), selection: Binding(
                     get: { patterns.week_start },
-                    set: { model.selectWeek($0) }
+                    set: { selectWeek($0) }
                 ), options: weekOptions(patterns))
                 .frame(maxWidth: 220)
             }
@@ -86,7 +96,7 @@ struct InsightsPatternsTab: View {
             ForEach(InsightsPatternsWords.basisLines(card, copy: copy), id: \.self) { line in
                 Text(line).insightsCaption()
             }
-            if card.sessions > 0 {
+            if card.sessions > 0, model.counter == nil {
                 Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
                     if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }
                 }
@@ -111,6 +121,62 @@ struct InsightsPatternsTab: View {
         .chartYAxis(.hidden)
         .frame(height: 48)
         .accessibilityHidden(true)
+    }
+
+    /// "Your goals" (feed T only): each goal with six weekly marks, oldest
+    /// first, and the change from last week. Marks, not a run of weeks
+    /// (owner decision D1, open).
+    private func goals(_ found: InsightsComparisons) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(text("analytics_goals_title")).insightsHeading()
+            Text(text("analytics_goals_note")).insightsCaption()
+            ForEach(found.goals) { goal in
+                GlassTableRow {
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s6) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                            Text(InsightsComparisonsWords.goal(goal.goal, copy: copy))
+                            Text(InsightsComparisonsWords.goalFigure(goal, copy: copy)).insightsMono()
+                            if let change = InsightsComparisonsWords.goalChange(goal, copy: copy) {
+                                Text(change).insightsCaption()
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        HStack(spacing: GlassTokens.Space.s2) {
+                            ForEach(Array((goal.marks?.marks ?? []).enumerated()), id: \.offset) { _, mark in
+                                Text(InsightsComparisonsWords.mark(mark, copy: copy)).insightsCaption()
+                                    .frame(minWidth: 44)
+                            }
+                        }
+                        Button(text("analytics_goal_delete")) { comparisons.deleteGoal(goal.id) }
+                            .buttonStyle(GlassButtonStyle(.link))
+                    }
+                }
+            }
+            HStack(alignment: .bottom, spacing: GlassTokens.Space.s4) {
+                GlassSelect(text("analytics_goal_add"), selection: $goalKind,
+                            options: InsightsComparisonsWords.goalKinds.map { kind in
+                                GlassPickerOption(InsightsComparisonsWords.goal(
+                                    InsightsGoal(kind: kind), copy: copy), value: kind)
+                            })
+                if InsightsComparisonsWords.goalNeedsSource(goalKind) {
+                    GlassSelect(text("analytics_card_by_tool"), selection: $goalSource, options: [
+                        GlassPickerOption(InsightsOverviewWords.harness("claude_code", copy: copy), value: "claude_code"),
+                        GlassPickerOption(InsightsOverviewWords.harness("codex", copy: copy), value: "codex"),
+                    ])
+                }
+                GlassTextField(text("analytics_goal_add"), text: $goalNumber, showsLabel: false)
+                    .frame(maxWidth: 140)
+                Button(text("analytics_goal_add")) {
+                    if let goal = InsightsComparisonsWords.newGoal(kind: goalKind, source: goalSource, number: goalNumber) {
+                        comparisons.addGoal(goal); goalNumber = ""
+                    }
+                }
+                .buttonStyle(GlassButtonStyle(.glass, small: true))
+                .disabled(InsightsComparisonsWords.newGoal(kind: goalKind, source: goalSource,
+                                                           number: goalNumber) == nil)
+            }
+        }
+        .insightsCard()
     }
 
     private func rereadTable(_ patterns: InsightsWeekPatterns) -> some View {

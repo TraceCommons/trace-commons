@@ -164,6 +164,9 @@ public protocol DaemonDataClient: Sendable {
     func setScrubCheck(_ mode: DaemonData.ScrubCheckMode) async throws -> DaemonData.Settings
     /// `set_settings` with `local_notifications`.
     func setLocalNotifications(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_recap_card_enabled }`: the Insights weekly
+    /// summary card's only switch (its "Turn off").
+    func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings` with `digest_schedule`.
     func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings
 

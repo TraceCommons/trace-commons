@@ -90,6 +90,15 @@ public struct InsightsRequest: Encodable, Sendable {
         public var pattern: String?
         /// `session_drill`: the saved snapshot to show turn by turn.
         public var snapshot_id: String?
+        /// `comparisons`: the daemon's weekly figures, passed through
+        /// unchanged (absent under feed S), and its summary-card switch.
+        public var counter_weeks: [InsightsWeekFigures]?
+        public var recap_card_enabled: Bool?
+        /// `goal_set`: the goal. `lever_feedback`: the lever's kind and
+        /// `not_useful` or `reenable`.
+        public var goal: InsightsGoal?
+        public var kind: String?
+        public var action: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
@@ -100,7 +109,9 @@ public struct InsightsRequest: Encodable, Sendable {
                     input: ComparisonSpecificationDraftInput? = nil,
                     specificationID: String? = nil, auditDigest: String? = nil,
                     weekStart: String? = nil, tz: Int32? = nil, card: String? = nil,
-                    weeks: Int? = nil, pattern: String? = nil, snapshotID: String? = nil) {
+                    weeks: Int? = nil, pattern: String? = nil, snapshotID: String? = nil,
+                    counterWeeks: [InsightsWeekFigures]? = nil, recapCardEnabled: Bool? = nil,
+                    goal: InsightsGoal? = nil, kind: String? = nil, action: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
@@ -112,6 +123,8 @@ public struct InsightsRequest: Encodable, Sendable {
             self.specification_id = specificationID; self.audit_digest = auditDigest
             self.week_start = weekStart; self.tz = tz; self.card = card
             self.weeks = weeks; self.pattern = pattern; self.snapshot_id = snapshotID
+            self.counter_weeks = counterWeeks; self.recap_card_enabled = recapCardEnabled
+            self.goal = goal; self.kind = kind; self.action = action
         }
     }
 }
@@ -143,13 +156,15 @@ public struct InsightsResponse: Decodable, Sendable {
     public let patterns: InsightsWeekPatterns?
     public let pattern_sessions: InsightsPatternSessions?
     public let session: InsightsSessionDrill?
+    public let comparisons: InsightsComparisons?
+    public let state: InsightsGoalState?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
     public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
         case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
         case detail, result, text, task, tasks, specification, specifications
-        case overview, inputs, patterns, pattern_sessions, session
+        case overview, inputs, patterns, pattern_sessions, session, comparisons, state
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -186,6 +201,8 @@ public struct InsightsResponse: Decodable, Sendable {
         patterns = try values.decodeIfPresent(InsightsWeekPatterns.self, forKey: .patterns)
         pattern_sessions = try values.decodeIfPresent(InsightsPatternSessions.self, forKey: .pattern_sessions)
         session = try values.decodeIfPresent(InsightsSessionDrill.self, forKey: .session)
+        comparisons = try values.decodeIfPresent(InsightsComparisons.self, forKey: .comparisons)
+        state = try values.decodeIfPresent(InsightsGoalState.self, forKey: .state)
     }
 }
 

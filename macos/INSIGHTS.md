@@ -71,6 +71,23 @@ threshold, and a file read again with no edit tool call to it in between
 show that turn-by-turn usage is not recorded. No what-if estimate and no
 project name are shown.
 
+When the daemon's watched-folder counting (feed T, the
+`insights_counter_pass` setting, off by default) is on and readable,
+Overview and Patterns show its week instead, in the same shapes, and the feed
+line says so; the two feeds are never mixed, and a failed read falls back to
+the saved week with a line saying counting is unavailable. Only then are
+weeks compared: "vs last week" and "Your best week" (a tick on the cache
+bar) need comparable weeks. The daemon's kept weekly figures go unchanged to
+the core's `comparisons`, which marks your goals (Patterns, "Your goals": six
+weekly marks and "Down from / Up from last week", never a run of weeks),
+picks the lever of the week (an observation with "Show the reads" and "Not
+useful", no advice) and, on the first opens after a week closes, the weekly
+summary card at the top of Overview. "Open recap" puts the closed week on
+screen; "Turn off" clears the daemon's `insights_recap_card_enabled`, the
+card's only switch. Goals and "Not useful" are stored as rule IDs and Monday
+dates only. Feed T sessions carry no reference, so its cards do not drill
+down to sessions.
+
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening
 loads saved results again. Selection uses the native macOS file picker.

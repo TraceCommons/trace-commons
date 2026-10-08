@@ -228,7 +228,9 @@ final class InsightsOverviewTests: XCTestCase {
         XCTAssertEqual(InsightsOverviewWords.coverageLine(week.coverage, copy: Self.words),
                        "Usage known for 1 of 4 sessions \u{b7} 1 partial \u{b7} 2 unknown, not counted as zero")
         XCTAssertEqual(InsightsOverviewWords.feedLines(week.feed, copy: Self.words), ["FEED_SAVED", "NEEDS_T"])
-        XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [])
+        XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [""])
+        XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: ["analytics_feed_counter_pass": "FEED_T"]),
+                       ["FEED_T"])
         XCTAssertEqual(InsightsOverviewWords.reason("no_usage_counters", copy: Self.words), "NO_COUNTERS")
         XCTAssertEqual(InsightsOverviewWords.state("unknown", copy: Self.words), "STATE_UNKNOWN")
         XCTAssertEqual(InsightsOverviewWords.fill("Largest: {t} tokens", ["t": "9"]), "Largest: 9 tokens")
@@ -336,6 +338,7 @@ final class InsightsWeekFeedTests: XCTestCase {
      "comparable": false, "unavailable": "below_coverage_floor",
      "change_vs_last_week": [
        {"source": "claude_code", "permille": null, "unavailable": "below_coverage_floor"}],
+     "overview": {"feed": "counter_pass"},
      "rollup": {"feed": "counter_pass", "week_start": "2026-10-05",
        "coverage": {"known": 1, "partial": 1, "unknown": 1,
                     "reasons": {"some_turns_unknown": 1, "no_usage_counters": 1}},
@@ -409,6 +412,19 @@ final class InsightsWeekFeedTests: XCTestCase {
             XCTAssertEqual(model.feedLineKey, InsightsModel.FeedLineKey.saved)
             XCTAssertEqual(model.counterPassNoticeKey, InsightsModel.FeedLineKey.counterPassUnavailable)
         }
+    }
+
+    @MainActor
+    func testAWeekWithoutTheCoresOverviewIsNotDrawnAsFeedT() async throws {
+        // An older daemon answers the rollup alone: the window cannot draw it
+        // with the core's shapes, so it shows the saved feed and says so.
+        let bare = try Self.week(Self.counted.replacingOccurrences(
+            of: #""overview": {"feed": "counter_pass"},"#, with: ""))
+        XCTAssertFalse(bare.showsCounterPass)
+        let model = model({ _ in bare })
+        await model.loadWeek()
+        XCTAssertEqual(model.weekFeed, .saved)
+        XCTAssertEqual(model.counterPassNoticeKey, InsightsModel.FeedLineKey.counterPassUnavailable)
     }
 
     @MainActor
@@ -796,6 +812,269 @@ private actor SessionsRecorder {
         if failing { throw InsightsError.service("insights-operation-failed") }
         let json = request.operation.snapshot_id == "snap-2"
             ? InsightsSessionsTests.codexJSON : InsightsSessionsTests.claudeJSON
+        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+    }
+}
+
+/// Feed T comparisons (owner decision D4, open): the daemon's week arrives in
+/// the core's own shapes, its weekly figures go to the core unchanged, and
+/// goals, the lever and the weekly summary card are the core's. Nothing is
+/// compared in Swift, and nothing is shown under feed S.
+final class InsightsComparisonsTests: XCTestCase {
+    /// A real `insights_week` answer, recorded from the daemon's own test
+    /// over the Claude fixture session (`daemon::insights_week`).
+    static let daemonWeek = #"""
+{"enabled":true,"feed":"counter_pass","readable":true,"updated_at":"2026-09-14T12:00:00+00:00","sessions_stored":1,"iso_week":"2026-W38","week_start":"2026-09-14","comparable":false,"unavailable":"below_coverage_floor","change_vs_last_week":[{"source":"claude_code","permille":null,"unavailable":"below_coverage_floor"}],"rollup":{"feed":"counter_pass","week_start":"2026-09-14","coverage":{"known":0,"partial":1,"unknown":0,"reasons":{"some_turns_unknown":1}},"undated_sessions":0,"sources":[{"source":"claude_code","sessions":1,"tokens":37235,"largest_session_tokens":37235,"cache_share":{"numerator":24500,"denominator":37115}}],"by_day":[{"date":"2026-09-14","uncached":15,"cache_read":24500,"cache_write":12600,"output":120},{"date":"2026-09-15","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-16","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-17","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-18","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-19","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-20","uncached":0,"cache_read":0,"cache_write":0,"output":0}],"codex_interval_tokens":null,"by_model":[{"label":"claude-fixture-model","tokens":37235}],"sessions":[{"cache_share":{"numerator":24500,"denominator":37115},"source":"claude_code","tokens":37235,"state":"partial","reasons":["some_turns_unknown"]}]},"overview":{"feed":"counter_pass","generation":0,"week_start":"2026-09-14","week_end":"2026-09-20","tz":0,"coverage":{"known":0,"partial":1,"unknown":0,"reasons":{"some_turns_unknown":1}},"undated_sessions":0,"sessions":1,"sources":[{"source":"claude_code","sessions":1,"tokens":37235,"cache_share":{"numerator":24500,"denominator":37115,"permille":660},"largest_session":{"tokens":37235},"change_permille":null,"change":"below_coverage_floor","best":null,"best_week":"below_coverage_floor"}],"by_day":[{"date":"2026-09-14","uncached":15,"cache_read":24500,"cache_write":12600,"output":120},{"date":"2026-09-15","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-16","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-17","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-18","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-19","uncached":0,"cache_read":0,"cache_write":0,"output":0},{"date":"2026-09-20","uncached":0,"cache_read":0,"cache_write":0,"output":0}],"codex_interval_tokens":null,"by_model":[{"label":"claude-fixture-model","tokens":37235}],"by_tool":[{"source":"claude_code","tokens":37235}],"by_project":"held_for_project_decision","weeks":["2026-09-14"]},"patterns":{"feed":"counter_pass","generation":0,"week_start":"2026-09-14","week_end":"2026-09-20","tz":0,"coverage":{"known":0,"partial":1,"unknown":0,"reasons":{"some_turns_unknown":1}},"sessions":1,"claude_sessions":1,"claude_only":false,"long_context_threshold":200000,"cards":[{"kind":"repeated_reads","tokens":0,"count":0,"files":0,"sessions":0,"basis":"estimate_from_result_size","inferred":false,"weeks":[{"week_start":"2026-08-10","tokens":null},{"week_start":"2026-08-17","tokens":null},{"week_start":"2026-08-24","tokens":null},{"week_start":"2026-08-31","tokens":null},{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":null}],"change":null,"change_unavailable":"below_coverage_floor"},{"kind":"retried_calls","tokens":0,"count":0,"files":null,"sessions":0,"basis":"estimate_from_result_size","inferred":false,"weeks":[{"week_start":"2026-08-10","tokens":null},{"week_start":"2026-08-17","tokens":null},{"week_start":"2026-08-24","tokens":null},{"week_start":"2026-08-31","tokens":null},{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":null}],"change":null,"change_unavailable":"below_coverage_floor"},{"kind":"edit_fail_edit","tokens":0,"count":0,"files":null,"sessions":0,"basis":"estimate_from_result_size","inferred":true,"weeks":[{"week_start":"2026-08-10","tokens":null},{"week_start":"2026-08-17","tokens":null},{"week_start":"2026-08-24","tokens":null},{"week_start":"2026-08-31","tokens":null},{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":null}],"change":null,"change_unavailable":"below_coverage_floor"},{"kind":"long_context","tokens":null,"count":0,"files":null,"sessions":0,"basis":"from_counters","inferred":false,"weeks":[{"week_start":"2026-08-10","tokens":null},{"week_start":"2026-08-17","tokens":null},{"week_start":"2026-08-24","tokens":null},{"week_start":"2026-08-31","tokens":null},{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":null}],"change":null,"change_unavailable":"below_coverage_floor"}],"reread_files":[],"weeks":["2026-09-14"]},"history":[{"week_start":"2026-06-22","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-06-29","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-07-06","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-07-13","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-07-20","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-07-27","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-08-03","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-08-10","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-08-17","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-08-24","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-08-31","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-09-07","comparable":false,"tokens":{},"cache_share_permille":{},"patterns":{},"sessions":0,"pattern_counts":{},"reread_files":null,"past_threshold":null},{"week_start":"2026-09-14","comparable":false,"tokens":{"claude_code":37235},"cache_share_permille":{"claude_code":660},"patterns":{"repeated_reads":0,"retried_calls":0,"edit_fail_edit":0},"sessions":1,"pattern_counts":{"repeated_reads":0,"retried_calls":0,"edit_fail_edit":0,"long_context":0},"reread_files":0,"past_threshold":null}],"recap_card_enabled":true}
+"""#
+
+    static let words: [String: String] = [
+        "analytics_unavailable": "\u{2014}",
+        "analytics_change_down": "\u{25BC} {p}% vs last week",
+        "analytics_change_up": "\u{25B2} {p}% vs last week",
+        "analytics_best_week": "Your best week \u{b7} previous best {q}%",
+        "analytics_goal_cache_share": "Input read from cache \u{2265} {p}%",
+        "analytics_goal_repeated_reads": "Repeated reads under {t}",
+        "analytics_goal_weekly_tokens": "Weekly tokens under {t}",
+        "analytics_goal_met": "Met",
+        "analytics_goal_not_met": "Not met",
+        "analytics_goal_down_from": "Down from {x} last week.",
+        "analytics_goal_up_from": "Up from {x} last week.",
+        "analytics_lever_line": "{f} files were read again {r} times, about {t} tokens.",
+        "analytics_pattern_retried_calls": "RETRIED",
+        "analytics_pattern_repeated_reads": "REPEATED",
+        "analytics_your_week": "Your week \u{b7} {range}",
+        "analytics_recap_fewer": "{n} sessions \u{b7} {p}% fewer tokens than last week",
+        "analytics_recap_more": "{n} sessions \u{b7} {p}% more tokens than last week",
+        "analytics_recap_best_cache": "Best cache week yet: {p}%. Previous best {q}%.",
+        "analytics_recap_goal_met": "Goal met: {goal}.",
+        "analytics_recap_pattern_up": "{pattern} went up {p}% against your usual week.",
+        "analytics_recap_threshold": "{n} sessions passed your {threshold} threshold.",
+        "claude_code": "Claude Code",
+    ]
+
+    func week() throws -> DaemonData.InsightsWeek {
+        try DaemonDataDecoding.decoder().decode(DaemonData.InsightsWeek.self, from: Data(Self.daemonWeek.utf8))
+    }
+
+    func testTheDaemonsWeekDecodesIntoTheCoresOwnShapes() throws {
+        let week = try week()
+        XCTAssertTrue(week.showsCounterPass)
+        XCTAssertEqual(week.recapCardEnabled, true)
+        let overview = try XCTUnwrap(week.coreOverview)
+        XCTAssertEqual(overview.feed, "counter_pass")
+        XCTAssertEqual(overview.by_project, "held_for_project_decision")
+        let line = try XCTUnwrap(overview.sources.first)
+        XCTAssertEqual(line.tokens, 37235)
+        XCTAssertNil(line.change_permille)
+        XCTAssertEqual(line.change, "below_coverage_floor")
+        XCTAssertNil(line.best)
+        XCTAssertNil(line.largest_session?.session_ref, "no session reference crosses")
+        XCTAssertEqual(InsightsOverviewWords.change(line, copy: Self.words), "\u{2014}")
+        let patterns = try XCTUnwrap(week.corePatterns)
+        XCTAssertEqual(patterns.feed, "counter_pass")
+        XCTAssertEqual(patterns.cards.count, 4)
+        let history = try XCTUnwrap(week.coreHistory)
+        XCTAssertEqual(history.count, 13)
+        XCTAssertEqual(history.last?.tokens["claude_code"], 37235)
+        XCTAssertEqual(history.last?.sessions, 1)
+        XCTAssertNil(history.first?.reread_files)
+        XCTAssertEqual(history.first?.tokens, [:], "no figure is absent, never zero")
+    }
+
+    func testTheWeeklyFiguresGoToTheCoreUnchanged() throws {
+        let history = try XCTUnwrap(try week().coreHistory)
+        let request = InsightsRequest(operation: .init("comparisons", tz: 0, counterWeeks: history,
+                                                       recapCardEnabled: true))
+        let sent = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? [String: Any]
+        let operation = try XCTUnwrap(sent?["operation"] as? [String: Any])
+        let weeks = try XCTUnwrap(operation["counter_weeks"] as? [[String: Any]])
+        let original = try XCTUnwrap(
+            (try JSONSerialization.jsonObject(with: Data(Self.daemonWeek.utf8)) as? [String: Any])?["history"]
+                as? [[String: Any]])
+        XCTAssertEqual(weeks.count, original.count)
+        XCTAssertEqual(weeks.last?["week_start"] as? String, original.last?["week_start"] as? String)
+        // Counts stay integers: a one is never sent as true.
+        let encoded = String(decoding: try JSONEncoder().encode(history.last), as: UTF8.self)
+        XCTAssertTrue(encoded.contains(#""sessions":1"#), encoded)
+        XCTAssertEqual(operation["recap_card_enabled"] as? Bool, true)
+    }
+
+    @MainActor
+    func testTheRealCoreComparesTheDaemonsWeeksWithoutCreatingAStore() async throws {
+        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = InsightsComparisonsModel(service: { request in
+            try await Task.detached {
+                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
+            }.value
+        })
+        let week = try week()
+        model.load(counterWeeks: week.coreHistory, weekStart: week.weekStart, recapCardEnabled: true)
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.failed)
+        let found = try XCTUnwrap(model.comparisons)
+        XCTAssertEqual(found.feed, "counter_pass")
+        XCTAssertEqual(found.week_start, "2026-09-14")
+        XCTAssertEqual(found.goals, [])
+        // One thin week: below the floor, so no lever.
+        XCTAssertNil(found.lever.pick)
+        XCTAssertEqual(found.lever.unavailable, "below_coverage_floor")
+        XCTAssertNil(found.recap)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
+    }
+
+    @MainActor
+    func testFeedSComparesNothingAndAsksTheCoreNothing() async throws {
+        let recorder = ComparisonsRecorder()
+        let model = InsightsComparisonsModel(service: { try await recorder.call($0) })
+        model.load(counterWeeks: nil, weekStart: "2026-10-05", recapCardEnabled: true)
+        model.notUseful(); model.addGoal(InsightsGoal(kind: "repeated_reads_under", tokens: 5))
+        for _ in 0..<20 { await Task.yield() }
+        let requests = await recorder.requests
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertNil(model.comparisons)
+    }
+
+    @MainActor
+    func testWritesCarryRuleIDsAndWeeksAndThenReread() async throws {
+        let recorder = ComparisonsRecorder()
+        let model = InsightsComparisonsModel(service: { try await recorder.call($0) })
+        let history = try XCTUnwrap(try week().coreHistory)
+        model.load(counterWeeks: history, weekStart: "2026-09-14", recapCardEnabled: false)
+        for _ in 0..<500 where model.busy || model.comparisons == nil {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var requests = await recorder.requests
+        XCTAssertEqual(requests.map(\.operation.type), ["comparisons"])
+        XCTAssertEqual(requests[0].operation.counter_weeks, history)
+        XCTAssertEqual(requests[0].operation.week_start, "2026-09-14")
+        XCTAssertEqual(requests[0].operation.recap_card_enabled, false)
+
+        model.notUseful()
+        for _ in 0..<500 {
+            if await recorder.requests.count >= 3 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        requests = await recorder.requests
+        XCTAssertEqual(requests[1].operation.type, "lever_feedback")
+        XCTAssertEqual(requests[1].operation.kind, "repeated_reads")
+        XCTAssertEqual(requests[1].operation.week_start, "2026-09-14")
+        XCTAssertEqual(requests[1].operation.action, "not_useful")
+        XCTAssertEqual(requests[2].operation.type, "comparisons", "a write is followed by a fresh read")
+
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.openRecap(), "2026-09-07")
+        for _ in 0..<500 {
+            if await recorder.requests.count >= 4 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        requests = await recorder.requests
+        XCTAssertEqual(requests[3].operation.type, "recap_opened")
+        XCTAssertEqual(requests[3].operation.week_start, "2026-09-07")
+    }
+
+    func testChangeAndBestWeekAreTheCoresFigures() throws {
+        let json = """
+        {"source":"claude_code","sessions":6,"tokens":800,"cache_share":null,"largest_session":null,
+         "change_permille":-204,"change":null,"best":{"previous_best_permille":396,"is_new_best":true},
+         "best_week":null}
+        """
+        let line = try JSONDecoder().decode(InsightsWeekSource.self, from: Data(json.utf8))
+        XCTAssertEqual(InsightsOverviewWords.change(line, copy: Self.words), "\u{25BC} 20% vs last week")
+        XCTAssertEqual(InsightsOverviewWords.changeLine(5, copy: Self.words), "\u{25B2} 1% vs last week")
+        XCTAssertEqual(InsightsOverviewWords.bestWeek(line, copy: Self.words), "Your best week \u{b7} previous best 40%")
+        XCTAssertEqual(InsightsOverviewWords.bestTick(line), 396)
+    }
+
+    func testTheWeekPickerAsksTheDaemonForAnISOWeek() {
+        XCTAssertEqual(InsightsOverviewWords.isoWeek("2026-10-05"), "2026-W41")
+        XCTAssertEqual(InsightsOverviewWords.isoWeek("2025-12-29"), "2026-W01")
+        XCTAssertNil(InsightsOverviewWords.isoWeek("last week"))
+    }
+
+    func testGoalWordsAreTheCoresFilled() throws {
+        let words = Self.words
+        let share = InsightsGoal(kind: "cache_share_at_least", source: "claude_code", permille: 600)
+        XCTAssertEqual(InsightsComparisonsWords.goal(share, copy: words),
+                       "Claude Code \u{b7} Input read from cache \u{2265} 60%")
+        XCTAssertEqual(InsightsComparisonsWords.goal(InsightsGoal(kind: "repeated_reads_under", tokens: 50_000),
+                                                     copy: words), "Repeated reads under 50K")
+        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "60"),
+                       InsightsGoal(kind: "cache_share_at_least", source: "codex", permille: 600))
+        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "cache_share_at_least", source: "codex", number: "101"))
+        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "0"))
+        XCTAssertNil(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "lots"))
+        XCTAssertEqual(InsightsComparisonsWords.newGoal(kind: "repeated_reads_under", source: "codex", number: "9000"),
+                       InsightsGoal(kind: "repeated_reads_under", tokens: 9000))
+        XCTAssertEqual(InsightsComparisonsWords.mark("met", copy: words), "Met")
+        XCTAssertEqual(InsightsComparisonsWords.mark("not_met", copy: words), "Not met")
+        XCTAssertEqual(InsightsComparisonsWords.mark("no_figure", copy: words), "\u{2014}")
+
+        let view = try JSONDecoder().decode(InsightsGoalView.self, from: Data("""
+        {"id":"goal-1","goal":{"kind":"weekly_tokens_under","source":"claude_code","tokens":900000},
+         "figure":800000,"marks":{"marks":["no_figure","no_figure","no_figure","no_figure","not_met","met"],
+         "change":{"direction":"down","from":1000000}},"unavailable":null}
+        """.utf8))
+        XCTAssertEqual(InsightsComparisonsWords.goalFigure(view, copy: words), "800K")
+        XCTAssertEqual(InsightsComparisonsWords.goalChange(view, copy: words), "Down from 1M last week.")
+    }
+
+    func testTheLeverIsAnObservationInTheCoresWords() throws {
+        let reads = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
+            #"{"kind":"repeated_reads","tokens":300000,"count":9,"files":4,"ratio_permille":3000}"#.utf8))
+        XCTAssertEqual(InsightsComparisonsWords.leverLines(reads, copy: Self.words),
+                       ["4 files were read again 9 times, about 300K tokens."])
+        let retried = try JSONDecoder().decode(InsightsLeverView.self, from: Data(
+            #"{"kind":"retried_calls","tokens":120000,"count":3,"files":null,"ratio_permille":1500}"#.utf8))
+        XCTAssertEqual(InsightsComparisonsWords.leverLines(retried, copy: Self.words), ["RETRIED", "120K"])
+    }
+
+    func testTheSummaryCardIsTheCoresItemsFilled() throws {
+        let recap = try JSONDecoder().decode(InsightsRecap.self, from: Data("""
+        {"week_start":"2026-09-28","week_end":"2026-10-04","sessions":6,
+         "sources":[{"source":"claude_code","tokens":800000,"change_permille":-200},
+                    {"source":"codex","tokens":10,"change_permille":null}],
+         "items":[{"kind":"best_cache_week","source":"claude_code","permille":450,"previous_best_permille":300},
+                  {"kind":"goal","id":"goal-1","goal":{"kind":"repeated_reads_under","tokens":50000},"met":true},
+                  {"kind":"pattern_up","pattern":"repeated_reads","up_permille":1500},
+                  {"kind":"from_a_newer_core"}],
+         "past_threshold":null}
+        """.utf8))
+        let words = Self.words
+        XCTAssertEqual(InsightsComparisonsWords.recapChange(recap.sources[0], sessions: recap.sessions, copy: words),
+                       "6 sessions \u{b7} 20% fewer tokens than last week")
+        XCTAssertNil(InsightsComparisonsWords.recapChange(recap.sources[1], sessions: recap.sessions, copy: words),
+                     "no comparable week: no line, never 0%")
+        XCTAssertEqual(recap.items.compactMap { InsightsComparisonsWords.recapItem($0, copy: words) }, [
+            "Best cache week yet: 45%. Previous best 30%.",
+            "Goal met: Repeated reads under 50K.",
+            "REPEATED went up 150% against your usual week.",
+        ])
+        XCTAssertNil(InsightsComparisonsWords.recapThreshold(recap, copy: words),
+                     "no threshold line until the user sets one")
+        XCTAssertTrue(InsightsComparisonsWords.recapTitle(recap, copy: words).hasPrefix("Your week \u{b7} "))
+    }
+}
+
+private actor ComparisonsRecorder {
+    var requests: [InsightsRequest] = []
+    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+        requests.append(request)
+        let json: String
+        switch request.operation.type {
+        case "comparisons":
+            json = """
+            {"type":"comparisons","comparisons":{"feed":"counter_pass","week_start":"2026-09-14","goals":[],
+             "lever":{"pick":{"kind":"repeated_reads","tokens":300000,"count":9,"files":4,"ratio_permille":3000},
+                      "disabled":[],"unavailable":null},
+             "recap":{"week_start":"2026-09-07","week_end":"2026-09-13","sessions":6,"sources":[],"items":[],
+                      "past_threshold":null}}}
+            """
+        default:
+            json = """
+            {"type":"\(request.operation.type)","state":{"goals":[],"lever_dismissals":[],"lever_reenables":[],
+             "recap_opened_week":null}}
+            """
+        }
         return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
     }
 }

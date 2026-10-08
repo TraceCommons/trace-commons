@@ -3,13 +3,27 @@ import SwiftUI
 import TCBridge
 import TCDesign
 
-/// Overview ("This week") over the saved snapshots (feed S). Every word is
-/// the core's analytics copy, every figure the core's; an unknown figure is
-/// the core's dash and never a zero. Under feed S nothing is compared with
-/// another week, so the change and the best week read as the dash.
+/// Overview ("This week") over one feed at a time: the daemon's counter
+/// pass (feed T) when it sent a week, the saved snapshots (feed S)
+/// otherwise. Every word is the core's analytics copy, every figure the
+/// core's; an unknown figure is the core's dash and never a zero. Only feed
+/// T compares weeks, carries the lever of the week and the weekly summary
+/// card; under feed S the change and the best week read as the dash.
 struct InsightsOverviewTab: View {
     let model: InsightsOverviewModel
+    let comparisons: InsightsComparisonsModel
     let copy: [String: String]
+    /// "Watched-folder counting is unavailable right now", shown with feed S
+    /// when feed T is switched on but could not be read.
+    var notice: String?
+    /// Put a week on screen; the window routes it to the feed showing.
+    var selectWeek: (String) -> Void = { _ in }
+    /// "Open recap": the window puts the closed week on screen.
+    var openRecap: () -> Void = {}
+    /// "Turn off": the daemon's `insights_recap_card_enabled`.
+    var turnOffRecap: (() -> Void)?
+    /// "Show the reads": the Patterns tab.
+    var showReads: () -> Void = {}
     @State private var breakdown: Breakdown = .model
 
     enum Breakdown: Hashable { case model, project, tool }
@@ -19,12 +33,16 @@ struct InsightsOverviewTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
-                if let overview = model.overview {
+                if let overview = model.shown {
+                    if let recap = comparisons.comparisons?.recap { recapCard(recap) }
                     header(overview)
                     HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
                         tokensCard(overview)
                         cacheCard(overview)
                         sessionsCard(overview)
+                    }
+                    if overview.feed == "counter_pass", let lever = comparisons.comparisons?.lever {
+                        leverCard(lever)
                     }
                     if let inputs = model.inputs {
                         InsightsCardInputsView(inputs: inputs, copy: copy)
@@ -50,7 +68,7 @@ struct InsightsOverviewTab: View {
                 Text(text("analytics_this_week")).insightsTitle()
                 GlassSelect(text("analytics_this_week"), selection: Binding(
                     get: { overview.week_start },
-                    set: { model.selectWeek($0) }
+                    set: { selectWeek($0) }
                 ), options: weekOptions(overview))
                 .frame(maxWidth: 220)
             }
@@ -66,6 +84,69 @@ struct InsightsOverviewTab: View {
             ForEach(InsightsOverviewWords.feedLines(overview.feed, copy: copy), id: \.self) { line in
                 Text(line).insightsCaption()
             }
+            if overview.feed == "saved", let notice { Text(notice).insightsCaption() }
+        }
+    }
+
+    /// The weekly summary card, on the first opens after a week closes.
+    private func recapCard(_ recap: InsightsRecap) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            Text(InsightsComparisonsWords.recapTitle(recap, copy: copy)).insightsHeading()
+            HStack(alignment: .top, spacing: GlassTokens.Space.s8) {
+                ForEach(recap.sources) { source in
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+                        Text(InsightsOverviewWords.figure(source.tokens, copy: copy))
+                            .glassType(GlassTokens.TypeScale.title).monospacedDigit()
+                        Text(InsightsOverviewWords.sourceLine(source.source, copy: copy)).insightsCaption()
+                        if let change = InsightsComparisonsWords.recapChange(source, sessions: recap.sessions, copy: copy) {
+                            Text(change).insightsCaption()
+                        }
+                    }
+                }
+            }
+            ForEach(Array(recap.items.enumerated()), id: \.offset) { _, item in
+                if let line = InsightsComparisonsWords.recapItem(item, copy: copy) {
+                    Text(line).insightsNote()
+                }
+            }
+            if let line = InsightsComparisonsWords.recapThreshold(recap, copy: copy) {
+                Text(line).insightsNote()
+            }
+            HStack(spacing: GlassTokens.Space.s4) {
+                Button(text("analytics_recap_open")) { openRecap() }
+                    .buttonStyle(GlassButtonStyle(.primary, small: true))
+                if let turnOffRecap {
+                    Button(text("analytics_recap_turn_off")) { turnOffRecap() }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .insightsCard()
+    }
+
+    /// The lever of the week: an observation only (owner decision D2, open).
+    @ViewBuilder
+    private func leverCard(_ lever: InsightsLeverState) -> some View {
+        if let pick = lever.pick {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(text("analytics_lever_title")).insightsHeading()
+                ForEach(InsightsComparisonsWords.leverLines(pick, copy: copy), id: \.self) { line in
+                    Text(line).insightsNote()
+                }
+                HStack(spacing: GlassTokens.Space.s4) {
+                    if pick.kind == "repeated_reads" {
+                        Button(text("analytics_lever_show_reads")) { showReads() }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    }
+                    Button(text("analytics_lever_not_useful")) { comparisons.notUseful() }
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsCard()
+        } else if !lever.disabled.isEmpty {
+            Text(text("analytics_lever_off")).insightsCaption()
         }
     }
 
@@ -85,7 +166,8 @@ struct InsightsOverviewTab: View {
     /// A card that opens its drill-down.
     private func card<Content: View>(_ name: String, _ inputs: String,
                                      @ViewBuilder content: () -> Content) -> some View {
-        // A second press on the open card closes its drill-down.
+        // A second press on the open card closes its drill-down. Feed T
+        // rows carry no session reference, so only the saved week drills.
         Button {
             if model.inputs?.card == inputs { model.hideInputs() } else { model.showInputs(inputs) }
         } label: {
@@ -97,6 +179,7 @@ struct InsightsOverviewTab: View {
             .insightsRowCard()
         }
         .buttonStyle(GlassPressStyle())
+        .disabled(model.counter != nil)
         .accessibilityHint(text("analytics_drill_title"))
     }
 
@@ -127,7 +210,8 @@ struct InsightsOverviewTab: View {
             ForEach(overview.sources) { source in
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
                     // A bar, not a ring (owner decision D1, open).
-                    InsightsShareBar(permille: source.cache_share?.permille)
+                    InsightsShareBar(permille: source.cache_share?.permille,
+                                     tick: InsightsOverviewWords.bestTick(source))
                     Text(InsightsOverviewWords.fill(text("analytics_cache_share_line"), [
                         "source": InsightsOverviewWords.harness(source.source, copy: copy),
                         "p": InsightsOverviewWords.share(source.cache_share, copy: copy),
@@ -247,8 +331,13 @@ struct InsightsOverviewTab: View {
 /// figure beside it is the dash.
 struct InsightsShareBar: View {
     let fraction: Double?
+    /// "Your best week": a tick at the previous best share (feed T only).
+    var tick: Double?
 
-    init(permille: UInt64?) { fraction = permille.map { min(Double($0) / 1_000, 1) } }
+    init(permille: UInt64?, tick: UInt64? = nil) {
+        fraction = permille.map { min(Double($0) / 1_000, 1) }
+        self.tick = tick.map { min(Double($0) / 1_000, 1) }
+    }
     init(fraction: Double) { self.fraction = min(max(fraction, 0), 1) }
 
     var body: some View {
@@ -257,6 +346,11 @@ struct InsightsShareBar: View {
                 Capsule().fill(GlassTokens.Color.tintNeutral.color)
                 if let fraction {
                     Capsule().fill(GlassColor.accentText).frame(width: proxy.size.width * fraction)
+                }
+                if let tick {
+                    Rectangle().fill(GlassColor.textPrimary)
+                        .frame(width: 2, height: 10)
+                        .offset(x: max(proxy.size.width * tick - 1, 0))
                 }
             }
         }
