@@ -1185,8 +1185,16 @@ async fn drain_approved(
                 uploaded_this_pass = true;
             }
             uploader::UploadDecision::Superseded { new_hash } => {
-                let size = std::fs::metadata(&entry.path).map(|m| m.len()).unwrap_or(0);
-                if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, now) {
+                let meta = std::fs::metadata(&entry.path).ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                // When the new content was last written, as the watcher
+                // would observe it: the group's newest write for a grouped
+                // source. Local-only; see `QueueEntry::last_modified_at`.
+                let written = eligibility::last_write(
+                    session_ref.group_modified_at,
+                    meta.and_then(|m| m.modified().ok()),
+                );
+                if let Some(fresh) = q.supersede(entry.entry_id, &new_hash, size, written, now) {
                     let max = shared
                         .settings
                         .lock()
@@ -3603,6 +3611,55 @@ mod tests {
             e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
         }));
         assert_eq!(h.uploads.load(Ordering::SeqCst), 0);
+    }
+
+    /// U4a: the offer the upload pass mints for content that moved records
+    /// when that content was written, not the old offer's last write.
+    #[tokio::test]
+    async fn the_pass_supersede_records_the_new_contents_last_write() {
+        let h = TransientRetryHarness::new().await;
+        h.classifier_status.store(500, Ordering::SeqCst);
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&h.session_path)
+            .unwrap();
+        file.write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "message": {"role": "user", "content": "new work"},
+                    "cwd": h.project_cwd,
+                    "timestamp": "2026-08-08T11:00:00Z",
+                    "version": "2.0.1",
+                    "sessionId": "7c7c7c7c-7c7c-7c7c-7c7c7c7c7c7c",
+                    "uuid": "a2"
+                })
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let written: chrono::DateTime<chrono::Utc> = "2026-08-08T11:30:00Z".parse().unwrap();
+        file.set_modified(written.into()).unwrap();
+        drop(file);
+        h.classifier_status.store(0, Ordering::SeqCst);
+
+        h.pass(failed.retry_after.unwrap()).await;
+
+        let q = h.shared.queue.lock().unwrap();
+        let fresh = q
+            .all()
+            .iter()
+            .find(|e| {
+                e.state == queue::QueueState::Pending && e.session_hash != failed.session_hash
+            })
+            .expect("the moved content is offered again")
+            .clone();
+        assert_eq!(fresh.last_modified_at, Some(written));
+        assert_ne!(fresh.last_modified_at, failed.last_modified_at);
     }
 
     #[tokio::test]

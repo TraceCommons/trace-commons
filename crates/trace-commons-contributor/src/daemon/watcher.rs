@@ -1818,6 +1818,10 @@ fn new_entry(
         // can recognize it without reading the group again. See
         // `QueueEntry::observed_modified_at`.
         observed_modified_at: Some(obs.modified_at),
+        // The same instant, kept for a different question: how long the
+        // session has been idle. Unlike the match key above it survives a
+        // re-offer. Local-only. See `QueueEntry::last_modified_at`.
+        last_modified_at: Some(obs.modified_at),
         // Free here and nowhere else. The load above already joined this
         // session's ledger hops and, where a body store is configured,
         // already ran the full attested check; recording what they said
@@ -6904,6 +6908,41 @@ mod tests {
         let report = f.tick_counted(at("2030-01-01T00:01:00Z"), &c);
         assert_eq!(report.ignored, 1, "{report:?}");
         assert_eq!(count(&c), 0);
+    }
+
+    /// U4a: an offer records when its session was last written, from the
+    /// same observation it was judged on -- for a claude-code session, the
+    /// group's newest write, so a conversation whose delegated transcript
+    /// was written after its parent went quiet is idle only from then.
+    #[tokio::test]
+    async fn a_minted_entry_records_the_groups_last_write() {
+        let f = WatcherFixture::new();
+        let session = "11111111-1111-1111-1111-111111111111";
+        let parent = f.write_session("proj", session, 0);
+        let sub = f.write_subagent("proj", session, "agent-a");
+        let set = |path: &Path, days: u64| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(days * 86_400),
+                )
+                .unwrap();
+            DateTime::<Utc>::from(std::fs::metadata(path).unwrap().modified().unwrap())
+        };
+        let parent_written = set(&parent, 3);
+        let sub_written = set(&sub, 2);
+        f.settle(at("2030-01-01T00:00:00Z")).await;
+
+        let queue = f.shared.queue.lock().unwrap();
+        let e = &queue.all()[0];
+        assert_eq!(e.last_modified_at, Some(sub_written));
+        assert_ne!(e.last_modified_at, Some(parent_written));
+        assert_eq!(
+            e.last_modified_at, e.observed_modified_at,
+            "minted from the one observation the offer was judged on"
+        );
     }
 
     #[tokio::test]

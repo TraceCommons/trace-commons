@@ -523,6 +523,39 @@ pub struct QueueEntry {
     /// exactly as they did before: the fast path fails open.
     #[serde(default)]
     pub observed_modified_at: Option<DateTime<Utc>>,
+    /// When the session was last written to, as far as the daemon knows:
+    /// the `modified_at` of the observation this offer was minted from (the
+    /// group's newest write for a claude-code session), or, after a
+    /// `Queue::supersede`, of the observation that found the new content.
+    ///
+    /// It answers "how long has this session been idle", which
+    /// `discovered_at` cannot. `discovered_at` is re-dated by re-offers that
+    /// never touch the file (`undo_keep`, `revive_expired`,
+    /// `return_to_waiting` and the rest, because expiry counts from it),
+    /// and a past session included at first run gets today's date though it
+    /// was last written months ago.
+    ///
+    /// Not `observed_modified_at` above, though both start as the same
+    /// instant. That one is a match key for the poll's fast path and is
+    /// cleared on every re-offer, because a re-offer's content was never
+    /// observed. This one is provenance: `reoffered_from` carries it, and
+    /// every in-place re-offer leaves it alone. Only `supersede` replaces
+    /// it, because a superseded session was written to.
+    ///
+    /// `None` on every entry written before this field existed, and on a
+    /// supersede whose stat failed. A reader falls back to `discovered_at`,
+    /// which is never earlier than the true last write, so the session can
+    /// only look less idle than it is -- the safe direction.
+    ///
+    /// Local-only, exactly like `path`: it never reaches the wire, a log
+    /// line, an audit row, a history record or a notification. Only a count
+    /// derived from it may.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub last_modified_at: Option<DateTime<Utc>>,
     /// Whether this session can be contributed on evidence, and why not when
     /// it cannot: one of `contribution_eligibility`'s `STATE_*` labels and
     /// one of its `REASON_*` labels.
@@ -908,6 +941,9 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // `None` sends the next poll down the load path, which is the
         // fail-open direction.
         observed_modified_at: None,
+        // `last_modified_at` is deliberately NOT cleared: it is provenance,
+        // when the session was last written, and re-offering an entry does
+        // not write to it. `supersede`, whose content did move, sets it.
         // Cleared rather than carried. This re-offer exists because the
         // content moved, and the old answer was about the old bytes; a
         // stale `eligible` riding across a content change is the very
@@ -2089,11 +2125,17 @@ impl Queue {
     /// being approved. The contributor approved a description; if the content
     /// no longer matches it, the approval does not carry over to the new
     /// content, so a new offer is made instead.
+    ///
+    /// `new_modified_at` is when the new content was last written, as the
+    /// watcher would observe it (the group's newest write for a grouped
+    /// source), or `None` if it could not be read. It becomes the fresh
+    /// entry's `last_modified_at`.
     pub fn supersede(
         &mut self,
         entry_id: Uuid,
         new_hash: &str,
         new_size: u64,
+        new_modified_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Option<QueueEntry> {
         let old = self
@@ -2111,6 +2153,11 @@ impl Queue {
             session_hash: new_hash.to_string(),
             size_bytes: new_size,
             discovered_at: now,
+            // The session was written to; that is why it is superseded. The
+            // old entry's last write is known stale, so it is replaced, and
+            // with `None` when the caller could not stat the new content --
+            // which reads as just discovered, never as idle.
+            last_modified_at: new_modified_at,
             ..reoffered_from(old)
         })
     }
@@ -3055,10 +3102,158 @@ mod tests {
                 entry_id_for("sha256:aa"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z"),
             )
             .unwrap();
         assert_eq!(fresh.observed_modified_at, None);
+    }
+
+    /// `entry`, last written at `written`.
+    fn written_entry(hash: &str, discovered: &str, written: &str) -> QueueEntry {
+        QueueEntry {
+            last_modified_at: Some(at(written)),
+            ..entry(hash, discovered)
+        }
+    }
+
+    /// A queue line written before `last_modified_at` existed must still
+    /// load: `Queue::load` drops a line it cannot parse, so a required
+    /// field here would silently empty a contributor's queue on upgrade.
+    /// It loads as `None`, which the idle rule reads as `discovered_at` --
+    /// never earlier than the true last write, so the safe direction.
+    #[test]
+    fn a_queue_line_from_before_last_modified_at_loads_with_none() {
+        let (_d, store) = temp_store();
+        let mut q = Queue::new();
+        q.upsert(
+            written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z"),
+            500,
+        )
+        .unwrap();
+        q.save(&store).unwrap();
+        assert_eq!(
+            Queue::load(&store).unwrap().all()[0].last_modified_at,
+            Some(at("2026-08-01T09:00:00Z")),
+            "the field round-trips through the queue file"
+        );
+
+        let mut old = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        old.as_object_mut().unwrap().remove("last_modified_at");
+        let loaded: QueueEntry = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.last_modified_at, None);
+    }
+
+    /// A superseded session was written to: that is why it is superseded.
+    /// The fresh offer takes the new observation's mtime, never the old
+    /// entry's, or a session still being worked on would read as idle.
+    #[test]
+    fn supersede_takes_the_new_last_write_not_the_old_one() {
+        let mut q = queue_of(vec![written_entry(
+            "sha256:aa",
+            "2026-08-08T12:00:00Z",
+            "2026-08-01T09:00:00Z",
+        )]);
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                Some(at("2026-08-08T15:30:00Z")),
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.last_modified_at, Some(at("2026-08-08T15:30:00Z")));
+
+        // Unknown (the stat failed) is `None`, which reads as just
+        // discovered -- not the old entry's write, which is known stale.
+        let mut q = queue_of(vec![written_entry(
+            "sha256:aa",
+            "2026-08-08T12:00:00Z",
+            "2026-08-01T09:00:00Z",
+        )]);
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                None,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.last_modified_at, None);
+    }
+
+    /// `reoffered_from` clears the watcher's observation, which is a match
+    /// key for the poll's fast path, but carries the last write, which is
+    /// provenance: re-offering an entry does not touch its file.
+    #[test]
+    fn a_reoffer_keeps_the_last_write_and_drops_the_observation() {
+        let e = QueueEntry {
+            observed_modified_at: Some(at("2026-08-01T09:00:00Z")),
+            ..written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z")
+        };
+        let re = reoffered_from(e);
+        assert_eq!(re.observed_modified_at, None);
+        assert_eq!(re.last_modified_at, Some(at("2026-08-01T09:00:00Z")));
+    }
+
+    /// Every re-offer that re-dates `discovered_at` without touching the
+    /// file keeps `last_modified_at`. `discovered_at` is re-dated so expiry
+    /// counts afresh; the session was not written to, so how long it has
+    /// been idle must not reset with it.
+    #[test]
+    fn re_offers_that_redate_discovery_keep_the_last_write() {
+        let written = at("2026-08-01T09:00:00Z");
+        let now = at("2026-08-20T12:00:00Z");
+        let id = entry_id_for("sha256:aa");
+        let fresh = || written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z");
+        let check = |q: &Queue, how: &str| {
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Pending, "{how} did not re-offer");
+            assert_eq!(e.discovered_at, now, "{how} did not re-date discovery");
+            assert_eq!(
+                e.last_modified_at,
+                Some(written),
+                "{how} lost the last write"
+            );
+        };
+
+        let mut q = queue_of(vec![fresh()]);
+        q.keep(id).unwrap();
+        q.undo_keep(id, now, 500).unwrap();
+        check(&q, "undo_keep");
+
+        let mut q = queue_of(vec![fresh()]);
+        q.set_state(id, QueueState::Expired, Some(REASON_EXPIRED.into()));
+        assert!(q.revive_expired(id, now));
+        check(&q, "revive_expired");
+
+        let mut q = queue_of(vec![QueueEntry {
+            reason_label: Some("some-hold".into()),
+            ..fresh()
+        }]);
+        assert_eq!(q.release_holds_for_reason("some-hold", now), 1);
+        check(&q, "release_holds_for_reason");
+
+        let mut q = queue_of(vec![QueueEntry {
+            state: QueueState::Refused,
+            reason_label: Some("some-gate".into()),
+            ..fresh()
+        }]);
+        assert!(q.reoffer_refused_for_reason("some-gate", now).changed());
+        check(&q, "reoffer_refused_for_reason");
+
+        let mut q = queue_of(vec![QueueEntry {
+            state: QueueState::Approved,
+            approved_unattended: true,
+            ..fresh()
+        }]);
+        assert_eq!(
+            q.return_unattended_to_waiting_for_project("/Users/z/code/proj", now),
+            1
+        );
+        check(&q, "return_unattended_to_waiting_for_project");
     }
 
     #[test]
@@ -3263,6 +3458,7 @@ mod tests {
                 entry_id_for("sha256:aa"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z"),
             )
             .unwrap();
@@ -3288,6 +3484,7 @@ mod tests {
                 entry_id_for("sha256:missing"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z")
             )
             .is_none()
