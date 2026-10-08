@@ -141,6 +141,74 @@ pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable
 /// its evidence lacks a field the row needs: the commit writes nothing.
 pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
     "pipeline_gate_decision_evidence_incomplete";
+/// Settle refuses to commit when the submission already has a pipeline gate
+/// decision row written by another run (V116 allows one per submission).
+pub const PIPELINE_GATE_DECISION_CONFLICT_LABEL: &str = "pipeline_gate_decision_conflict";
+
+/// The columns of a pipeline gate decision row that come from the Score
+/// evidence alone (spec C-D3), checked before Settle pays any leg and
+/// written by its commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineGateDecisionScoreValues {
+    pub perplexity_micros: i64,
+    pub tail_fraction_micros: i64,
+    pub novelty_score_micros: i64,
+    pub perplexity_passed: bool,
+    pub novelty_passed: bool,
+    pub nearest_neighbor_hash: String,
+    pub embedding_evidence_hash: String,
+    pub peak_perplexity_micros: Option<i64>,
+    pub peak_novelty_micros: Option<i64>,
+    pub chunk_count: Option<i32>,
+    pub chunks_capped: Option<bool>,
+    pub total_chunk_count: Option<i32>,
+    pub credit_quality_micros: Option<i64>,
+    pub credit_quality_version: Option<i32>,
+    pub index_cardinality: Option<i64>,
+}
+
+impl PipelineGateDecisionScoreValues {
+    /// Refuses with `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL` only
+    /// when a field the row requires is absent. A value too large for its
+    /// column saturates, as `main`'s gate writer stores it: the chunk
+    /// aggregate saturates a perplexity to `u64::MAX` on purpose.
+    pub fn from_evidence(evidence: &ScoreEvidence) -> Result<Self, &'static str> {
+        let micros = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        let count = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        let required = |value: Option<u64>| {
+            value
+                .map(micros)
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+        };
+        Ok(Self {
+            perplexity_micros: required(evidence.perplexity_micros)?,
+            tail_fraction_micros: required(evidence.tail_fraction_micros)?,
+            novelty_score_micros: required(evidence.novelty_score_micros)?,
+            perplexity_passed: evidence
+                .quality_passed
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            novelty_passed: evidence
+                .novelty_passed
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            nearest_neighbor_hash: evidence
+                .nearest_neighbor_hash
+                .clone()
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            embedding_evidence_hash: evidence
+                .embedding_artifact_hash
+                .clone()
+                .unwrap_or_else(|| sha256_prefixed(PIPELINE_NO_INDEX_COMMAND.as_bytes())),
+            peak_perplexity_micros: evidence.peak_perplexity_micros.map(micros),
+            peak_novelty_micros: evidence.peak_novelty_micros.map(micros),
+            chunk_count: evidence.chunk_count.map(count),
+            chunks_capped: evidence.chunks_capped,
+            total_chunk_count: evidence.total_chunk_count.map(count),
+            credit_quality_micros: evidence.credit_quality_micros.map(micros),
+            credit_quality_version: evidence.credit_quality_version,
+            index_cardinality: evidence.index_cardinality.map(micros),
+        })
+    }
+}
 /// What a pipeline gate decision row's `embedding_evidence_hash` hashes when
 /// the Score sealed no index command (spec C-D3).
 pub const PIPELINE_NO_INDEX_COMMAND: &str = "pipeline_no_index_command";
@@ -4780,14 +4848,18 @@ impl PgPipelineStore {
     /// sweeps to fill.
     ///
     /// The decision id is a UUIDv5 over the tenant and the run (C-D2), and
-    /// the insert does nothing on a conflict on it, so offering the same
-    /// row twice is a no-op. Returns whether a row was written: `false` for
-    /// a non-compatibility bundle and for a row that already exists.
+    /// offering this run's row twice is a no-op. Returns whether a row was
+    /// written: `false` for a non-compatibility bundle and for this run's
+    /// row already existing. A pipeline row for the same submission that
+    /// names another run refuses with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`.
     ///
     /// Fails closed, writing nothing, when the run has no Score outcome or
     /// its compatibility evidence lacks a field the row needs
     /// (`PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`): such a row
-    /// would tell every consumer something the Score did not say.
+    /// would tell every consumer something the Score did not say. The
+    /// Settle phase runs the same evidence check before any leg settles
+    /// (`PipelineGateDecisionScoreValues::from_evidence`), so this refusal
+    /// is reached only if the outcome changed between the two.
     pub async fn write_pipeline_gate_decision_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
@@ -4826,34 +4898,8 @@ impl PgPipelineStore {
         let evaluation: serde_json::Value = outcome.get("evaluation");
         let evidence = serde_json::from_value::<ScoreEvidence>(evidence_value.clone())
             .map_err(|_| incomplete())?;
-        let micros = |value: Option<u64>| -> Result<i64, DatabaseError> {
-            value
-                .and_then(|value| i64::try_from(value).ok())
-                .ok_or_else(incomplete)
-        };
-        let optional_micros = |value: Option<u64>| -> Result<Option<i64>, DatabaseError> {
-            value
-                .map(|value| i64::try_from(value).map_err(|_| incomplete()))
-                .transpose()
-        };
-        let optional_count = |value: Option<u32>| -> Result<Option<i32>, DatabaseError> {
-            value
-                .map(|value| i32::try_from(value).map_err(|_| incomplete()))
-                .transpose()
-        };
-        let perplexity_micros = micros(evidence.perplexity_micros)?;
-        let tail_fraction_micros = micros(evidence.tail_fraction_micros)?;
-        let novelty_score_micros = micros(evidence.novelty_score_micros)?;
-        let perplexity_passed = evidence.quality_passed.ok_or_else(incomplete)?;
-        let novelty_passed = evidence.novelty_passed.ok_or_else(incomplete)?;
-        let nearest_neighbor_hash = evidence
-            .nearest_neighbor_hash
-            .clone()
-            .ok_or_else(incomplete)?;
-        let embedding_evidence_hash = evidence
-            .embedding_artifact_hash
-            .clone()
-            .unwrap_or_else(|| sha256_prefixed(PIPELINE_NO_INDEX_COMMAND.as_bytes()));
+        let values =
+            PipelineGateDecisionScoreValues::from_evidence(&evidence).map_err(|_| incomplete())?;
         let attestation_chain_hash =
             pipeline_score_outcome_hash(&decision, &evidence_value, &evaluation)
                 .map_err(|_| incomplete())?;
@@ -4890,35 +4936,61 @@ impl PgPipelineStore {
                      index_cardinality_at_scoring, source, pipeline_run_id
                  ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),$14,
                            $15,$16,$17,$18,$19,$20,$21,$22,'pipeline_settle',$23)
-                 ON CONFLICT (tenant_id, decision_id) DO NOTHING",
+                 ON CONFLICT DO NOTHING",
                 &[
                     &run.tenant_id,
                     &decision_id,
                     &run.submission_id,
                     &gate_policy_version,
                     &score_policy.configuration_hash,
-                    &perplexity_micros,
-                    &tail_fraction_micros,
-                    &perplexity_passed,
-                    &novelty_score_micros,
-                    &nearest_neighbor_hash,
-                    &novelty_passed,
-                    &embedding_evidence_hash,
+                    &values.perplexity_micros,
+                    &values.tail_fraction_micros,
+                    &values.perplexity_passed,
+                    &values.novelty_score_micros,
+                    &values.nearest_neighbor_hash,
+                    &values.novelty_passed,
+                    &values.embedding_evidence_hash,
                     &attestation_chain_hash,
                     &credit_withheld_reason,
-                    &optional_micros(evidence.peak_perplexity_micros)?,
-                    &optional_micros(evidence.peak_novelty_micros)?,
-                    &optional_count(evidence.chunk_count)?,
-                    &evidence.chunks_capped,
-                    &optional_count(evidence.total_chunk_count)?,
-                    &optional_micros(evidence.credit_quality_micros)?,
-                    &evidence.credit_quality_version,
-                    &optional_micros(evidence.index_cardinality)?,
+                    &values.peak_perplexity_micros,
+                    &values.peak_novelty_micros,
+                    &values.chunk_count,
+                    &values.chunks_capped,
+                    &values.total_chunk_count,
+                    &values.credit_quality_micros,
+                    &values.credit_quality_version,
+                    &values.index_cardinality,
                     &run.run_id,
                 ],
             )
             .await?;
-        Ok(written == 1)
+        if written == 1 {
+            return Ok(true);
+        }
+        // The targetless conflict clause covers both the primary key and
+        // V116's `trace_gate_decisions_one_pipeline_row`. Nothing was
+        // written, so the submission's pipeline row must already be this
+        // run's (a retried commit); a row naming another run means a second
+        // run reached Settle for the same submission, which
+        // `insert_pipeline_receipt` is meant to prevent. That refuses here,
+        // classified, rather than leaving the other run's row standing as
+        // this run's verdict.
+        let owner: Option<Uuid> = tx
+            .query_opt(
+                "SELECT pipeline_run_id FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle'",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .and_then(|row| row.get("pipeline_run_id"));
+        if owner == Some(run.run_id) {
+            Ok(false)
+        } else {
+            Err(DatabaseError::Constraint(
+                PIPELINE_GATE_DECISION_CONFLICT_LABEL.to_string(),
+            ))
+        }
     }
 
     /// Fails the run terminally under its live lease. When the
@@ -10720,6 +10792,19 @@ impl PipelineService {
                         .mark_failed_or_record_lease_expired(&run, PIPELINE_INDEX_CONFLICT_LABEL)
                         .await;
                 }
+                // Spec 2026-10-08, Slice C: Settle's gate decision row
+                // cannot be written -- the compatibility Score evidence lacks
+                // a field the row needs, or the submission's pipeline row
+                // names another run. Both are deterministic, so the run fails
+                // terminally instead of spending its attempts. Settle checks
+                // the evidence before any leg settles, and `mark_failed`
+                // resolves only legs still open, so a completed leg stays
+                // complete.
+                if label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL
+                {
+                    return self.mark_failed_or_record_lease_expired(&run, &label).await;
+                }
                 // In Review, an inoperable
                 // submission (withdrawn, expired, or purged) is permanent --
                 // the condition that caused it can never reverse -- so the
@@ -11756,6 +11841,14 @@ impl PipelineService {
                 && *score_decision.awards() == score_evaluation.awards,
             "score_outcome_invalid"
         );
+        // Spec 2026-10-08, Slice C: a compatibility run's commit writes a
+        // gate decision row from this evidence. Checked here, before the
+        // index write or any leg settles, so evidence the row cannot be
+        // built from fails the run with nothing paid.
+        if bundle.package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
+            PipelineGateDecisionScoreValues::from_evidence(&score_evidence)
+                .map_err(|label| anyhow::anyhow!(label))?;
+        }
 
         // Step 2 (brief 3C, `ensure_operations_match_committed_awards`):
         // the settlement rows Score seeded (decision D5) must still be
@@ -12639,8 +12732,15 @@ impl PipelineService {
             // verbatim (as for Review and Score above), so it is re-raised
             // bare. The commit wrote nothing; the legs this attempt completed
             // stay complete, and the retry after the resume commits from them.
+            //
+            // The gate decision row's refusals are re-raised bare for the
+            // same reason, and `process_claimed_run` fails the run
+            // terminally on them: both are deterministic, so a retry would
+            // fail the same way.
             Err(DatabaseError::Constraint(label))
-                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
+                    || label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL =>
             {
                 return Err(anyhow::anyhow!(label));
             }

@@ -2330,15 +2330,27 @@ What the row holds:
 
 The vector entry and snapshot ids, the per-author columns and every column a
 sweep fills (dedup, contributor cap, correction, composite score) start
-NULL; the sweeps fill theirs on their next pass. The credit-quality sweep
+NULL. Dedup is not filled by a periodic pass: the recluster pass skips rows
+with no `dedup_simhash`, and only the operator-run re-derivation
+(`POST /v1/admin/rederive-dedup`) computes one for a row that has none. Until
+an operator runs it, pipeline rows are not clustered and their
+`dedup_cluster_size` stays NULL for the contributor cap. The credit-quality sweep
 (`POST /v1/admin/score-credit-quality`) skips pipeline rows, since the Score
 already computed their credit quality under the bundle. The perplexity
 re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
 submission with a pipeline row: rewriting its perplexity would leave the
 row's verdict disagreeing with the Score that awarded the credit and with
-its `attestation_chain_hash`, and its per-author columns stay NULL. A Settle commit
-whose compatibility Score evidence lacks a field the row needs refuses with
-`pipeline_gate_decision_evidence_incomplete` and writes nothing.
+its `attestation_chain_hash`, and its per-author columns stay NULL.
+
+Settle checks a compatibility run's Score evidence before the index write or
+any settlement leg. Evidence that lacks a field the row needs fails the run
+terminally with `pipeline_gate_decision_evidence_incomplete`, with nothing
+paid and no row written; it is deterministic, so the run is not retried. A
+value too large for its column (the chunk aggregate saturates a perplexity
+on purpose) is stored saturated, as `main`'s gate writer stores it. If the
+submission already has a pipeline row naming another run, the commit fails
+the run terminally with `pipeline_gate_decision_conflict` and leaves that
+row as it is; a completed leg stays complete.
 
 A withdrawal, a revocation follow-up and a retention follow-up clear the
 row's dedup columns, as `main`'s withdrawal does for its rows, and change

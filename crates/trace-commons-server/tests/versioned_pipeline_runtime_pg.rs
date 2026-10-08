@@ -44088,3 +44088,179 @@ async fn legacy_gate_driver_still_skips_pipeline_submissions() {
         "no pipeline submission is listed for main's gate: {listed:?}"
     );
 }
+
+/// Rewrites a run's stored Score evidence as the owner, with the immutability
+/// trigger off for the one statement. `set` is the SQL expression the
+/// evidence becomes. No service write can produce this (`phase_outcomes` rows
+/// are immutable); it stands in for evidence a Score policy could commit.
+async fn rewrite_stored_score_evidence(tenant_id: &str, run_id: uuid::Uuid, set: &str) {
+    let mut client = owner_client().await;
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("disable the immutability trigger");
+    let updated = tx
+        .execute(
+            &format!(
+                "UPDATE phase_outcomes SET evidence = {set}
+                  WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'"
+            ),
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("rewrite the stored Score evidence");
+    assert_eq!(updated, 1, "one stored Score evidence");
+    tx.batch_execute("ALTER TABLE phase_outcomes ENABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("enable the immutability trigger");
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// #1294 review 1: the chunk aggregate saturates a perplexity to `u64::MAX`
+/// on purpose. Settle stores it as `i64::MAX`, as `main`'s gate writer does,
+/// and completes, instead of refusing it as incomplete after the legs paid.
+#[tokio::test]
+async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-saturated-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    rewrite_stored_score_evidence(
+        &tenant,
+        scored.run_id,
+        "evidence
+           || jsonb_build_object(
+                'perplexity_micros', 18446744073709551615::NUMERIC,
+                'peak_perplexity_micros', 18446744073709551615::NUMERIC,
+                'chunk_count', 4294967295::NUMERIC)",
+    )
+    .await;
+    let settled = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete, "{settled:?}");
+    let rows = gate_decision_rows(&tenant, scored.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].perplexity_micros, i64::MAX);
+    assert_eq!(rows[0].peak_perplexity_micros, Some(i64::MAX));
+    assert_eq!(rows[0].chunk_count, Some(i32::MAX));
+}
+
+/// #1294 review 2: compatibility evidence the row cannot be built from fails
+/// the run terminally with `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`
+/// on its first Settle attempt, before the index write or any leg settles:
+/// no credit, no row, and no charged retries.
+#[tokio::test]
+async fn incomplete_score_evidence_fails_settle_before_any_leg_settles() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-incomplete-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    rewrite_stored_score_evidence(
+        &tenant,
+        scored.run_id,
+        "jsonb_set(evidence, '{nearest_neighbor_hash}', 'null'::JSONB)",
+    )
+    .await;
+    let failed = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+    );
+    assert_eq!(failed.index_write_state, scored.index_write_state);
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert!(
+        settlements
+            .iter()
+            .any(|leg| leg.instrument_id == InstrumentId::trace_credit().as_str()),
+        "Score seeded a Trace Credit leg: {settlements:?}"
+    );
+    assert!(
+        settlements
+            .iter()
+            .all(|leg| leg.operation_state != "complete" && leg.credit_event_id.is_none()),
+        "no leg settled: {settlements:?}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty()
+    );
+}
+
+/// #1294 review 3: a pipeline row for the submission that names another run
+/// is caught by the targetless conflict clause, and Settle fails terminally
+/// with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`, leaving that row as it was.
+#[tokio::test]
+async fn a_pipeline_row_naming_another_run_refuses_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-conflict-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let other_run = uuid::Uuid::new_v4();
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_gate_decisions (
+             tenant_id, decision_id, submission_id, gate_policy_version,
+             gate_version_hash, perplexity_micros, tail_fraction_micros,
+             perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+             novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+             source, pipeline_run_id
+         ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+        &[
+            &tenant,
+            &expected_pipeline_decision_id(&tenant, other_run),
+            &scored.submission_id,
+            &other_run,
+        ],
+    )
+    .await
+    .expect("another run's pipeline row");
+    tx.commit().await.unwrap();
+    let before = gate_decision_rows(&tenant, scored.submission_id).await;
+
+    let failed = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+    );
+    assert_eq!(
+        gate_decision_rows(&tenant, scored.submission_id).await,
+        before
+    );
+}
