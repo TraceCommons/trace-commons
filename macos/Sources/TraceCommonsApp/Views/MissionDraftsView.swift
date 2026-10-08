@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCBridge
 import UniformTypeIdentifiers
 
@@ -13,40 +14,49 @@ struct MissionDraftsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 Text(model.text("intro"))
                 controls
+                // The core's sentence ends in its own full stop, so the
+                // file's name goes on a line of its own after it, never
+                // joined with a colon ("selected.: x.json").
                 if let selectedFile {
-                    Text("\(model.text("file_selected")): \(selectedFile.lastPathComponent)")
-                        .font(.callout)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                        Text(model.text("file_selected"))
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        Text(selectedFile.lastPathComponent)
+                            .glassType(GlassTokens.TypeScale.mono)
+                            .textSelection(.enabled)
+                    }
                 }
                 if model.loading || model.mutationBusy {
-                    ProgressView(model.text("working"))
-                        .controlSize(.small)
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        GlassSpinner()
+                        Text(model.text("working")).insightsNote()
+                    }
                 }
-                if let error = model.error { Text(error).foregroundStyle(.red) }
-                if let notice = model.notice { Text(notice).foregroundStyle(.secondary) }
+                if let error = model.error { Text(error).foregroundStyle(GlassStatus.outside.textColor) }
+                if let notice = model.notice { Text(notice).foregroundStyle(GlassColor.textSecondary) }
                 Text(model.text("review_notice"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .insightsNote()
                 Text(model.text("authority_notice"))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Divider()
+                    .insightsNote()
+                InsightsRule()
                 draftList
-                if model.detailBusy { ProgressView().controlSize(.small) }
+                if model.detailBusy { GlassSpinner() }
                 if let detail = model.detail {
-                    Divider()
+                    InsightsRule()
                     MissionDraftDetailView(detail: detail, copy: model.copy)
                     HStack {
                         Button(model.text("close")) { model.closeDetail() }
                         Button(model.text("delete"), role: .destructive) {
                             deleteConfirmation = model.deleteConfirmation()
                         }
+                        .buttonStyle(GlassButtonStyle(.destructive, small: true))
                     }
                     .disabled(model.mutationBusy)
                 }
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .insightsSurface()
         }
         .fileImporter(
             isPresented: $choosingFile,
@@ -55,22 +65,22 @@ struct MissionDraftsView: View {
         ) { result in
             if case .success(let files) = result { selectedFile = files.first }
         }
-        .confirmationDialog(
-            model.text("delete_confirm_title"),
-            isPresented: Binding(
-                get: { deleteConfirmation != nil },
-                set: { if !$0 { deleteConfirmation = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button(model.text("delete"), role: .destructive) {
-                guard let confirmation = deleteConfirmation else { return }
-                deleteConfirmation = nil
-                model.delete(confirmation)
-            }
-            Button(model.text("cancel"), role: .cancel) { deleteConfirmation = nil }
-        } message: {
-            Text(model.text("delete_confirm"))
+        // Delete is destructive: right-most, never on Return.
+        .glassModal(isPresented: Binding(
+            get: { deleteConfirmation != nil },
+            set: { if !$0 { deleteConfirmation = nil } }
+        )) {
+            GlassConfirmation(
+                title: model.text("delete_confirm_title"), message: model.text("delete_confirm"),
+                actions: [
+                    .cancel(model.text("cancel")) { deleteConfirmation = nil },
+                    .destructive(model.text("delete")) {
+                        guard let confirmation = deleteConfirmation else { return }
+                        deleteConfirmation = nil
+                        model.delete(confirmation)
+                    },
+                ],
+                onCancel: { deleteConfirmation = nil })
         }
         .onAppear { model.open() }
         .onDisappear { model.close() }
@@ -102,16 +112,17 @@ struct MissionDraftsView: View {
                     Button { model.show(draft.id) } label: {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(model.text(draft.status))
-                                .font(.headline)
+                                .insightsHeading()
                             Text("\(model.text("source_count")): \(draft.source_count.formatted())")
-                                .font(.caption)
+                                .glassType(GlassTokens.TypeScale.caption)
                             Text(draft.id)
-                                .font(.caption.monospaced())
+                                .insightsMono()
                                 .lineLimit(1)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .insightsRowCard()
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(GlassPressStyle())
                     .disabled(model.mutationBusy)
                     .accessibilityLabel("\(model.text(draft.status)), \(draft.id)")
                 }
@@ -128,7 +139,7 @@ struct MissionDraftDetailView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text(detail.proposal.title).font(.title2)
+            Text(detail.proposal.title).insightsTitle()
             field("proposal_sha256", detail.id, monospaced: true)
             field("proposal_title", detail.proposal.title)
             field("source_claim", detail.proposal.claim_to_test)
@@ -141,7 +152,7 @@ struct MissionDraftDetailView: View {
             values("allowed_models", detail.proposal.allowed_models)
             values("allowed_tools", detail.proposal.allowed_tools)
             VStack(alignment: .leading, spacing: 4) {
-                Text(text("proposed_budget")).font(.headline)
+                Text(text("proposed_budget")).insightsHeading()
                 Text("\(text("duration_seconds")): \(detail.proposal.budget.max_duration_seconds.formatted())")
                 Text("\(text("input_tokens")): \(detail.proposal.budget.max_input_tokens.formatted())")
                 Text("\(text("output_tokens")): \(detail.proposal.budget.max_output_tokens.formatted())")
@@ -149,10 +160,10 @@ struct MissionDraftDetailView: View {
             field("author_unverified", detail.proposal.author_id)
             field("evaluator_unverified", detail.proposal.evaluator_id)
             field("rubric_version", detail.proposal.rubric_version)
-            Text(text(detail.review.status)).font(.headline)
-            Text(text("display_notice")).font(.callout).foregroundStyle(.secondary)
-            Text(text("review_notice")).font(.callout).foregroundStyle(.secondary)
-            Text(text("authority_notice")).font(.callout).foregroundStyle(.secondary)
+            Text(text(detail.review.status)).insightsHeading()
+            Text(text("display_notice")).insightsNote()
+            Text(text("review_notice")).insightsNote()
+            Text(text("authority_notice")).insightsNote()
         }
         .textSelection(.enabled)
         .accessibilityElement(children: .contain)
@@ -160,14 +171,14 @@ struct MissionDraftDetailView: View {
 
     private func field(_ key: String, _ value: String, monospaced: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(text(key)).font(.headline)
-            Text(value).font(monospaced ? .body.monospaced() : .body)
+            Text(text(key)).insightsHeading()
+            Text(value).glassType(monospaced ? GlassTokens.TypeScale.mono : GlassTokens.TypeScale.body)
         }
     }
 
     private func values(_ key: String, _ values: [String]) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(text(key)).font(.headline)
+            Text(text(key)).insightsHeading()
             ForEach(Array(values.enumerated()), id: \.offset) { _, value in
                 Text("• \(value)")
             }

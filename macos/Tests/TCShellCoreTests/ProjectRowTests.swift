@@ -140,16 +140,6 @@ final class ProjectRowTests: XCTestCase {
         XCTAssertEqual(row.displayLabel, "unknown-project")
     }
 
-    /// The note states what the daemon does. Pinned against the spec's words
-    /// so a reword in one shell does not pass unnoticed.
-    func testTheNoteSaysWhatTheDaemonDoes() {
-        XCTAssertEqual(
-            ProjectCopy.unresolvedBucketNote,
-            "Trace Commons can't tell which folder these ran in, so they can never "
-                + "be contributed automatically. You'll always be asked."
-        )
-    }
-
     /// A daemon predating the flag leaves rows plain rather than explained.
     /// Defaulting the other way would tell a contributor their own repository
     /// can never be contributed automatically, which is a lie about their

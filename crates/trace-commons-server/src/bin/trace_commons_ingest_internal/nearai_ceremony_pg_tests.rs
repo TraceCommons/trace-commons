@@ -1,7 +1,7 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! The NEAR AI enrolment ceremony, client half against server half, over a
+//! The NEAR AI enrollment ceremony, client half against server half, over a
 //! real PostgreSQL.
 //!
 //! #836 shipped as two halves that had never been run against each other. The
@@ -16,14 +16,14 @@
 //! — and they did not. The server returned the ceremony nonce as hex while the
 //! client decoded it as standard base64; hex characters are all in the base64
 //! alphabet and 64 is a multiple of 4, so the decode *succeeded* and yielded 48
-//! bytes, `try_into::<[u8; 32]>` failed, and every enrolment refused
+//! bytes, `try_into::<[u8; 32]>` failed, and every enrollment refused
 //! `near_ai_enroll_invalid` before the device ever signed. Neither half's tests
 //! could see it.
 //!
 //! # Why the assertions are shaped the way they are
 //!
 //! `the_start_nonce_is_the_shape_the_client_decodes` asserts the **field
-//! shape**, not just the outcome. A test that only checked "enrolment
+//! shape**, not just the outcome. A test that only checked "enrollment
 //! succeeds" would have caught this bug but reported it as a signature failure
 //! or a refused finish, sending the next reader to the wrong half. When this
 //! recurs it will recur as an encoding, so the failure message names the
@@ -60,7 +60,7 @@ use trace_commons_contributor::identity::DeviceIdentity;
 /// so with a constant the suite passes exactly once per database and cannot be
 /// re-run against it.
 ///
-/// This surfaced the moment enrolment first succeeded: on a second local run
+/// This surfaced the moment enrollment first succeeded: on a second local run
 /// the count stayed at one. That is the resolver pool working, not a defect,
 /// but a fixture that only holds on a pristine database is one that tests the
 /// database's history as much as the code.
@@ -83,7 +83,7 @@ fn stub_subject() -> String {
 /// reports that a refused finish wrote one.
 ///
 /// That was invisible until the happy path started working. While every
-/// enrolment refused, no test ever wrote an anchor, so the table-wide count was
+/// enrollment refused, no test ever wrote an anchor, so the table-wide count was
 /// accidentally stable and the two refusal tests passed for a reason unrelated
 /// to what they assert. The first green run of
 /// `a_client_device_proof_enrols_against_the_real_handlers` is what made them
@@ -229,7 +229,7 @@ async fn post_json(
 }
 
 /// How many anchor rows exist for the stub subject. The thing a successful
-/// enrolment is supposed to leave behind, and the thing a refused one must not.
+/// enrollment is supposed to leave behind, and the thing a refused one must not.
 async fn anchor_rows(db: &PgBackend) -> i64 {
     let client = db.raw_pool_for_tests_and_diagnostics().get().await.unwrap();
     client
@@ -292,7 +292,7 @@ async fn a_client_device_proof_enrols_against_the_real_handlers() {
     let expires_at = started["expires_at"].as_i64().unwrap();
 
     // The field shape, named. See the module docs: when this recurs it will
-    // recur as an encoding, and a bare "enrolment failed" would send the next
+    // recur as an encoding, and a bare "enrollment failed" would send the next
     // reader to the signature check instead of to this line.
     assert_eq!(
         base64::engine::general_purpose::STANDARD

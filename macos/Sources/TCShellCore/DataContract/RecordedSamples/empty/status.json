@@ -1,8 +1,10 @@
 {
   "schema_version": "trace_commons.daemon.v1_1",
   "logged_in": false,
+  "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "tenant_id": null,
   "consent_scopes": [],
+  "consent_hold": null,
   "paused": false,
   "queue_depth": 0,
   "decisions_owed": 0,
@@ -50,5 +52,6 @@
   },
   "contribution_override": null,
   "contribution_mode": "notify_only",
-  "contribution_mode_partial": false
+  "contribution_mode_partial": false,
+  "dev_dry_run": false
 }

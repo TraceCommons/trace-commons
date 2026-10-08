@@ -776,7 +776,7 @@
                 first.
 
                 CanPrepareAdmission is false unless the daemon says this
-                contributor's enrolment admits evidence-bearing contribution,
+                contributor's enrollment admits evidence-bearing contribution,
                 so an invited contributor, whom it could only refuse, is not
                 offered it at all. Visibility, not IsEnabled: absent, not
                 present and refusing.

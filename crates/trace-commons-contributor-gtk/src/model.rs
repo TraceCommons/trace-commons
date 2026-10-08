@@ -20,6 +20,8 @@ pub struct Status {
     #[serde(default)]
     pub tenant_id: Option<String>,
     #[serde(default)]
+    pub account_scope: Option<String>,
+    #[serde(default)]
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,
@@ -1162,6 +1164,9 @@ pub struct RoutingDeclaration {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsentScope {
     pub name: String,
+    /// The core's title for the scope (`consent_options`). Required: see
+    /// the onboarding's `ScopeOption`.
+    pub title: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]

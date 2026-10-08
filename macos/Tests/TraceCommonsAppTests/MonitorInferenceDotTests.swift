@@ -24,11 +24,13 @@ final class MonitorInferenceDotTests: XCTestCase {
         quitNeedsNotice: { _, _ in false }
     )
 
+    /// #1146's rule (`monitor-shell.tsx`): on while working, outside (red)
+    /// for every other reported state, refused, held and off alike.
     func test_onlyAServingListenerIsDrawnOn() {
         XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "serving", port: 1), calls: calls), .on)
-        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "port_in_use", port: nil), calls: calls), .ask)
-        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "held", port: nil), calls: calls), .ask)
-        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "off", port: nil), calls: calls), .off)
+        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "port_in_use", port: nil), calls: calls), .outside)
+        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "held", port: nil), calls: calls), .outside)
+        XCTAssertEqual(MonitorWindowView.inferenceDot(PrivateInferenceState(label: "off", port: nil), calls: calls), .outside)
     }
 
     /// No report is no dot: unknown is neither on nor off.

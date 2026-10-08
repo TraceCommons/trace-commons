@@ -3,29 +3,54 @@ import SwiftUI
 /// One glass pane: the app's outermost containment. Panes float with a gap
 /// between them; there is no window chrome around them.
 public struct GlassPane<Content: View>: View {
-    private let padding: CGFloat?
+    private let insets: EdgeInsets
     private let isContent: Bool
+    private let edge: [GlassShadow]?
     private let content: Content
 
     /// `padding` defaults to the pane padding; pass 0 for edge-to-edge
     /// content such as the Traces tree. `isContent` puts the pane in the
     /// content layer (the map): the opaque base, never Liquid Glass, so the
-    /// glass controls floating on it are not glass on glass.
+    /// glass controls floating on it are not glass on glass. `edge`
+    /// replaces the pane's edge (the map's `mapEdge`).
     public init(
-        padding: CGFloat? = GlassTokens.Space.panePadding, isContent: Bool = false,
+        padding: CGFloat? = GlassTokens.Space.panePadding, isContent: Bool = false, edge: [GlassShadow]? = nil,
         @ViewBuilder content: () -> Content
     ) {
-        self.padding = padding
+        let padding = padding ?? 0
+        self.init(
+            insets: EdgeInsets(top: padding, leading: padding, bottom: padding, trailing: padding),
+            isContent: isContent, edge: edge, content: content)
+    }
+
+    /// A pane with its own insets on each side (the inspector's 16 by 18).
+    public init(
+        insets: EdgeInsets, isContent: Bool = false, edge: [GlassShadow]? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.insets = insets
         self.isContent = isContent
+        self.edge = edge
         self.content = content()
     }
 
     public var body: some View {
         content
-            .padding(padding ?? 0)
+            .padding(insets)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .glassTier(.pane)
+            .glassTier(.pane, edge: edge)
             .environment(\.glassPaneIsContent, isContent)
+    }
+}
+
+/// A pane's insets other than the uniform pane padding.
+public enum GlassPaneInsets {
+    /// The inspector's: #1146's `px-4 py-4.5`, 16 on the sides and 18 at
+    /// the top and bottom.
+    public static var inspector: EdgeInsets {
+        EdgeInsets(
+            top: GlassTokens.Space.inspectorPaddingVertical, leading: GlassTokens.Space.inspectorPaddingHorizontal,
+            bottom: GlassTokens.Space.inspectorPaddingVertical, trailing: GlassTokens.Space.inspectorPaddingHorizontal)
     }
 }
 
@@ -53,7 +78,9 @@ public struct GlassPopover<Content: View>: View {
     }
 }
 
-/// A sheet's body: "Exactly what would be sent" and the passkey steps.
+/// A sheet's body: "Exactly what would be sent" and the passkey steps. A
+/// padded column inside the pane or modal that holds it, with no tier of
+/// its own (#1146 `.tc-sheet`): never a pane on a pane.
 public struct GlassSheet<Content: View>: View {
     private let title: String
     private let subtitle: String?
@@ -77,7 +104,6 @@ public struct GlassSheet<Content: View>: View {
         }
         .padding(GlassTokens.Space.panePadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassTier(.pane)
     }
 }
 
@@ -192,6 +218,10 @@ private struct GlassMenuRowBody: View {
                     .glassPressedFill()
             )
             .environment(\.glassPressed, configuration.isPressed && isEnabled)
+            // Clear room above and below the selection, inside the button:
+            // rows stack with no gap, so the pointer is always over one, and
+            // the hit rect clears 28pt while the highlight keeps its size.
+            .padding(.vertical, GlassTokens.Space.s2)
             .contentShape(Rectangle())
             .onHover { hovering = $0 }
     }

@@ -19,7 +19,7 @@ use crate::witness::WitnessTrust;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
-const CONFIG_FILE: &str = "contributor.json";
+pub(crate) const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
@@ -65,10 +65,32 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// The passkeys used on this Mac, remembered for the first run's "Welcome
+/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
+/// Survives sign-out; swept by `wipe()`.
+pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
+
+/// The plain files that belong to one enrollment, apart from the credential
+/// references `commons_credentials` owns (device key, account session,
+/// staged device key). `unenroll` removes exactly these, with the stored
+/// approved envelopes; `wipe()` removes them with everything else.
+///
+/// Not here, deliberately: receipts, history and the audit log (the local
+/// record of what this device did, and the audit log records the unenroll
+/// itself), settings, folder rules and the queue (the person's choices about
+/// this Mac, not about an account), the NEAR AI notice marker, and the
+/// remembered passkeys (a passkey is not an enrollment).
+pub(crate) const ENROLLMENT_FILES: [&str; 5] = [
+    CONFIG_FILE,
+    DAEMON_INFERENCE_CONNECTION_FILE,
+    IDENTITY_SWITCH_JOURNAL_FILE,
+    LEGACY_INVITE_LINK_FILE,
+    INVITE_SUBJECT_FILE,
+];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
 pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
@@ -174,10 +196,22 @@ pub struct ContributorConfig {
     /// having picked it. Every enrollment path writes `false`; only
     /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
     ///
-    /// `#[serde(default)]` is required: a config written before this field
-    /// existed has no such key, and reads as not chosen.
-    #[serde(default)]
-    pub consent_scopes_chosen: bool,
+    /// Three states, because the key's absence carries meaning:
+    ///
+    /// - `Some(true)`: chosen. Sends, and may carry the Flow 1 grant.
+    /// - `Some(false)`: an enrollment whose scopes nobody chose. Nothing is
+    ///   sent under it (`consent_hold`, `consent-scopes-not-chosen`) and the
+    ///   grant is refused.
+    /// - `None`: the config predates this record. No released client ever
+    ///   wrote it, so every such config belongs to a contributor who joined
+    ///   before it existed; they keep sending as they always have. The grant
+    ///   still asks for an explicit choice (R7).
+    ///
+    /// Absent stays absent across a save (`skip_serializing_if`), so a legacy
+    /// config rewritten for another reason is not turned into an unchosen
+    /// enrollment. Every enrollment writes `Some(..)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_scopes_chosen: Option<bool>,
     /// How [`Self::witness`] got here, for the disclosure screens (K11).
     ///
     /// Written only beside the witness it describes, by
@@ -294,6 +328,26 @@ pub fn environment_witness_origin(
     witness: Option<&WitnessSettings>,
 ) -> Option<WitnessOriginRecord> {
     witness.map(|w| WitnessOriginRecord::for_witness(w, WitnessOrigin::Environment))
+}
+
+/// Why nothing may be sent under an enrollment: its consent scopes were saved
+/// by enrollment and never chosen (`ContributorConfig::consent_scopes_chosen`
+/// is `Some(false)`). A fixed label, and the one every send path refuses or
+/// holds with: `approve`, `include_past_sessions`, arming a folder, an
+/// `auto_upload` contribution override, the watcher's unattended approvals,
+/// and the uploader.
+pub const CONSENT_SCOPES_NOT_CHOSEN: &str = "consent-scopes-not-chosen";
+
+/// Whether sending under `cfg` is held because its consent scopes were never
+/// chosen, as the fixed label to refuse or hold with. `None` with no
+/// enrollment (nothing can be sent under one, and that is answered
+/// elsewhere), with a choice recorded, and for a config that predates the
+/// record (see `consent_scopes_chosen`).
+pub fn consent_hold(cfg: Option<&ContributorConfig>) -> Option<&'static str> {
+    match cfg {
+        Some(cfg) if cfg.consent_scopes_chosen == Some(false) => Some(CONSENT_SCOPES_NOT_CHOSEN),
+        _ => None,
+    }
 }
 
 impl ContributorConfig {
@@ -1133,7 +1187,59 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Remove the plain files of one enrollment ([`ENROLLMENT_FILES`]), their
+    /// orphaned atomic-write temp files, and every stored approved envelope
+    /// with its temp files. Missing is not an error.
+    ///
+    /// The credential references are not touched here: `unenroll` runs this
+    /// inside `commons_credentials::clear_with`, which removes those first,
+    /// under the same commit lock -- see `daemon::unenroll` for why that
+    /// order is the fail-closed one.
+    pub(crate) fn remove_enrollment_files(&self) -> Result<()> {
+        for name in ENROLLMENT_FILES {
+            let path = self.dir.join(name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
+        }
+        let tmp_prefixes: Vec<String> = ENROLLMENT_FILES
+            .iter()
+            .map(|name| format!(".{name}.tmp-"))
+            .collect();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading dir {}", self.dir.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            // Stored envelopes are stamped with this enrollment's identity, so
+            // they go with it -- see `wipe_files` below.
+            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
+            if is_approved_envelope
+                || tmp_prefixes
+                    .iter()
+                    .any(|prefix| file_name.starts_with(prefix))
+            {
+                let path = entry.path();
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn wipe_files(&self) -> Result<()> {
+        // Everything an enrollment owns goes first, through the one list
+        // `unenroll` uses, so a file added there can never survive a logout.
+        self.remove_enrollment_files()?;
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
@@ -1163,6 +1269,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1187,6 +1294,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1651,7 +1759,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(false),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -1706,7 +1814,55 @@ mod tests {
     fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.consent_scopes_chosen);
+        assert_ne!(cfg.consent_scopes_chosen, Some(true));
+        assert!(crate::flow1::grant_precondition(true, Some(&cfg)).is_err());
+    }
+
+    /// The migration rule. No released client ever wrote the scope-choice
+    /// record, so a config without the key belongs to someone who joined
+    /// before it existed, and sends as it always did. Only an enrollment that
+    /// records `false` -- every enrollment made since -- is held.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_is_not_held() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.consent_scopes_chosen, None);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+    }
+
+    #[test]
+    fn an_enrolment_whose_scopes_nobody_chose_is_held() {
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = Some(false);
+        assert_eq!(consent_hold(Some(&cfg)), Some(CONSENT_SCOPES_NOT_CHOSEN));
+        assert_eq!(CONSENT_SCOPES_NOT_CHOSEN, "consent-scopes-not-chosen");
+        cfg.consent_scopes_chosen = Some(true);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+        // No enrollment, nothing to send under: not this hold's to answer.
+        assert_eq!(consent_hold(None), None);
+    }
+
+    /// Absence survives a save, so rewriting a legacy config for any other
+    /// reason does not turn it into an unchosen enrollment.
+    #[test]
+    fn a_legacy_config_keeps_no_record_across_a_save() {
+        let (_d, store) = store();
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = None;
+        store.save_config(&cfg).unwrap();
+        let raw = std::fs::read_to_string(store_path(&store, "contributor.json")).unwrap();
+        assert!(!raw.contains("consent_scopes_chosen"));
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            None
+        );
+
+        cfg.consent_scopes_chosen = Some(false);
+        store.save_config(&cfg).unwrap();
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            Some(false)
+        );
     }
 
     #[test]

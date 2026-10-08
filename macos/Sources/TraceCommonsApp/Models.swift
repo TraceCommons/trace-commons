@@ -62,8 +62,13 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// than repeating `projectPath`, so a row renders this line only when
     /// it says something.
     let sessionPath: String?
-    let sizeBytes: Int
-    let discoveredAt: Date
+    /// The transcript's size and when the daemon found it. Every entry the
+    /// legacy queue decodes carries both (the decoder requires them); nil
+    /// only on a session carried over from the data contract
+    /// (`QueueEntryBridge.previewEntry`) whose daemon did not report it,
+    /// which is never drawn as zero bytes or as found at the epoch.
+    let sizeBytes: Int?
+    let discoveredAt: Date?
     let state: QueueState
     let reasonLabel: String?
     let attempts: Int
@@ -248,6 +253,7 @@ struct DaemonStatus: Decodable, Equatable {
     let schemaVersion: String
     let loggedIn: Bool
     let tenantID: String?
+    var accountScope: String?
     var consentScopes: [String]
     let paused: Bool
     let queueDepth: Int
@@ -286,6 +292,7 @@ struct DaemonStatus: Decodable, Equatable {
         case schemaVersion = "schema_version"
         case loggedIn = "logged_in"
         case tenantID = "tenant_id"
+        case accountScope = "account_scope"
         case consentScopes = "consent_scopes"
         case paused
         case queueDepth = "queue_depth"
@@ -305,6 +312,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion: String,
         loggedIn: Bool,
         tenantID: String?,
+        accountScope: String? = nil,
         consentScopes: [String],
         paused: Bool,
         queueDepth: Int,
@@ -322,6 +330,7 @@ struct DaemonStatus: Decodable, Equatable {
         self.schemaVersion = schemaVersion
         self.loggedIn = loggedIn
         self.tenantID = tenantID
+        self.accountScope = accountScope
         self.consentScopes = consentScopes
         self.paused = paused
         self.queueDepth = queueDepth
@@ -342,6 +351,7 @@ struct DaemonStatus: Decodable, Equatable {
         schemaVersion = try c.decodeIfPresent(String.self, forKey: .schemaVersion) ?? ""
         loggedIn = try c.decodeIfPresent(Bool.self, forKey: .loggedIn) ?? false
         tenantID = try c.decodeIfPresent(String.self, forKey: .tenantID)
+        accountScope = try c.decodeIfPresent(String.self, forKey: .accountScope)
         consentScopes = try c.decodeIfPresent([String].self, forKey: .consentScopes) ?? []
         paused = try c.decodeIfPresent(Bool.self, forKey: .paused) ?? false
         queueDepth = try c.decodeIfPresent(Int.self, forKey: .queueDepth) ?? 0
@@ -644,6 +654,11 @@ struct HistoryRollup: Decodable, Equatable {
 
 struct ConsentScope: Decodable, Identifiable, Equatable {
     let name: String
+    /// The scope's short bold label, from the core's consent table
+    /// (`daemon::enroll::consent_options`). Required: a list carrying a
+    /// scope without one does not decode, so nothing is offered under words
+    /// this shell made up (owner ruling, 2026-10-06).
+    let title: String
     let description: String
     let alwaysOn: Bool
     let grantsDataUse: Bool
@@ -651,7 +666,7 @@ struct ConsentScope: Decodable, Identifiable, Equatable {
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
-        case name, description
+        case name, title, description
         case alwaysOn = "always_on"
         case grantsDataUse = "grants_data_use"
     }
@@ -687,6 +702,9 @@ struct DaemonSettingsView: Decodable, Equatable {
     let geminiSourceMode: String?
     let clineSourceMode: String?
     var opencodeSourceMode: String? = nil
+    /// The declared folder of exported traces: `watch`, `off`, or `unset`,
+    /// never its path. Watched folders draws its own row from it.
+    var trajectorySourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -746,6 +764,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case opencodeSourceMode = "opencode_source_mode"
+        case trajectorySourceMode = "trajectory_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
         case tokenDistributionsContribution = "token_distributions_contribution"

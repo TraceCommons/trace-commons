@@ -30,7 +30,7 @@ struct HealthCopy: Equatable {
     /// The banner for a spent daily budget, built from the numbers the
     /// daemon actually reported.
     ///
-    /// Separate from `forLabel` because the daemon reports this separately:
+    /// Separate from `core(label:maxQueueEntries:)` because the daemon reports this separately:
     /// `daily-cap-reached` is last in the precedence order, so on the
     /// machine this was written for the single health slot was held by
     /// `queue-full` and the real reason nothing was uploading never reached
@@ -56,10 +56,10 @@ struct HealthCopy: Equatable {
     /// (`tc_witness_capacity_notice`): the title, the counted body, and the
     /// next try in local time when the daemon gave one.
     ///
-    /// Separate from `forLabel` for the reason `forBudget` is: the health
+    /// Separate from `core(label:maxQueueEntries:)` for the reason `forBudget` is: the health
     /// slot can be held by a higher label, and the sessions are still
     /// waiting. Nil when nothing is waiting or the notice cannot be read --
-    /// the label, if it holds the slot, then falls back to `forLabel`'s
+    /// the label, if it holds the slot, then falls back to the core's
     /// on-hold line rather than disappearing.
     ///
     /// `.waiting`: nothing is broken, nothing left the machine, and the
@@ -79,125 +79,40 @@ struct HealthCopy: Equatable {
             actionTitle: nil
         )
     }
-
-    static func forLabel(_ label: String) -> HealthCopy {
-        switch label {
-        case "not-logged-in":
-            return HealthCopy(
-                title: "Not connected.",
-                detail: """
-                Sessions are being queued, but nothing can be sent until you \
-                reconnect. Nothing has been lost.
-                """,
-                severity: .actionable,
-                actionTitle: "Reconnect"
-            )
-        case "near-ai-notice-not-acknowledged":
-            // The recovery prompt's words are the core's
-            // (`privacy_scan_copy`), the same ones onboarding's scan screen
-            // reads; without them this is the on-hold line, never a
-            // sentence of this shell's own.
-            guard let copy = PrivacyScanCopy.decode(fromJSON: TCCoreCopy.privacyScanCopyJSON())
-            else { return forLabel("") }
-            return HealthCopy(
-                title: copy.recoveryTitle,
-                detail: copy.recoveryDetail,
-                severity: .actionable,
-                actionTitle: copy.recoveryAction
-            )
-        case "privacy-filter-canary-failed":
-            return HealthCopy(
-                title: "The privacy scan failed its own self-test,",
-                detail: """
-                so nothing is being sent through it. This is deliberate -- a scan \
-                we can't verify doesn't get used.
-                """,
-                severity: .waiting,
-                actionTitle: nil
-            )
-        case "pii-filter-unavailable":
-            return HealthCopy(
-                title: "The extra privacy scan isn't reachable.",
-                detail: """
-                Your traces are waiting rather than going out unscanned. Retrying \
-                automatically.
-                """,
-                severity: .waiting,
-                actionTitle: nil
-            )
-        case "claim-mint-failed", "ingest-unreachable":
-            return HealthCopy(
-                title: "Can't reach Trace Commons right now.",
-                detail: "Your queue is safe; it'll retry on its own.",
-                severity: .waiting,
-                actionTitle: nil
-            )
-        case "opencode-export-version-unsupported":
-            guard let copy = TCSourceChecks.settingsCopy(),
-                  let title = copy.opencodeVersionTitle,
-                  let detail = copy.opencodeVersionDetail else { return forLabel("") }
-            return HealthCopy(title: title, detail: detail, severity: .actionable, actionTitle: nil)
-        case "queue-full":
-            return HealthCopy(
-                title: "Trace Commons has stopped queuing new sessions",
-                detail: """
-                -- 500 are already waiting. Review or clear some to start again.
-                """,
-                severity: .actionable,
-                actionTitle: "Review",
-                reviewsQueue: true
-            )
-        case "daily-cap-reached":
-            // The fallback for a daemon that reported the label without a
-            // `daily_budget` object. `forBudget` is what normally renders
-            // this condition, and it can say how many are waiting and when
-            // the limit actually resets; this line must not promise a time
-            // it does not have. It said "The rest goes out tomorrow",
-            // which is false for most of the world -- the daemon rolls its
-            // counters at UTC midnight.
-            return HealthCopy(
-                title: DailyBudgetCopy.title,
-                detail: """
-                Approved traces are waiting. Nothing has been lost -- they go out when the \
-                limit resets.
-                """,
-                severity: .waiting,
-                actionTitle: nil
-            )
-        default:
-            // An unrecognised label is still a real condition. Say that
-            // something is holding contributions rather than inventing a
-            // cause, and never render the raw label as an explanation.
-            return HealthCopy(
-                title: "Contributions are on hold.",
-                detail: """
-                Something is stopping traces from being sent. Nothing has been \
-                lost, and nothing has gone out.
-                """,
-                severity: .waiting,
-                actionTitle: nil
-            )
-        }
-    }
 }
 
-/// Plain-English names for the queue states a contributor sees. Four of them
-/// mean nothing left the machine, and each says so in words.
-enum QueueStateCopy {
-    static func sentence(for state: QueueState) -> String {
-        switch state {
-        case .pending: return "Waiting for your decision. Nothing has been sent."
-        case .approved: return "You said yes. Not sent yet."
-        case .uploading: return "Being sent now."
-        case .uploaded: return "In the commons."
-        case .refused: return "The system declined to send this. Nothing was sent."
-        case .failed: return "Sending didn't work. Nothing was sent; it will retry."
-        case .expired: return "Dropped after waiting too long for a decision. Never sent."
-        case .superseded:
-            return """
-            This session changed after you approved it, so it was not sent. A \
-            fresh copy is waiting for a new decision.
-            """
-        }
+/// The core's words for one health line. In an extension so the struct keeps
+/// its memberwise initialiser, which `forBudget` and `forWitnessCapacity` use.
+extension HealthCopy {
+    init(line: HealthLineCopy) {
+        self.init(
+            title: line.title,
+            detail: line.detail,
+            severity: line.severity == .actionable ? .actionable : .waiting,
+            actionTitle: line.action,
+            reviewsQueue: line.actionKind == .reviewQueue
+        )
+    }
+
+    /// The core's `on_hold_copy()`, verbatim. Drawn only when
+    /// `tc_health_copy_json` returns nothing for a reported label (a caught
+    /// panic or an undecodable payload), so a reported condition is never
+    /// drawn as healthy.
+    static let onHoldFallback = HealthCopy(
+        title: "Contributions are on hold.",
+        detail: "Something is stopping traces from being sent. Nothing has been lost, and nothing has gone out.",
+        severity: .waiting,
+        actionTitle: nil
+    )
+
+    /// The banner for the one label `status.health.last_error_label` carries,
+    /// in the core's words (`tc_health_copy_json`). `maxQueueEntries` is the
+    /// daemon's configured queue limit, named in `queue-full`'s count when
+    /// known.
+    static func core(label: String, maxQueueEntries: Int?) -> HealthCopy {
+        guard let line = HealthLineCopy.decode(
+            fromJSON: TCCoreCopy.healthCopyJSON(reachable: true, label: label, maxQueueEntries: maxQueueEntries))
+        else { return onHoldFallback }
+        return HealthCopy(line: line)
     }
 }

@@ -109,10 +109,15 @@ pub fn is_near_ai_tenant_id(tenant_id: &str) -> bool {
 /// Deliberately takes no account id and no token: the account comes from the
 /// commons's introspection of the JWT, and the JWT comes from the session this
 /// daemon already holds. A caller cannot name either.
+///
+/// `ingest_url` may be left out: the first run's "Sign in with near.ai"
+/// without an invite names no commons, and enrolls against the native
+/// account's (`enroll_origin`).
 pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Response {
-    let Some(ingest_url) = req.params.get("ingest_url").and_then(|v| v.as_str()) else {
+    let Ok(ingest_url) = enroll_origin(&shared.store, &req.params) else {
         return Response::err(req.id, ERR_BAD_PARAMS, "near_ai_enroll_invalid");
     };
+    let ingest_url = ingest_url.as_str();
     let api = match CloudApi::live() {
         Ok(api) => api,
         Err(_) => {
@@ -124,6 +129,20 @@ pub(super) async fn handle_enroll(shared: &DaemonShared, req: &Request) -> Respo
         // Label only. Every failure below already carries a control name, and
         // the errors underneath them can quote a remote body or a URL.
         Err(error) => Response::err(req.id, ERR_UNAVAILABLE, label(&error)),
+    }
+}
+
+/// The commons an enrollment is for: the one named, or, when none is, the
+/// origin `native_identity` trusts for this store -- the native account's
+/// commons on a daemon that holds no config. A non-string `ingest_url` is
+/// refused rather than read as absent.
+fn enroll_origin(store: &ConfigStore, params: &serde_json::Value) -> Result<String> {
+    match params.get("ingest_url") {
+        Some(value) => value
+            .as_str()
+            .map(str::to_string)
+            .ok_or_else(|| anyhow!("near_ai_enroll_invalid")),
+        None => super::native_identity::resolve_origin(store, &serde_json::json!({})),
     }
 }
 
@@ -468,6 +487,13 @@ struct Commons<'a> {
     receipt_endpoint: Option<String>,
 }
 
+/// The account a ceremony must have answered with, when the caller is signed
+/// in to one and the outcome keeps it (bind's `bound`, enroll's `enrolled`).
+struct ExpectedAccount {
+    tenant_id: String,
+    account_id: String,
+}
+
 fn persist(
     store: &ConfigStore,
     commons: Commons<'_>,
@@ -475,7 +501,27 @@ fn persist(
     result: Finished,
     expected: Option<&super::commons_credentials::Snapshot>,
 ) -> Result<serde_json::Value> {
+    persist_for(store, commons, identity, result, expected, None)
+}
+
+/// [`persist`], refusing (before anything is written) a result whose tenant
+/// or account is not `expected_account`. Defence in depth for bind and
+/// enroll: the commons already refuses an enrollment into any other account,
+/// and this makes a commons that answered otherwise publish nothing.
+fn persist_for(
+    store: &ConfigStore,
+    commons: Commons<'_>,
+    identity: &DeviceIdentity,
+    result: Finished,
+    expected: Option<&super::commons_credentials::Snapshot>,
+    expected_account: Option<&ExpectedAccount>,
+) -> Result<serde_json::Value> {
     validate_finished(&result, identity)?;
+    if let Some(account) = expected_account {
+        if result.tenant_id != account.tenant_id || result.account_id != account.account_id {
+            bail!("account-enrollment-mismatch")
+        }
+    }
 
     let dir = store.dir().to_path_buf();
     let store = ConfigStore::open(dir.clone())?;
@@ -506,7 +552,7 @@ fn persist(
         )),
         witness: Some(commons.witness),
         inference_receipt_endpoint: commons.receipt_endpoint,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(false),
         inference_receipt_check_attestation: true,
     };
 
@@ -670,6 +716,28 @@ mod tests {
                 "{address} left an enrollment behind"
             );
         }
+    }
+
+    /// The first run's "Sign in with near.ai" without an invite names no
+    /// commons: an unenrolled daemon enrolls against the native account's
+    /// commons, the one origin `native_identity` trusts before any config
+    /// exists. A named address is used as given, as before.
+    #[test]
+    fn an_enrollment_naming_no_commons_uses_the_native_account_origin() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        std::mem::forget(dir);
+        assert_eq!(
+            enroll_origin(&store, &serde_json::json!({})).unwrap(),
+            "https://ingest.tracecommons.ai"
+        );
+        assert_eq!(
+            enroll_origin(
+                &store,
+                &serde_json::json!({"ingest_url": "https://commons.example"})
+            )
+            .unwrap(),
+            "https://commons.example"
+        );
     }
 
     /// No login, no enrollment -- and no attempt to invent one.
@@ -875,6 +943,452 @@ mod tests {
             ("rt_leaked_secret_value", "near_ai_enroll_unavailable"),
         ] {
             assert_eq!(label(&anyhow!(raw.to_string())), expected, "{raw}");
+        }
+    }
+}
+
+/// Connect a retained NEAR AI login to the signed-in passkey account: bind an
+/// unbound one, or enroll this Mac into a bound one. The authenticated bind
+/// protocol has its own account-bound proof; the unauthenticated provisioning
+/// preimage is never substituted for it.
+///
+/// An enrollment's expected account is the passkey session's, which the
+/// commons reads from the session itself: nothing here names it. If this
+/// Mac's near.ai login is someone else's, the commons refuses before it
+/// writes the device key, and this answers `account-enrol-mismatch` with the
+/// passkey session left as it was for the shell to sign out.
+pub(super) async fn bind(shared: &DaemonShared) -> Result<serde_json::Value> {
+    use super::native_identity::{authenticated, resolve_origin};
+    use reqwest::Method;
+    use serde_json::json;
+    if let Some(config) = shared.store.load_config()? {
+        return already_enrolled(shared, &config);
+    }
+    let mut account = crate::account_auth::try_load_session_with_snapshot(&shared.store)?
+        .ok_or_else(|| anyhow!("account-session-required"))?;
+    let origin = resolve_origin(&shared.store, &json!({}))?;
+    let account_id = uuid::Uuid::parse_str(&account.session.account_id)
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    let binding = authenticated(
+        shared,
+        &origin,
+        &mut account,
+        Method::GET,
+        "/v1/account/binding",
+        None,
+    )
+    .await?;
+    if !binding
+        .get("binding_state")
+        .and_then(|v| v.as_str())
+        .is_some_and(bind_admits)
+    {
+        bail!("account-bind-refused");
+    }
+    let prepared = prepare(shared, &origin).await?;
+    let api = CloudApi::live().map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    bind_prepared(shared, &api, &origin, account, account_id, prepared).await
+}
+
+/// `account_bind` on a Mac that is already enrolled: the enrollment it holds
+/// may be the signed-in account's own (Welcome back's sign-in, after the
+/// first status reported an enrollment). Answered from local state alone,
+/// with no request and nothing written:
+///
+/// - the session's tenant (decoded from its `tcn1_` token, as
+///   `persist_session` reads it) is the enrollment's `tenant_id`, and
+/// - the session was signed in to a `bound` account (the `binding_state`
+///   stored with it).
+///
+/// Both hold: `{"outcome":"already_enrolled","binding_state":"bound"}`.
+/// Anything else, including no session or a record without a stored state,
+/// keeps the refusal `account-already-enrolled`.
+///
+/// The config records a tenant and no account, so this is a tenant match.
+/// It names one account because a binding row, and so a `bound` state, is
+/// only ever written for a passkey-origin account, and each of those is
+/// created alone in a freshly minted tenant. It grants nothing
+/// `persist_session` had not already accepted when it kept this session
+/// under this enrollment.
+fn already_enrolled(
+    shared: &DaemonShared,
+    config: &crate::config::ContributorConfig,
+) -> Result<serde_json::Value> {
+    let refused = || anyhow!("account-already-enrolled");
+    let session = crate::account_auth::try_load_session_with_snapshot(&shared.store)
+        .ok()
+        .flatten()
+        .ok_or_else(refused)?;
+    let same_tenant =
+        token_tenant(&session.session.access_token).as_deref() == Some(config.tenant_id.as_str());
+    let bound = session.stored_binding_state().as_deref() == Some("bound");
+    if !(same_tenant && bound) {
+        return Err(refused());
+    }
+    Ok(serde_json::json!({"outcome":"already_enrolled","binding_state":"bound"}))
+}
+
+/// Whether `account_bind` runs a ceremony for the signed-in account's
+/// `binding_state`: `unbound` binds it to this Mac's near.ai login; `bound`
+/// (another Mac bound it, and this one signed in with the same passkey)
+/// enrolls this Mac into it, which the commons allows only when this Mac's
+/// near.ai login is the one that account is bound to. Anything else is
+/// refused before the refresh token is spent.
+fn bind_admits(binding_state: &str) -> bool {
+    matches!(binding_state, "unbound" | "bound")
+}
+
+async fn bind_prepared(
+    shared: &DaemonShared,
+    api: &CloudApi,
+    origin: &str,
+    mut account: crate::account_auth::LoadedAccountSession,
+    account_id: uuid::Uuid,
+    prepared: Prepared,
+) -> Result<serde_json::Value> {
+    use super::native_identity::authenticated;
+    use reqwest::Method;
+    use serde_json::json;
+    let identity = DeviceIdentity::load_or_generate_async(&shared.store).await?;
+    let verifier = random()?;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(Sha256::digest(verifier.as_bytes()));
+    let started = authenticated(
+        shared,
+        origin,
+        &mut account,
+        Method::POST,
+        "/v1/account/near-ai/provision/bind/start",
+        Some(&start_payload(&challenge, &identity.public_key_b64)),
+    )
+    .await?;
+    let started: Started =
+        serde_json::from_value(started).map_err(|_| anyhow!("account-bind-invalid"))?;
+    let signature = bind_device_proof(
+        &identity,
+        &started.ceremony_id,
+        &started.nonce,
+        &challenge,
+        started.expires_at,
+        Utc::now().timestamp(),
+        &account_id,
+    )?;
+    // Capabilities, local authority, server ceremony and device proof have all
+    // been validated before this one-use refresh credential is spent.
+    if super::commons_credentials::snapshot(
+        &shared.store,
+        super::commons_credentials::Kind::Account,
+    )? != account.snapshot
+    {
+        bail!("account-session-changed");
+    }
+    let token = super::nearai_credential::exchange(shared, api, &prepared.session)
+        .await
+        .map_err(|_| anyhow!("near_ai_enroll_token_unavailable"))?;
+    let result = authenticated(shared,origin,&mut account,Method::POST,"/v1/account/near-ai/provision/bind/finish",Some(&json!({
+        "ceremony_id":started.ceremony_id,"code_verifier":verifier,"device_public_key":identity.public_key_b64,
+        "device_signature":signature,"access_token":token.access_token,
+    }))).await?;
+    let outcome = result
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("account-bind-invalid"))?
+        .to_string();
+    let state = result
+        .get("binding_state")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("account-bind-invalid"))?
+        .to_string();
+    let finished: Finished =
+        serde_json::from_value(result).map_err(|_| anyhow!("account-bind-invalid"))?;
+    let session_tenant = token_tenant(&account.session.access_token);
+    if token_tenant(&finished.access_token).as_deref() != Some(finished.tenant_id.as_str()) {
+        bail!("account-bind-invalid");
+    }
+    let returned_id =
+        uuid::Uuid::parse_str(&finished.account_id).map_err(|_| anyhow!("account-bind-invalid"))?;
+    // `bound` and `enrolled` keep the passkey session's account, so persist
+    // must find the same account AND tenant it was signed in to;
+    // `existing_account` is the one outcome that deliberately switches.
+    let keeps = match outcome.as_str() {
+        "bound" | "enrolled" if state == "bound" && returned_id == account_id => true,
+        "existing_account"
+            if matches!(state.as_str(), "bound" | "legacy") && returned_id != account_id =>
+        {
+            false
+        }
+        _ => bail!("account-bind-invalid"),
+    };
+    let expected_account = if keeps {
+        let tenant = session_tenant.ok_or_else(|| anyhow!("account-bind-invalid"))?;
+        Some(ExpectedAccount {
+            tenant_id: tenant,
+            account_id: account_id.to_string(),
+        })
+    } else {
+        None
+    };
+    // First enrollment is atomic with the replacement account session. A
+    // bound or enrolled result keeps this account; existing_account
+    // intentionally switches account and does not claim that the newly
+    // created passkey moved.
+    persist_for(
+        &shared.store,
+        Commons {
+            ingest_url: origin,
+            issuer_url: &prepared.issuer_url,
+            audience: &prepared.audience,
+            witness: prepared.witness,
+            receipt_endpoint: prepared.receipt_endpoint,
+        },
+        &identity,
+        finished,
+        Some(&account.snapshot),
+        expected_account.as_ref(),
+    )?;
+    Ok(json!({"outcome":outcome,"binding_state":state}))
+}
+
+/// The tenant a native `tcn1_` token names, as the server encodes it.
+fn token_tenant(token: &str) -> Option<String> {
+    token
+        .strip_prefix("tcn1_")
+        .and_then(|s| s.split_once('.'))
+        .and_then(|(s, _)| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(s)
+                .ok()
+        })
+        .and_then(|s| String::from_utf8(s).ok())
+}
+
+pub(super) fn bind_device_proof(
+    identity: &DeviceIdentity,
+    ceremony_id: &str,
+    nonce_wire: &str,
+    challenge: &str,
+    expires_at: i64,
+    now: i64,
+    account_id: &uuid::Uuid,
+) -> Result<String> {
+    // Reuse provisioning's freshness and encoding validation, but discard its
+    // signature: the signed bytes below are the distinct bind contract.
+    device_proof_for_ceremony(
+        identity,
+        ceremony_id,
+        nonce_wire,
+        challenge,
+        expires_at,
+        now,
+    )?;
+    let nonce: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(nonce_wire)?
+        .try_into()
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    let device: [u8; 32] = base64::engine::general_purpose::STANDARD
+        .decode(&identity.public_key_b64)?
+        .try_into()
+        .map_err(|_| anyhow!("account-bind-invalid"))?;
+    Ok(identity.sign_b64(
+        &trace_commons_protocol::onboarding::near_ai_bind_device_bytes(
+            &nonce,
+            ceremony_id,
+            &device,
+            challenge,
+            expires_at,
+            account_id,
+        ),
+    ))
+}
+
+#[cfg(test)]
+mod native_bind_tests {
+    use super::*;
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    /// An unbound account binds and a bound one enrolls this Mac (a second
+    /// Mac signed in with the same passkey); a legacy, closed or unknown
+    /// state runs no ceremony and spends nothing.
+    #[test]
+    fn only_unbound_and_bound_accounts_run_a_ceremony() {
+        assert!(bind_admits("unbound"));
+        assert!(bind_admits("bound"));
+        for refused in ["legacy", "closed", "", "Bound", "unknown"] {
+            assert!(!bind_admits(refused), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_http_preserves_account_or_switches_only_on_existing_account_without_consent() {
+        for outcome in [
+            "bound",
+            "existing_account",
+            "stale",
+            "wrong-account",
+            "wrong-device",
+            "wrong-tenant",
+            // A second Mac joining its passkey's bound account.
+            "enrolled",
+            "enrolled-wrong-account",
+            "enrolled-other-tenant",
+            "bound-other-tenant",
+            "mismatch",
+        ] {
+            let (_dir, store) = crate::config::tests_support::temp_store();
+            let shared = DaemonShared::load(store).unwrap();
+            let near = super::super::settings::NearAiSession {
+                refresh_token: "rt_original".into(),
+                refresh_token_expires_at: None,
+                stored_at: Utc::now(),
+                user_agent: "test-agent".into(),
+            };
+            {
+                let mut settings = shared.settings.lock().unwrap();
+                settings.near_ai_session = Some(near.clone());
+                settings.save_for_test(&shared.store).unwrap();
+            }
+            let account_id = uuid::Uuid::new_v4();
+            // The passkey session's tenant rides in its token, as the server
+            // issues it.
+            let session_tenant = format!("nearai-{}", "ab".repeat(32));
+            let initial = json!({"access_token":format!("tcn1_{}.original",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&session_tenant)),"expires_at":Utc::now()+chrono::Duration::hours(6),"account_id":account_id.to_string()});
+            let snapshot = super::super::commons_credentials::snapshot(
+                &shared.store,
+                super::super::commons_credentials::Kind::Account,
+            )
+            .unwrap();
+            super::super::commons_credentials::replace(
+                &shared.store,
+                &snapshot,
+                &serde_json::to_vec(&initial).unwrap(),
+                None,
+            )
+            .unwrap();
+            let account = crate::account_auth::try_load_session_with_snapshot(&shared.store)
+                .unwrap()
+                .unwrap();
+            let identity = DeviceIdentity::load_or_generate(&shared.store).unwrap();
+            let device_id = identity.device_key_id.clone();
+            let public = base64::engine::general_purpose::STANDARD
+                .decode(&identity.public_key_b64)
+                .unwrap();
+            let challenge = Arc::new(Mutex::new(String::new()));
+            let saved_challenge = Arc::clone(&challenge);
+            let nonce = [9u8; 32];
+            let expires = Utc::now().timestamp() + 300;
+            let returned_id = if matches!(
+                outcome,
+                "existing_account" | "wrong-account" | "enrolled-wrong-account"
+            ) {
+                uuid::Uuid::new_v4()
+            } else {
+                account_id
+            };
+            let finished_id = returned_id.to_string();
+            let store = shared.store.clone();
+            let app = axum::Router::new()
+                .route("/v1/account/near-ai/provision/bind/start",axum::routing::post(move |axum::Json(value):axum::Json<Value>| {
+                    *saved_challenge.lock().unwrap()=value["code_challenge"].as_str().unwrap().into();
+                    async move { axum::Json(json!({"ceremony_id":"bind-ceremony","nonce":base64::engine::general_purpose::STANDARD.encode(nonce),"expires_at":expires})) }
+                }))
+                .route("/v1/account/near-ai/provision/bind/finish",axum::routing::post(move |axum::Json(value):axum::Json<Value>| {
+                    let challenge=challenge.lock().unwrap().clone();
+                    let public=public.clone(); let device_id=device_id.clone(); let finished_id=finished_id.clone(); let store=store.clone();
+                    async move {
+                        let device:[u8;32]=public.clone().try_into().unwrap();
+                        let proof=trace_commons_protocol::onboarding::near_ai_bind_device_bytes(&nonce,"bind-ceremony",&device,&challenge,expires,&account_id);
+                        let signature=base64::engine::general_purpose::STANDARD.decode(value["device_signature"].as_str().unwrap()).unwrap();
+                        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519,public).verify(&proof,&signature).unwrap();
+                        assert_eq!(value["access_token"],"near-access");
+                        if outcome=="stale" {super::super::commons_credentials::clear(&store,&[super::super::commons_credentials::Kind::Account]).unwrap();}
+                        if outcome=="mismatch" {
+                            return (axum::http::StatusCode::CONFLICT, axum::Json(json!({"error":"near_ai_account_mismatch"})));
+                        }
+                        // A well-formed tenant, consistent with its own token,
+                        // that is not the passkey session's.
+                        let tenant=if matches!(outcome,"existing_account"|"enrolled-other-tenant"|"bound-other-tenant") {format!("nearai-{}","cd".repeat(32))} else {format!("nearai-{}","ab".repeat(32))};
+                        let reported=if outcome.starts_with("enrolled") {"enrolled"} else if outcome=="existing_account" {"existing_account"} else {"bound"};
+                        (axum::http::StatusCode::OK, axum::Json(json!({"access_token":format!("tcn1_{}.secret",base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(if outcome=="wrong-tenant" {"different-tenant"} else {&tenant})),"token_type":"Bearer","expires_in_secs":43200,"account_id":finished_id,"tenant_id":tenant,"device_key_id":if outcome=="wrong-device" {"wrong"} else {&device_id},"anchor_hash":format!("sha256:{}","ab".repeat(32)),"outcome":reported,"binding_state":if outcome=="existing_account" {"legacy"} else {"bound"}})))
+                    }
+                }))
+                .route("/v1/users/me/access-tokens",axum::routing::post(||async {axum::Json(json!({"access_token":"near-access","refresh_token":"rt_rotated","refresh_token_expiration":Utc::now()+chrono::Duration::days(1)}))}));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let origin = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let prepared=Prepared {commons:super::super::native_identity::client(&origin,"unauthenticated").unwrap(),session:near,issuer_url:"https://issuer.example".into(),audience:"trace-commons-upload".into(),witness:serde_json::from_value(json!({"url":"https://witness.example","signing_address":format!("0x{}","ab".repeat(20)),"expected_measurements":[format!("mrtd={}","ab".repeat(48))],"admission_evidence":true})).unwrap(),receipt_endpoint:None};
+            let result = bind_prepared(
+                &shared,
+                &CloudApi::for_test(&origin).unwrap(),
+                &origin,
+                account,
+                account_id,
+                prepared,
+            )
+            .await;
+            server.abort();
+            if matches!(
+                outcome,
+                "stale"
+                    | "wrong-account"
+                    | "wrong-device"
+                    | "wrong-tenant"
+                    | "enrolled-wrong-account"
+                    | "enrolled-other-tenant"
+                    | "bound-other-tenant"
+                    | "mismatch"
+            ) {
+                let error = result.expect_err(outcome).to_string();
+                assert!(shared.store.load_config().unwrap().is_none(), "{outcome}");
+                if outcome == "mismatch" {
+                    // The server's refusal, by its own daemon label, so the
+                    // shell can say what happened; and the passkey session is
+                    // left exactly as it was for the shell to sign out.
+                    assert_eq!(error, "account-enrol-mismatch");
+                    assert_eq!(
+                        crate::account_auth::try_load_session_with_snapshot(&shared.store)
+                            .unwrap()
+                            .unwrap()
+                            .session
+                            .account_id,
+                        account_id.to_string()
+                    );
+                }
+            } else {
+                let result = result.unwrap();
+                assert_eq!(result["outcome"], outcome);
+                assert_eq!(
+                    result["binding_state"],
+                    if outcome == "existing_account" {
+                        "legacy"
+                    } else {
+                        "bound"
+                    }
+                );
+                assert!(!result.to_string().contains("secret"));
+                let cfg = shared.store.load_config().unwrap().unwrap();
+                assert!(cfg.consent_scopes.is_empty());
+                assert_eq!(cfg.consent_scopes_chosen, Some(false));
+                assert_eq!(
+                    crate::account_auth::try_load_session_with_snapshot(&shared.store)
+                        .unwrap()
+                        .unwrap()
+                        .session
+                        .account_id,
+                    returned_id.to_string()
+                );
+            }
+            assert_eq!(
+                shared
+                    .settings
+                    .lock()
+                    .unwrap()
+                    .near_ai_session
+                    .as_ref()
+                    .unwrap()
+                    .refresh_token,
+                "rt_rotated"
+            );
         }
     }
 }

@@ -227,7 +227,7 @@ public sealed class WithdrawCopyTests
     }
 
     [Fact]
-    public void AFailedWithdrawalOpensBySayingNothingHappened()
+    public void AFailedWithdrawalSaysNothingHappened()
     {
         // A contributor must not walk away from a failure believing their
         // trace was taken back, whichever failure it was.
@@ -244,24 +244,30 @@ public sealed class WithdrawCopyTests
                      WithdrawCopy.FailureSentence(string.Empty),
                  })
         {
-            Assert.StartsWith("Nothing was withdrawn", sentence, StringComparison.Ordinal);
+            Assert.True(
+                sentence.StartsWith("Nothing was withdrawn", StringComparison.Ordinal)
+                    || sentence.Contains(". Nothing was withdrawn", StringComparison.Ordinal),
+                sentence);
         }
     }
 
     [Fact]
     public void TheFailureContributorsActuallyHitIsExplainedInFull()
     {
-        // `daemon/withdraw.rs` answers `account-session-required` before ever
-        // attempting the call, always, because the daemon holds a device key
-        // and never an account session. So this is the path contributors will
-        // actually take, and it gets the whole explanatory sentence rather
-        // than a bare label.
+        // `daemon/withdraw.rs` answers `account-session-required` before any
+        // request is made, when the account sign-in is missing or expired. It
+        // gets the core's whole sentence rather than a bare label, says how
+        // to recover, and never claims an answer from the server (#1280).
         string sentence = WithdrawCopy.FailureSentence(WithdrawCopy.AccountSessionRequiredLabel);
 
         Assert.Equal(WithdrawCopy.AccountSessionRequired, sentence);
         Assert.DoesNotContain("account-session-required", sentence, StringComparison.Ordinal);
-        Assert.Contains("authenticated by your Trace Commons account", sentence, StringComparison.Ordinal);
-        Assert.Contains("no account sign-in yet", sentence, StringComparison.Ordinal);
+        Assert.Contains("not signed in", sentence, StringComparison.Ordinal);
+        Assert.Contains("Sign in again", sentence, StringComparison.Ordinal);
+        foreach (string claim in new[] { "rejected", "refused", "server", "declined" })
+        {
+            Assert.DoesNotContain(claim, sentence, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]

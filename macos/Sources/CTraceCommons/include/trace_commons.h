@@ -45,13 +45,13 @@
  * this library returns -- fixed labels only, the same discipline the
  * daemon's socket already applies.
  *
- * FOUR NAMED EXEMPTIONS, and no others: tc_discover_sources and
- * tc_discover_opencode_export return filesystem paths, tc_preview_body
- * returns post-redaction trace content, and tc_witness_status_json returns
- * the witness URL and signing address. Each is documented where it is
- * declared, and each is a value the contributor is being asked to make a
- * decision about -- a consent prompt that will not name what it is asking
- * about is not a consent prompt.
+ * FIVE NAMED EXEMPTIONS, and no others: tc_discover_sources,
+ * tc_discover_opencode_export and tc_describe_folder return filesystem
+ * paths, tc_preview_body returns post-redaction trace content, and
+ * tc_witness_status_json returns the witness URL and signing address.
+ * Each is documented where it is declared, and each is a value the
+ * contributor is being asked to make a decision about -- a consent prompt
+ * that will not name what it is asking about is not a consent prompt.
  *
  * THE PREVIEW EXEMPTION: tc_preview_body is the one and only interface here
  * that deliberately carries trace content, and the rule above is absolute
@@ -435,6 +435,25 @@ char*       tc_discover_sources(void);
  */
 char*       tc_discover_opencode_export(const char* path);
 
+/* Recognise a folder the contributor picked, by its layout alone, so "add
+ * your tool" can say which tool's sessions it holds.
+ *
+ * Takes no handle, like tc_discover_sources. Returns an owned JSON array
+ * whose elements have the shape of one row of tc_discover_sources: source
+ * ("claude-code" | "codex" | "gemini-cli" | "cline" | "opencode" |
+ * "trajectory"), path (the picked folder itself), exists, session_count,
+ * most_recent, relocated_by_env (always false) and answers_at. One element
+ * per kind whose layout matches; a folder that fits two kinds (a flat
+ * folder of .json files is both an OpenCode and a trajectory export)
+ * reports both, and one that fits none, or is not there, is []. Free it
+ * with tc_string_free.
+ *
+ * Reads directory entries and metadata only, follows no symlink below the
+ * picked folder, and never opens a file. Returns NULL for a NULL or
+ * non-UTF-8 path, and NULL on a caught panic.
+ */
+char*       tc_describe_folder(const char* path);
+
 /* Every fixed word on the routing surface, in one call.
  *
  * Takes no handle: it describes the build, not a running daemon.
@@ -772,6 +791,16 @@ int32_t     tc_private_inference_quit_needs_notice(int32_t requested_on, const c
  */
 char*       tc_private_inference_state_line(const char* state);
 
+/* The Private AI runtime tile's word for one private_inference_state label:
+ * every running label is "On", a stopped one "Off", and an unreported or
+ * unfamiliar label "Unknown", never "Off". A shell must not re-implement this
+ * mapping.
+ *
+ * An empty, NULL or non-UTF-8 label answers the unknown word. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_private_inference_runtime_word(const char* state);
+
 /* How firmly the sentence tc_private_inference_state_line returned reads: one
  * of the TC_PRIVATE_INFERENCE_TONE_* values.
  *
@@ -891,7 +920,7 @@ char*       tc_outcome_refusal_line(const char* label);
 /* Shared queue outcome sentence. Unknown labels are neutral. Free with tc_string_free. */
 char*       tc_queue_outcome_line(const char* label);
 
-/* The sentence for one NEAR AI login-enrolment control name.
+/* The sentence for one NEAR AI login-enrollment control name.
  *
  * Ten labels, each with its own sentence, and anything else -- including a
  * label from a newer daemon, an empty string or NULL -- reaching the generic
@@ -1720,7 +1749,8 @@ char*       tc_gate_held_notice(const char* held_json);
 
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
- * the opencode-export-version-unsupported health label. No daemon handle needed. */
+ * the opencode-export-version-unsupported health label, and a trajectory
+ * object for the exported-traces row. No daemon handle needed. */
 char*       tc_source_settings_copy(void);
 
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
@@ -1982,6 +2012,14 @@ char*       tc_witness_last_result_json(void);
 char*       tc_witness_copy(void);
 /* Owned JSON; release with tc_string_free. */
 char*       tc_onboarding_copy(void);
+
+/* The first-run wording of #1030 (first_run_copy::first_run_copy): {frame,
+ * join, folders, tools, rules, uses, passkey, private_ai}, each a map of
+ * strings with {tool}, {host}, {pay_range}, {count}, {folder}, {name},
+ * {max}, {selected}, {total} and {tools} placeholders the shell fills. NULL
+ * only on a caught panic.
+ */
+char*       tc_first_run_copy_json(void);
 
 /* The sentence for a witness state, given a TC_WITNESS_STATE_* value.
  * Returns an OWNED string; free with tc_string_free.
@@ -2360,9 +2398,9 @@ char*       tc_residual_secret_line_text(uint32_t count, const char* sites_json)
 char*       tc_redaction_summary_json(const char* redactions_json, const char* distinct_json);
 
 /* The ignore-project control and confirmation (project_copy::
- * ignore_project_copy): {title, body, button, tooltip}. pending is the count
- * the confirmation names; negative clamps to 0. NULL for an unreadable
- * project_label and on a caught panic.
+ * ignore_project_copy): {title, body, button, tooltip, keep}. pending is
+ * the count the confirmation names; negative clamps to 0. NULL for an
+ * unreadable project_label and on a caught panic.
  */
 char*       tc_project_ignore_copy_json(const char* project_label, int64_t pending);
 
@@ -2390,9 +2428,10 @@ char*       tc_contribution_mode_copy_json(void);
 
 /* The confirmation for one contribution override (#1173, project_copy::
  * contribution_override_confirm_copy): {mode, title, body, confirm, cancel,
- * arming}. mode is "notify_only", "auto_upload" or "ignore". arming is the
+ * arming}. mode is "notify_only", "auto_upload" or "ignore", or "clear" for
+ * the confirmation before clear_contribution_override. arming is the
  * arming disclosure for auto_upload, read for the configuration in
- * config_dir, and null otherwise; config_dir may be NULL for the other two.
+ * config_dir, and null otherwise; config_dir may be NULL for the others.
  * NULL for an unknown or unreadable mode, for auto_upload with an unreadable
  * config_dir or configuration, and on a caught panic.
  */
@@ -2405,6 +2444,14 @@ char*       tc_contribution_override_confirm_json(const char* mode, const char* 
  * only on a caught panic.
  */
 char*       tc_contribution_override_refusal_text(const char* label);
+
+/* The Missions disclosure (M4, #1173; consent_copy::
+ * missions_disclosure_copy): {title, matching, nothing_sent, credit}.
+ * Matching happens on this Mac; nothing is sent because of a mission; a
+ * mission's credit is projected until the commons records it, then pending.
+ * Approved 2026-10-06. NULL only on a caught panic.
+ */
+char*       tc_missions_disclosure_copy_json(void);
 
 /* The legacy invite migration offer (consent_copy::legacy_migration_offer),
  * as LegacyMigrationOfferCopy's fields. NULL only on a caught panic.
@@ -2428,6 +2475,13 @@ char*       tc_monitor_traces_copy_json(void);
  * Missions and the menu-bar popover. NULL only on a caught panic.
  */
 char*       tc_monitor_screens_copy_json(void);
+
+/* The words the macOS shell used to write itself
+ * (shell_words_copy::shell_words_copy): withdrawal, the public profile, the
+ * queue's and History's legacy words, the scrubbing caveat and the Settings
+ * sections' sentences. NULL only on a caught panic.
+ */
+char*       tc_shell_words_copy_json(void);
 
 /* The grant screens' words for one disclosure the daemon chose and named
  * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects

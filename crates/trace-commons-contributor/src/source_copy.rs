@@ -201,6 +201,33 @@ pub struct SourceSettingsCopy {
     pub opencode_version_title: &'static str,
     pub opencode_version_detail: &'static str,
     pub tools: std::collections::BTreeMap<&'static str, SourceSettingsToolCopy>,
+    /// The row for a declared folder of exported traces
+    /// (`trajectory_source`), shown while `get_settings` reports
+    /// `trajectory_source_mode` as `watch` or `off`.
+    pub trajectory: TrajectorySettingsCopy,
+}
+
+/// The Watched folders row for a declared folder of exported traces. It is
+/// no tool's store, so it is not one of `tools`: discovery never offers it,
+/// and its exports are never sent unattended -- the watcher holds every one
+/// for a person, whatever the folder's rule (`watcher::visit_session`'s
+/// `from_trajectory`), and counts it as a decision owed. Owner decision
+/// 2026-10-05: the declaration does not ship without this row.
+///
+/// Approved 2026-10-07, with the decline button cut to two words (owner
+/// ruling: a button is an action verb, or a verb and an object).
+#[derive(serde::Serialize)]
+pub struct TrajectorySettingsCopy {
+    /// The row's name.
+    pub title: &'static str,
+    /// What the folder's exports are subject to.
+    pub explanation: &'static str,
+    /// `trajectory_source_mode` is `watch`.
+    pub watching: &'static str,
+    /// `trajectory_source_mode` is `off`.
+    pub off: &'static str,
+    /// The off switch: writes `trajectory_source` `{"mode":"off"}`.
+    pub decline: &'static str,
 }
 
 #[derive(serde::Serialize)]
@@ -229,8 +256,9 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
             tool.adapter_name(),
             SourceSettingsToolCopy {
                 key,
-                decline: if tool == SourceTool::OpenCode { "Don't read OpenCode exports".into() }
-                    else { format!("I don't use {}", tool.name()) },
+                // Two words at most (owner ruling, 2026-10-07): the row
+                // already names the tool, so the button need not.
+                decline: if tool == SourceTool::OpenCode { "Don't read".into() } else { "Not used".into() },
                 explanation: (tool == SourceTool::OpenCode).then_some(
                     "Choose a folder of JSON files saved with opencode export SESSION_ID. Only those exports are read; this does not read OpenCode's live session store or configure model calls."),
                 choose_folder: (tool == SourceTool::OpenCode).then_some("Choose an exports folder…"),
@@ -253,12 +281,42 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         choose_folder: "Choose a different folder…",
         retry: "Retry",
         tools,
+        trajectory: TrajectorySettingsCopy {
+            title: "Exported traces",
+            explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
+            watching: "A folder of exported traces is read.",
+            off: "No folder of exported traces is read.",
+            decline: "Stop reading",
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Kristi b#10 and the owner decision of 2026-10-05: a declared folder
+    /// of exported traces has a Watched folders row of its own, saying that
+    /// its exports always wait for a person, with a control to stop reading
+    /// it. It names no path.
+    #[test]
+    fn a_trajectory_folder_has_a_row_that_says_exports_wait_for_you() {
+        let payload = serde_json::to_value(source_settings_copy()).unwrap();
+        let row = &payload["trajectory"];
+        for key in ["title", "explanation", "watching", "off", "decline"] {
+            assert!(
+                row[key].as_str().is_some_and(|s| !s.trim().is_empty()),
+                "{key}: {row}"
+            );
+        }
+        assert!(
+            row["explanation"]
+                .as_str()
+                .unwrap()
+                .contains("wait for you")
+        );
+        assert_ne!(row["watching"], row["off"]);
+    }
 
     #[test]
     fn export_refusal_payload_preserves_supported_version_and_scope() {
@@ -284,14 +342,14 @@ mod tests {
                     .contains("Previously queued sessions are not removed")
             );
             if source == SourceTool::OpenCode {
-                assert_eq!(tool.decline, "Don't read OpenCode exports");
+                assert_eq!(tool.decline, "Don't read");
                 assert!(
                     tool.explanation
                         .unwrap()
                         .contains("opencode export SESSION_ID")
                 );
             } else {
-                assert_eq!(tool.decline, format!("I don't use {}", source.name()));
+                assert_eq!(tool.decline, "Not used");
             }
         }
         let payload = serde_json::to_value(copy).unwrap();

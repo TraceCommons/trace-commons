@@ -21,13 +21,14 @@ There are no default numeric allowances. The bound is a conservative unit of
 server processing work. It must be calibrated against enforced request size
 and work ceilings; it is not money, tokens, or NEAR credit. A fixed period has
 an advisory retry delay to its next boundary. A lifetime period has no reset
-time, so the API does not invent one. No quality-based growth is enabled.
+time, so the API does not invent one. Growth requires the explicit external
+evaluation configuration described below.
 
 V77 stores deduplicated, typed source facts for accepted credit events and
 gate evaluations. The database verifies the source row, account ownership,
-and outcome before recording a fact. No current acceptance/evaluator worker
-calls this seam, and admission never reads it. It is historical storage for a
-later reviewed growth policy, not earned allowance in this release.
+and outcome before recording a fact. Fact recording alone never increases
+admission: flat policies use the base allowance, and external policies consume
+only a matching, fresh applied evaluation.
 
 Grant the ingest login `trace_account_admission_runtime` after applying V77.
 The role cannot mint or revoke invite codes and has no `BYPASSRLS` privilege.
@@ -201,3 +202,121 @@ leases re-reserve through the account ledger and its current live-identity and
 budget checks. This recovery exception does not make expired evidence valid for
 a submission UUID that has never been reserved. The shared allowance health
 condition makes no promise that a lifetime budget will reset.
+
+## External evaluation contract
+
+V114 adds an optional `"growth_rule":"external"` policy mode. Keep `"none"`
+for a flat allowance. External mode additionally requires explicit
+`growth_policy_version`, `allowance_ceiling` and
+`evaluation_max_age_seconds`. The ceiling must be at least the base allowance;
+all cost values and the maximum age must be positive and bounded. A `none`
+policy must omit those external fields. This contract introduces no configured
+allowance values or activation defaults.
+
+Admission and contribution status use the same transaction-local decision:
+select the newest applied evaluation of the authenticated tenant/account and
+configured growth policy whose input generation still matches. Order by
+`as_of DESC, recorded_at DESC, evaluation_id DESC`. Future or nonfinite
+timestamps are excluded. An absent or stale evaluation yields the base
+allowance, tier zero, and no digest. A usable allowance is clamped between the
+base allowance and the ceiling. The stored budget limit remains the base
+allowance, and previously charged period spend survives changes in evaluation.
+Reservations record the actual tier and digest used. Invited authority retains
+its existing bypass and records no external evaluation attribution.
+
+The evaluator login needs only membership in `trace_account_trust_evaluator`,
+with `NOSUPERUSER NOBYPASSRLS`. Do not grant membership in the worker, admission,
+or guard roles. It can enumerate open accounts through
+`trace_account_trust_worker_accounts(TEXT,UUID,BIGINT)` and read facts through
+`trace_account_trust_evaluation_inputs(TEXT,UUID)`. Enumeration returns only
+account keys; every account read and write requires a transaction-local
+`trace_commons.trace_tenant_id` set to that account's tenant. It cannot record
+facts or directly modify evaluations, accounts, admission rows, or budgets.
+
+Inside a `REPEATABLE READ` (or `SERIALIZABLE`) transaction, read
+`trace_account_trust_input_generation(TEXT tenant, UUID account)` and the
+account's fact inputs from the same snapshot. Cluster selection and membership
+exclude nonfinite decisions and decisions later than `transaction_timestamp()`.
+This remains a current projection; it does not offer historical replay for an
+arbitrary earlier timestamp. The generation is a `BIGINT`,
+or `NULL` for missing/wrong-scope input. Obtain `as_of` from the database's
+`transaction_timestamp()`. Then write through:
+
+```sql
+trace_record_external_account_trust_evaluation(
+    TEXT tenant, UUID evaluation, UUID account,
+    TEXT policy_version, TEXT mode, TIMESTAMPTZ as_of,
+    INTEGER tier, BIGINT effective_allowance, TEXT facts_digest,
+    BIGINT expected_generation
+) RETURNS BOOLEAN
+```
+
+Mode is explicitly `shadow` or `applied`. The digest uses
+`sha256:` followed by lowercase hexadecimal. Evaluation IDs are unique per
+tenant. The returned boolean indicates a tier change within the same account,
+policy and mode; unchanged tiers still create an evaluation. The writer refuses
+closed accounts, future/nonfinite timestamps, wrong tenant scope, and changed
+input generations. It also enforces the snapshot rule above: a call from a
+`READ COMMITTED` transaction is refused with
+`account_trust_evaluation_snapshot_required`, and any call while external
+growth is switched off (below) with `account_trust_external_growth_disabled`. Roll back the entire batch on a database failure or changed
+inputs; PostgreSQL serialization failures require a new snapshot. Do not reuse
+an evaluation computed from an earlier generation when retrying.
+
+The forced-RLS frontier table advances transactionally on fact mutations,
+account/principal mutations, current gate projections and their shared cluster
+dependencies, and completed merge hooks. This includes merges
+with no newly copied facts. Admission holds a scoped definer frontier lock
+until reservation commit; the login gains no frontier write privilege. The
+writer locks account before frontier, matching admission's order. Legacy
+feature fields are nullable for compact rows; the original shadow writer and
+feature decoder continue to handle only complete legacy evaluations.
+
+The gate-write invalidation is switched off until external growth is enabled,
+so a `growth_rule:none` deployment pays nothing for it: a gate write takes no
+dependency lock and scans no facts, the writer refuses, and admission and status
+read no evaluation. An ingest started with an external policy turns it on
+(`trace_account_trust_enable_external_growth()`, granted to
+`trace_account_admission_runtime`) before its readiness check. The first enable
+advances every frontier, so nothing recorded before it is consumed; later calls
+change nothing. The runtime has no path back. Turning it off again is an owner
+action, safe only once no ingest runs an external policy, and the next enable
+invalidates every evaluation again.
+
+Contribution status reads the generation through the non-locking
+`trace_account_trust_input_generation`; only a reservation takes the frontier
+lock.
+
+External startup additionally checks the role, writer/read contract, grants and
+forced RLS. Missing controls refuse startup with
+`external_account_trust_contract_not_ready`; readiness errors use
+`external_account_trust_readiness_unavailable`. These controls prove the
+consumption boundary, not that all upstream outcomes have been recorded as
+facts. Operators must separately qualify recorder coverage before activating
+applied evaluations. This migration does not activate production admission.
+
+
+Gate changes invalidate accounts whose recorded gate inputs name the decision or
+submission, plus all recorded gate-input accounts in affected old/new clusters
+across tenants. Internal dependency lock rows serialize gate and fact mutations
+before dependency enumeration; a conflicting repeatable-read writer must retry
+from a new snapshot. Only a NOLOGIN input guard reads dependency keys and
+advances generations; it returns no cross-tenant inputs to either login. This
+internal lock table uses guard-only forced RLS and is tracked separately from
+ordinary tenant-readable tables. Dependency and account frontier locks are
+acquired in deterministic key order within each trigger; the trigger acquires
+no account row locks afterward. Multi-row transactions must still roll back and
+retry on PostgreSQL serialization or deadlock failures.
+
+The enumeration uses partial indexes on the gate facts by
+`(tenant_id, submission_id)` and `(tenant_id, source_id)`, and an index on
+`trace_gate_decisions(dedup_cluster_id)`.
+
+Dependency lock rows carry `touched_at`. The retention worker
+(`POST /v1/workers/retention-maintenance`, when account admission is
+configured) calls `trace_account_trust_prune_dependency_locks(limit, dry_run)`,
+which removes at most 1000 rows per run that nothing has touched for seven days
+(a dry run counts them). A row only serializes writes that overlap in time, so
+one idle that long guards no transaction still running. Deleting an account
+deletes its frontier row; principal and fact changes only advance an existing
+one.

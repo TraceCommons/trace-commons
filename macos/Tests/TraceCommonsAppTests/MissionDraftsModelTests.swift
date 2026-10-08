@@ -25,6 +25,25 @@ final class MissionDraftsModelTests: XCTestCase {
         XCTAssertEqual(model.notice, "deleted copy")
     }
 
+    /// Home's Missions card reads the copy and the drafts without opening
+    /// the screen; an unread inbox is nil, never an empty list, and a
+    /// failed read leaves it so.
+    @MainActor
+    func testPreviewReadsTheDraftsForHomeWithoutOpeningTheScreen() async throws {
+        let service = MissionDraftFakeService(seed: true)
+        let model = MissionDraftsModel(service: { try await service.call($0) })
+        XCTAssertNil(model.summary)
+        await service.failNextList()
+        model.preview()
+        try await Task.sleep(for: .milliseconds(50))
+        XCTAssertNil(model.summary, "a failed read is not an empty inbox")
+        XCTAssertEqual(model.text("title"), "mission title")
+        model.preview()
+        for _ in 0..<200 where model.summary == nil { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(model.summary?.map(\.id), [MissionDraftFakeService.id])
+        XCTAssertTrue(model.drafts.isEmpty, "the screen's own list waits for the screen")
+    }
+
     @MainActor
     func testStaleShowCannotResurrectClosedDetail() async throws {
         let service = MissionDraftFakeService(seed: true)
@@ -138,17 +157,13 @@ final class MissionDraftsModelTests: XCTestCase {
     }
 
     @MainActor
-    func testMissionNavigationDoesNotActivateEnrollmentServices() async throws {
+    func testMissionNavigationNoLongerDefersServices() async throws {
         let navigation = MainWindowNavigation()
         var starts = 0
-        navigation.section = .missionDrafts
+        // D-11: Mission drafts is a Home page; no section defers services.
         navigation.activateServicesIfNeeded { starts += 1 }
-        XCTAssertEqual(starts, 0)
-        XCTAssertEqual(
-            MainWindowView.title(.missionDrafts, compute: nil, privateInference: nil,
-                                 missionCopy: ["title": "shared mission title"]),
-            "shared mission title"
-        )
+        navigation.activateServicesIfNeeded { starts += 1 }
+        XCTAssertEqual(starts, 1)
     }
 
     @MainActor private func settle(_ model: MissionDraftsModel) async throws {

@@ -23,6 +23,7 @@ public sealed partial class PrivateInferenceView : UserControl
         InitializeComponent();
 
         ViewModel = new PrivateInferenceViewModel(host);
+        ManagedContent.Content = new ManagedSessionsView(host);
         Loaded += OnFirstLoaded;
         Loaded += OnFundingLoaded;
         Unloaded += (_, _) => ViewModel.Funding.Deactivate();

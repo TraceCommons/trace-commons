@@ -6,6 +6,55 @@ import XCTest
 final class DaemonDataContractWireTests: XCTestCase {
     private func frame(_ result: String) -> String { #"{"id":0,"result":\#(result)}"# }
 
+    func testToolDestinationsPreservesObservedRoutesAndConfiguredHubEvidence() async throws {
+        let transport = FakeTransport(response: frame(#"{"tools":[],"ledger_readable":true,"observed_destinations":[{"route":"outside","to":"unknown","via":"local_proxy","basis":"observed"}],"hub":{"kind":"owned_loopback","state":"running_answered_elsewhere","port":43127,"owned":true,"basis":"configured"}}"#))
+        let result = try await LiveDaemonClient(transport: transport).toolDestinations()
+        XCTAssertEqual(result.ledgerReadable, true)
+        let destination = try XCTUnwrap(result.observedDestinations?.first)
+        XCTAssertEqual(destination.route, "outside")
+        XCTAssertEqual(destination.to, "unknown", "observing a route does not identify its provider")
+        XCTAssertEqual(destination.via, "local_proxy")
+        XCTAssertEqual(destination.basis, "observed")
+        let hub = try XCTUnwrap(result.hub)
+        XCTAssertEqual(hub.kind, "owned_loopback")
+        XCTAssertEqual(hub.state, "running_answered_elsewhere")
+        XCTAssertEqual(hub.port, 43127)
+        XCTAssertEqual(hub.owned, true)
+        XCTAssertEqual(hub.basis, "configured", "a configured hub does not prove a call destination")
+    }
+
+    func testToolDestinationsDistinguishesUnreadableLedgerFromReadableEmptyLedger() async throws {
+        for readable in [false, true] {
+            let transport = FakeTransport(response: frame(#"{"tools":[],"ledger_readable":\#(readable),"observed_destinations":[],"hub":{"kind":"owned_loopback","state":null,"port":null,"owned":null,"basis":"unknown"}}"#))
+            let result = try await LiveDaemonClient(transport: transport).toolDestinations()
+            XCTAssertEqual(result.ledgerReadable, readable)
+            XCTAssertEqual(result.observedDestinations, [])
+            let hub = try XCTUnwrap(result.hub)
+            XCTAssertNil(hub.state)
+            XCTAssertNil(hub.port)
+            XCTAssertNil(hub.owned, "unknown ownership must not become false")
+            XCTAssertEqual(hub.basis, "unknown")
+        }
+    }
+
+    func testToolDestinationsPreservesUnreadableHubStateAsNull() async throws {
+        let transport = FakeTransport(response: frame(#"{"tools":[],"ledger_readable":false,"observed_destinations":[],"hub":{"kind":"owned_loopback","state":null,"port":null,"owned":null,"basis":"unknown"}}"#))
+        let result = try await LiveDaemonClient(transport: transport).toolDestinations()
+        let hub = try XCTUnwrap(result.hub)
+        XCTAssertNil(hub.state, "unreadable settings must not manufacture a hub state")
+        XCTAssertNil(hub.port)
+        XCTAssertNil(hub.owned)
+        XCTAssertEqual(hub.basis, "unknown")
+    }
+
+    func testOlderToolDestinationsLeavesNewEvidenceUnknown() async throws {
+        let transport = FakeTransport(response: frame(#"{"tools":[]}"#))
+        let result = try await LiveDaemonClient(transport: transport).toolDestinations()
+        XCTAssertNil(result.ledgerReadable)
+        XCTAssertNil(result.observedDestinations, "an absent observation list is not a readable empty list")
+        XCTAssertNil(result.hub)
+    }
+
     // MARK: - Unreachable
 
     /// An attached daemon that stops listening, disconnects or times out
@@ -357,6 +406,20 @@ final class DaemonDataContractWireTests: XCTestCase {
         XCTAssertEqual(response.approved, 0)
         XCTAssertEqual(response.excludedHeld, 2)
         XCTAssertEqual(response.excludedIneligible, 1)
+    }
+
+    /// A folder approve carries the verdict only when one was chosen.
+    func testAFolderApproveSendsTheVerdictOnlyWhenChosen() async throws {
+        let transport = FakeTransport { _, _ in
+            #"{"id":0,"result":{"approved":2,"hold_secs":30,"hold_until":null,"flagged":0,"redactions":{},"skipped":[],"excluded_held":0,"excluded_ineligible":1}}"#
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: nil)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: .partly)
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"project_id":"proj_1"}"#,
+            #"{"outcome":"partly","project_id":"proj_1"}"#,
+        ])
     }
 
     func testSampleFolderApproveLeavesHeldSessionsOut() async throws {

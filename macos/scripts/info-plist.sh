@@ -96,7 +96,7 @@ cat <<PLIST
         <key>CFBundleURLName</key><string>ai.tracecommons.shell.invite</string>
         <key>CFBundleURLSchemes</key><array><string>tracecommons</string></array>
         <!-- Viewer, not Editor: the app shows what the URL names and waits
-             for a person to press the button. A deep link never enrols. -->
+             for a person to press the button. A deep link never enrolls. -->
         <key>CFBundleTypeRole</key><string>Viewer</string>
       </dict>
     </array>

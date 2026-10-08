@@ -28,7 +28,7 @@
             <SolidColorBrush x:Key="TcStatusAskBrush" Color="#F5C142" />
             <SolidColorBrush x:Key="TcStatusAskTextBrush" Color="#F5C142" />
             <SolidColorBrush x:Key="TcStatusOutsideBrush" Color="#FF6B6B" />
-            <SolidColorBrush x:Key="TcStatusOutsideTextBrush" Color="#FF6B6B" />
+            <SolidColorBrush x:Key="TcStatusOutsideTextBrush" Color="#FF9494" />
             <SolidColorBrush x:Key="TcOnStatusBrush" Color="#0C0C0E" />
 
             <SolidColorBrush x:Key="TcGreenBrandBrush" Color="#8A3DFF" />
@@ -41,7 +41,7 @@
             <SolidColorBrush x:Key="TcGoldTextBrush" Color="#F5C142" />
             <SolidColorBrush x:Key="TcGoldAttentionBorderBrush" Color="#99F5C142" />
             <SolidColorBrush x:Key="TcCoralBrandBrush" Color="#FF6B6B" />
-            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#FF6B6B" />
+            <SolidColorBrush x:Key="TcCoralTextBrush" Color="#FF9494" />
         </ResourceDictionary>
 
         <!-- Light. -->

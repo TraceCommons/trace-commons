@@ -993,8 +993,7 @@ three things:
   pending until it settles.
 
 Like every consent string, this copy lives in Rust (`consent_copy.rs`) and
-is pinned by the shell copy tests. Until it is approved, it is marked
-**DRAFT, NEEDS APPROVAL** there.
+is pinned by the shell copy tests. It was approved 2026-10-06.
 
 ## Open
 

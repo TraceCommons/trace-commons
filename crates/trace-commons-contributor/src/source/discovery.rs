@@ -24,7 +24,7 @@ use super::cline::{
 use super::gemini_cli::{GEMINI_CLI_HOME_ENV, conventional_root};
 use super::{
     SOURCE_CLAUDE_CODE, SOURCE_CLINE, SOURCE_CODEX, SOURCE_GEMINI_CLI, SOURCE_OPENCODE,
-    source_answers_at,
+    SOURCE_TRAJECTORY, source_answers_at,
 };
 
 /// The environment variable Claude Code uses to relocate its config
@@ -57,7 +57,9 @@ const MESSAGES_JSON_SUFFIX: &str = ".messages.json";
 /// OpenCode's own export writes one `<session-id>.json` file per session,
 /// directly in the declared folder -- see `source::opencode`, which reads
 /// that folder non-recursively. The count here is flat too, so "N sessions
-/// found" never includes a file the adapter would not read.
+/// found" never includes a file below the folder the adapter would not read.
+/// [`describe_opencode`] also stops where the adapter's discovery cap does;
+/// [`describe_folder`]'s OpenCode row does not (see [`FOLDER_ENTRY_BUDGET`]).
 const OPENCODE_JSON_SUFFIX: &str = ".json";
 
 /// How far [`count_sessions`] may look below the store it was handed.
@@ -214,6 +216,305 @@ pub fn describe_opencode(path: &Path) -> SourceCandidate {
             entry_budget: super::opencode::DISCOVERY_ENTRY_BUDGET,
         },
     )
+}
+
+/// How many directory entries one kind's layout walk in [`describe_folder`]
+/// may read before it stops counting.
+///
+/// A picked folder can be anything -- `$HOME`, `~/Downloads` -- and this runs
+/// on the calling thread. Each walk is already bounded in depth by the
+/// layout it checks; this bounds its breadth. It sits well above a real
+/// store (thousands of sessions), so a real count is not truncated.
+///
+/// Every row, OpenCode's included, counts under this one budget. The OpenCode
+/// row is deliberately not [`describe_opencode`]'s count, which stops at the
+/// adapter's 256-entry discovery cap: in a large flat folder that cap would
+/// drop the OpenCode row while the trajectory row, walking further, still
+/// matched, and the shell would get one confident match for a layout that
+/// fits two.
+const FOLDER_ENTRY_BUDGET: usize = 65_536;
+
+/// Recognise a folder the contributor picked by its layout alone, so "add
+/// your tool" can say which tool's sessions it holds.
+///
+/// Runs each parsed kind's layout check over `path` and returns one
+/// candidate per kind whose layout matches, in a fixed order -- Claude Code
+/// (`<encoded-cwd>/<uuid>.jsonl`), Codex (`YYYY/MM/DD/rollout-*.jsonl`),
+/// Gemini CLI (`<project>/chats/session-*.json`), Cline
+/// (`<id>/<id>.messages.json`), OpenCode (flat `*.json`) and trajectory
+/// (flat `*.json`/`*.jsonl`). A kind matches when at least one session file
+/// sits where its layout puts one.
+///
+/// It never guesses. A folder whose layout fits two kinds -- a flat folder
+/// of `.json` files is both an OpenCode export and a trajectory export --
+/// reports both, and the shell asks; a folder that fits none, or is not
+/// there, reports nothing, and the shell refuses it. Each row's `path` is
+/// the picked folder itself, except for a tool's home:
+///
+/// - A moved Claude Code or Codex home -- the folder `CLAUDE_CONFIG_DIR` or
+///   `CODEX_HOME` would name, holding `projects/` or `sessions/` -- is that
+///   tool, read at that subfolder as [`probe`] reads the conventional one,
+///   and only that tool: the config files beside the store are not exports.
+/// - One Claude Code project folder (flat `<uuid>.jsonl`) matches nothing.
+///   The adapter reads the `projects` folder above it, not one project, and
+///   the trajectory reader would refuse every file, so any row would offer
+///   a reading that yields nothing.
+/// - A tool's own config files ([`CONFIG_FILE_NAMES`]) are never counted
+///   as flat exports.
+///
+/// Like everything in this module it reads directory entries and metadata
+/// only and never opens a file. It follows no symlink below the picked
+/// folder; the picked folder itself is taken as given, symlink or not, as
+/// [`describe_opencode`] takes it.
+#[must_use]
+pub fn describe_folder(path: &Path) -> Vec<SourceCandidate> {
+    if !path.is_dir() {
+        return Vec::new();
+    }
+    let row = |source: &str, at: PathBuf, tally: Tally| SourceCandidate {
+        source: source.to_string(),
+        path: at,
+        exists: true,
+        session_count: tally.count,
+        most_recent: tally.most_recent,
+        relocated_by_env: false,
+        answers_at: source_answers_at(source).map(str::to_string),
+    };
+    // A tool's home: its store is a subfolder, never followed through a
+    // symlink, as every walk below the picked folder is.
+    let homes: Vec<SourceCandidate> = [
+        (
+            SOURCE_CLAUDE_CODE,
+            "projects",
+            claude_code_layout as fn(&Path) -> Tally,
+        ),
+        (SOURCE_CODEX, "sessions", codex_layout),
+    ]
+    .into_iter()
+    .filter_map(|(source, store, layout)| {
+        let at = path.join(store);
+        if !std::fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir()) {
+            return None;
+        }
+        let tally = layout(&at);
+        (tally.count > 0).then(|| row(source, at, tally))
+    })
+    .collect();
+    if !homes.is_empty() {
+        return homes;
+    }
+    if is_one_claude_code_project(path) {
+        return Vec::new();
+    }
+    [
+        (SOURCE_CLAUDE_CODE, claude_code_layout(path)),
+        (SOURCE_CODEX, codex_layout(path)),
+        (SOURCE_GEMINI_CLI, gemini_layout(path)),
+        (SOURCE_CLINE, cline_layout(path)),
+        (SOURCE_OPENCODE, opencode_layout(path)),
+        (SOURCE_TRAJECTORY, trajectory_layout(path)),
+    ]
+    .into_iter()
+    .filter(|(_, tally)| tally.count > 0)
+    .map(|(source, tally)| row(source, path.to_path_buf(), tally))
+    .collect()
+}
+
+/// The config files a coding tool keeps beside its store: never an export,
+/// whatever their suffix.
+pub const CONFIG_FILE_NAMES: &[&str] = &[
+    "settings.json",
+    "settings.local.json",
+    "auth.json",
+    "config.json",
+    "history.jsonl",
+];
+
+/// Whether `root` is one Claude Code project folder: it holds `.jsonl`
+/// files directly, and every one is named `<uuid>.jsonl`, as Claude Code
+/// names a top-level session.
+fn is_one_claude_code_project(root: &Path) -> bool {
+    let mut tally = Tally::new();
+    let stems: Vec<String> = tally
+        .files(root, |name| name.ends_with(JSONL_SUFFIX))
+        .iter()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    !stems.is_empty() && stems.iter().all(|name| is_claude_code_session_name(name))
+}
+
+/// `<uuid>.jsonl`, the hyphenated UUID Claude Code names a session by.
+fn is_claude_code_session_name(name: &str) -> bool {
+    name.strip_suffix(JSONL_SUFFIX)
+        .is_some_and(|stem| stem.len() == 36 && uuid::Uuid::try_parse(stem).is_ok())
+}
+
+/// One layout walk's running count, and what is left of its entry budget.
+struct Tally {
+    count: u64,
+    most_recent: Option<DateTime<Utc>>,
+    budget: usize,
+}
+
+impl Tally {
+    fn new() -> Self {
+        Tally {
+            count: 0,
+            most_recent: None,
+            budget: FOLDER_ENTRY_BUDGET,
+        }
+    }
+
+    /// `dir`'s entries, up to what is left of the budget. An unreadable
+    /// directory contributes nothing.
+    fn entries(&mut self, dir: &Path) -> Vec<std::fs::DirEntry> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in read {
+            if self.budget == 0 {
+                break;
+            }
+            self.budget -= 1;
+            if let Ok(entry) = entry {
+                out.push(entry);
+            }
+        }
+        out
+    }
+
+    /// `dir`'s subdirectories, never through a symlink: `file_type` does not
+    /// follow one.
+    fn subdirs(&mut self, dir: &Path) -> Vec<std::fs::DirEntry> {
+        self.entries(dir)
+            .into_iter()
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_dir()))
+            .collect()
+    }
+
+    /// `dir`'s regular files whose name satisfies `named`.
+    fn files(&mut self, dir: &Path, named: impl Fn(&str) -> bool) -> Vec<std::fs::DirEntry> {
+        self.entries(dir)
+            .into_iter()
+            .filter(|e| e.file_type().is_ok_and(|ft| ft.is_file()))
+            .filter(|e| e.file_name().to_str().is_some_and(&named))
+            .collect()
+    }
+
+    /// Count one session file, from metadata only.
+    fn note(&mut self, meta: Option<std::fs::Metadata>) {
+        self.count += 1;
+        if let Some(modified) = meta.and_then(|m| m.modified().ok()) {
+            let stamp: DateTime<Utc> = modified.into();
+            self.most_recent = Some(match self.most_recent {
+                Some(current) if current >= stamp => current,
+                _ => stamp,
+            });
+        }
+    }
+}
+
+/// `<encoded-cwd>/<uuid>.jsonl`. The stem must be a hyphenated UUID, as
+/// Claude Code names every top-level session: a `.jsonl` file two levels
+/// down is otherwise too common a shape to call a Claude Code store.
+fn claude_code_layout(root: &Path) -> Tally {
+    let mut tally = Tally::new();
+    for project in tally.subdirs(root) {
+        for file in tally.files(&project.path(), is_claude_code_session_name) {
+            tally.note(file.metadata().ok());
+        }
+    }
+    tally
+}
+
+/// `YYYY/MM/DD/rollout-*.jsonl`, the date directories all digits.
+fn codex_layout(root: &Path) -> Tally {
+    fn digits(entry: &std::fs::DirEntry, width: usize) -> bool {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.len() == width && n.bytes().all(|b| b.is_ascii_digit()))
+    }
+    let mut tally = Tally::new();
+    for year in tally.subdirs(root) {
+        if !digits(&year, 4) {
+            continue;
+        }
+        for month in tally.subdirs(&year.path()) {
+            if !digits(&month, 2) {
+                continue;
+            }
+            for day in tally.subdirs(&month.path()) {
+                if !digits(&day, 2) {
+                    continue;
+                }
+                for file in tally.files(&day.path(), super::codex::is_rollout_file_name) {
+                    tally.note(file.metadata().ok());
+                }
+            }
+        }
+    }
+    tally
+}
+
+/// `<project>/chats/session-*.json`.
+fn gemini_layout(root: &Path) -> Tally {
+    let mut tally = Tally::new();
+    for project in tally.subdirs(root) {
+        let chats = project.path().join(super::gemini_cli::CHATS_DIR);
+        if !std::fs::symlink_metadata(&chats).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        for file in tally.files(&chats, super::gemini_cli::is_session_file_name) {
+            tally.note(file.metadata().ok());
+        }
+    }
+    tally
+}
+
+/// Flat `*.json` directly in the folder, the shape of an OpenCode export.
+/// Counted against [`FOLDER_ENTRY_BUDGET`] like [`trajectory_layout`], so a
+/// flat `.json` folder that fits both layouts reports both, with one count.
+fn opencode_layout(root: &Path) -> Tally {
+    flat_layout(root, |name| name.ends_with(OPENCODE_JSON_SUFFIX))
+}
+
+/// Flat `*.json` and `*.jsonl` directly in the folder, the shape of a Letta
+/// trajectory export. Counted against [`FOLDER_ENTRY_BUDGET`], not
+/// OpenCode's smaller discovery cap: a declared trajectory folder is read
+/// whole, so the count it is offered under should be whole too.
+fn trajectory_layout(root: &Path) -> Tally {
+    flat_layout(root, |name| {
+        name.ends_with(JSON_SUFFIX) || name.ends_with(JSONL_SUFFIX)
+    })
+}
+
+/// Regular files directly in `root` whose name satisfies `named`, a tool's
+/// config files ([`CONFIG_FILE_NAMES`]) aside.
+fn flat_layout(root: &Path, named: impl Fn(&str) -> bool) -> Tally {
+    let mut tally = Tally::new();
+    let named = |name: &str| named(name) && !CONFIG_FILE_NAMES.contains(&name);
+    for file in tally.files(root, named) {
+        tally.note(file.metadata().ok());
+    }
+    tally
+}
+
+/// `<id>/<id>.messages.json`: one stat per session directory, no listing.
+fn cline_layout(root: &Path) -> Tally {
+    let mut tally = Tally::new();
+    for session in tally.subdirs(root) {
+        let Some(messages) = super::cline::messages_file_for(&session.path()) else {
+            continue;
+        };
+        if let Ok(meta) = std::fs::symlink_metadata(&messages)
+            && meta.is_file()
+        {
+            tally.note(Some(meta));
+        }
+    }
+    tally
 }
 
 fn describe(
@@ -595,5 +896,270 @@ mod tests {
             None,
             "OpenCode ships with no single default vendor to name"
         );
+    }
+
+    const A_UUID: &str = "0f8fad5b-d9cb-469f-a165-70867728950e";
+
+    fn sources_of(found: &[SourceCandidate]) -> Vec<&str> {
+        found.iter().map(|c| c.source.as_str()).collect()
+    }
+
+    fn only(found: &[SourceCandidate], source: &str) -> SourceCandidate {
+        assert_eq!(sources_of(found), vec![source], "exactly one kind expected");
+        found[0].clone()
+    }
+
+    #[test]
+    fn describe_folder_recognises_a_claude_code_store() {
+        let picked = Scratch::new("folder-claude");
+        let project = picked.path().join("-Users-someone-code-app");
+        write_session(&project, &format!("{A_UUID}.jsonl"));
+        write_session(&project, "0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl");
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CLAUDE_CODE);
+        assert_eq!(row.path, picked.path());
+        assert!(row.exists);
+        assert_eq!(row.session_count, 2);
+        assert!(row.most_recent.is_some());
+        assert!(!row.relocated_by_env);
+        assert_eq!(row.answers_at, Some("Anthropic".to_string()));
+    }
+
+    #[test]
+    fn describe_folder_recognises_a_codex_store() {
+        let picked = Scratch::new("folder-codex");
+        let day = picked.path().join("2026/08/20");
+        write_session(&day, "rollout-2026-08-20T10-00-00-abc.jsonl");
+        write_session(&day, "rollout-2026-08-20T11-00-00-def.jsonl");
+        write_session(&picked.path().join("2026/08/21"), "rollout-x.jsonl");
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
+        assert_eq!(row.path, picked.path());
+        assert_eq!(row.session_count, 3);
+    }
+
+    #[test]
+    fn describe_folder_recognises_a_gemini_store() {
+        let picked = Scratch::new("folder-gemini");
+        let chats = picked.path().join("proj/chats");
+        write_session(&chats, "session-a.json");
+        write_session(&chats, "session-b.json");
+
+        let row = only(&describe_folder(picked.path()), SOURCE_GEMINI_CLI);
+        assert_eq!(row.session_count, 2);
+    }
+
+    #[test]
+    fn describe_folder_recognises_a_cline_store() {
+        let picked = Scratch::new("folder-cline");
+        let session = picked.path().join("1767000000000");
+        write_session(&session, "1767000000000.messages.json");
+        write_session(&session, "1767000000000.json");
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CLINE);
+        assert_eq!(row.session_count, 1);
+        assert_eq!(row.answers_at, None);
+    }
+
+    #[test]
+    fn describe_folder_recognises_a_trajectory_jsonl_folder() {
+        let picked = Scratch::new("folder-trajectory");
+        write_session(picked.path(), "run-1.jsonl");
+        write_session(picked.path(), "run-2.jsonl");
+
+        let row = only(&describe_folder(picked.path()), SOURCE_TRAJECTORY);
+        assert_eq!(row.session_count, 2);
+    }
+
+    #[test]
+    fn describe_folder_counts_a_trajectory_export_past_the_opencode_cap() {
+        // A trajectory export is read whole once declared, so its count
+        // must not stop at OpenCode's discovery budget. `.jsonl` alone, so
+        // only the trajectory layout fits.
+        let picked = Scratch::new("folder-trajectory-large");
+        let total = super::super::opencode::DISCOVERY_ENTRY_BUDGET + 44;
+        for i in 0..total {
+            write_session(picked.path(), &format!("run-{i}.jsonl"));
+        }
+
+        let row = only(&describe_folder(picked.path()), SOURCE_TRAJECTORY);
+        assert_eq!(row.session_count, total as u64);
+    }
+
+    #[test]
+    fn describe_folder_reports_both_kinds_for_a_flat_json_folder() {
+        // OpenCode exports and Letta trajectory exports are both flat
+        // `.json`; the layout cannot tell them apart and must not guess.
+        let picked = Scratch::new("folder-flat-json");
+        write_session(picked.path(), "ses_a.json");
+        write_session(picked.path(), "ses_b.json");
+
+        let found = describe_folder(picked.path());
+        assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
+        assert!(found.iter().all(|c| c.session_count == 2));
+    }
+
+    #[test]
+    fn describe_folder_reports_both_kinds_for_a_flat_json_folder_past_the_opencode_cap() {
+        // A large flat folder (`~/Downloads`) with `.json` files past the
+        // adapter's 256-entry discovery cap still fits both layouts. Counting
+        // the OpenCode row under the smaller cap would drop it and leave one
+        // confident trajectory match, which is a guess.
+        let picked = Scratch::new("folder-flat-json-large");
+        let over = super::super::opencode::DISCOVERY_ENTRY_BUDGET + 44;
+        for i in 0..over {
+            std::fs::write(picked.path().join(format!("note-{i}.txt")), b"x").unwrap();
+            write_session(picked.path(), &format!("ses_{i}.json"));
+        }
+
+        let found = describe_folder(picked.path());
+        assert_eq!(sources_of(&found), vec![SOURCE_OPENCODE, SOURCE_TRAJECTORY]);
+        assert!(found.iter().all(|c| c.session_count == over as u64));
+    }
+
+    /// Kristi b#7: a moved Claude Code home (`settings.json` beside
+    /// `projects/`) is Claude Code, read at its `projects` folder as
+    /// `probe` reads the conventional one -- never an OpenCode or trajectory
+    /// export because of the config file beside it.
+    #[test]
+    fn describe_folder_recognises_a_moved_claude_code_home_at_its_projects_folder() {
+        let picked = Scratch::new("folder-claude-home");
+        std::fs::write(picked.path().join("settings.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("projects/-Users-someone-code-app"),
+            &format!("{A_UUID}.jsonl"),
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CLAUDE_CODE);
+        assert_eq!(row.path, picked.path().join("projects"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: a moved Codex home (`auth.json` and `history.jsonl`
+    /// beside `sessions/`) is Codex, read at its `sessions` folder.
+    #[test]
+    fn describe_folder_recognises_a_moved_codex_home_at_its_sessions_folder() {
+        let picked = Scratch::new("folder-codex-home");
+        std::fs::write(picked.path().join("auth.json"), b"{}").unwrap();
+        std::fs::write(picked.path().join("history.jsonl"), b"{}").unwrap();
+        std::fs::write(picked.path().join("config.json"), b"{}").unwrap();
+        write_session(
+            &picked.path().join("sessions/2026/08/20"),
+            "rollout-2026-08-20T10-00-00-abc.jsonl",
+        );
+
+        let row = only(&describe_folder(picked.path()), SOURCE_CODEX);
+        assert_eq!(row.path, picked.path().join("sessions"));
+        assert_eq!(row.session_count, 1);
+    }
+
+    /// Kristi b#7: one Claude Code project folder (flat `<uuid>.jsonl`) is
+    /// not a trajectory export -- the strict reader would refuse every file
+    /// -- and the Claude Code adapter reads the `projects` folder above it,
+    /// not one project. So it matches nothing, and the shell refuses it,
+    /// rather than offering a reading that yields nothing.
+    #[test]
+    fn describe_folder_offers_nothing_for_a_single_claude_code_project_folder() {
+        let picked = Scratch::new("folder-claude-project");
+        write_session(picked.path(), &format!("{A_UUID}.jsonl"));
+        write_session(picked.path(), "0e1d2c3b-4a59-4687-9b0a-1b2c3d4e5f60.jsonl");
+
+        assert_eq!(describe_folder(picked.path()), Vec::new());
+    }
+
+    /// A tool's own config files are not exports: a folder holding only
+    /// them matches neither flat layout.
+    #[test]
+    fn describe_folder_does_not_count_config_files_as_exports() {
+        let picked = Scratch::new("folder-config-only");
+        for name in ["settings.json", "auth.json", "config.json", "history.jsonl"] {
+            std::fs::write(picked.path().join(name), b"{}").unwrap();
+        }
+        assert_eq!(describe_folder(picked.path()), Vec::new());
+    }
+
+    #[test]
+    fn describe_folder_reports_nothing_for_an_unrelated_folder() {
+        let picked = Scratch::new("folder-unrelated");
+        std::fs::write(picked.path().join("notes.txt"), b"x").unwrap();
+        std::fs::write(picked.path().join("photo.png"), b"x").unwrap();
+        // Near misses for every layout.
+        write_session(&picked.path().join("exports"), "data.jsonl");
+        write_session(&picked.path().join("a/b"), "deep.jsonl");
+        write_session(&picked.path().join("2026/08/20"), "not-a-rollout.jsonl");
+        write_session(&picked.path().join("proj/chats"), "chat.json");
+        write_session(&picked.path().join("abc"), "other.messages.json");
+        std::fs::create_dir_all(picked.path().join("empty")).unwrap();
+
+        assert_eq!(describe_folder(picked.path()), Vec::new());
+
+        let empty = Scratch::new("folder-empty");
+        assert_eq!(describe_folder(empty.path()), Vec::new());
+        assert_eq!(
+            describe_folder(&empty.path().join("never-created")),
+            Vec::new()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn describe_folder_never_opens_a_file() {
+        use std::os::unix::fs::PermissionsExt;
+        // Mode 000 on every session file: any attempt to open one fails, so
+        // a recognition that read contents would miss them. Vacuous when the
+        // tests run as root, who can open anything.
+        let picked = Scratch::new("folder-unreadable");
+        let project = picked.path().join("-Users-someone-code-app");
+        let session = project.join(format!("{A_UUID}.jsonl"));
+        write_session(&project, &format!("{A_UUID}.jsonl"));
+        let flat = picked.path().join("loose.json");
+        std::fs::write(&flat, b"{}").unwrap();
+        let rollout = picked.path().join("2026/08/20/rollout-x.jsonl");
+        write_session(&picked.path().join("2026/08/20"), "rollout-x.jsonl");
+        let gemini = picked.path().join("proj/chats/session-a.json");
+        write_session(&picked.path().join("proj/chats"), "session-a.json");
+        let cline = picked
+            .path()
+            .join("1767000000000/1767000000000.messages.json");
+        write_session(
+            &picked.path().join("1767000000000"),
+            "1767000000000.messages.json",
+        );
+        let all = [&session, &flat, &rollout, &gemini, &cline];
+        for file in all {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let found = describe_folder(picked.path());
+        assert_eq!(
+            sources_of(&found),
+            vec![
+                SOURCE_CLAUDE_CODE,
+                SOURCE_CODEX,
+                SOURCE_GEMINI_CLI,
+                SOURCE_CLINE,
+                SOURCE_OPENCODE,
+                SOURCE_TRAJECTORY
+            ]
+        );
+        assert!(found.iter().all(|c| c.session_count == 1));
+        assert!(found.iter().all(|c| c.most_recent.is_some()));
+
+        for file in all {
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn describe_folder_follows_no_symlink() {
+        let elsewhere = Scratch::new("folder-link-target");
+        write_session(&elsewhere.path().join("2026/08/20"), "rollout-x.jsonl");
+        let picked = Scratch::new("folder-link");
+        std::os::unix::fs::symlink(elsewhere.path().join("2026"), picked.path().join("2026"))
+            .unwrap();
+
+        assert_eq!(describe_folder(picked.path()), Vec::new());
     }
 }

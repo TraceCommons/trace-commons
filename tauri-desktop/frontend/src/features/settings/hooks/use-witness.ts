@@ -1,6 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
-import { routeDisclosureKey } from "../../../lib/tauri/use-contributor-copy";
+import {
+  routeDisclosureKey,
+  useShellStatusLines,
+} from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import { settingsKeys } from "../api/query-keys";
 import {
@@ -12,6 +15,7 @@ import {
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Witness hook maps safety-specific status and configure/clear actions.
 export function useWitness() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const query = useQuery<WitnessStatus>({
@@ -58,7 +62,7 @@ export function useWitness() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: query.isError
-      ? "Witness status unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : mutation.isError &&
           mutation.error instanceof Error &&
           mutation.error.message.includes("pin")

@@ -467,7 +467,7 @@ pub struct PreviewSummary {
     /// Preview is a local operation -- no lock, no running loop, no network
     /// -- and requiring an enrollment for it was incidental rather than
     /// necessary: a contributor should be able to see what would be sent
-    /// *before* deciding to enrol, which is exactly when the question
+    /// *before* deciding to enroll, which is exactly when the question
     /// matters most.
     ///
     /// When this is `false`, `envelope_digest` and `input_fingerprint`
@@ -1436,7 +1436,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -2236,9 +2236,11 @@ mod tests {
         // Moved again by `routing_metadata_included`: a new consent field
         // serializes into the envelope, so the digest changes while the
         // classification does not.
+        // Native source_session now carries the validated parent UUID; this
+        // changes envelope bytes while preserving the risk classification.
         assert_eq!(
             summary.envelope_digest,
-            "sha256:8d9b9d0b2f1c78be8875d79435cc21397da4a1366139df38d59dff046930d27c",
+            "sha256:2fb042e4cb4e82532b3d8a35d1d8cf2d27366e7700ab43d19cf9acb3f4eab027",
             "the digest for this fixture moved -- if that is an intentional \
              change to the redaction or envelope pipeline, recompute and \
              update this pin; if not, something changed what gets hashed"

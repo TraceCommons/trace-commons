@@ -51,28 +51,55 @@ public struct GlassStatusLabel: View {
     }
 }
 
-/// A mono chip with a hairline ring at 60% of its colour.
+/// A mono chip with a hairline ring at 60% of its colour; or #1146's
+/// `tc-chip--glass`: purple ink on the quiet card edge, no dot, and, when
+/// `muted`, the neutral tint with secondary ink.
 public struct GlassChip: View {
     private let title: String
     private let status: GlassStatus?
+    private let glass: Bool
+    private let muted: Bool
 
     public init(_ title: String, status: GlassStatus? = nil) {
         self.title = title
         self.status = status
+        self.glass = false
+        self.muted = false
+    }
+
+    /// #1146's glass chip (`tc-chip--glass`), muted for the negative state
+    /// (`bg-tc-tint text-tc-secondary`).
+    public init(glass title: String, muted: Bool = false) {
+        self.title = title
+        self.status = nil
+        self.glass = true
+        self.muted = muted
     }
 
     public var body: some View {
-        let ink = status?.textColor ?? GlassColor.textSecondary
-        HStack(spacing: 5) {
-            if let status { GlassStatusDot(status, size: 6) }
+        if glass {
             Text(title)
+                .glassType(GlassTokens.TypeScale.mono)
+                .foregroundStyle(muted ? GlassColor.textSecondary : GlassColor.accentText)
+                .lineLimit(1)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 9)
+                .background(Capsule().fill(muted ? GlassTokens.Color.tintNeutral.color : Color.clear))
+                .glassEdge(GlassTokens.Shadow.cardEdgeQuiet, in: Capsule())
+                .accessibilityElement(children: .combine)
+        } else {
+            let ink = status?.textColor ?? GlassColor.textSecondary
+            HStack(spacing: 5) {
+                if let status { GlassStatusDot(status, size: 6) }
+                Text(title)
+            }
+            .glassType(GlassTokens.TypeScale.mono)
+            .foregroundStyle(ink)
+            .padding(.vertical, 3)
+            .padding(.horizontal, 9)
+            .overlay(Capsule().strokeBorder(ink.opacity(0.6), lineWidth: 0.5))
+            .accessibilityElement(children: .combine)
         }
-        .glassType(GlassTokens.TypeScale.mono)
-        .foregroundStyle(ink)
-        .padding(.vertical, 3)
-        .padding(.horizontal, 9)
-        .overlay(Capsule().strokeBorder(ink.opacity(0.6), lineWidth: 0.5))
-        .accessibilityElement(children: .combine)
     }
 }
 
@@ -204,18 +231,37 @@ public enum GlassTool: Sendable, Equatable {
 public struct GlassToolTile: View {
     public enum Kind: Sendable, Equatable {
         case tool(GlassTool), folder, session
+        /// The "+" of an add box (the first run's "add your tool").
+        case add
+        /// A folder tile marked with its name's first letter (#1146
+        /// `HistoryRow`: `project_label.slice(0, 1).toUpperCase()`).
+        case folderInitial(String)
+    }
+
+    /// A name's first letter, upper-cased; the folder mark for none.
+    public static func initial(_ name: String, mark: String) -> String {
+        name.first.map { String($0).uppercased() } ?? mark
     }
 
     private let kind: Kind
     private let large: Bool
+    /// The folder tile's mark, the core's (`glassFolderMark`, set at the
+    /// window's root); none drawn without it.
+    @Environment(\.glassFolderMark) private var folderMark
 
     public init(_ kind: Kind, large: Bool = false) {
         self.kind = kind
         self.large = large
     }
 
+    /// The session tile's mark, as #1146 draws it. The folder's is the
+    /// core's word (`glassFolderMark`).
+    static let sessionMark = "▤"
+
     public var body: some View {
         let side = large ? GlassTokens.Size.toolTileLarge : GlassTokens.Size.toolTile
+        // The large tile rounds like a control (#1146 `.tc-tool-tile--lg`).
+        let radius = large ? GlassTokens.Radius.control : GlassTokens.Radius.tile
         Group {
             switch kind {
             case let .tool(tool):
@@ -232,19 +278,33 @@ public struct GlassToolTile: View {
                     }
                 }
                     .frame(width: side, height: side)
-                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassColor.ink(0.1)))
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassColor.ink(0.1)))
+            // #1146 `ToolTile` marks a folder "dir" and a session "▤": a
+            // glyph, hidden from assistive tech with the rest of the tile.
             case .folder:
-                Image(systemName: "folder.fill")
-                    .glassGlyph(large ? 12 : 10, weight: .semibold)
+                Text(folderMark)
+                    .glassGlyph(large ? 11 : 9, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
                     .frame(width: side, height: side)
-                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+            case let .folderInitial(name):
+                Text(Self.initial(name, mark: folderMark))
+                    .glassGlyph(large ? 11 : 9, weight: .bold)
+                    .foregroundStyle(GlassTokens.Color.tileFolderInk.color)
+                    .frame(width: side, height: side)
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+            case .add:
+                Image(systemName: "plus")
+                    .glassGlyph(large ? 13 : 10, weight: .semibold)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .frame(width: side, height: side)
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassColor.ink(0.1)))
             case .session:
-                Image(systemName: "doc.plaintext")
-                    .glassGlyph(large ? 13 : 10)
+                Text(Self.sessionMark)
+                    .glassGlyph(11, weight: .bold)
                     .foregroundStyle(GlassTokens.Color.statusOff.color)
                     .frame(width: side, height: side)
-                    .background(RoundedRectangle(cornerRadius: GlassTokens.Radius.tile, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
+                    .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(GlassTokens.Color.tileFolder.color))
             }
         }
         .accessibilityHidden(true)
@@ -276,23 +336,54 @@ public struct GlassBarBucket: Identifiable, Sendable {
 public struct GlassBarGraph: View {
     private let buckets: [GlassBarBucket]
     private let scaleFloor: Double
+    private let period: Int
     @Binding private var hovered: String?
+    /// The window last drawn, so a change knows which side it came from.
+    @State private var shownPeriod: Int?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(_ buckets: [GlassBarBucket], scaleFloor: Double = 1, hovered: Binding<String?> = .constant(nil)) {
+    /// `period` names the window the buckets cover (0 is now, -1 the window
+    /// before it): when it changes the bars slide in from the side the new
+    /// window lies on (#1146 `tc-slide-l` / `tc-slide-r`).
+    public init(
+        _ buckets: [GlassBarBucket], scaleFloor: Double = 1, period: Int = 0,
+        hovered: Binding<String?> = .constant(nil)
+    ) {
         self.buckets = buckets
         self.scaleFloor = scaleFloor
+        self.period = period
         self._hovered = hovered
     }
 
+    /// The bar labels' ink: `statusOff`, primary under the pointer (#1146
+    /// `.tc-bar-graph__label`).
+    static func labelInk(hovered: Bool) -> GlassRGBA {
+        hovered ? GlassTokens.Color.textPrimary : GlassTokens.Color.statusOff
+    }
+
     public var body: some View {
+        ZStack {
+            bars
+                .id(period)
+                .transition(GlassBarSlide(from: shownPeriod ?? period, to: period).transition)
+        }
+        .animation(reduceMotion ? nil : GlassBarSlide.animation, value: period)
+        .clipped()
+        .onAppear { shownPeriod = period }
+        .onChange(of: period) { _, new in shownPeriod = new }
+    }
+
+    private var bars: some View {
         let maximum = max(scaleFloor, buckets.map { max($0.up, $0.down) }.max() ?? 0)
         let thin = buckets.count > 14
-        HStack(alignment: .bottom, spacing: thin ? 2 : 6) {
+        return HStack(alignment: .bottom, spacing: thin ? 2 : 6) {
             ForEach(buckets) { bucket in
                 VStack(spacing: GlassTokens.Space.s2) {
                     ZStack {
-                        RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
+                        let track = RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
+                        track
                             .fill(GlassColor.ink(hovered == bucket.id ? 0.18 : 0.08))
+                            .glassEdge(GlassTokens.Shadow.barTrackEdge, in: track)
                         VStack(spacing: 0) {
                             Spacer(minLength: 0)
                             bar(bucket.up, of: maximum, color: GlassTokens.Color.dataShared.color, top: true)
@@ -305,7 +396,13 @@ public struct GlassBarGraph: View {
                     .frame(height: 96)
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
-                        .foregroundStyle(hovered == bucket.id ? GlassColor.textPrimary : GlassColor.textTertiary)
+                        .foregroundStyle(Self.labelInk(hovered: hovered == bucket.id).color)
+                        // Never wrapped or cut ("Sat", "14:00"): centred on
+                        // its bar and free to run past it, as #1146's
+                        // `white-space: nowrap`, without widening the bar.
+                        .lineLimit(1)
+                        .fixedSize()
+                        .frame(width: 0)
                         .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
@@ -317,8 +414,9 @@ public struct GlassBarGraph: View {
 
     private func bar(_ value: Double, of maximum: Double, color: Color, top: Bool) -> some View {
         let height = value <= 0 ? 0 : max(3, value / maximum * 46)
+        // Shared stands on the axis and kept hangs from it (#1146
+        // `.tc-bar-graph__down { top: 50% }`), never from the track's foot.
         return VStack(spacing: 0) {
-            if !top { Spacer(minLength: 0) }
             UnevenRoundedRectangle(
                 topLeadingRadius: top ? 99 : 0,
                 bottomLeadingRadius: top ? 0 : 99,
@@ -330,6 +428,54 @@ public struct GlassBarGraph: View {
             if top { EmptyView() }
         }
         .frame(height: 47.5, alignment: top ? .bottom : .top)
+    }
+}
+
+/// How a bar graph's new window comes in (#1146 `tc-slide-l` / `tc-slide-r`
+/// over .45s): a later window from the trailing side, an earlier one from
+/// the leading side, the window it replaces fading out.
+public enum GlassBarSlide: Sendable, Equatable {
+    case none, fromTrailing, fromLeading
+
+    public init(from old: Int, to new: Int) {
+        self = new > old ? .fromTrailing : new < old ? .fromLeading : .none
+    }
+
+    /// #1146's `cubic-bezier(.4,0,.2,1)` at .45s.
+    static let animation = Animation.timingCurve(0.4, 0, 0.2, 1, duration: 0.45)
+
+    var transition: AnyTransition {
+        switch self {
+        case .none: .opacity
+        case .fromTrailing: .asymmetric(insertion: .move(edge: .trailing).combined(with: .opacity), removal: .opacity)
+        case .fromLeading: .asymmetric(insertion: .move(edge: .leading).combined(with: .opacity), removal: .opacity)
+        }
+    }
+}
+
+/// The map's field (#1146 `--tc-map-fill`): `radial-gradient(80% 60% at
+/// 50% 55%, mapFieldInner, mapFieldOuter)`, an ellipse 80% of the field's
+/// width and 60% of its height across each radius, its centre a little
+/// below the middle.
+public struct GlassMapField: View {
+    public init() {}
+
+    /// The ellipse's radii as fractions of the field, and its centre.
+    static let radii = CGSize(width: 0.8, height: 0.6)
+    static let center = UnitPoint(x: 0.5, y: 0.55)
+
+    public var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            EllipticalGradient(
+                colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
+                center: .center, startRadiusFraction: 0, endRadiusFraction: 0.5)
+                .frame(width: size.width * Self.radii.width * 2, height: size.height * Self.radii.height * 2)
+                .position(x: size.width * Self.center.x, y: size.height * Self.center.y)
+        }
+        .background(GlassTokens.Color.mapFieldOuter.color)
+        .clipped()
+        .accessibilityHidden(true)
     }
 }
 

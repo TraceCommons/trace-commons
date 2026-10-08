@@ -527,7 +527,7 @@ pub fn build_raw_contribution_with_verdict(
 /// - credential detection, which refuses the whole submission on a High or
 ///   Critical match rather than masking it (`detect_correction_credentials`),
 /// - `ConsentMetadata::correction_included`, which is derived from the
-///   outcome this builds and is what enrols the envelope for the PII
+///   outcome this builds and is what enrolls the envelope for the PII
 ///   backstop hold and floors its residual risk at Medium.
 ///
 /// Stamping a correction onto an already-redacted envelope would skip both.
@@ -783,7 +783,7 @@ fn build_raw_contribution_with_id(
         embedding_analysis: None,
         value: ValueMetadata::default(),
         conversation_id: t.conversation_id.clone(),
-        source_session: None,
+        source_session: t.source_session.clone(),
     }
 }
 
@@ -1144,6 +1144,22 @@ fn raw_event_for(e: &SessionEvent, now: DateTime<Utc>) -> RawTraceContributionEv
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_identity_survives_envelope_and_redaction() {
+        let mut transcript = fixture_transcript();
+        transcript.source_session = crate::source::native_session_identity(
+            "codex",
+            Some("11111111-1111-4111-8111-111111111111"),
+        );
+        let raw = build_raw_contribution(&transcript, &test_config(), chrono::Utc::now());
+        assert_eq!(raw.source_session, transcript.source_session);
+        let redactor =
+            trace_commons_protocol::trace_contribution::DeterministicTraceRedactor::try_default()
+                .unwrap();
+        let redacted = redact_to_envelope(&redactor, raw).await.unwrap();
+        assert_eq!(redacted.source_session, transcript.source_session);
+    }
+
     use super::*;
     use crate::source::{TraceSource, claude_code::ClaudeCodeSource};
 
@@ -1218,7 +1234,7 @@ mod tests {
     fn test_config() -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

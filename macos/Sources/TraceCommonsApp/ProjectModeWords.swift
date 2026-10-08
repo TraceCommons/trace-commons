@@ -12,6 +12,13 @@ enum ProjectModeWords {
     static let table: ContributionModeCopy? = ContributionModeCopy.decode(fromJSON: TCCoreCopy.contributionModeCopyJSON())
 }
 
+/// The Traces tree's words (`MonitorTreeCopy`), decoded once, for the
+/// surfaces that draw them without a `TracesStore` at hand: Settings, first
+/// run and the window roots' folder mark.
+enum TracesTreeWords {
+    static let table: MonitorTreeCopy? = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.tree
+}
+
 extension ProjectCopy {
     /// A project mode's name, for a picker option, a row's state or a
     /// summary: the core's, by wire mode. The accessor every macOS screen
@@ -20,4 +27,9 @@ extension ProjectCopy {
     static func modeChoiceLabel(_ mode: ProjectMode) -> String {
         ProjectModeWords.table?.label(for: mode) ?? ""
     }
+
+    /// The line under the bucket of sessions whose folder could not be
+    /// resolved, in the core's words: a statement of what the daemon does,
+    /// not an apology. Nil with no table, and then nothing is drawn.
+    static var unresolvedBucketNote: String? { TracesTreeWords.table?.unresolvedBucketNote }
 }
