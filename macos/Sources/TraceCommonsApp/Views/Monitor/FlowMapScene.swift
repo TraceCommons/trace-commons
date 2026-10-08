@@ -64,7 +64,9 @@ struct FlowMapScene: Equatable {
     /// What has been contributed from this machine, from History's rows
     /// that left and still stand (#1146 `ToolNode.contributed`). Nil
     /// counts while History has not been read: an unread record is never
-    /// said as nothing contributed.
+    /// said as nothing contributed. A page the daemon capped, or one kept
+    /// after a failed `list_history`, is not a whole current count either,
+    /// so it is nil too, as the Folder inspector's shared count.
     struct Contributions: Equatable {
         var total: Int?
         var byTool: [SourceKind: Int] = [:]
@@ -78,8 +80,9 @@ struct FlowMapScene: Equatable {
             self.byFolder = byFolder
         }
 
-        init(history: [DaemonData.HistoryRow]?) {
-            guard let history else {
+        @MainActor
+        init(history: [DaemonData.HistoryRow]?, failure: DaemonDataError? = nil) {
+            guard let history = SummaryFacts.wholeHistory(SummaryFacts.fresh(history, unless: failure)) else {
                 self = .unread
                 return
             }

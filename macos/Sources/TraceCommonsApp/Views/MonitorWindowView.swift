@@ -238,7 +238,7 @@ struct MonitorWindowView: View {
                                                 calls: model.privateInferenceCalls),
                 privateAIDescription: Self.inferenceDotDescription(
                     model.daemonSettings?.privateInferenceState?.surfaceState, calls: model.privateInferenceCalls),
-                traces: traces, history: home.history, inference: inference,
+                traces: traces, history: home.history, historyFailure: home.failures["list_history"], inference: inference,
                 focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 selectedTool: selectedTool?.rawValue,
                 sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
@@ -723,6 +723,9 @@ private struct MonitorMapPane: View {
     /// History's rows, for what each node says was contributed; nil while
     /// unread, and then the cards say a dash, never none.
     let history: [DaemonData.HistoryRow]?
+    /// Why the last `list_history` failed, if it did: the page above is
+    /// then the last good one, not current.
+    let historyFailure: DaemonDataError?
     let inference: InferenceStore
     /// The tool the binoculars focus the Traces view on; nil for all.
     let focusTool: String?
@@ -758,7 +761,7 @@ private struct MonitorMapPane: View {
             let scene = FlowMapScene.traces(
                 traces.tree,
                 gate: .init(state: tracesState, status: traces.status, destinations: traces.destinations),
-                contributed: .init(history: history), selectedTool: selectedTool)
+                contributed: .init(history: history, failure: historyFailure), selectedTool: selectedTool)
             FlowMapView(
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,

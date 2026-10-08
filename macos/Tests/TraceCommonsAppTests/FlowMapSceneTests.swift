@@ -1,6 +1,6 @@
 import SwiftUI
 import TCDesign
-import TCShellCore
+@testable import TCShellCore
 import XCTest
 
 @testable import TraceCommonsApp
@@ -130,6 +130,48 @@ final class FlowMapSceneTests: XCTestCase {
                        "Rule: not set. 3 sessions waiting, \u{2014} contributed.")
         XCTAssertNil(FlowMapView.hint(pinned: true))
         XCTAssertEqual(FlowMapView.hint(pinned: false), words.hint)
+    }
+
+    /// The cards' contributed counts are a whole count or a dash: a page
+    /// the daemon capped (`HomeStore.historyLimit`) is not a total, and a
+    /// page kept after a failed `list_history` is not current, as the
+    /// Folder inspector's shared count (`SummaryFacts.wholeHistory`).
+    func test_aCappedOrFailedHistoryCountsNoContributed() async throws {
+        let words = try XCTUnwrap(FlowMapScene.words)
+        let reply = try XCTUnwrap(SampleDaemonData.reply("list_history", in: .normalDay))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any])
+        let first = try XCTUnwrap((object["history"] as? [[String: Any]])?.first)
+        func rows(_ count: Int) throws -> [DaemonData.HistoryRow] {
+            try (0..<count).map { index in
+                var row = first
+                row["status"] = "accepted"
+                row["source"] = "claude-code"
+                row["project_id"] = "p1"
+                row["submission_id"] = "row-\(index)"
+                row["session_hash"] = "sha256:row-\(index)"
+                return try DaemonDataDecoding.decoder().decode(
+                    DaemonData.HistoryRow.self, from: JSONSerialization.data(withJSONObject: row))
+            }
+        }
+        let whole = FlowMapScene.Contributions(history: try rows(HomeStore.historyLimit - 1))
+        XCTAssertEqual(whole.total, HomeStore.historyLimit - 1)
+        XCTAssertEqual(whole.tool(.claudeCode), HomeStore.historyLimit - 1)
+        XCTAssertEqual(whole.folder("p1"), HomeStore.historyLimit - 1)
+
+        let capped = FlowMapScene.Contributions(history: try rows(HomeStore.historyLimit))
+        XCTAssertNil(capped.total, "a capped page is counted as the whole")
+        XCTAssertNil(capped.tool(.claudeCode))
+        XCTAssertNil(capped.folder("p1"))
+        let scene = FlowMapScene.traces(try await tree(.normalDay), gate: try await gate(.normalDay), contributed: capped)
+        XCTAssertEqual(scene.nodes.first { $0.id == "library" }?.detail, words.library(contributed: nil))
+
+        let stale = FlowMapScene.Contributions(history: try rows(3), failure: .unreachable)
+        XCTAssertNil(stale.total, "the last good page is drawn as current after a failed read")
+        XCTAssertEqual(FlowMapScene.Contributions(history: try rows(3), failure: nil).total, 3)
+
+        // The window hands the map the failure with the page.
+        let window = try TracesInspectorHostTests.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("historyFailure: home.failures[\"list_history\"]"))
     }
 
     /// Nothing moves to the commons while the core says something stops it:
