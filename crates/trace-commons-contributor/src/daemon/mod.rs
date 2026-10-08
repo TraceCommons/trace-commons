@@ -48,6 +48,7 @@ pub mod health;
 pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
+pub mod insights_glance;
 pub mod install;
 pub mod ipc;
 pub mod ironwire_pointer;

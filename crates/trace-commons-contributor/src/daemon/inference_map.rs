@@ -341,7 +341,7 @@ fn speakers_from_links(harness: &[(String, HarnessLink)]) -> Speakers {
 }
 
 /// The speakers among the harness rows `harness_list` computes.
-fn speakers_from_rows(harness: &[HarnessRow]) -> Speakers {
+pub(crate) fn speakers_from_rows(harness: &[HarnessRow]) -> Speakers {
     harness
         .iter()
         .filter(|row| row.connected)
@@ -757,7 +757,10 @@ fn endpoint_tool(facade: &str, path: &str) -> Option<&'static str> {
 /// A tool pointed at the proxy by hand, speaking the same API at the same
 /// facade as a tool this daemon connects, is indistinguishable in the row
 /// and reads as that tool. Nothing in the row can tell them apart.
-fn attribute(row: &RoutedExchange, speakers: &[(&'static str, &'static str)]) -> &'static str {
+pub(crate) fn attribute(
+    row: &RoutedExchange,
+    speakers: &[(&'static str, &'static str)],
+) -> &'static str {
     let facade = row.facade.as_str();
     if let Some(path) = row.path.as_deref().filter(|path| !path.is_empty()) {
         let Some(tool) = endpoint_tool(facade, path) else {

@@ -527,6 +527,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
+| `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (owner decision D3, open); see "`insights_glance`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -3784,6 +3785,97 @@ them:
 - **the smart router's choice** -- nothing records which model a router
   picked or why.
 
+### `insights_glance`
+
+Additive. The menu-bar glance's "Today" figure: tokens in calls routed
+through this machine's proxy since local midnight (Insights feed L), read
+from the ledger snapshot the poll tick already holds. Synchronous and
+read-only: it never refreshes the ledger, never forwards to the Insights
+service, and makes no network call, so it answers under the developer dry
+run too. It does not use `inference_calls`.
+
+`tz` is required: the shell's current UTC offset in **seconds east** (for
+example `-14400` for UTC-4), an integer within 18 hours either way. Anything
+else, including an IANA zone name, is `bad_params` / `tz-invalid`, whatever
+the setting. "Today" is the local date at that offset.
+
+With the `insights_ledger_feed` setting off (the default; owner decision D3,
+open) the answer is exactly the following, and the ledger is not read:
+
+```json
+{ "enabled": false, "feed": "ledger" }
+```
+
+A shell that gets this, an `unknown_method` error (an older daemon) or a
+failed read shows no glance; the Insights window falls back to the saved
+imports feed and its feed line says so. With the setting on but no ledger
+answered yet:
+
+```json
+{ "enabled": true, "feed": "ledger", "readable": false }
+```
+
+`readable: false` is not evidence of no calls and is never drawn as zero.
+Otherwise:
+
+```json
+{
+  "enabled": true,
+  "feed": "ledger",
+  "readable": true,
+  "updated_at": "2026-10-08T09:59:12+00:00",
+  "stale": false,
+  "date": "2026-10-08",
+  "tools": [
+    {
+      "tool": "claude-code",
+      "calls": 42,
+      "known_calls": 41,
+      "tokens": 3810440,
+      "cache_share": { "numerator": 3402115, "denominator": 3790000, "permille": 898 }
+    }
+  ],
+  "coverage": { "calls": 42, "known": 41, "unknown": 1, "unreadable_rows": 0 },
+  "context_tip": { "state": "held" }
+}
+```
+
+- `updated_at` is when the ledger last answered, not now. `stale` is true
+  when that is more than 600 seconds ago; a shell hides the card rather than
+  show an old figure.
+- `tools[]` is one line per tool, attributed exactly as `inference_calls`
+  names it, in fixed order: `claude-code`, `codex`, any other label
+  alphabetically, `unknown` last. Never sorted by value, and **never summed
+  across tools**: there is no total. Only tools with a call today appear.
+- `tokens` is the sum over the tool's known calls of input (uncached), cache
+  read, cache write and output, normalized per facade in the daemon: on the
+  OpenAI facade cached input is taken out of input so it is counted once. A
+  call is known only when all four counters are recorded and in range;
+  `tokens` and `cache_share` are `null` when no call of the tool is known.
+  `null` is never zero.
+- `cache_share` is cache read over all input (uncached + cache read + cache
+  write) for the known calls, as integers and as per mille rounded half up.
+- `coverage.unknown` is calls today with any counter unknown, never counted
+  as zero tokens. `unreadable_rows` is rows in the ledger's 24-hour window
+  this build could not read at all, so a nonzero value means the day may be
+  incomplete.
+- `context_tip.state` is one of `held`, `threshold_unset`, `no_session`,
+  `no_figure`, `quiet` or `lit`; only `lit` carries `context` and
+  `threshold` (tokens). While owner decision D2 (advice) is open the state is
+  always `held` and nothing else is computed. Once D2 allows it: with no
+  `insights_context_threshold` set it is `threshold_unset` (there is no
+  default threshold); otherwise the current session is the one of the newest
+  call in the last 10 minutes that carries a session id, its context is the
+  maximum known input (uncached + cache read + cache write) over that
+  session's newest 5 calls in those 10 minutes, and the tip is `lit` at 90%
+  of the threshold. A call with no session id makes no tip; no call in 10
+  minutes is `no_session`.
+
+No session id, model name, body reference, digest, provider exchange id,
+endpoint, backend name, retry count or price ever appears here: the ledger's
+priced cost never reaches Insights (owner decision D5, open). The method
+carries no sentence; a shell draws the core's copy for these labels.
+
 ### `set_settings`
 
 Takes a JSON object whose top-level keys must come from
@@ -6490,6 +6582,7 @@ relaxation of origin/CORS/CSP controls.
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
+| `usage_changed` | additive: the poll tick's ledger read added at least one call while the `insights_ledger_feed` setting is on | `{}` -- see below |
 
 `inference_call_added` is published where the daemon already reads IronWire's
 `/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
@@ -6510,6 +6603,13 @@ no poll of its own, so a call is announced on the first tick after it lands
 - Rows without an id (a proxy too old to expose one) are never announced.
 - At most 64 per tick, the newest kept, so a burst cannot push a subscriber
   into `resync_required`. Re-read `tool_destinations` for exact counts.
+
+`usage_changed` is a coalesced pulse for the Insights glance: at most one
+per poll tick, published on the same tick and from the same ledger read as
+`inference_call_added` (any added call counts, with or without an id), and
+only while the `insights_ledger_feed` setting is on (owner decision D3,
+open). Its data is `{}`; a shell re-reads `insights_glance` for the figures.
+An older daemon never sends it, and `hello.events` lists it on one that can.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call

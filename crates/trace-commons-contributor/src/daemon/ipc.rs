@@ -386,6 +386,7 @@ pub const METHODS: &[&str] = &[
     "inference_connection_install",
     "inference_connection_disconnect",
     "inference_calls",
+    "insights_glance",
     "inference_summary",
     "inference_call_proof",
     "model_spend",
@@ -486,6 +487,7 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "route_disclosure",
     "tool_destinations",
     "inference_calls",
+    "insights_glance",
     "inference_call_proof",
     "private_ai",
     "list_pending",
@@ -560,6 +562,11 @@ pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 /// `inference_map::call_added`. At most `inference_map::MAX_ADDED_PER_TICK`
 /// per tick, newest kept.
 pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
+/// The poll tick's ledger read added at least one call while the Insights
+/// ledger feed is on (owner decision D3, open). At most one per tick, and
+/// `{}`: a pulse to re-read `insights_glance`, carrying no figure. See
+/// `insights_glance::publish_usage_changed`.
+pub const EVENT_USAGE_CHANGED: &str = "usage_changed";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -1651,7 +1658,9 @@ impl DaemonShared {
         ledger.refresh().await;
         // Once per row this tick read that no earlier tick had. Reads only
         // the snapshot the refresh above committed; never a second fetch.
-        super::inference_map::publish_added_calls(self, &ledger.take_added_rows());
+        let added = ledger.take_added_rows();
+        super::inference_map::publish_added_calls(self, &added);
+        super::insights_glance::publish_usage_changed(self, &added);
         if let Some(has_rows) = self.routing_transition(ledger.has_rows()) {
             // Hash-only by construction: `has_rows` is a bool, and nothing
             // else about the ledger -- port, token, row contents -- appears
@@ -2753,7 +2762,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
-                    "managed_changed",
+                    "managed_changed", EVENT_USAGE_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -2763,6 +2772,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "route_disclosure" => handle_route_disclosure(shared, req),
         "tool_destinations" => super::inference_map::handle_destinations(shared, req),
         "inference_calls" => super::inference_map::handle_calls(shared, req),
+        "insights_glance" => super::insights_glance::handle_glance(shared, req),
         "inference_call_proof" => super::network_data::handle_proof(shared, req),
         "private_ai" => super::network_data::handle_private_ai(shared, req),
         "list_pending" => handle_list_pending(shared, req),
