@@ -109,13 +109,20 @@ public struct GlassListRow: View {
         return hovering ? GlassTokens.Color.rowHover : nil
     }
 
-    /// An unflagged sub-line's ink: tertiary. An off row fades by `rowOff`
-    /// with the rest of the row (#1146 `glass.css` `.tc-list-row[data-off]`),
-    /// under which tertiary text falls to 3.9:1, so an off row's sub-line
-    /// takes the secondary ink, which faded clears 4.5:1 (owner ruling,
-    /// 2026-10-07: hold the WCAG floors; TextContrastTests).
+    /// An unflagged sub-line's ink: tertiary, on and off. An off row is no
+    /// longer faded as a whole (#1146's `rowOff` 0.6 put a light off row's
+    /// title at 4.32:1 and its sub-line at 3.02:1); its title steps down to
+    /// the secondary ink instead, and only its tool tile keeps the fade, so
+    /// every word on it clears 4.5:1 in both appearances (owner ruling,
+    /// 2026-10-07: the floors win everywhere; TextContrastTests).
     static func plainSubInk(off: Bool) -> GlassRGBA {
-        off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textTertiary
+        GlassTokens.Color.textTertiary
+    }
+
+    /// The title's ink: the selection's, else secondary on an off row.
+    static func titleInk(selected: Bool, off: Bool) -> GlassRGBA {
+        if selected { return selectedInk }
+        return off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textPrimary
     }
 
     public var body: some View {
@@ -145,11 +152,14 @@ public struct GlassListRow: View {
             }
             .frame(width: 16)
 
+            // Decorative; the one part of an off row that still fades.
             GlassToolTile(tile)
+                .opacity(off ? GlassTokens.Opacity.rowOff : 1)
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .glassType(GlassTokens.TypeScale.body.weight(depth == .session ? .medium : .semibold))
+                    .foregroundStyle(Self.titleInk(selected: selected, off: off).color)
                     .lineLimit(1)
                 if let sub {
                     Text(sub)
@@ -215,7 +225,6 @@ public struct GlassListRow: View {
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(Self.fill(selected: selected, hovering: hovering)?.color ?? Color.clear)
         )
-        .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         // A click selects the row. The keyboard does not stop on each row:

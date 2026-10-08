@@ -214,7 +214,8 @@ pub struct SourceSettingsCopy {
 /// `from_trajectory`), and counts it as a decision owed. Owner decision
 /// 2026-10-05: the declaration does not ship without this row.
 ///
-/// Every string here is DRAFT, NEEDS APPROVAL (new, 2026-10-06).
+/// Approved 2026-10-07, with the decline button cut to two words (owner
+/// ruling: a button is an action verb, or a verb and an object).
 #[derive(serde::Serialize)]
 pub struct TrajectorySettingsCopy {
     /// The row's name.
@@ -284,7 +285,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
             explanation: "Exports in this folder always wait for you. None is sent automatically, whatever a folder's rule.",
             watching: "A folder of exported traces is read.",
             off: "No folder of exported traces is read.",
-            decline: "Stop reading exported traces",
+            decline: "Stop reading",
         },
     }
 }
