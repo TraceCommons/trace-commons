@@ -4000,9 +4000,10 @@ sessions on disk. Otherwise:
 - `rollup.sessions[]` carries each session's figure and coverage, and no
   reference to it.
 
-Four further fields are additive (a daemon that predates them omits them, and
-a shell that finds them absent draws feed T from `rollup` alone, without
-comparisons):
+Four further fields are additive. A daemon that predates them omits them;
+the macOS window then cannot draw the week in the core's shapes, so it shows
+the saved imports feed (S) with its "counting is unavailable" line, exactly as
+for a failed read:
 
 - `overview` is the Overview tab's week in exactly the shape the in-process
   `week_overview` operation returns for saved imports, with `feed:

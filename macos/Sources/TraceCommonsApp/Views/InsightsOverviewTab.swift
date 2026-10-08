@@ -310,9 +310,12 @@ struct InsightsOverviewTab: View {
                 }
                 Text(text("analytics_model_labels_note")).insightsCaption()
             case .project:
-                // Owner decision D7, open: analyzed files carry no project.
+                // Owner decision D7, open: analyzed files carry no project,
+                // and watched-folder rows keep only a digest of one.
                 Text(text("analytics_unavailable")).insightsHeading()
-                Text(text("analytics_by_project_unavailable")).insightsCaption()
+                if overview.by_project == "not_available_for_analyzed_files" {
+                    Text(text("analytics_by_project_unavailable")).insightsCaption()
+                }
             case .tool:
                 ForEach(overview.by_tool) { tool in
                     HStack {
