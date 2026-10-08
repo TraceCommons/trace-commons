@@ -611,6 +611,14 @@ pub struct DaemonSettings {
     #[serde(default)]
     pub insights_context_threshold: Option<u32>,
 
+    /// Whether the watcher runs the Insights counter pass (feed T) over the
+    /// sessions it finds, after quiescence, and `insights_week` answers from
+    /// its store. Off, the pass never runs and nothing is read for Insights.
+    /// Starts as `insights::analytics_constants::COUNTER_PASS_DEFAULT_ON`,
+    /// owner decision D4, open.
+    #[serde(default = "default_insights_counter_pass")]
+    pub insights_counter_pass: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -1005,6 +1013,10 @@ fn default_insights_ledger_feed() -> bool {
     crate::insights::analytics_constants::LEDGER_FEED_DEFAULT_ON
 }
 
+fn default_insights_counter_pass() -> bool {
+    crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
+}
+
 /// The smallest context threshold the tip accepts.
 pub const INSIGHTS_CONTEXT_THRESHOLD_MIN: u32 = 1_000;
 /// The largest context threshold the tip accepts.
@@ -1058,6 +1070,7 @@ impl Default for DaemonSettings {
             private_inference_offer_seen: false,
             insights_ledger_feed: default_insights_ledger_feed(),
             insights_context_threshold: None,
+            insights_counter_pass: default_insights_counter_pass(),
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             legacy_claude_root: None,
@@ -1617,6 +1630,11 @@ pub fn apply_settings_object(
             // Insights feed L (owner decision D3, open). Off by default.
             "insights_ledger_feed" => {
                 settings.insights_ledger_feed =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // Insights feed T (owner decision D4, open). Off by default.
+            "insights_counter_pass" => {
+                settings.insights_counter_pass =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // The context tip's threshold: a number in range, or `null` to
@@ -2451,6 +2469,33 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(s.insights_ledger_feed);
+    }
+
+    /// The Insights counter pass (feed T, owner decision D4, open) starts
+    /// off, an older settings file loads it off, and it takes a boolean only.
+    #[test]
+    fn the_insights_counter_pass_starts_off_and_takes_a_boolean() {
+        assert!(!DaemonSettings::default().insights_counter_pass);
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_counter_pass"),
+            Some(&serde_json::json!(false))
+        );
+        v.as_object_mut().unwrap().remove("insights_counter_pass");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert!(!settings.insights_counter_pass);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": true})),
+            Ok(true)
+        );
+        assert!(s.insights_counter_pass);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_counter_pass": 1})),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(s.insights_counter_pass);
     }
 
     /// The context threshold has no default; it is a number in range or

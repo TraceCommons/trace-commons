@@ -363,6 +363,8 @@ const DOMAIN_MSG: &[u8] = b"trace-commons/insights/msg_key/v1\0";
 const DOMAIN_ARGS: &[u8] = b"trace-commons/insights/args_key/v1\0";
 const DOMAIN_PATH: &[u8] = b"trace-commons/insights/path_key/v1\0";
 const DOMAIN_FINGERPRINT: &[u8] = b"trace-commons/insights/key_fingerprint/v1\0";
+const DOMAIN_SESSION: &[u8] = b"trace-commons/insights/session_key/v1\0";
+const DOMAIN_PROJECT: &[u8] = b"trace-commons/insights/project_digest/v1\0";
 
 /// A keyed digest that names `key` without revealing it. Stored beside rows
 /// so a reader can tell digests made under another key (a new device, a
@@ -393,6 +395,26 @@ pub fn args_key(
 /// Keyed digest of a file path after [`normalize_tool_path`].
 pub fn path_key(key: &DigestKey, path: &str) -> KeyedDigest {
     keyed(key, DOMAIN_PATH, &[normalize_tool_path(path).as_bytes()])
+}
+
+/// Keyed digest naming one watched session: the harness that found it and
+/// the address it was found at. A host keys its stored rows by this, so the
+/// same session seen again replaces its row and the address is never stored.
+/// The harness name is length-prefixed, so the two parts cannot run together.
+pub fn session_key(key: &DigestKey, source: &str, address: &str) -> KeyedDigest {
+    let length = (source.len() as u64).to_be_bytes();
+    keyed(
+        key,
+        DOMAIN_SESSION,
+        &[&length, source.as_bytes(), address.as_bytes()],
+    )
+}
+
+/// Keyed digest of a project key (a normalized working directory). Stored in
+/// place of the key itself; a display label is resolved from the watcher at
+/// view time, never stored.
+pub fn project_digest(key: &DigestKey, project_key: &str) -> KeyedDigest {
+    keyed(key, DOMAIN_PROJECT, &[project_key.as_bytes()])
 }
 
 fn keyed(key: &DigestKey, domain: &[u8], parts: &[&[u8]]) -> KeyedDigest {
@@ -547,6 +569,33 @@ mod tests {
         assert_ne!(msg, path);
         assert_ne!(msg, args);
         assert_ne!(path, args);
+    }
+
+    /// A watched session and a watched folder are named by keyed digests in
+    /// their own domains: never equal to a message, path or argument digest of
+    /// the same text, and the session digest depends on the harness too.
+    #[test]
+    fn session_and_project_digests_are_domain_separated() {
+        let key8 = || key(8);
+        let key = key(7);
+        let session = session_key(&key, "claude-code", "same");
+        let project = project_digest(&key, "same");
+        for other in [
+            msg_key(&key, "same"),
+            path_key(&key, "same"),
+            args_key(&key, ToolKind::Other, &json!("same")).unwrap(),
+            key_fingerprint(&key),
+        ] {
+            assert_ne!(session, other);
+            assert_ne!(project, other);
+        }
+        assert_ne!(session, project);
+        assert_ne!(session, session_key(&key, "codex", "same"));
+        // The harness and the address cannot run into each other.
+        assert_ne!(session_key(&key, "ab", "c"), session_key(&key, "a", "bc"));
+        assert_eq!(session, session_key(&key, "claude-code", "same"));
+        assert_ne!(session, session_key(&key8(), "claude-code", "same"));
+        assert_ne!(project, project_digest(&key8(), "same"));
     }
 
     /// Rows made under different keys never match. The fingerprint lets a

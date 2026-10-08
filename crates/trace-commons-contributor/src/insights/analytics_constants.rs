@@ -160,6 +160,39 @@ pub const CONTEXT_TIP_RATIO: Ratio = Ratio::new(9, 10);
 /// open.
 pub const LEDGER_GLANCE_STALE_SECS: i64 = 600;
 
+/// Whether the daemon setting `insights_counter_pass` starts on. While it is
+/// off the watcher runs no counter pass, nothing is read for Insights, and
+/// `insights_week` answers `enabled: false` without touching the store.
+/// Owner decision D4, open.
+pub const COUNTER_PASS_DEFAULT_ON: bool = false;
+/// Whether sessions in a folder whose rule is Never are left out of the
+/// counter pass, and their stored rows dropped. Owner decision D4, open; the
+/// recommended answer is yes.
+pub const COUNTER_PASS_EXCLUDES_NEVER_FOLDERS: bool = true;
+/// The counter store keeps at most this many sessions; past it the oldest go
+/// first. Owner decision D4, open (a capped daemon-local store).
+pub const COUNTER_STORE_MAX_SESSIONS: usize = 2_048;
+/// ...and at most this many turns across every session. Owner decision D4,
+/// open.
+pub const COUNTER_STORE_MAX_TURNS: usize = 131_072;
+/// ...and at most this many tool calls across every session. Owner decision
+/// D4, open.
+pub const COUNTER_STORE_MAX_TOOL_CALLS: usize = 131_072;
+/// Sessions last written longer ago than this many weeks are not read, and
+/// their rows are dropped: enough for six weekly marks and a four-week
+/// baseline. Owner decision D4, open.
+pub const COUNTER_STORE_KEEP_WEEKS: i64 = 13;
+/// One poll reads at most this many session files for the counter pass; the
+/// rest wait for later polls, so a first pass over a large corpus never stalls
+/// the watcher. Owner decision D4, open.
+pub const COUNTER_PASS_MAX_READS_PER_TICK: usize = 16;
+/// ...and at most this many bytes. Owner decision D4, open.
+pub const COUNTER_PASS_MAX_BYTES_PER_TICK: u64 = 64 * 1024 * 1024;
+/// A session file larger than this is not read; it is stored as unknown,
+/// never as zero. The same bound the extractors apply. Owner decision D4,
+/// open.
+pub const COUNTER_PASS_MAX_SESSION_BYTES: u64 = 16 * 1024 * 1024;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +280,21 @@ mod tests {
         assert_eq!(CONTEXT_TIP_WINDOW_SECS, 600);
         assert_eq!(CONTEXT_TIP_RATIO, Ratio::new(9, 10));
         assert_eq!(LEDGER_GLANCE_STALE_SECS, 600);
+    }
+
+    #[test]
+    fn counter_pass_constants() {
+        const { assert!(!COUNTER_PASS_DEFAULT_ON) };
+        const { assert!(COUNTER_PASS_EXCLUDES_NEVER_FOLDERS) };
+        assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);
+        assert_eq!(COUNTER_STORE_MAX_TURNS, 131_072);
+        assert_eq!(COUNTER_STORE_MAX_TOOL_CALLS, 131_072);
+        assert_eq!(COUNTER_STORE_KEEP_WEEKS, 13);
+        assert_eq!(COUNTER_PASS_MAX_READS_PER_TICK, 16);
+        assert_eq!(COUNTER_PASS_MAX_BYTES_PER_TICK, 64 * 1024 * 1024);
+        assert_eq!(COUNTER_PASS_MAX_SESSION_BYTES, 16 * 1024 * 1024);
+        // The kept weeks cover the six weekly marks plus the lever's baseline.
+        const { assert!(COUNTER_STORE_KEEP_WEEKS as usize > WEEKLY_MARKS + LEVER_BASELINE_WEEKS) };
     }
 
     #[test]
