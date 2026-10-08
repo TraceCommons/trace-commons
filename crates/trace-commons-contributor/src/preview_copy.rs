@@ -445,8 +445,15 @@ pub struct MonitorSafeguardsCopy {
     /// The inference routing cell's short state label (#1146
     /// `routingLabel`), by `routing.state`; anything else is `routing_unknown`.
     pub routing_not_declared: &'static str,
+    /// Declared, and nothing recorded yet. Names the destination, never
+    /// the mechanism (`routing_copy`'s sweep). DRAFT, NEEDS APPROVAL
+    /// (reworded, 2026-10-07).
     pub routing_awaiting_rows: &'static str,
+    /// Declared, and records are arriving. DRAFT, NEEDS APPROVAL
+    /// (reworded, 2026-10-07).
     pub routing_rows_seen: &'static str,
+    /// Declared, and the file needed to read the record cannot be read.
+    /// DRAFT, NEEDS APPROVAL (reworded, 2026-10-07).
     pub routing_token_unreadable: &'static str,
     pub routing_unknown: &'static str,
 }
@@ -1209,9 +1216,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
                 but this build could not read how many or why.",
             routing_not_declared: "Not declared",
-            routing_awaiting_rows: "Waiting for proxy rows",
-            routing_rows_seen: "Receiving proxy rows",
-            routing_token_unreadable: "Proxy token unreadable",
+            routing_awaiting_rows: "Waiting for Private AI records",
+            routing_rows_seen: "Receiving Private AI records",
+            routing_token_unreadable: "Private AI records unreadable",
             routing_unknown: "Unknown",
         },
         history_actions: MonitorHistoryActionsCopy {
@@ -1660,6 +1667,22 @@ mod tests {
         assert_eq!(nav.log, screens.shell.changes_heading);
         for name in &names {
             assert!(!name.ends_with('.') && name.chars().count() <= 24, "{name}");
+        }
+    }
+
+    /// The monitor tables do not name the mechanism, as the routing
+    /// surface does not (`routing_copy`'s forbidden-word sweep): the
+    /// safeguards grid's routing labels once said "proxy" while the
+    /// routing card declined it.
+    #[test]
+    fn the_monitor_tables_never_say_proxy() {
+        let mut words = words_of(&monitor_traces_copy());
+        words.extend(words_of(&monitor_screens_copy()));
+        for (key, word) in &words {
+            assert!(
+                !word.to_lowercase().contains("proxy"),
+                "{key} says proxy: {word}"
+            );
         }
     }
 

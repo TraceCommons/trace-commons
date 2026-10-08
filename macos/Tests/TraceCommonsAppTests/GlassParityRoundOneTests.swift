@@ -65,7 +65,7 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertEqual(copy.routingLabel("token_unreadable"), copy.routingTokenUnreadable)
         XCTAssertEqual(copy.routingLabel("something_new"), copy.routingUnknown)
         XCTAssertEqual(copy.routingLabel(nil), copy.routingUnknown)
-        XCTAssertEqual(copy.routingRowsSeen, "Receiving proxy rows")
+        XCTAssertEqual(copy.routingRowsSeen, "Receiving Private AI records")
     }
 
     /// The Traces legend and the credential node take the core's words.
