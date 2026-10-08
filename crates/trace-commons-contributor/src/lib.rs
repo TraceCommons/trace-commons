@@ -16,6 +16,7 @@ pub mod config;
 pub mod consent;
 pub mod consent_copy;
 pub mod contribution_missions;
+pub mod credit_estimate_check;
 pub mod credit_estimate_table;
 pub mod daemon;
 pub mod deep_link;

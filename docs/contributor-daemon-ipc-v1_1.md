@@ -2929,6 +2929,30 @@ scored credit, and no other rendering of an entry (`list_kept`, history,
 **The table.** The daemon holds one table in memory, starting as the built-in
 one. It is public and not account-scoped, so `unenroll` leaves it.
 
+The daemon fetches the published table from `GET /v1/credit-estimate/table`
+on the configured ingest origin, unauthenticated, on a fixed schedule: every
+24 hours plus a random offset of up to 4 hours, the first a random offset
+after the daemon starts (OWNER DECISION E11). Nothing a shell does, and
+nothing the queue does, moves that schedule. No method or event is added for
+it. What a fetch changes:
+
+- An accepted table is in force from then on, and `basis` reads
+  `"published"`. `queue_changed` and `status_changed` are published when the
+  table in force changes.
+- A table the daemon refuses (a newer schema, out-of-range numbers, too
+  large) puts the built-in table back in force.
+- A 404, a network failure, or no config leaves the table in force as it is,
+  so a daemon works against a server that publishes none.
+- A fetched table not re-fetched for 7 days is no longer in force: rows and
+  `status` render with the built-in table until a fetch succeeds.
+
+**Entries queued before the features existed** carry no estimate until the
+daemon re-reads them: at most 4 waiting entries per full watcher pass, oldest
+first, and none while a preview is building or queued (OWNER DECISION E13).
+Each gains its estimate on the `queue_changed` that pass publishes. An entry
+whose session has changed since it was queued is not given one; the watcher
+re-offers it, and the new entry carries its own.
+
 ### `mission_matches`
 
 K16 (#1173). Which **contribution missions** fit this contributor's work,
