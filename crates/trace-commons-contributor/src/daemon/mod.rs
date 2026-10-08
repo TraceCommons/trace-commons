@@ -27,6 +27,7 @@ pub mod admission_setup;
 pub mod approved_envelope;
 pub mod arming_wording;
 pub mod attached;
+pub mod attention;
 pub mod attestation_mark;
 pub mod audit;
 pub mod automatic_gate;
