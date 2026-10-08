@@ -1812,6 +1812,9 @@ impl DaemonShared {
         let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
         let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
+        // Same guards as `decisions_owed`, and the same function
+        // `list_projects` reports, so the two answers always agree.
+        let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -1842,6 +1845,11 @@ impl DaemonShared {
             // See `queue::decisions_owed`. `queue_depth` is kept unchanged
             // for compatibility; do not derive it from this field.
             "decisions_owed": decisions_owed,
+            // Additive (nudge U1). The count `list_projects` carries as
+            // `unpurposed_traces`, from the same `queue::unpurposed_traces`:
+            // previewed `Pending` entries in folders set to Ask me. Every one
+            // is also in `decisions_owed`; never a badge number of its own.
+            "unpurposed_traces": unpurposed_traces,
             "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
@@ -3615,36 +3623,9 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             )
         }))
         .collect();
-    // K7's upsell: "27 scrubbed sessions are sitting on this Mac under
-    // folders set to Ask me. None has been decided." Three conditions,
-    // all required:
-    //
-    // - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
-    //   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded`
-    //   entry has already been decided, one way or another.
-    // - The project's mode resolves to `NotifyOnly` ("Ask me"), never
-    //   `AutoUpload` ("armed") or `Ignore`. Armed is excluded on the
-    //   project's resolved mode rather than the entry's own
-    //   `approved_unattended` flag, because a gate-held armed session is
-    //   `Pending` with nothing decided about it yet either -- see
-    //   `policy::resolve` and the design's note that "gate-held armed
-    //   sessions stay Pending". Counting those into this upsell would tell a
-    //   contributor to go decide about a folder they already armed.
-    // - Previewed at least once (`previewed_envelope_digest.is_some()`) --
-    //   "scrubbed", in the design's word. An entry nobody has opened a
-    //   preview for has not been through the redaction pass this count is
-    //   about, and including it would inflate "27" with sessions no
-    //   preview-then-decide flow has touched.
-    //
-    // This is not K6's decisions-owed badge: its copy promises previewed
-    // Ask-me sessions only, while the badge also includes unpreviewed and
-    // armed-but-human-held sessions. Keep the two contracts distinct.
-    let unpurposed_traces = queue
-        .pending()
-        .iter()
-        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
-        .filter(|e| e.previewed_envelope_digest.is_some())
-        .count();
+    // K7's suggestion. See `queue::unpurposed_traces`, which `status` shares
+    // so the two can never disagree.
+    let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
     Response::ok(
         req.id,
         serde_json::json!({ "projects": projects, "unpurposed_traces": unpurposed_traces }),
@@ -10727,7 +10708,7 @@ mod tests {
         );
     }
 
-    /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    /// K7's suggestion: "27 scrubbed sessions are sitting on this Mac under
     /// folders set to Ask me. None has been decided." Three entries, each
     /// failing exactly one of the three conditions the count requires, so a
     /// broken filter shows up as a wrong number rather than a coincidence:
@@ -10767,6 +10748,68 @@ mod tests {
             .result
             .unwrap();
         assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
+    /// Nudge U1 reads `unpurposed_traces` from `status`, and Ron's cards
+    /// read it from `list_projects`; one shared `queue::unpurposed_traces`
+    /// keeps the two from ever disagreeing. Never (`ignore`) and armed
+    /// folders contribute 0 even when previewed, and previewing -- which
+    /// is what moves this count -- leaves `decisions_owed` where it was.
+    #[test]
+    fn status_unpurposed_traces_matches_list_projects_and_leaves_decisions_owed_alone() {
+        let s = shared();
+        let ask_project = "/tmp/askproj-status";
+        let armed_project = "/tmp/armedproj-status";
+        let never_project = "/tmp/neverproj-status";
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode(armed_project, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy
+                .set_mode(never_project, ProjectMode::Ignore, Utc::now())
+                .unwrap();
+        }
+        let ask_previewed = seed_entry(&s, ask_project);
+        let _ask_unpreviewed = seed_entry(&s, ask_project);
+        let armed_previewed = seed_entry(&s, armed_project);
+        let never_previewed = seed_entry(&s, never_project);
+
+        let status_of = |s: &DaemonShared| {
+            handle_request(s, &req("status", serde_json::json!({})))
+                .result
+                .expect("status answers")
+        };
+        let before = status_of(&s);
+        assert_eq!(before["unpurposed_traces"], 0, "{before}");
+        // The two Ask-me entries; the armed one sends on its own under the
+        // default Automatic scrub check, and Never is never owed.
+        assert_eq!(before["decisions_owed"], 2, "{before}");
+
+        {
+            let mut queue = s.queue.lock().unwrap();
+            for (id, digest) in [
+                (ask_previewed, "sha256:a"),
+                (armed_previewed, "sha256:b"),
+                (never_previewed, "sha256:c"),
+            ] {
+                assert!(queue.record_previewed_envelope(id, digest, None, None));
+            }
+        }
+
+        let after = status_of(&s);
+        let listed = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(after["unpurposed_traces"], 1, "{after}");
+        assert_eq!(
+            after["unpurposed_traces"], listed["unpurposed_traces"],
+            "status and list_projects must agree"
+        );
+        assert_eq!(
+            after["decisions_owed"], before["decisions_owed"],
+            "previewing must not move the badge"
+        );
     }
 
     /// K11: a project's `list_projects` row names the tools that produced

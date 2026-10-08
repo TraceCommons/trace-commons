@@ -39,7 +39,8 @@ import Foundation
 /// Three more files under `RecordedSamples/` carry a `"_sample"` marker of
 /// their own for the same reason: a temp store's real daemon cannot exhibit
 /// the state the screen needs to draw. `unknownCounts/status.json` is the
-/// real `status` recording with `decisions_owed` removed by hand (the badge
+/// real `status` recording with `decisions_owed` and `unpurposed_traces`
+/// removed by hand (the badge
 /// draws "—" for an older daemon or an unreachable one, and the real
 /// `status_value` always computes a concrete count); `normalDay/` and
 /// `busyQueue/inference_calls.json` are hand-written `readable: true` pages

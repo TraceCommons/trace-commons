@@ -101,8 +101,11 @@ old behaviour, because no application has shipped against `v1` yet. See
     back" tile. A row withdrawn here or `revoked` by a withdrawal on the web
     counts there, once, and never in `other`.
   - `list_projects` now carries a top-level `unpurposed_traces`: scrubbed
-    (previewed), undecided, Ask-me sessions, for the design's upsell
+    (previewed), undecided, Ask-me sessions, for the design's suggestion
     sentence. See ["`list_projects`"](#list_projects).
+  - `status` now carries `unpurposed_traces` too, computed by the same
+    function as `list_projects`', so the two always agree. See
+    ["`status.unpurposed_traces`"](#statusunpurposed_traces).
   - `commons_credit_summary` is new: the commons' own settlement posture,
     read from the device route `GET /v1/contributors/me/settlement-posture`,
     and this contributor's points on its ledger, read from
@@ -620,6 +623,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "paused": false,
   "queue_depth": 0,
   "decisions_owed": 0,
+  "unpurposed_traces": 0,
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
   "daily_budget": {
@@ -651,7 +655,8 @@ contribution override" below.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
-additive; see their sections below.
+additive; see their sections below. `unpurposed_traces` is additive; see
+"`status.unpurposed_traces`" below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -902,6 +907,26 @@ growing a second badge-counting path elsewhere. Desktop shells consume this
 field directly, never `queue_depth` or `list_pending` length. When connecting
 to an older daemon that omits it, they show an unavailable count rather than
 inventing a zero or reconstructing the daemon's policy locally.
+
+#### `status.unpurposed_traces`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (nudge U1). The
+same count `list_projects` carries at its top level -- previewed, `Pending`
+entries in folders whose mode resolves to `notify_only` -- defined in
+["`unpurposed_traces` (K7)"](#unpurposed_traces-k7). Both responses compute it
+with the one function `queue::unpurposed_traces(queue, policy)`, so for any
+queue `status.unpurposed_traces == list_projects.unpurposed_traces`. Folders
+set to `ignore` (Never) and armed (`auto_upload`) folders contribute 0, even
+for previewed entries.
+
+It is read under the same policy and queue guards as `decisions_owed`, so one
+`status` never pairs two different queues. Every entry it counts is also a
+decision owed, so it is never larger than `decisions_owed`, and it never
+changes that number: previewing an entry can raise this count but leaves the
+badge where it was. It is not a badge number and a shell never draws it on
+the menu-bar icon. A non-negative integer, always present on a daemon that
+has it; a shell connected to an older daemon that omits it treats the count
+as unknown (no suggestion row or card), never as 0.
 
 A policy change can move this count without changing the queue: arming a
 folder with entries waiting (`set_project_mode`), or the watcher arming a
@@ -2444,7 +2469,7 @@ file says `auto_upload`, because the daemon refuses to act on that.
 
 #### `unpurposed_traces` (K7)
 
-A top-level count beside `projects[]`, for the design's upsell: "27 scrubbed
+A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
 sessions are sitting on this Mac under folders set to Ask me. None has been
 decided." It is the number of queue entries that are, all three:
 
@@ -2462,7 +2487,7 @@ decided." It is the number of queue entries that are, all three:
   entry) -- "scrubbed", in the design's word. An entry nobody has opened a
   preview for has not been through the redaction pass this count is about.
 
-This differs intentionally from K6's `status.decisions_owed`: the upsell
+This differs intentionally from K6's `status.decisions_owed`: the suggestion
 promises previewed Ask-me sessions only, while the badge includes unpreviewed
 sessions and armed sessions that require a person. Neither changes the
 other's number.
