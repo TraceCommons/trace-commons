@@ -133,14 +133,21 @@ final class ComponentParityTests: XCTestCase {
     /// #1273 review: a busy modal, or one whose cancel action is disabled
     /// while work is in flight, ignores the scrim, Escape and its close
     /// button, so a click beside it never abandons that work.
+    @MainActor
     func test_aBusyModalIgnoresTheScrim() throws {
         let cancel = GlassModalAction.cancel("Cancel") {}
         let held = GlassModalAction("Cancel", role: .cancel, isEnabled: false) {}
         let go = GlassModalAction("Go", isDefault: true) {}
-        XCTAssertTrue(GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: false))
-        XCTAssertTrue(GlassModal<EmptyView>.cancellable(actions: [], busy: false))
-        XCTAssertFalse(GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: true))
-        XCTAssertFalse(GlassModal<EmptyView>.cancellable(actions: [held, go], busy: false))
+        // Each answer is read before the assertion, so no non-Sendable
+        // action array is sent into XCTest's autoclosures.
+        let idle = GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: false)
+        let noActions = GlassModal<EmptyView>.cancellable(actions: [], busy: false)
+        let busy = GlassModal<EmptyView>.cancellable(actions: [cancel, go], busy: true)
+        let cancelHeld = GlassModal<EmptyView>.cancellable(actions: [held, go], busy: false)
+        XCTAssertTrue(idle)
+        XCTAssertTrue(noActions)
+        XCTAssertFalse(busy)
+        XCTAssertFalse(cancelHeld)
         let modal = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["Modal.swift"])
         for needle in ["let cancellable = Self.cancellable(actions: actions, busy: busy)",
                        ".onExitCommand(perform: isTopmost && cancellable ? onCancel : nil)",
