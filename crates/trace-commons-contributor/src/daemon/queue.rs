@@ -2547,6 +2547,47 @@ pub fn unpurposed_traces(queue: &Queue, policy: &ProjectPolicy) -> usize {
         .count()
 }
 
+/// Upsell U4: the waiting sessions nobody has written to for
+/// `idle_days_eff` days, which the idle-session suggestion, its status
+/// field, the Traces card's idle filter and (later) its announcement all
+/// read, so the four cannot drift. An entry is a candidate when:
+///
+/// - it is `Pending`. Kept and dismissed sessions are `Refused`, and every
+///   other state has been decided already;
+/// - its project's mode resolves to `NotifyOnly` (Ask me). Never folders
+///   are out, and so are armed ones, which send on their own;
+/// - it is not [`QueueEntry::returned_from_keep`]: the person kept it once,
+///   read conservatively as kept;
+/// - it is not [`QueueEntry::held_for_review`]: that hold needs a different
+///   conversation;
+/// - `now - idle_since >= idle_days_eff`, where `idle_since` is
+///   `last_modified_at`, or `discovered_at` for a line written before that
+///   field existed (never earlier than the true last write, so it can only
+///   look less idle). A last write after `now` is not idle: a clock that went
+///   backwards can only suppress.
+///
+/// Unlike [`unpurposed_traces`], previewing is not required. The shared
+/// gates (paused, consent hold, enrollment, health) are not checked here;
+/// `nudge::lead` checks them. Pure: callers pass the guards they hold.
+pub fn idle_candidates<'q>(
+    queue: &'q Queue,
+    policy: &ProjectPolicy,
+    now: DateTime<Utc>,
+    idle_days_eff: i64,
+) -> Vec<&'q QueueEntry> {
+    let threshold = chrono::Duration::days(idle_days_eff);
+    queue
+        .pending()
+        .into_iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| !e.returned_from_keep() && !e.held_for_review())
+        .filter(|e| {
+            let idle_since = e.last_modified_at.unwrap_or(e.discovered_at);
+            now.signed_duration_since(idle_since) >= threshold
+        })
+        .collect()
+}
+
 /// Whether one `Pending` entry is a decision owed to a person. See
 /// [`decisions_owed`] for each rule and why.
 fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> bool {
@@ -4844,6 +4885,160 @@ mod tests {
         );
         assert!(e.reason_label.is_none());
         assert_eq!(q.expire(at("2026-10-02T00:00:00Z"), 30, false), 0);
+    }
+
+    // -- `idle_candidates` (upsell U4) ----------------------------------
+
+    /// An Ask-me entry last written `days` days before `idle_now()`.
+    fn idle_entry(project_key: &str, days: i64) -> QueueEntry {
+        let mut e = entry_in(project_key, QueueState::Pending);
+        // `upsert` keys on the hash, so every fixture needs its own.
+        e.session_hash = format!("sha256:{}", e.entry_id);
+        e.discovered_at = at("2026-10-01T00:00:00Z");
+        e.last_modified_at = Some(idle_now() - chrono::Duration::days(days));
+        e
+    }
+
+    fn idle_now() -> DateTime<Utc> {
+        at("2026-10-08T12:00:00Z")
+    }
+
+    fn idle_ids(q: &Queue, policy: &ProjectPolicy, idle_days: i64) -> Vec<Uuid> {
+        idle_candidates(q, policy, idle_now(), idle_days)
+            .into_iter()
+            .map(|e| e.entry_id)
+            .collect()
+    }
+
+    /// The threshold is inclusive, measured from the last write, and a
+    /// session written to since is not a candidate.
+    #[test]
+    fn idle_candidates_are_ask_me_pending_entries_quiet_for_the_threshold() {
+        let policy = ProjectPolicy::new();
+        let quiet = idle_entry("/w/a", 3);
+        let fresh = idle_entry("/w/b", 2);
+        let q = queue_of(vec![quiet.clone(), fresh]);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![quiet.entry_id]);
+        assert_eq!(idle_ids(&q, &policy, 2).len(), 2);
+    }
+
+    /// An old queue line has no last write: `discovered_at` stands in, which
+    /// is never earlier than the true write, so it can only look less idle.
+    #[test]
+    fn idle_candidates_fall_back_to_discovery_for_old_lines() {
+        let policy = ProjectPolicy::new();
+        let mut old = idle_entry("/w/a", 30);
+        old.last_modified_at = None;
+        old.discovered_at = idle_now() - chrono::Duration::days(1);
+        let q = queue_of(vec![old.clone()]);
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+        let mut q = q;
+        q.entries[0].discovered_at = idle_now() - chrono::Duration::days(3);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![old.entry_id]);
+    }
+
+    /// A last write stamped after now (the clock went backwards) is not
+    /// idle: a backwards clock can only suppress.
+    #[test]
+    fn idle_candidates_ignore_a_write_from_the_future() {
+        let policy = ProjectPolicy::new();
+        let q = queue_of(vec![idle_entry("/w/a", -5)]);
+        assert!(idle_ids(&q, &policy, 1).is_empty());
+    }
+
+    /// Never folders, armed folders, kept and dismissed sessions, sessions
+    /// returned from Keep and sessions held for review are never
+    /// candidates, however long they have been quiet.
+    #[test]
+    fn idle_candidates_exclude_never_armed_kept_dismissed_returned_and_held() {
+        let now = at("2026-10-01T00:00:00Z");
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode("/w/never", ProjectMode::Ignore, now)
+            .unwrap();
+        policy
+            .set_mode("/w/armed", ProjectMode::AutoUpload, now)
+            .unwrap();
+
+        let never = idle_entry("/w/never", 10);
+        let armed = idle_entry("/w/armed", 10);
+        let kept = idle_entry("/w/kept", 10);
+        let dismissed = idle_entry("/w/dismissed", 10);
+        let returned = idle_entry("/w/returned", 10);
+        let mut held = idle_entry("/w/held", 10);
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        assert!(held.held_for_review());
+        let candidate = idle_entry("/w/ask", 10);
+
+        let mut q = queue_of(vec![
+            never,
+            armed,
+            kept.clone(),
+            dismissed.clone(),
+            returned.clone(),
+            held,
+            candidate.clone(),
+        ]);
+        q.keep(kept.entry_id).unwrap();
+        q.set_state(
+            dismissed.entry_id,
+            QueueState::Refused,
+            Some(REASON_DISMISSED.to_string()),
+        );
+        q.keep(returned.entry_id).unwrap();
+        q.undo_keep(returned.entry_id, now, 5000).unwrap();
+        assert!(q.get(returned.entry_id).unwrap().returned_from_keep());
+
+        assert_eq!(idle_ids(&q, &policy, 3), vec![candidate.entry_id]);
+
+        // A Never override covers every folder.
+        policy
+            .set_contribution_override(ProjectMode::Ignore, now, None)
+            .unwrap();
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+    }
+
+    /// A superseded session was written to, so its idle clock restarts:
+    /// the old entry leaves the set and the fresh one is not idle until it
+    /// has been quiet for the full threshold.
+    #[test]
+    fn a_superseded_session_restarts_its_idle_clock() {
+        let policy = ProjectPolicy::new();
+        let mut old = written_entry("sha256:aa", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z");
+        old.project_key = "/w/ask".into();
+        let mut q = queue_of(vec![old.clone()]);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![old.entry_id]);
+
+        let written_again = idle_now() - chrono::Duration::hours(1);
+        let fresh = q
+            .supersede(
+                old.entry_id,
+                "sha256:bb",
+                900,
+                Some(written_again),
+                idle_now(),
+            )
+            .unwrap();
+        // The watcher upserts what `supersede` mints (`mod.rs`).
+        q.upsert(fresh.clone(), 5000).unwrap();
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+        let later = idle_now() + chrono::Duration::days(3);
+        let ids: Vec<Uuid> = idle_candidates(&q, &policy, later, 3)
+            .into_iter()
+            .map(|e| e.entry_id)
+            .collect();
+        assert_eq!(ids, vec![fresh.entry_id]);
+    }
+
+    /// Idle candidates are not U1's: previewing is not required.
+    #[test]
+    fn idle_candidates_do_not_need_a_preview() {
+        let policy = ProjectPolicy::new();
+        let e = idle_entry("/w/a", 4);
+        assert!(e.previewed_envelope_digest.is_none());
+        let q = queue_of(vec![e]);
+        assert_eq!(unpurposed_traces(&q, &policy), 0);
+        assert_eq!(idle_ids(&q, &policy, 3).len(), 1);
     }
 
     // -- `decisions_owed` (K6): the badge's exact count -----------------

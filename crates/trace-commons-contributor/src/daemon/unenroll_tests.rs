@@ -181,6 +181,8 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
             newest_at: at,
         });
         state.verdicts_acked_through = Some(at);
+        // Upsell U4: the idle batching set names this account's queue.
+        state.idle_announced.insert(uuid::Uuid::from_bytes([9; 16]));
         state.save(&s.store).unwrap();
     }
     assert!(
@@ -198,6 +200,7 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
             && !state.verdict_marks_seeded
             && state.verdicts_pending.is_none()
             && state.verdicts_acked_through.is_none()
+            && state.idle_announced.is_empty()
     };
     assert!(cleared(&s.state.lock().unwrap()), "cleared in memory");
     assert!(

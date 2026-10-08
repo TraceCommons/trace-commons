@@ -12,10 +12,12 @@
 //! every snapshot before its policy and queue section, each in its own short
 //! lock, so nothing here can add a lock ordering.
 //!
-//! Phase 1 has two kinds so far: U1 `review_backlog` (previewed, undecided
-//! sessions in folders set to Ask me) and, behind it, U2 `verdicts_landed`
-//! (submissions that newly reached a verdict since the daemon last looked).
-//! A later slice adds idle sessions (U4) ahead of both.
+//! Phase 1 has three kinds, highest first: U4 `idle_sessions` (Ask-me
+//! sessions nobody has written to for [`IDLE_DAYS`], the primary trigger),
+//! U1 `review_backlog` (previewed, undecided sessions in folders set to Ask
+//! me) and U2 `verdicts_landed` (submissions that newly reached a verdict
+//! since the daemon last looked). U4 and U1 both ask for decisions on the
+//! same waiting sessions, so they share one "Not now".
 //!
 //! **Verdicts are diffed against a high-water mark the daemon owns.** The
 //! history cache is shared: the CLI's `history` command and `note_uploads`
@@ -58,9 +60,94 @@ pub const NUDGE_DECLINE_COOLDOWN_DAYS: i64 = 7;
 /// section 3 ("Shared gates", history stale); not a numbered owner decision.
 pub const HISTORY_STALE_POLL_MULTIPLE: i64 = 2;
 
+/// U4: a waiting Ask-me session is an idle candidate once nobody has written
+/// to it for this many days, before the queue TTL shortens it (see
+/// [`idle_window`]). DRAFT, owner decision 26.
+pub const IDLE_DAYS: i64 = 3;
+
+/// U4: the longest the idle-session kind waits between two announcements
+/// (`idle_repeat_days_eff`'s cap), before the queue TTL shortens it. DRAFT,
+/// owner decisions 4 and 26.
+pub const IDLE_REPEAT_DAYS: i64 = 7;
+
+/// U4: the days `idle_repeat_days_eff` leaves between the threshold plus the
+/// repeat interval and the queue TTL, so an announcement that slips a day
+/// (quiet hours, the evening tick) still lands before its entry expires.
+/// DRAFT, owner decision 26.
+pub const IDLE_REPEAT_MARGIN_DAYS: i64 = 2;
+
+/// U4: below this queue TTL the idle-session kind is off, because there is
+/// no honest room to announce a candidate before it expires. DRAFT, owner
+/// decision 26.
+pub const IDLE_MIN_TTL_DAYS: i64 = 4;
+
+/// U4's effective threshold and repeat interval for one queue TTL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdleWindow {
+    /// `idle_days_eff`: days without a write before a session is a candidate.
+    pub idle_days: i64,
+    /// `idle_repeat_days_eff`: the kind's minimum interval between
+    /// announcements.
+    pub repeat_days: i64,
+}
+
+impl IdleWindow {
+    /// The threshold as a duration.
+    #[must_use]
+    pub fn idle(self) -> Duration {
+        Duration::days(self.idle_days)
+    }
+
+    /// The repeat interval as a duration: what the attention arbiter's N1
+    /// cap (`attention::Kind::default_caps`) is given.
+    #[must_use]
+    pub fn repeat(self) -> Duration {
+        Duration::days(self.repeat_days)
+    }
+}
+
+/// U4's window for `queue_ttl_days`, or `None` when the kind is off (a TTL
+/// below [`IDLE_MIN_TTL_DAYS`]):
+///
+/// - `idle_days_eff = min(IDLE_DAYS, max(1, ttl / 4))`
+/// - `idle_repeat_days_eff = min(IDLE_REPEAT_DAYS, max(1, ttl - idle_days_eff - IDLE_REPEAT_MARGIN_DAYS))`
+///
+/// so `idle_days_eff + idle_repeat_days_eff + 1 < ttl` always holds, and a
+/// candidate is announced before its queue entry can expire.
+#[must_use]
+pub fn idle_window(queue_ttl_days: i64) -> Option<IdleWindow> {
+    if queue_ttl_days < IDLE_MIN_TTL_DAYS {
+        return None;
+    }
+    let idle_days = IDLE_DAYS.min((queue_ttl_days / 4).max(1));
+    let repeat_days =
+        IDLE_REPEAT_DAYS.min((queue_ttl_days - idle_days - IDLE_REPEAT_MARGIN_DAYS).max(1));
+    Some(IdleWindow {
+        idle_days,
+        repeat_days,
+    })
+}
+
+/// Drop every announced entry id that is no longer pending, so the batching
+/// set (`DaemonState::idle_announced`) never outgrows the queue and an id
+/// can never be read back for a session that has left it. Returns whether
+/// anything was dropped, so the caller saves only when it must.
+pub fn prune_idle_announced(
+    announced: &mut BTreeSet<uuid::Uuid>,
+    pending: &BTreeSet<uuid::Uuid>,
+) -> bool {
+    let before = announced.len();
+    announced.retain(|id| pending.contains(id));
+    announced.len() != before
+}
+
 /// A suggestion kind. The wire, ledger keys and logs use [`NudgeKind::label`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NudgeKind {
+    /// U4: Ask-me sessions nobody has written to for the idle threshold
+    /// (`queue::idle_candidates`). The primary phase-1 trigger. Its "Not
+    /// now" is U1's: the two ask for decisions on the same sessions.
+    IdleSessions,
     /// U1: previewed, undecided sessions in folders set to Ask me
     /// (`queue::unpurposed_traces`). It has no notification kind of its own:
     /// the digest already covers that moment.
@@ -74,7 +161,11 @@ pub enum NudgeKind {
 
 impl NudgeKind {
     /// Every kind, highest precedence first.
-    pub const ALL: [NudgeKind; 2] = [NudgeKind::ReviewBacklog, NudgeKind::VerdictsLanded];
+    pub const ALL: [NudgeKind; 3] = [
+        NudgeKind::IdleSessions,
+        NudgeKind::ReviewBacklog,
+        NudgeKind::VerdictsLanded,
+    ];
 
     /// The stable label used on the wire, as a ledger key and in logs. A
     /// kind that is also a notification kind takes `attention::Kind::label`,
@@ -82,6 +173,7 @@ impl NudgeKind {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            NudgeKind::IdleSessions => super::attention::Kind::IdleSessions.label(),
             NudgeKind::ReviewBacklog => "review_backlog",
             NudgeKind::VerdictsLanded => super::attention::Kind::VerdictsLanded.label(),
         }
@@ -92,7 +184,7 @@ impl NudgeKind {
     #[must_use]
     pub fn declinable(self) -> bool {
         match self {
-            NudgeKind::ReviewBacklog => true,
+            NudgeKind::IdleSessions | NudgeKind::ReviewBacklog => true,
             NudgeKind::VerdictsLanded => false,
         }
     }
@@ -398,6 +490,9 @@ pub struct LeadInputs {
     pub history_poll_secs: u64,
     /// `DaemonState::verdicts_pending`: verdicts landed and unacknowledged.
     pub verdicts_pending: Option<VerdictDelta>,
+    /// U4: how many entries `queue::idle_candidates` returns. Zero while the
+    /// kind is off ([`idle_window`] is `None`).
+    pub idle_candidates: usize,
 }
 
 /// Three-valued on purpose: a shell draws nothing for `Unknown` or `None`,
@@ -487,17 +582,25 @@ pub fn lead(
     if inputs.arming_offer_present {
         return NudgeLead::quiet(NudgeState::None);
     }
-    // U1 first. A "Not now" in force lets U2 lead behind it.
+    // U4, then U1. Both ask for decisions on the same waiting sessions, so
+    // one "Not now" silences both, and lets U2 lead behind them.
+    let asks = [
+        (NudgeKind::IdleSessions, inputs.idle_candidates, 1),
+        (
+            NudgeKind::ReviewBacklog,
+            unpurposed,
+            NUDGE_BACKLOG_THRESHOLD,
+        ),
+    ];
     let mut silenced_until = None;
-    if unpurposed >= NUDGE_BACKLOG_THRESHOLD {
-        let kind = NudgeKind::ReviewBacklog;
-        match cooldown_until(kind, inputs.queue_ttl_days, ledger, now) {
+    if let Some((kind, count, _)) = asks.into_iter().find(|(_, n, at_least)| n >= at_least) {
+        match shared_cooldown_until(inputs.queue_ttl_days, ledger, now) {
             Some(until) => silenced_until = Some(until),
             None => {
                 return NudgeLead {
                     state: NudgeState::Armed,
                     lead: Some(kind),
-                    count: Some(unpurposed),
+                    count: Some(count),
                     cooldown_until: None,
                     verdicts: None,
                 };
@@ -532,16 +635,19 @@ pub fn lead(
     }
 }
 
-/// When the "Not now" in force against `kind` lapses, or `None` when none
-/// is in force. A decline stamped after `now` is in force: a clock that went
-/// backwards can only suppress.
-fn cooldown_until(
-    kind: NudgeKind,
+/// When the "Not now" in force against U4 and U1 lapses, or `None` when
+/// none is in force. The two share it: a decline of either counts, and the
+/// later decline governs. A decline stamped after `now` is in force: a clock
+/// that went backwards can only suppress.
+fn shared_cooldown_until(
     queue_ttl_days: i64,
     ledger: &BTreeMap<String, NudgeLedger>,
     now: DateTime<Utc>,
 ) -> Option<DateTime<Utc>> {
-    let declined = ledger.get(&ledger_key(kind, None))?.declined_at?;
+    let declined = [NudgeKind::IdleSessions, NudgeKind::ReviewBacklog]
+        .into_iter()
+        .filter_map(|kind| ledger.get(&ledger_key(kind, None))?.declined_at)
+        .max()?;
     let cooldown = decline_cooldown(queue_ttl_days);
     (now.signed_duration_since(declined) < cooldown).then(|| declined + cooldown)
 }
@@ -571,6 +677,7 @@ mod tests {
             last_history_poll_at: Some(now() - Duration::minutes(5)),
             history_poll_secs: 1800,
             verdicts_pending: None,
+            idle_candidates: 0,
         }
     }
 
@@ -1270,6 +1377,218 @@ mod tests {
         let all = NeverProjects::from_policy(&policy, &keys);
         assert!(all.all);
         assert!(all.contains(&policy::project_id_for("/tmp/ask-b")));
+    }
+
+    // ---- U4: idle sessions ----
+
+    /// Over every TTL from 1 to 60 days the kind is either disabled or
+    /// leaves room to announce a candidate before its entry expires:
+    /// threshold + repeat interval + one day of slack < TTL.
+    #[test]
+    fn the_idle_window_always_fits_inside_the_queue_ttl() {
+        for ttl in 1..=60_i64 {
+            match idle_window(ttl) {
+                None => assert!(ttl < IDLE_MIN_TTL_DAYS, "ttl {ttl} must not be disabled"),
+                Some(w) => {
+                    assert!(ttl >= IDLE_MIN_TTL_DAYS, "ttl {ttl} must be disabled");
+                    assert!(w.idle_days >= 1 && w.repeat_days >= 1, "ttl {ttl}: {w:?}");
+                    assert!(
+                        w.idle_days + w.repeat_days + 1 < ttl,
+                        "ttl {ttl}: {w:?} does not fit"
+                    );
+                    assert!(w.idle_days <= IDLE_DAYS, "ttl {ttl}: {w:?}");
+                    assert!(w.repeat_days <= IDLE_REPEAT_DAYS, "ttl {ttl}: {w:?}");
+                }
+            }
+        }
+    }
+
+    /// The defaults the spec states: 3 days idle and a 7-day repeat at the
+    /// default 14-day TTL, and the kind off below a 4-day TTL.
+    #[test]
+    fn the_idle_window_at_the_default_ttl_is_three_and_seven() {
+        assert_eq!(
+            idle_window(14),
+            Some(IdleWindow {
+                idle_days: 3,
+                repeat_days: 7
+            })
+        );
+        assert_eq!(
+            idle_window(4),
+            Some(IdleWindow {
+                idle_days: 1,
+                repeat_days: 1
+            })
+        );
+        assert_eq!(idle_window(3), None);
+        assert_eq!(idle_window(0), None);
+        assert_eq!(idle_window(-5), None);
+        assert_eq!(
+            idle_window(14).unwrap().repeat(),
+            Duration::days(7),
+            "the attention arbiter's N1 interval comes from here"
+        );
+    }
+
+    fn with_idle(n: usize) -> LeadInputs {
+        LeadInputs {
+            idle_candidates: n,
+            ..open()
+        }
+    }
+
+    /// U4 leads ahead of U1, with the candidate count.
+    #[test]
+    fn idle_sessions_lead_ahead_of_the_backlog() {
+        let got = lead(&with_idle(2), &empty(), now());
+        assert_eq!(got.state, NudgeState::Armed);
+        assert_eq!(got.lead, Some(NudgeKind::IdleSessions));
+        assert_eq!(got.count, Some(2));
+        assert_eq!(got.verdicts, None);
+    }
+
+    /// One candidate is enough, even with no backlog and verdict news
+    /// waiting: U4 > U1 > U2.
+    #[test]
+    fn one_idle_session_leads_ahead_of_verdicts() {
+        let inputs = LeadInputs {
+            unpurposed_traces: Some(0),
+            verdicts_pending: Some(delta(1, 0, 0, now())),
+            idle_candidates: 1,
+            ..open()
+        };
+        let got = lead(&inputs, &empty(), now());
+        assert_eq!(got.lead, Some(NudgeKind::IdleSessions));
+        assert_eq!(got.count, Some(1));
+    }
+
+    /// No candidates: U1 leads exactly as before.
+    #[test]
+    fn no_idle_sessions_leave_the_backlog_leading() {
+        let got = lead(&with_idle(0), &empty(), now());
+        assert_eq!(got.lead, Some(NudgeKind::ReviewBacklog));
+    }
+
+    /// The arming offer outranks U4, and every closed gate closes it.
+    #[test]
+    fn the_arming_offer_and_the_gates_close_idle_sessions() {
+        let closed = [
+            LeadInputs {
+                arming_offer_present: true,
+                ..with_idle(3)
+            },
+            LeadInputs {
+                paused: true,
+                ..with_idle(3)
+            },
+            LeadInputs {
+                consent_hold: true,
+                ..with_idle(3)
+            },
+            LeadInputs {
+                enrolled: false,
+                ..with_idle(3)
+            },
+            LeadInputs {
+                suggestions_enabled: false,
+                ..with_idle(3)
+            },
+        ];
+        for inputs in closed {
+            assert_eq!(
+                lead(&inputs, &empty(), now()),
+                NudgeLead::quiet(NudgeState::None),
+                "{inputs:?}"
+            );
+        }
+        let unhealthy = LeadInputs {
+            healthy: false,
+            ..with_idle(3)
+        };
+        assert_eq!(
+            lead(&unhealthy, &empty(), now()),
+            NudgeLead::quiet(NudgeState::Unknown)
+        );
+    }
+
+    fn declined_kind(kind: NudgeKind, at: DateTime<Utc>) -> BTreeMap<String, NudgeLedger> {
+        BTreeMap::from([(
+            ledger_key(kind, None),
+            NudgeLedger {
+                declined_at: Some(at),
+                ..NudgeLedger::default()
+            },
+        )])
+    }
+
+    /// U1 and U4 share one "Not now": both ask for decisions on the same
+    /// waiting sessions, so declining either must not put the other up in
+    /// its place. Verdict news, which is not an ask, still leads behind it.
+    #[test]
+    fn idle_and_backlog_share_one_not_now() {
+        let at = now() - Duration::days(1);
+        let until = at + decline_cooldown(14);
+        for kind in [NudgeKind::IdleSessions, NudgeKind::ReviewBacklog] {
+            let got = lead(&with_idle(4), &declined_kind(kind, at), now());
+            assert_eq!(got.state, NudgeState::None, "{kind:?}");
+            assert_eq!(got.lead, None, "{kind:?}");
+            assert_eq!(got.cooldown_until, Some(until), "{kind:?}");
+
+            let news = LeadInputs {
+                verdicts_pending: Some(delta(1, 0, 0, now())),
+                ..with_idle(4)
+            };
+            let got = lead(&news, &declined_kind(kind, at), now());
+            assert_eq!(got.lead, Some(NudgeKind::VerdictsLanded), "{kind:?}");
+        }
+        // Lapsed: U4 leads again.
+        let lapsed = now() - decline_cooldown(14) - Duration::minutes(1);
+        let got = lead(
+            &with_idle(4),
+            &declined_kind(NudgeKind::IdleSessions, lapsed),
+            now(),
+        );
+        assert_eq!(got.lead, Some(NudgeKind::IdleSessions));
+    }
+
+    /// The later of the two declines governs the shared cooldown.
+    #[test]
+    fn the_later_decline_governs_the_shared_cooldown() {
+        let early = now() - Duration::days(6);
+        let late = now() - Duration::days(1);
+        let mut ledger = declined_kind(NudgeKind::ReviewBacklog, early);
+        ledger.extend(declined_kind(NudgeKind::IdleSessions, late));
+        let got = lead(&with_idle(1), &ledger, now());
+        assert_eq!(got.cooldown_until, Some(late + decline_cooldown(14)));
+    }
+
+    /// U4 has a "Not now" and shares the notification kind's label.
+    #[test]
+    fn idle_sessions_is_declinable_and_shares_the_attention_label() {
+        assert!(NudgeKind::IdleSessions.declinable());
+        assert_eq!(
+            NudgeKind::IdleSessions.label(),
+            crate::daemon::attention::Kind::IdleSessions.label()
+        );
+        assert_eq!(
+            NudgeKind::parse("idle_sessions"),
+            Some(NudgeKind::IdleSessions)
+        );
+        assert_eq!(NudgeKind::ALL[0], NudgeKind::IdleSessions, "U4 ranks first");
+    }
+
+    /// The batching set is pruned to entries still pending.
+    #[test]
+    fn idle_announced_is_pruned_to_pending_entries() {
+        let a = uuid::Uuid::from_u128(1);
+        let b = uuid::Uuid::from_u128(2);
+        let c = uuid::Uuid::from_u128(3);
+        let mut announced = BTreeSet::from([a, b]);
+        let pending = BTreeSet::from([b, c]);
+        assert!(prune_idle_announced(&mut announced, &pending));
+        assert_eq!(announced, BTreeSet::from([b]));
+        assert!(!prune_idle_announced(&mut announced, &pending), "no change");
     }
 
     /// The module is pure: no lock is ever taken in it, so the status

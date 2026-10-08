@@ -220,6 +220,16 @@ pub const ERR_NUDGE_KIND_REQUIRED: &str = "nudge-kind-required";
 pub const ERR_NUDGE_KIND_UNRECOGNIZED: &str = "nudge-kind-unrecognized";
 /// A `subject` for a kind that takes none (no kind takes one yet).
 pub const ERR_NUDGE_SUBJECT_UNRECOGNIZED: &str = "nudge-subject-unrecognized";
+
+/// `list_pending` was given a `filter` this daemon does not know.
+pub const ERR_LIST_FILTER_UNRECOGNIZED: &str = "filter-unrecognized";
+
+/// `list_pending` was given a `filter` that is not a string.
+pub const ERR_LIST_FILTER_INVALID: &str = "filter-invalid";
+
+/// `list_pending {filter}`: upsell U4's idle filter, exactly the set
+/// `status.idle_sessions.count` counts. The kind's own label.
+const LIST_FILTER_IDLE_SESSIONS: &str = "idle_sessions";
 /// `nudge_decline` for a kind with no "Not now": `verdicts_landed` is news,
 /// not an ask.
 pub const ERR_NUDGE_KIND_NOT_DECLINABLE: &str = "nudge-kind-not-declinable";
@@ -1998,6 +2008,19 @@ impl DaemonShared {
         // Policy only, under the guard already held: whether the arming
         // offer would be drawn right now, which hides the backlog nudge.
         let arming_offer_present = policy.arming_suggestion(now).is_some();
+        // Upsell U4, under the same guards: the one shared
+        // `queue::idle_candidates`, which `list_pending {filter:
+        // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
+        // the idle window needs.
+        let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
+        let idle_sessions = idle_window.map(|window| {
+            let candidates = super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+            idle_sessions_value(&candidates, window)
+        });
+        let idle_candidate_count = idle_sessions
+            .as_ref()
+            .and_then(|v| v["count"].as_u64())
+            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -2021,11 +2044,11 @@ impl DaemonShared {
                 last_history_poll_at: nudge_snapshot.last_history_poll_at,
                 history_poll_secs: nudge_snapshot.history_poll_secs,
                 verdicts_pending: nudge_snapshot.verdicts_pending,
+                idle_candidates: idle_candidate_count,
             },
             &nudge_snapshot.ledger,
             now,
         ));
-        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
             "logged_in": logged_in,
@@ -2132,6 +2155,14 @@ impl DaemonShared {
             // `ContributionModeCopy.auto_partial` under its label.
             "contribution_mode_partial": contribution_mode_partial,
         });
+        // Additive (upsell U4). `{count, tools, threshold_days}`: how many
+        // waiting Ask-me sessions nobody has written to for the idle
+        // threshold, the display names of the tools they came from, and the
+        // threshold. Counts and display names only. Absent, never `null`,
+        // while the kind is off (a queue TTL below 4 days).
+        if let Some(idle) = idle_sessions {
+            status["idle_sessions"] = idle;
+        }
         // K2 (#1173): debug builds only, so the app shows the dry-run notice
         // from what this daemon is doing rather than parsing the
         // environment itself. A release build never names the field.
@@ -3417,10 +3448,43 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         }
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid"),
     };
+    // Upsell U4: an optional `filter`. `idle_sessions` lists exactly what
+    // `status.idle_sessions.count` counts, from the same
+    // `queue::idle_candidates`, so the Traces card's Review can never show a
+    // different set from the one it named. Unknown is refused, never
+    // answered with an empty list. Absent is every pending entry, as before.
+    let idle_filter = match req.params.get("filter") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(f)) if f == LIST_FILTER_IDLE_SESSIONS => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_INVALID),
+    };
+    // Settings first, in its own short lock, then policy and queue: the
+    // order `status_value` takes them in.
+    let idle_window = idle_filter
+        .then(|| {
+            let ttl = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .queue_ttl_days;
+            super::nudge::idle_window(ttl)
+        })
+        .flatten();
+    let policy = idle_filter.then(|| shared.policy.lock().expect("policy lock"));
     let queue = shared.queue.lock().expect("queue lock");
-    let entries: Vec<serde_json::Value> = queue
-        .pending()
-        .iter()
+    let selected: Vec<&super::queue::QueueEntry> = match (&policy, idle_window) {
+        (Some(policy), Some(window)) => {
+            super::queue::idle_candidates(&queue, policy, Utc::now(), window.idle_days)
+        }
+        // The kind is off below the TTL it needs: nothing is idle.
+        (Some(_), None) => Vec::new(),
+        (None, _) => queue.pending(),
+    };
+    let entries: Vec<serde_json::Value> = selected
+        .into_iter()
         .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
         .map(|e| entry_value(e, admission_evidence))
         .collect();
@@ -4896,6 +4960,26 @@ pub(crate) struct NudgeSnapshot {
     pub last_history_poll_at: Option<chrono::DateTime<Utc>>,
     pub history_poll_secs: u64,
     pub verdicts_pending: Option<super::nudge::VerdictDelta>,
+}
+
+/// `status.idle_sessions` on the wire: how many candidates, the display
+/// names of the tools they came from (distinct, in alphabetical order; a
+/// source the tool table has no name for is left out, never shown as its
+/// raw id), and the threshold in days. Never an id, a path, a folder label
+/// or a session's own age.
+fn idle_sessions_value(
+    candidates: &[&super::queue::QueueEntry],
+    window: super::nudge::IdleWindow,
+) -> serde_json::Value {
+    let tools: std::collections::BTreeSet<&'static str> = candidates
+        .iter()
+        .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
+        .collect();
+    serde_json::json!({
+        "count": candidates.len(),
+        "tools": tools,
+        "threshold_days": window.idle_days,
+    })
 }
 
 /// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
@@ -17683,6 +17767,205 @@ mod tests {
             assert!(
                 snapshot < policy_lock,
                 "snapshot must precede the policy lock"
+            );
+        }
+
+        // ---- U4: idle sessions ----
+
+        /// One waiting entry in `project_key` from `source`, last written
+        /// `days` days ago.
+        fn seed_idle(s: &DaemonShared, project_key: &str, source: &str, days: i64) -> uuid::Uuid {
+            let entry_id = uuid::Uuid::new_v4();
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: source.to_string(),
+                        project_key: project_key.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(project_key),
+                        path: std::path::PathBuf::from(format!("/tmp/idle-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: Utc::now() - chrono::Duration::days(days),
+                        last_modified_at: Some(Utc::now() - chrono::Duration::days(days)),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id
+        }
+
+        fn list_idle(s: &DaemonShared) -> Vec<String> {
+            let r = handle_request(
+                s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "idle_sessions"}),
+                ),
+            );
+            r.result.expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["entry_id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        /// U4 leads on `status.nudge`, and `status.idle_sessions` carries
+        /// the count, the tools' display names (an unknown source left
+        /// unnamed) and the threshold: no id, no path, no folder label.
+        #[test]
+        fn idle_sessions_lead_and_report_counts_and_tool_names_only() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let a = seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_TRAJECTORY, 6);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "armed", "{status}");
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["count"], 3);
+            assert_eq!(
+                status["idle_sessions"],
+                serde_json::json!({
+                    "count": 3,
+                    "tools": ["Claude Code", "Codex"],
+                    "threshold_days": crate::daemon::nudge::IDLE_DAYS,
+                })
+            );
+            let text = status["idle_sessions"].to_string();
+            assert!(!text.contains(ASK), "{text}");
+            assert!(!text.contains(&a.to_string()), "{text}");
+            assert!(!text.contains("nudge-ask"), "{text}");
+        }
+
+        /// The card filter and the status count come from one function:
+        /// `list_pending {filter: "idle_sessions"}` lists exactly the
+        /// candidates `status.idle_sessions.count` counts.
+        #[test]
+        fn the_idle_filter_lists_exactly_what_status_counts() {
+            let s = live();
+            let never = "/tmp/nudge-never";
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(
+                    never,
+                    crate::daemon::policy::ProjectMode::Ignore,
+                    Utc::now(),
+                )
+                .unwrap();
+            let idle_a = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 3);
+            let idle_b = seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 9);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 1);
+            seed_idle(&s, never, crate::source::SOURCE_CLAUDE_CODE, 9);
+            seed_entry(&s, ASK);
+            let listed = list_idle(&s);
+            let status = status_of(&s);
+            assert_eq!(
+                status["idle_sessions"]["count"].as_u64().unwrap() as usize,
+                listed.len(),
+                "{status}"
+            );
+            let mut want = vec![idle_a.to_string(), idle_b.to_string()];
+            want.sort();
+            let mut got = listed;
+            got.sort();
+            assert_eq!(got, want);
+            // Absent filter: every pending entry, as before.
+            let all = handle_request(&s, &req("list_pending", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(all["pending"].as_array().unwrap().len(), 5);
+        }
+
+        /// An unknown filter is refused by label, never answered with an
+        /// empty list a shell would read as "nothing idle".
+        #[test]
+        fn an_unknown_list_filter_is_refused() {
+            let s = live();
+            for (filter, label) in [
+                (serde_json::json!("stale"), ERR_LIST_FILTER_UNRECOGNIZED),
+                (serde_json::json!(3), ERR_LIST_FILTER_INVALID),
+            ] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({"filter": filter})),
+                );
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, label);
+            }
+        }
+
+        /// Below a 4-day queue TTL the kind is off: `status.idle_sessions`
+        /// is absent (never `null`), nothing leads for it, and the filter
+        /// lists nothing.
+        #[test]
+        fn a_short_queue_ttl_turns_idle_sessions_off() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 30);
+            s.settings.lock().unwrap().queue_ttl_days = 3;
+            let status = status_of(&s);
+            assert!(status.get("idle_sessions").is_none(), "{status}");
+            assert_ne!(status["nudge"]["lead"], "idle_sessions");
+            assert!(list_idle(&s).is_empty());
+        }
+
+        /// Gates close U4's lead, but the fact is still reported: like
+        /// `unpurposed_traces`, `status.idle_sessions` is a count.
+        #[test]
+        fn a_paused_daemon_reports_idle_sessions_but_leads_nothing() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["count"], 1);
+        }
+
+        /// `nudge_decline {idle_sessions}` is the in-app "Not now": it
+        /// silences U4 and U1 together and persists. `nudge_opened` is
+        /// accepted and does not retire U4, which retires by fact.
+        #[test]
+        fn idle_sessions_take_a_not_now_shared_with_the_backlog() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+
+            let opened = handle_request(
+                &s,
+                &req("nudge_opened", serde_json::json!({"kind": "idle_sessions"})),
+            );
+            assert!(opened.error.is_none(), "{:?}", opened.error);
+            assert_eq!(nudge_of(&s)["lead"], "idle_sessions");
+
+            let mut rx = s.events.subscribe();
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+            );
+            assert_eq!(
+                declined.result.expect("declined"),
+                serde_json::json!({"declined": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["state"], "none", "{nudge}");
+            assert_eq!(nudge["lead"], serde_json::Value::Null);
+            assert!(nudge.get("cooldown_until").is_some(), "{nudge}");
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert!(
+                reloaded.nudges[&ledger_key(NudgeKind::IdleSessions, None)]
+                    .declined_at
+                    .is_some()
             );
         }
     }

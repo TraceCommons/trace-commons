@@ -341,6 +341,10 @@ extension DaemonData {
         /// Which in-app suggestion leads (upsell S3). `nil` from an older
         /// daemon: no row and no card, never a lead of its own.
         public let nudge: Nudge?
+        /// Waiting Ask-me sessions nobody has written to for days (upsell
+        /// U4). `nil` while the kind is off or from an older daemon: no idle
+        /// card or row, never 0.
+        public let idleSessions: IdleSessions?
         public let nextDigestAt: Date?
         public let health: Health?
         public let dailyBudget: DailyBudget?
@@ -384,6 +388,7 @@ extension DaemonData {
             case decisionsOwed = "decisions_owed"
             case unpurposedTraces = "unpurposed_traces"
             case nudge
+            case idleSessions = "idle_sessions"
             case nextDigestAt = "next_digest_at"
             case health
             case dailyBudget = "daily_budget"
@@ -418,6 +423,23 @@ extension DaemonData {
             case lead
             case count
             case cooldownUntil = "cooldown_until"
+        }
+    }
+
+    /// `status.idle_sessions` (upsell U4). Decoded only; no screen draws it
+    /// yet. Counts and tool display names only, never an id or a path.
+    public struct IdleSessions: Codable, Equatable, Sendable {
+        /// How many waiting sessions are idle. Never a badge number.
+        public let count: Int?
+        /// Display names of the tools they came from, from the daemon.
+        public let tools: [String]?
+        /// How many days without a write counts as idle.
+        public let thresholdDays: Int?
+
+        public enum CodingKeys: String, CodingKey {
+            case count
+            case tools
+            case thresholdDays = "threshold_days"
         }
     }
 

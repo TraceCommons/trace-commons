@@ -12,8 +12,9 @@
   "decisions_owed": 14,
   "unpurposed_traces": 3,
   "nudge": {
-    "state": "none",
-    "lead": null
+    "state": "armed",
+    "lead": "idle_sessions",
+    "count": 14
   },
   "next_digest_at": null,
   "health": {
@@ -60,6 +61,14 @@
   "contribution_override": null,
   "contribution_mode": "notify_only",
   "contribution_mode_partial": false,
+  "idle_sessions": {
+    "count": 14,
+    "tools": [
+      "Claude Code",
+      "Codex"
+    ],
+    "threshold_days": 3
+  },
   "dev_dry_run": false,
   "_sample": "private AI, routing and budget need a live IronWire"
 }
