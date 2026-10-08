@@ -27,12 +27,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use trace_commons_protocol::insights_usage_series::UsageSeries;
 
-use super::cache_share::CacheShare;
+use super::cache_share::{BestWeek, CacheShare, best_week};
 use super::usage::NativeTokenCounts;
 use super::week_rollup::{
     AnalyticsSource, CodexObserved, CoverageReason, CoverageState, DayTokens, Feed, ModelTokens,
     RollupCache, RollupCacheKey, SessionBody, SessionInput, Unavailable, UnknownReason,
-    WeekCoverage, WeekRollup, local_week_start, week_rollup,
+    WeekCoverage, WeekRollup, change_vs_last_week, comparable, local_week_start, week_rollup,
 };
 use super::{LocalInsight, LocalInsightStore, SourceFormat};
 
@@ -60,6 +60,9 @@ pub enum ByProjectUnavailable {
     /// Owner decision D7, open: a project key is path-derived, and analyzed
     /// files carry none.
     NotAvailableForAnalyzedFiles,
+    /// Feed T: the counter rows keep only a keyed digest of the folder's
+    /// project key, and no label is resolved for it until owner decision D7.
+    HeldForProjectDecision,
 }
 
 /// A cache share with its parts, so a shell divides nothing.
@@ -91,16 +94,25 @@ pub struct OverviewSource {
     pub cache_share: Option<ShareFigure>,
     /// The largest session of this source by its own tokens.
     pub largest_session: Option<LargestSession>,
-    /// "vs last week": always unavailable under feed S.
-    pub change: Unavailable,
-    /// "Your best week": always unavailable under feed S.
-    pub best_week: Unavailable,
+    /// "vs last week" per mille, rounded half away from zero. Feed T only,
+    /// and only when both weeks are comparable.
+    pub change_permille: Option<i64>,
+    /// Why `change_permille` is absent; always `needs_counter_pass` under
+    /// feed S.
+    pub change: Option<Unavailable>,
+    /// "Your best week": the previous best share and whether this week beat
+    /// it. Feed T only.
+    pub best: Option<BestWeek>,
+    /// Why `best` is absent; always `needs_counter_pass` under feed S.
+    pub best_week: Option<Unavailable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LargestSession {
-    /// The snapshot ID. Never a path.
-    pub session_ref: String,
+    /// The snapshot ID under feed S. Never a path, and absent under feed T,
+    /// whose rows carry no reference that may leave the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
     pub tokens: u64,
 }
 
@@ -475,7 +487,7 @@ fn sources(rollup: &WeekRollup) -> Vec<OverviewSource> {
                     },
                 )
                 .map(|(tokens, session_ref)| LargestSession {
-                    session_ref: session_ref.clone(),
+                    session_ref: (!session_ref.is_empty()).then(|| session_ref.clone()),
                     tokens,
                 });
             OverviewSource {
@@ -484,8 +496,10 @@ fn sources(rollup: &WeekRollup) -> Vec<OverviewSource> {
                 tokens: line.tokens,
                 cache_share: line.cache_share.map(ShareFigure::from),
                 largest_session,
-                change: Unavailable::NeedsCounterPass,
-                best_week: Unavailable::NeedsCounterPass,
+                change_permille: None,
+                change: Some(Unavailable::NeedsCounterPass),
+                best: None,
+                best_week: Some(Unavailable::NeedsCounterPass),
             }
         })
         .collect()
@@ -523,6 +537,84 @@ pub fn overview(glance: &WeekGlance) -> WeekOverview {
         by_project: ByProjectUnavailable::NotAvailableForAnalyzedFiles,
         weeks: glance.weeks.clone(),
     }
+}
+
+/// Feed T: the Overview over the daemon's counter rows, with "vs last week"
+/// and "Your best week" filled wherever the weeks compared are comparable.
+/// `earlier` holds rolled-up weeks before `this`, in any order; a week absent
+/// from it had no session and is not comparable. `weeks` feeds the picker.
+pub fn counter_overview(
+    this: &WeekRollup,
+    earlier: &[WeekRollup],
+    tz: i32,
+    weeks: Vec<NaiveDate>,
+) -> WeekOverview {
+    let glance = WeekGlance {
+        generation: 0,
+        tz,
+        rollup: this.clone(),
+        weeks,
+    };
+    let mut view = overview(&glance);
+    view.by_project = ByProjectUnavailable::HeldForProjectDecision;
+    // The rows' references are the daemon's own; none leaves it.
+    for line in &mut view.sources {
+        if let Some(largest) = &mut line.largest_session {
+            largest.session_ref = None;
+        }
+    }
+    let last_start = this.week_start - Duration::days(7);
+    let empty = WeekRollup {
+        feed: this.feed,
+        week_start: last_start,
+        coverage: WeekCoverage::default(),
+        undated_sessions: 0,
+        sources: Vec::new(),
+        by_day: None,
+        codex_interval_tokens: None,
+        by_model: Vec::new(),
+        sessions: Vec::new(),
+    };
+    let last = earlier
+        .iter()
+        .find(|week| week.week_start == last_start)
+        .unwrap_or(&empty);
+    let share_of = |week: &WeekRollup, source: AnalyticsSource| {
+        week.sources
+            .iter()
+            .find(|line| line.source == source)
+            .and_then(|line| line.cache_share)
+    };
+    for line in &mut view.sources {
+        match change_vs_last_week(this, last, line.source) {
+            Ok(permille) => {
+                line.change_permille = Some(permille);
+                line.change = None;
+            }
+            Err(reason) => line.change = Some(reason),
+        }
+        let best = comparable(this).and_then(|()| {
+            let share = share_of(this, line.source).ok_or(Unavailable::NoFigure)?;
+            let history: Vec<Option<CacheShare>> = earlier
+                .iter()
+                .filter(|week| week.week_start < this.week_start)
+                .map(|week| {
+                    comparable(week)
+                        .ok()
+                        .and_then(|()| share_of(week, line.source))
+                })
+                .collect();
+            best_week(share, &history).map_err(|_| Unavailable::InsufficientHistory)
+        });
+        match best {
+            Ok(best) => {
+                line.best = Some(best);
+                line.best_week = None;
+            }
+            Err(reason) => line.best_week = Some(reason),
+        }
+    }
+    view
 }
 
 pub fn card_inputs(glance: &WeekGlance, card: OverviewCard) -> CardInputs {
@@ -621,8 +713,10 @@ mod tests {
         let codex_line = line(&codex_week, AnalyticsSource::Codex).unwrap();
         // The observed delta, input + output, nothing added again.
         assert_eq!(codex_line.tokens, Some((150 - 100) + (30 - 20)));
-        assert_eq!(codex_line.change, Unavailable::NeedsCounterPass);
-        assert_eq!(codex_line.best_week, Unavailable::NeedsCounterPass);
+        assert_eq!(codex_line.change, Some(Unavailable::NeedsCounterPass));
+        assert_eq!(codex_line.change_permille, None);
+        assert_eq!(codex_line.best_week, Some(Unavailable::NeedsCounterPass));
+        assert_eq!(codex_line.best, None);
         assert!(line(&codex_week, AnalyticsSource::ClaudeCode).is_none());
         assert_eq!(codex_week.feed, Feed::Saved);
         assert_eq!(
@@ -636,7 +730,7 @@ mod tests {
         assert!(claude_line.cache_share.is_some());
         assert_eq!(
             claude_line.largest_session.as_ref().unwrap().session_ref,
-            saved.id
+            Some(saved.id.clone())
         );
         assert!(claude_week.by_day.is_some());
         assert!(line(&claude_week, AnalyticsSource::Codex).is_none());
@@ -866,5 +960,107 @@ mod tests {
             after.rollup.sources[0].tokens,
             before.rollup.sources[0].tokens
         );
+    }
+
+    /// A feed T week with one Codex line: `known` sessions, all known, and
+    /// the given tokens and cache share in per mille of 1,000 input.
+    fn counter_week(start: NaiveDate, known: u32, tokens: u64, share: u64) -> WeekRollup {
+        WeekRollup {
+            feed: Feed::CounterPass,
+            week_start: start,
+            coverage: WeekCoverage {
+                known,
+                ..WeekCoverage::default()
+            },
+            undated_sessions: 0,
+            sources: vec![super::super::week_rollup::SourceWeek {
+                source: AnalyticsSource::Codex,
+                sessions: known,
+                tokens: Some(tokens),
+                largest_session_tokens: Some(tokens),
+                cache_share: CacheShare::codex(1_000, share),
+            }],
+            by_day: None,
+            codex_interval_tokens: Some(tokens),
+            by_model: Vec::new(),
+            sessions: vec![super::super::week_rollup::SessionWeek {
+                session_ref: String::new(),
+                source: Some(AnalyticsSource::Codex),
+                tokens: Some(tokens),
+                state: CoverageState::Known,
+                reasons: Vec::new(),
+                cache_share: None,
+            }],
+        }
+    }
+
+    fn monday(weeks_ago: i64) -> NaiveDate {
+        date(2026, 10, 5) - Duration::weeks(weeks_ago)
+    }
+
+    #[test]
+    fn under_feed_t_the_change_is_a_figure_when_both_weeks_are_comparable() {
+        let this = counter_week(monday(0), 5, 1_200, 500);
+        let last = counter_week(monday(1), 5, 1_000, 500);
+        let view = counter_overview(&this, &[last], 0, vec![monday(0)]);
+        assert_eq!(view.feed, Feed::CounterPass);
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(codex.change_permille, Some(200));
+        assert_eq!(codex.change, None);
+        // No readable session reference crosses from the counter rows.
+        assert_eq!(codex.largest_session.as_ref().unwrap().session_ref, None);
+        assert_eq!(
+            view.by_project,
+            ByProjectUnavailable::HeldForProjectDecision
+        );
+    }
+
+    #[test]
+    fn under_feed_t_a_thin_or_missing_week_has_no_change() {
+        let thin = counter_week(monday(0), 4, 1_200, 500);
+        let last = counter_week(monday(1), 5, 1_000, 500);
+        let view = counter_overview(&thin, std::slice::from_ref(&last), 0, Vec::new());
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(codex.change_permille, None);
+        assert_eq!(codex.change, Some(Unavailable::BelowCoverageFloor));
+
+        let this = counter_week(monday(0), 5, 1_200, 500);
+        let view = counter_overview(&this, &[], 0, Vec::new());
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(codex.change, Some(Unavailable::BelowCoverageFloor));
+    }
+
+    #[test]
+    fn under_feed_t_the_best_week_needs_three_earlier_comparable_weeks() {
+        let this = counter_week(monday(0), 5, 1_000, 500);
+        let earlier = [
+            counter_week(monday(3), 5, 1_000, 200),
+            counter_week(monday(2), 5, 1_000, 400),
+            counter_week(monday(1), 5, 1_000, 300),
+        ];
+        let view = counter_overview(&this, &earlier, 0, Vec::new());
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(
+            codex.best,
+            Some(BestWeek {
+                previous_best_permille: 400,
+                is_new_best: true
+            })
+        );
+        assert_eq!(codex.best_week, None);
+
+        // A thin earlier week does not count towards the three.
+        let mut short = earlier.clone();
+        short[0].coverage.known = 4;
+        let view = counter_overview(&this, &short, 0, Vec::new());
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(codex.best, None);
+        assert_eq!(codex.best_week, Some(Unavailable::InsufficientHistory));
+
+        // A thin week on screen is never ranked.
+        let thin = counter_week(monday(0), 4, 1_000, 900);
+        let view = counter_overview(&thin, &earlier, 0, Vec::new());
+        let codex = line(&view, AnalyticsSource::Codex).unwrap();
+        assert_eq!(codex.best_week, Some(Unavailable::BelowCoverageFloor));
     }
 }

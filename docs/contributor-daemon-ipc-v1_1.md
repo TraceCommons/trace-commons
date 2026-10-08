@@ -528,7 +528,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (owner decision D3, open); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -586,7 +586,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`, `insights_counter_pass`, `insights_recap_card_enabled` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
@@ -4000,6 +4000,44 @@ sessions on disk. Otherwise:
 - `rollup.sessions[]` carries each session's figure and coverage, and no
   reference to it.
 
+Four further fields are additive (a daemon that predates them omits them, and
+a shell that finds them absent draws feed T from `rollup` alone, without
+comparisons):
+
+- `overview` is the Overview tab's week in exactly the shape the in-process
+  `week_overview` operation returns for saved imports, with `feed:
+  "counter_pass"`, so a shell draws both feeds with one view. Under feed T
+  each `sources[]` entry carries `change_permille` (as in
+  `change_vs_last_week`) with `change: null`, or `change_permille: null` with
+  `change` naming why; and `best` (`{"previous_best_permille", "is_new_best"}`,
+  needing this week and at least three earlier kept weeks comparable) with
+  `best_week: null`, or `best: null` with `best_week` naming why
+  (`below_coverage_floor`, `insufficient_history`, `no_figure`).
+  `largest_session` carries `tokens` and no `session_ref`; `by_project` is
+  `held_for_project_decision` (owner decision D7, open); `generation` is 0;
+  `weeks` lists the weeks holding a stored session, newest first.
+- `patterns` is the Patterns tab's week in exactly the shape the in-process
+  `patterns` operation returns (six weekly bars), with `feed:
+  "counter_pass"`: `change` per card is filled only when both weeks are
+  comparable, and a week below the floor draws a gap. Re-read files are
+  letters and extensions only.
+- `history[]` is one entry per kept week (13), oldest first, always ending at
+  the week holding now whatever `iso_week` asked for. Each is
+  `{"week_start", "comparable", "sessions", "tokens": {source: n},
+  "cache_share_permille": {source: n}, "patterns": {kind: n},
+  "pattern_counts": {kind: n}, "reread_files", "past_threshold"}`; a source or
+  kind with no known figure is absent from its map, never zero.
+  `past_threshold` is `{"threshold", "sessions"}` (sessions whose context
+  reached the contributor's `insights_context_threshold` that week) and
+  `null` while that setting is unset. The shell passes `history` unchanged to
+  the in-process `comparisons` operation, which marks goals and picks the
+  lever and the weekly summary card: goals live in the Insights store, which
+  this daemon never reads.
+- `recap_card_enabled` is the `insights_recap_card_enabled` setting, passed
+  to `comparisons` with `history`.
+
+With the setting off none of these are present, as above.
+
 No path, project key or label, session or message ID, digest, file content
 or price ever appears here, and nothing is logged but fixed labels. The
 method carries no sentence; a shell draws the core's copy for these labels.
@@ -4015,7 +4053,7 @@ Takes a JSON object whose top-level keys must come from
 `ironwire_attested_bodies`, `private_inference`,
 `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
 `max_bytes_per_day`, `insights_ledger_feed`, `insights_context_threshold`,
-`insights_counter_pass` --
+`insights_counter_pass`, `insights_recap_card_enabled` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -4918,6 +4956,16 @@ loads it as `false`. It is the one gate on the Insights counter pass (feed T):
 while it is `false` the watcher runs no pass, nothing is read for Insights,
 and `insights_week` answers `enabled: false` without opening the store or its
 key. Turning it off does not remove rows already stored; `unenroll` does.
+
+#### `insights_recap_card_enabled`
+
+Additive; a daemon that predates it refuses it as `settings-unknown-field`,
+and `get_settings` from it omits it. Takes a boolean and defaults to `true`
+(owner decisions D1 and D4, open), and a settings file written before the key
+existed loads it as `true`. It is the only switch for the Insights window's
+weekly summary card ("Show the weekly summary card", and the card's own
+"Turn off"); the Insights store keeps no switch of its own. It shows nothing
+while `insights_counter_pass` is off, and it sends no notification.
 
 #### `scrub_check`
 

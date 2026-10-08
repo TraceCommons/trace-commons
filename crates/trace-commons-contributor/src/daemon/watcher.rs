@@ -2589,6 +2589,7 @@ mod tests {
                 chrono::FixedOffset::east_opt(0).unwrap(),
                 later,
                 &[],
+                crate::daemon::insights_week::WeekOptions::default(),
             )["sessions_stored"]
                 .clone()
         };
@@ -2625,6 +2626,7 @@ mod tests {
             chrono::FixedOffset::east_opt(0).unwrap(),
             Utc::now(),
             &[],
+            crate::daemon::insights_week::WeekOptions::default(),
         );
         assert_eq!(value["sessions_stored"], 0);
     }

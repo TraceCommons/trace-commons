@@ -170,6 +170,10 @@ pub const LEDGER_GLANCE_STALE_SECS: i64 = 600;
 /// `insights_week` answers `enabled: false` without touching the store.
 /// Owner decision D4, open.
 pub const COUNTER_PASS_DEFAULT_ON: bool = false;
+/// Whether the weekly summary card starts on. It is an in-app card only (no
+/// notification: owner decision D1), and it shows nothing without feed T.
+/// Owner decisions D1 and D4, open.
+pub const RECAP_CARD_DEFAULT_ON: bool = true;
 /// Whether sessions in a folder whose rule is Never are left out of the
 /// counter pass, and their stored rows dropped. Owner decision D4, open; the
 /// recommended answer is yes.
@@ -292,6 +296,7 @@ mod tests {
     fn counter_pass_constants() {
         const { assert!(!COUNTER_PASS_DEFAULT_ON) };
         const { assert!(COUNTER_PASS_EXCLUDES_NEVER_FOLDERS) };
+        const { assert!(RECAP_CARD_DEFAULT_ON) };
         assert_eq!(COUNTER_STORE_MAX_SESSIONS, 2_048);
         assert_eq!(COUNTER_STORE_MAX_TURNS, 131_072);
         assert_eq!(COUNTER_STORE_MAX_TOOL_CALLS, 131_072);

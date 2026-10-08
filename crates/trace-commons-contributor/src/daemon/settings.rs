@@ -619,6 +619,15 @@ pub struct DaemonSettings {
     #[serde(default = "default_insights_counter_pass")]
     pub insights_counter_pass: bool,
 
+    /// Whether the Insights window shows the weekly summary card on the first
+    /// open after a week closes. The card's only on/off: there is no switch
+    /// for it in the Insights store. It needs feed T, so it shows nothing
+    /// while `insights_counter_pass` is off. Starts as
+    /// `insights::analytics_constants::RECAP_CARD_DEFAULT_ON`, owner
+    /// decisions D1 and D4, open.
+    #[serde(default = "default_insights_recap_card_enabled")]
+    pub insights_recap_card_enabled: bool,
+
     /// Legacy spellings, read on load and never written.
     ///
     /// Settings files written before source declarations existed carry
@@ -1017,6 +1026,10 @@ fn default_insights_counter_pass() -> bool {
     crate::insights::analytics_constants::COUNTER_PASS_DEFAULT_ON
 }
 
+fn default_insights_recap_card_enabled() -> bool {
+    crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
+}
+
 /// The smallest context threshold the tip accepts.
 pub const INSIGHTS_CONTEXT_THRESHOLD_MIN: u32 = 1_000;
 /// The largest context threshold the tip accepts.
@@ -1071,6 +1084,7 @@ impl Default for DaemonSettings {
             insights_ledger_feed: default_insights_ledger_feed(),
             insights_context_threshold: None,
             insights_counter_pass: default_insights_counter_pass(),
+            insights_recap_card_enabled: default_insights_recap_card_enabled(),
             scrub_check: ScrubCheck::Automatic,
             scrub_check_defaulted_on_upgrade: false,
             legacy_claude_root: None,
@@ -1635,6 +1649,12 @@ pub fn apply_settings_object(
             // Insights feed T (owner decision D4, open). Off by default.
             "insights_counter_pass" => {
                 settings.insights_counter_pass =
+                    value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
+            }
+            // The weekly summary card's only switch (owner decisions D1
+            // and D4, open). On by default; it needs feed T to show anything.
+            "insights_recap_card_enabled" => {
+                settings.insights_recap_card_enabled =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
             // The context tip's threshold: a number in range, or `null` to
@@ -2496,6 +2516,46 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(s.insights_counter_pass);
+    }
+
+    /// The weekly summary card starts as its constant says (owner decisions
+    /// D1 and D4, open), an older settings file loads it the same way, and it
+    /// takes a boolean only.
+    #[test]
+    fn the_insights_recap_card_follows_its_default_and_takes_a_boolean() {
+        use crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON;
+        assert_eq!(
+            DaemonSettings::default().insights_recap_card_enabled,
+            RECAP_CARD_DEFAULT_ON
+        );
+        let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
+        assert_eq!(
+            v.get("insights_recap_card_enabled"),
+            Some(&serde_json::json!(RECAP_CARD_DEFAULT_ON))
+        );
+        v.as_object_mut()
+            .unwrap()
+            .remove("insights_recap_card_enabled");
+        let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
+        assert_eq!(settings.insights_recap_card_enabled, RECAP_CARD_DEFAULT_ON);
+
+        let mut s = DaemonSettings::default();
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": false})
+            ),
+            Ok(true)
+        );
+        assert!(!s.insights_recap_card_enabled);
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": "on"})
+            ),
+            Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_recap_card_enabled);
     }
 
     /// The context threshold has no default; it is a number in range or

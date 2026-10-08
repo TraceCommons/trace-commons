@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use super::LocalInsight;
 use super::analytics_constants::LONG_CONTEXT_TOKENS;
+use super::goals::{ThresholdCount, WeekFigures};
 use super::markers::letter_label;
 use super::patterns::{
     LongContextFigure, PatternFigure, PatternKind, SessionPatterns, merge_reread_files,
@@ -360,6 +361,53 @@ pub fn week_patterns(
         reread_files,
         weeks: Vec::new(),
     }
+}
+
+/// One week's figures for goals, the lever and the weekly summary card, over
+/// any feed's sessions: the rollup's per-source lines and the merged pattern
+/// figures of the Claude Code sessions it counts. `threshold` is the user's
+/// own context threshold; with none set nothing is counted against one.
+pub fn week_figures(
+    feed: Feed,
+    sessions: &[SessionInput],
+    week_start: NaiveDate,
+    tz: FixedOffset,
+    threshold: Option<u64>,
+) -> WeekFigures {
+    let data = week_data(feed, sessions, monday_of(week_start), &tz);
+    let mut figures = WeekFigures::from_rollup(&data.rollup, &[]);
+    if let Some(week) = merged(&data) {
+        for kind in shown_kinds() {
+            if let Some(figure) = week.figure(kind) {
+                figures.patterns.insert(kind, figure);
+            }
+            if let Some(count) = occurrences(&week, kind) {
+                figures.pattern_counts.insert(kind, count);
+            }
+        }
+        figures.reread_files = Some(week.reread_files.len() as u32);
+    }
+    figures.past_threshold = threshold.map(|threshold| {
+        let counted = counted_claude_turns(sessions, data.rollup.week_start, &tz);
+        let sessions = sessions
+            .iter()
+            .zip(&counted)
+            .filter(|(input, turns)| {
+                let (SessionBody::Claude { series, .. }, Some(turns)) = (&input.body, turns) else {
+                    return false;
+                };
+                series.turns.iter().any(|turn| {
+                    turns.contains(&turn.ordinal)
+                        && turn.context().is_some_and(|context| context >= threshold)
+                })
+            })
+            .count() as u32;
+        ThresholdCount {
+            threshold,
+            sessions,
+        }
+    });
+    figures
 }
 
 /// The sessions behind one kind in one week, over any feed's sessions.
@@ -824,6 +872,68 @@ mod tests {
         assert_eq!(week.coverage.unknown, 1);
         assert_eq!(week.claude_sessions, 0);
         assert_eq!(card(&week, PatternKind::RepeatedReads).tokens, None);
+    }
+
+    #[test]
+    fn week_figures_carry_the_figures_goals_and_the_lever_read() {
+        let sessions = [rereading("a", 0, 15), codex("c", 1, 16)];
+        let figures = week_figures(Feed::CounterPass, &sessions, date(2026, 9, 16), utc(), None);
+        assert_eq!(figures.week_start, date(2026, 9, 14));
+        assert_eq!(figures.sessions, 2);
+        // Two sessions are below the floor.
+        assert!(!figures.comparable);
+        assert_eq!(figures.tokens[&AnalyticsSource::Codex], 110);
+        assert_eq!(figures.cache_share_permille[&AnalyticsSource::Codex], 100);
+        assert_eq!(figures.patterns[&PatternKind::RepeatedReads], 20_000);
+        assert_eq!(figures.pattern_counts[&PatternKind::RepeatedReads], 3);
+        assert_eq!(figures.reread_files, Some(2));
+        assert_eq!(figures.past_threshold, None);
+    }
+
+    #[test]
+    fn week_figures_with_no_claude_session_have_no_pattern_figure() {
+        let figures = week_figures(
+            Feed::CounterPass,
+            &[codex("c", 0, 15)],
+            date(2026, 9, 14),
+            utc(),
+            Some(1),
+        );
+        assert!(figures.patterns.is_empty());
+        assert!(figures.pattern_counts.is_empty());
+        assert_eq!(figures.reread_files, None);
+        assert_eq!(
+            figures.past_threshold,
+            Some(ThresholdCount {
+                threshold: 1,
+                sessions: 0
+            })
+        );
+    }
+
+    #[test]
+    fn sessions_past_the_threshold_are_counted_only_when_one_is_set() {
+        // Every turn of these sessions sends 1,000 tokens of context.
+        let sessions = [rereading("a", 0, 15), rereading("b", 1, 16)];
+        let count = |threshold| {
+            week_figures(
+                Feed::CounterPass,
+                &sessions,
+                date(2026, 9, 14),
+                utc(),
+                threshold,
+            )
+            .past_threshold
+        };
+        assert_eq!(count(None), None);
+        assert_eq!(
+            count(Some(1_000)),
+            Some(ThresholdCount {
+                threshold: 1_000,
+                sessions: 2
+            })
+        );
+        assert_eq!(count(Some(1_001)).map(|found| found.sessions), Some(0));
     }
 
     #[test]

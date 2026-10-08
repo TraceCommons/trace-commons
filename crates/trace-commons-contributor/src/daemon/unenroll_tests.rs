@@ -442,6 +442,7 @@ fn stored(s: &DaemonShared) -> serde_json::Value {
         chrono::FixedOffset::east_opt(0).unwrap(),
         Utc::now(),
         &[],
+        crate::daemon::insights_week::WeekOptions::default(),
     )["sessions_stored"]
         .clone()
 }

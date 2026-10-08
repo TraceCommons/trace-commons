@@ -86,14 +86,26 @@ pub fn best_week(
     this: CacheShare,
     earlier: &[Option<CacheShare>],
 ) -> Result<BestWeek, BestWeekUnavailable> {
-    let comparable: Vec<u64> = earlier.iter().flatten().map(CacheShare::permille).collect();
+    let earlier: Vec<Option<u64>> = earlier
+        .iter()
+        .map(|share| share.as_ref().map(CacheShare::permille))
+        .collect();
+    best_week_permille(this.permille(), &earlier)
+}
+
+/// [`best_week`] over shares already in per mille.
+pub fn best_week_permille(
+    this: u64,
+    earlier: &[Option<u64>],
+) -> Result<BestWeek, BestWeekUnavailable> {
+    let comparable: Vec<u64> = earlier.iter().flatten().copied().collect();
     if comparable.len() < BEST_WEEK_MIN_EARLIER_WEEKS {
         return Err(BestWeekUnavailable::InsufficientHistory);
     }
     let previous_best_permille = comparable.into_iter().max().unwrap_or(0);
     Ok(BestWeek {
         previous_best_permille,
-        is_new_best: this.permille() > previous_best_permille,
+        is_new_best: this > previous_best_permille,
     })
 }
 

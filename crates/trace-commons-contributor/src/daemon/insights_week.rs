@@ -57,14 +57,18 @@ use trace_commons_protocol::insights_usage_series::{
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
+use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
     COUNTER_PASS_MAX_READS_PER_TICK, COUNTER_PASS_MAX_SESSION_BYTES, COUNTER_STORE_KEEP_WEEKS,
     COUNTER_STORE_MAX_SESSIONS, COUNTER_STORE_MAX_TOOL_CALLS, COUNTER_STORE_MAX_TURNS,
     DIGEST_KEY_CUSTODY, DigestKeyCustody,
 };
+use crate::insights::goals::WeekFigures;
 use crate::insights::usage::NativeTokenCounts;
 use crate::insights::usage_evidence::{PersistedUsageEvidence, extract_codex_usage_evidence};
+use crate::insights::week_glance::{counter_overview, dated_weeks};
+use crate::insights::week_patterns::{week_figures, week_patterns};
 use crate::insights::week_rollup::{
     AnalyticsSource, CodexObserved, Feed, SessionBody, SessionInput, UnknownReason, WeekRollup,
     change_vs_last_week, comparable, local_week_start, week_rollup,
@@ -142,9 +146,9 @@ impl CounterRow {
 
     fn session_input(&self) -> SessionInput {
         SessionInput {
-            // The rollup copies this into its per-session rows; the wire form
-            // drops it, so a digest never crosses.
-            session_ref: String::new(),
+            // The order the row was made in, so the engine can tell the
+            // sessions apart. Never a digest; every wire form drops it.
+            session_ref: format!("t{}", self.seq),
             import_seq: self.seq,
             placed_at: self.placed_at,
             body: match &self.body {
@@ -212,6 +216,24 @@ pub(crate) struct PassSummary {
     /// Left for a later poll by the per-poll budget.
     pub deferred: usize,
     pub dropped: usize,
+}
+
+/// What the daemon's settings add to an `insights_week` answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WeekOptions {
+    /// `insights_recap_card_enabled`.
+    pub recap_card_enabled: bool,
+    /// `insights_context_threshold`; unset, nothing is counted against one.
+    pub context_threshold: Option<u32>,
+}
+
+impl Default for WeekOptions {
+    fn default() -> Self {
+        Self {
+            recap_card_enabled: crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON,
+            context_threshold: None,
+        }
+    }
 }
 
 /// The daemon's counter pass and its store.
@@ -400,6 +422,7 @@ impl CounterPass {
         tz: FixedOffset,
         now: DateTime<Utc>,
         never_project_keys: &[String],
+        options: WeekOptions,
     ) -> serde_json::Value {
         if !enabled {
             // Owner decision D4, open: nothing is read for Insights.
@@ -462,6 +485,44 @@ impl CounterPass {
                 },
             )
             .collect();
+        // Every kept week up to the current one, oldest first, whatever week
+        // is on screen: goals, the lever and the weekly summary card read
+        // them in process (owner decision D4, open).
+        let current = local_week_start(&now, &tz);
+        let threshold = options.context_threshold.map(u64::from);
+        let history: Vec<WeekFigures> = (0..COUNTER_STORE_KEEP_WEEKS)
+            .rev()
+            .map(|back| {
+                week_figures(
+                    Feed::CounterPass,
+                    &inputs,
+                    current - Duration::weeks(back),
+                    tz,
+                    threshold,
+                )
+            })
+            .collect();
+        let earlier: Vec<WeekRollup> = (1..=COUNTER_STORE_KEEP_WEEKS)
+            .map(|back| {
+                week_rollup(
+                    Feed::CounterPass,
+                    &inputs,
+                    this.week_start - Duration::weeks(back),
+                    &tz,
+                )
+            })
+            .filter(|week| week.coverage.sessions() > 0)
+            .collect();
+        let picker = dated_weeks(&inputs, &tz);
+        let overview = counter_overview(&this, &earlier, tz.local_minus_utc(), picker.clone());
+        let mut patterns = week_patterns(
+            Feed::CounterPass,
+            &inputs,
+            this.week_start,
+            tz,
+            PATTERN_BAR_WEEKS,
+        );
+        patterns.weeks = picker;
         let comparable = comparable(&this);
         let updated_at = self
             .last_pass_at
@@ -482,6 +543,10 @@ impl CounterPass {
             "unavailable": comparable.err(),
             "change_vs_last_week": changes,
             "rollup": rollup_value(&this),
+            "overview": overview,
+            "patterns": patterns,
+            "history": history,
+            "recap_card_enabled": options.recap_card_enabled,
         })
     }
 
@@ -816,10 +881,16 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
         },
     };
     // A poisoned lock reads as off: fail closed, never a guess.
-    let enabled = shared
-        .settings
-        .lock()
-        .is_ok_and(|settings| settings.insights_counter_pass);
+    let (enabled, options) = match shared.settings.lock() {
+        Ok(settings) => (
+            settings.insights_counter_pass,
+            WeekOptions {
+                recap_card_enabled: settings.insights_recap_card_enabled,
+                context_threshold: settings.insights_context_threshold,
+            },
+        ),
+        Err(_) => (false, WeekOptions::default()),
+    };
     let never = if enabled {
         never_project_keys(shared)
     } else {
@@ -829,7 +900,7 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
         req.id,
         shared
             .insights_counter
-            .week_value(enabled, week, tz, Utc::now(), &never),
+            .week_value(enabled, week, tz, Utc::now(), &never, options),
     )
 }
 
@@ -940,8 +1011,17 @@ mod tests {
         }
 
         fn week(&self, never: &[String]) -> serde_json::Value {
+            self.week_with(Some(monday()), never, WeekOptions::default())
+        }
+
+        fn week_with(
+            &self,
+            week: Option<NaiveDate>,
+            never: &[String],
+            options: WeekOptions,
+        ) -> serde_json::Value {
             self.pass
-                .week_value(true, Some(monday()), utc(), now(), never)
+                .week_value(true, week, utc(), now(), never, options)
         }
     }
 
@@ -1211,14 +1291,28 @@ mod tests {
         f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
         let other = f.rekeyed(4);
         // Rows made under another key are not read as this key's.
-        let value = other.week_value(true, Some(monday()), utc(), now(), &[]);
+        let value = other.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &[],
+            WeekOptions::default(),
+        );
         assert_eq!(value["sessions_stored"], 0);
         assert_eq!(
             run_with(&other, &[candidate(SOURCE_CLAUDE_CODE, &path)], &[], false).read,
             1
         );
         assert_eq!(
-            other.week_value(true, Some(monday()), utc(), now(), &[])["sessions_stored"],
+            other.week_value(
+                true,
+                Some(monday()),
+                utc(),
+                now(),
+                &[],
+                WeekOptions::default()
+            )["sessions_stored"],
             1
         );
     }
@@ -1254,7 +1348,9 @@ mod tests {
     #[test]
     fn with_the_setting_off_nothing_is_read_or_created() {
         let f = Fixture::new();
-        let value = f.pass.week_value(false, None, utc(), now(), &[]);
+        let value = f
+            .pass
+            .week_value(false, None, utc(), now(), &[], WeekOptions::default());
         assert_eq!(
             value,
             serde_json::json!({"enabled": false, "feed": "counter_pass"})
@@ -1309,6 +1405,101 @@ mod tests {
         ] {
             assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
         }
+    }
+
+    #[test]
+    fn the_answer_carries_the_cores_overview_and_patterns_for_feed_t() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let value = f.week(&[]);
+        let overview = &value["overview"];
+        assert_eq!(overview["feed"], "counter_pass");
+        assert_eq!(overview["week_start"], "2026-09-14");
+        assert_eq!(overview["week_end"], "2026-09-20");
+        assert_eq!(overview["sources"][0]["source"], "claude_code");
+        assert_eq!(overview["sources"][0]["tokens"], CLAUDE_TOKENS);
+        assert_eq!(overview["sources"][0]["change"], "below_coverage_floor");
+        assert_eq!(overview["sources"][0]["best_week"], "below_coverage_floor");
+        assert_eq!(overview["by_project"], "held_for_project_decision");
+        assert_eq!(overview["weeks"], serde_json::json!(["2026-09-14"]));
+        let patterns = &value["patterns"];
+        assert_eq!(patterns["feed"], "counter_pass");
+        assert_eq!(patterns["week_start"], "2026-09-14");
+        assert_eq!(patterns["cards"].as_array().unwrap().len(), 4);
+        assert_eq!(patterns["weeks"], serde_json::json!(["2026-09-14"]));
+        assert_eq!(
+            value["recap_card_enabled"],
+            crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON
+        );
+    }
+
+    #[test]
+    fn history_runs_to_the_current_week_whatever_week_is_asked_for() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        for asked in [Some(monday()), Some(monday() - Duration::weeks(3)), None] {
+            let value = f.week_with(asked, &[], WeekOptions::default());
+            let history = value["history"].as_array().unwrap();
+            assert_eq!(history.len(), COUNTER_STORE_KEEP_WEEKS as usize);
+            assert_eq!(history.last().unwrap()["week_start"], "2026-09-14");
+            assert_eq!(
+                history.first().unwrap()["week_start"],
+                (monday() - Duration::weeks(COUNTER_STORE_KEEP_WEEKS - 1)).to_string()
+            );
+            let this = history.last().unwrap();
+            assert_eq!(this["tokens"]["claude_code"], CLAUDE_TOKENS);
+            assert_eq!(this["sessions"], 1);
+            assert_eq!(this["comparable"], false);
+            assert_eq!(this["past_threshold"], serde_json::Value::Null);
+            // An earlier week with no session has no figure, never zero.
+            assert_eq!(history[0]["tokens"], serde_json::json!({}));
+            assert_eq!(history[0]["sessions"], 0);
+        }
+    }
+
+    #[test]
+    fn the_threshold_count_and_the_summary_switch_follow_the_settings() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let value = f.week_with(
+            Some(monday()),
+            &[],
+            WeekOptions {
+                recap_card_enabled: false,
+                context_threshold: Some(12_000),
+            },
+        );
+        assert_eq!(value["recap_card_enabled"], false);
+        assert_eq!(
+            value["history"].as_array().unwrap().last().unwrap()["past_threshold"],
+            serde_json::json!({"threshold": 12_000, "sessions": 1})
+        );
+        let higher = f.week_with(
+            Some(monday()),
+            &[],
+            WeekOptions {
+                recap_card_enabled: true,
+                context_threshold: Some(1_000_000),
+            },
+        );
+        assert_eq!(
+            higher["history"].as_array().unwrap().last().unwrap()["past_threshold"]["sessions"],
+            0
+        );
+    }
+
+    #[test]
+    fn a_never_folder_leaves_no_figure_in_the_overview_or_history() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let value = f.week(&[PROJECT.to_string()]);
+        assert_eq!(value["overview"]["sources"], serde_json::json!([]));
+        let history = value["history"].as_array().unwrap();
+        assert!(history.iter().all(|week| week["sessions"] == 0));
     }
 
     #[test]

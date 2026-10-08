@@ -22,6 +22,27 @@ pub struct WeekFigures {
     pub cache_share_permille: BTreeMap<AnalyticsSource, u64>,
     /// Per kind; absent when unknown or when no session had tool calls.
     pub patterns: BTreeMap<PatternKind, u64>,
+    /// Sessions in the week, of any coverage state.
+    #[serde(default)]
+    pub sessions: u32,
+    /// Occurrences per kind (reads, calls, cycles, long-context turns);
+    /// absent beside an absent figure.
+    #[serde(default)]
+    pub pattern_counts: BTreeMap<PatternKind, u32>,
+    /// Files read again; `None` when no Claude Code session is counted.
+    #[serde(default)]
+    pub reread_files: Option<u32>,
+    /// Sessions whose context reached the user's own threshold. `None` while
+    /// the user has set none: the threshold has no default.
+    #[serde(default)]
+    pub past_threshold: Option<ThresholdCount>,
+}
+
+/// "{n} sessions passed your {threshold} threshold."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThresholdCount {
+    pub threshold: u64,
+    pub sessions: u32,
 }
 
 impl WeekFigures {
@@ -31,6 +52,7 @@ impl WeekFigures {
         let mut figures = WeekFigures {
             week_start: rollup.week_start,
             comparable: comparable(rollup).is_ok(),
+            sessions: rollup.coverage.sessions(),
             ..WeekFigures::default()
         };
         for line in &rollup.sources {
@@ -91,7 +113,8 @@ pub enum Goal {
 }
 
 impl Goal {
-    fn figure(&self, week: &WeekFigures) -> Option<u64> {
+    /// The week's figure this goal is judged on; `None` when unknown.
+    pub fn figure(&self, week: &WeekFigures) -> Option<u64> {
         match self {
             Self::CacheShareAtLeast { source, .. } => {
                 week.cache_share_permille.get(source).copied()
@@ -104,7 +127,7 @@ impl Goal {
         }
     }
 
-    fn met(&self, figure: u64) -> bool {
+    pub fn met(&self, figure: u64) -> bool {
         match self {
             Self::CacheShareAtLeast { permille, .. } => figure >= *permille,
             Self::RepeatedReadsUnder { tokens }
