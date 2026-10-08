@@ -1190,6 +1190,32 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
+    v109_disables_v94_era_pending_legs(V109Order::Ascending).await;
+}
+
+/// `main` took V110 to V114 while 109 was free, so a database that runs
+/// `main` records every other version before V109, and the runner applies
+/// V109 last there (it applies each version that is not recorded, in the
+/// order of the list). The same seeded legs, the same non-superuser owner and
+/// the same results as the ascending test above; it fails when a later
+/// migration changes something a V109 statement names.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v109_applies_after_every_later_migration_on_a_database_that_runs_main() {
+    v109_disables_v94_era_pending_legs(V109Order::AfterEveryLaterMigration).await;
+}
+
+/// When V109 reaches the database of `v109_disables_v94_era_pending_legs`.
+#[derive(Clone, Copy, PartialEq)]
+enum V109Order {
+    /// After V108 and before V110: a database that goes from #1143 to a
+    /// build with V109.
+    Ascending,
+    /// After every other migration of the list.
+    AfterEveryLaterMigration,
+}
+
+async fn v109_disables_v94_era_pending_legs(order: V109Order) {
     let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
     // A database of its own beside the isolated one, so this upgrade starts
     // from nothing whatever else ran on that one. It is dropped at the end.
@@ -1200,7 +1226,10 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
         .map_or((base_name, String::new()), |(name, query)| {
             (name, format!("?{query}"))
         });
-    let name = format!("{base_name}_v94_legs");
+    let name = match order {
+        V109Order::Ascending => format!("{base_name}_v94_legs"),
+        V109Order::AfterEveryLaterMigration => format!("{base_name}_v109_last"),
+    };
     let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
         .await
         .expect("connect to the isolated database");
@@ -1315,15 +1344,36 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
     // tables and is not a superuser, with no tenant set. Row security does
     // not apply to a superuser, so as the URL's role the update would reach
     // the legs with or without V109's lift of forced row security. V105 to
-    // V108 are applied first, as the admin; the five tables V109 changes
-    // are then given to the owner role.
-    for (version, migration, sql) in MIGRATIONS
-        .iter()
-        .filter(|(version, _, _)| (105..=108).contains(version))
-    {
+    // V108 are applied first, as the admin (and each later migration too,
+    // when V109 goes last); the five tables V109 changes are then given to
+    // the owner role.
+    for (version, migration, sql) in MIGRATIONS.iter().filter(|(version, _, _)| match order {
+        V109Order::Ascending => (105..=108).contains(version),
+        V109Order::AfterEveryLaterMigration => *version >= 105 && *version != 109,
+    }) {
         apply_and_record_migration(&mut admin, *version, migration, sql)
             .await
             .unwrap_or_else(|error| panic!("apply real V{version} ({migration}): {error}"));
+    }
+    if order == V109Order::AfterEveryLaterMigration {
+        // The history a database of `main` has: the newest version of the
+        // list is recorded, and V109 is the one version that is not.
+        let missing: Vec<i32> = admin
+            .query(
+                "SELECT version FROM unnest($1::INTEGER[]) AS listed(version)
+                  WHERE NOT EXISTS (
+                        SELECT 1 FROM _trace_commons_migrations m
+                         WHERE m.version = listed.version
+                  )",
+                &[&MIGRATIONS.iter().map(|(v, _, _)| *v).collect::<Vec<_>>()],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(missing, vec![109]);
+        assert!(MIGRATIONS.iter().any(|(version, _, _)| *version > 109));
     }
     admin
         .batch_execute(
@@ -1367,8 +1417,17 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
         .expect("apply V109 as the non-superuser owner");
     admin.batch_execute("RESET ROLE").await.unwrap();
 
+    // Ascending, the runner applies the later migrations now. With V109
+    // last it finds nothing to apply, and it accepts a history in which V109
+    // was recorded after them.
     let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
     migrator.run_migrations().await.expect("upgrade to current");
+    let recorded: i64 = admin
+        .query_one("SELECT COUNT(*) FROM _trace_commons_migrations", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(recorded, MIGRATIONS.len() as i64);
     set_tenant(&admin, tenant).await;
     let legs: Vec<(String, String, bool)> = admin
         .query(
@@ -1398,6 +1457,33 @@ async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
         .unwrap()
         .get(0);
     assert!(forced, "V109 forces row security again after its update");
+    // The rest of V109 is there in either order: its four checks and its
+    // two indexes.
+    let objects: i64 = admin
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pg_constraint
+                      WHERE contype = 'c' AND conname::TEXT = ANY($1::TEXT[]))
+                  + (SELECT COUNT(*) FROM pg_indexes
+                      WHERE schemaname = 'public' AND indexname::TEXT = ANY($2::TEXT[]))",
+            &[
+                &[
+                    "pipeline_export_snapshots_requester_principal_ref_check",
+                    "pipeline_review_assessments_resolved_reasons_array",
+                    "pipeline_export_snapshot_items_outcome_schema_id_shape",
+                    "pipeline_export_snapshot_items_view_schema_id_shape",
+                ]
+                .as_slice(),
+                &[
+                    "idx_pipeline_index_invalidations_submission",
+                    "idx_pipeline_export_snapshot_items_run",
+                ]
+                .as_slice(),
+            ],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(objects, 6);
 
     // Multi-lens review C13: no run leaves this test's database on the
     // server. Its own connections are closed first.
