@@ -433,7 +433,7 @@ pub struct SettingsWords {
     pub updates_off: &'static str,
     pub notifications_rendered_here: &'static str,
     pub paused_nothing_sent: &'static str,
-    /// Rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07).
+    /// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite).
     pub applies_from_now: &'static str,
     pub always_included: &'static str,
     pub optional_data_use: &'static str,

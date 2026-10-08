@@ -32,7 +32,7 @@ use crate::witness::status::{InferenceReceiptCount, WitnessLastResult, WitnessTr
 pub const WITNESS_HEADING: &str = "Redaction witness";
 
 /// What the card is for, in Ron's #1146 words (`witness-panel.tsx`).
-/// Rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07): it was "A witness is a
+/// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it was "A witness is a
 /// sealed machine that removes private material from a session for you,
 /// instead of this app doing it here. ..."
 pub const WITNESS_INTRO: &str = concat!(

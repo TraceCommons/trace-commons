@@ -1801,7 +1801,7 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 pub const BALANCE_TITLE: &str = "NEAR AI usage";
 pub const FUNDING_TITLE: &str = "Cloud billing";
 /// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
-/// machinery word, rewritten plainly at the owner's request. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07): it
+/// machinery word, rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it
 /// was "Choose a payment method or staking option in Cloud. Your browser
 /// may ask you to sign in again."
 pub const FUNDING_WHAT: &str = "The billing link opens only after your account and connection \

@@ -144,7 +144,7 @@ pub struct JoinCopy {
     pub passkey_chosen: &'static str,
     /// Create passkey on Join starts the daemon so the sheets open there,
     /// over Join (#1030), and it did not start: no account was made and
-    /// nothing is watched. DRAFT, NEEDS APPROVAL (owner rewrite request, 2026-10-07).
+    /// nothing is watched. Approved 2026-10-07 (owner rewrite).
     pub passkey_unavailable: &'static str,
     pub near_ai_eyebrow: &'static str,
     pub near_ai_text: &'static str,
