@@ -2013,14 +2013,17 @@ impl DaemonShared {
         // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
         // the idle window needs.
         let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
-        let idle_sessions = idle_window.map(|window| {
-            let candidates = super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
-            idle_sessions_value(&candidates, window)
-        });
-        let idle_candidate_count = idle_sessions
-            .as_ref()
-            .and_then(|v| v["count"].as_u64())
-            .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
+        let (idle_sessions, idle_candidate_count) = match idle_window {
+            Some(window) => {
+                let candidates =
+                    super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+                (
+                    Some(idle_sessions_value(&candidates, window)),
+                    candidates.len(),
+                )
+            }
+            None => (None, 0),
+        };
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -17880,6 +17883,13 @@ mod tests {
                 .result
                 .unwrap();
             assert_eq!(all["pending"].as_array().unwrap().len(), 5);
+        }
+
+        /// The filter is spelled as the kind's own label, so a filter and a
+        /// ledger key can never drift apart.
+        #[test]
+        fn the_idle_filter_is_the_kind_label() {
+            assert_eq!(LIST_FILTER_IDLE_SESSIONS, NudgeKind::IdleSessions.label());
         }
 
         /// An unknown filter is refused by label, never answered with an
