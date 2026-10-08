@@ -110,7 +110,7 @@ test("a row with no credit states nothing rather than a zero", () => {
 
 test("a processing record counts and filters as waiting to be scored", () => {
   // `processing` is the versioned pipeline's receipt status: uploaded, no
-  // verdict yet, so it shares the `submitted` bucket.
+  // verdict reported, so it shares the `submitted` bucket.
   const withProcessing = [
     ...records,
     {
