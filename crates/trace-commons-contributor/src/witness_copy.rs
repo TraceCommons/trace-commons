@@ -84,7 +84,7 @@ pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[("operator_label", &["l
 pub const WITNESS_CONFIGURE: &str = "Save witness";
 /// Approved 2026-10-07: it was "Stop using a
 /// witness".
-pub const WITNESS_CLEAR: &str = "Return to local redaction";
+pub const WITNESS_CLEAR: &str = "Return";
 
 /// What clearing actually does. Not "off": the redaction still happens, on
 /// this machine, and saying "off" would read as no redaction at all.

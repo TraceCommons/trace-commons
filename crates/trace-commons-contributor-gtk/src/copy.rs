@@ -1698,7 +1698,7 @@ pub const ROOTS_CLINE: &str = "Cline sessions";
 /// not, and the path beside it still says exactly what would be read.
 pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent sessions";
 pub const ROOTS_WATCH: &str = "Watch this folder";
-pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_OFF: &str = "Not used";
 pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
 pub const ROOTS_CONTINUE: &str = "Continue";
 pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";

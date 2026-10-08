@@ -1234,7 +1234,8 @@ pub const CREDENTIAL_OBTAIN: &str = "Connect credential";
 /// #1146's words (owner ruling, 2026-10-06). What stops is this computer's
 /// waiting; anything the contributor already finished in the browser
 /// stands.
-pub const CREDENTIAL_CANCEL: &str = "Cancel sign-in";
+/// Cut to one verb (owner ruling, 2026-10-07).
+pub const CREDENTIAL_CANCEL: &str = "Cancel";
 
 /// The button that removes a stored key from this machine.
 pub const CREDENTIAL_FORGET: &str = "Forget local credential";
