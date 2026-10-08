@@ -334,7 +334,7 @@ fn legacy_config(ingest_url: &str, device_key_id: &str) -> ContributorConfig {
     cfg.instance_id = String::new();
     cfg.user_subject = "invitee".to_string();
     cfg.device_key_id = device_key_id.to_string();
-    cfg.consent_scopes_chosen = true;
+    cfg.consent_scopes_chosen = Some(true);
     cfg
 }
 

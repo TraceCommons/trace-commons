@@ -1,15 +1,55 @@
 import SwiftUI
 
+/// A rule one device pixel thick, as a browser draws #1146's 0.5px border:
+/// 0.5pt on a Retina display and a whole point at 1x, where a 0.5pt fill
+/// would blend into the glass and drop out.
+public struct GlassHairline: View {
+    public enum Axis: Sendable { case horizontal, vertical }
+
+    private let color: Color
+    private let axis: Axis
+    @Environment(\.displayScale) private var displayScale
+
+    public init(_ color: Color = GlassColor.hairline, axis: Axis = .horizontal) {
+        self.color = color
+        self.axis = axis
+    }
+
+    /// The rule's thickness in points for a display of this scale: one
+    /// device pixel, never thinner than half a point.
+    public static func thickness(displayScale: CGFloat) -> CGFloat {
+        max(0.5, 1 / max(displayScale, 1))
+    }
+
+    public var body: some View {
+        let thickness = Self.thickness(displayScale: displayScale)
+        Rectangle().fill(color)
+            .frame(width: axis == .vertical ? thickness : nil, height: axis == .horizontal ? thickness : nil)
+            .accessibilityHidden(true)
+    }
+}
+
 /// A tint layer on a pane. Never blurred. `quiet` is the 12pt-radius tier.
+///
+/// `interactive` is a card that acts (it sits in a button): it lifts under
+/// the pointer (#1146 `.tc-card--interactive:hover`).
 public struct GlassCard<Content: View>: View {
     private let quiet: Bool
     private let flush: Bool
+    private let interactive: Bool
     private let content: Content
 
-    public init(quiet: Bool = false, flush: Bool = false, @ViewBuilder content: () -> Content) {
+    public init(quiet: Bool = false, flush: Bool = false, interactive: Bool = false, @ViewBuilder content: () -> Content) {
         self.quiet = quiet
         self.flush = flush
+        self.interactive = interactive
         self.content = content()
+    }
+
+    /// The hover fill: `cardHover` on an interactive card, none otherwise.
+    /// It replaces the card's gradient (#1146 `.tc-card--interactive:hover`).
+    static func hoverFill(interactive: Bool) -> GlassRGBA? {
+        interactive ? GlassTokens.Color.cardHover : nil
     }
 
     public var body: some View {
@@ -17,35 +57,49 @@ public struct GlassCard<Content: View>: View {
             .padding(.vertical, flush ? 0 : (quiet ? 10 : GlassTokens.Space.cardPaddingVertical))
             .padding(.horizontal, flush ? 0 : (quiet ? 12 : GlassTokens.Space.cardPaddingHorizontal))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassTier(quiet ? .cardQuiet : .card)
+            .glassTier(quiet ? .cardQuiet : .card, hover: Self.hoverFill(interactive: interactive))
     }
 }
 
 /// A card with an eyebrow heading and an optional accessory on the right.
-/// With `action` the whole card is a button (Home's Missions and History).
+/// With `title`, #1146's two-level head: the eyebrow over an h2, the
+/// accessory (a chip, a re-read link) top-right. With `action` the whole
+/// card is a button (Home's Missions and History).
 public struct GlassEyebrowCard<Accessory: View, Content: View>: View {
     private let eyebrow: String
+    private let title: String?
     private let accessory: Accessory
     private let content: Content
     private let action: (() -> Void)?
 
     public init(
         _ eyebrow: String,
+        title: String? = nil,
         action: (() -> Void)? = nil,
         @ViewBuilder accessory: () -> Accessory = { EmptyView() },
         @ViewBuilder content: () -> Content
     ) {
         self.eyebrow = eyebrow
+        self.title = title
         self.action = action
         self.accessory = accessory()
         self.content = content()
     }
 
     private var card: some View {
-        GlassCard {
+        GlassCard(interactive: action != nil) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack {
-                    Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                HStack(alignment: title == nil ? .center : .top, spacing: GlassTokens.Space.s6) {
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                        Text(eyebrow).glassType(GlassTokens.TypeScale.eyebrow).foregroundStyle(GlassColor.textTertiary)
+                        if let title {
+                            Text(title)
+                                .glassType(GlassTokens.TypeScale.title)
+                                .foregroundStyle(GlassColor.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityAddTraits(.isHeader)
+                        }
+                    }
                     Spacer(minLength: GlassTokens.Space.s4)
                     accessory
                 }
@@ -101,7 +155,10 @@ public struct GlassConsentBlock: View {
     }
 }
 
-/// One datum in a well: dot with a halo, label, tabular value.
+/// One datum in a well: dot with a halo, label, tabular value. #1146's
+/// `.tc-legend-cell`: a fixed 28pt pill on one line, so two cells side by
+/// side are always the same height; a label too long for its half shrinks a
+/// little, then truncates, and never wraps.
 public struct GlassLegendCell: View {
     private let status: GlassStatus
     private let label: String
@@ -113,25 +170,34 @@ public struct GlassLegendCell: View {
         self.status = status
     }
 
+    /// How far a long label may shrink before it truncates.
+    public static let labelShrink: CGFloat = 0.85
+
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             HStack(spacing: 7) {
                 GlassStatusDot(status, size: GlassTokens.Size.dotLarge, halo: true)
                 Text(label).foregroundStyle(GlassColor.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(Self.labelShrink)
+                    .truncationMode(.tail)
             }
             Spacer(minLength: GlassTokens.Space.s4)
             Text(value).monospacedDigit().fontWeight(.semibold).foregroundStyle(GlassColor.textPrimary)
+                .lineLimit(1)
+                .fixedSize()
         }
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
         .padding(.horizontal, 10)
-        .frame(minHeight: GlassTokens.Size.controlLarge)
+        .frame(height: GlassTokens.Size.controlLarge)
         .glassTier(.well)
         .accessibilityElement(children: .combine)
     }
 }
 
 /// Label and value pairs, labels right-aligned in a 70pt column (the
-/// inspector's Path, Sessions, User).
+/// inspector's Path, Sessions, User), inset 6pt on each side (#1146
+/// `.tc-kv`).
 public struct GlassKeyValueList: View {
     public struct Item: Identifiable {
         public let label: String
@@ -172,8 +238,11 @@ public struct GlassKeyValueList: View {
                 .accessibilityElement(children: .combine)
             }
         }
+        .padding(.horizontal, Self.inset)
         .glassType(GlassTokens.TypeScale.label.weight(.regular))
     }
+
+    static let inset: CGFloat = 6
 }
 
 /// A grid row inside a flush card: hairline above, never around.
@@ -194,9 +263,31 @@ public struct GlassTableRow<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .overlay(alignment: .top) {
                 if !first {
-                    Rectangle().fill(GlassColor.hairline).frame(height: 0.5)
+                    GlassHairline(GlassColor.hairline)
                 }
             }
+    }
+}
+
+/// The heading row over a flush card's `GlassTableRow`s (#1146
+/// `TableHead`): eyebrow type in tertiary text, on the rows' insets, read as
+/// a header. The caller lays out the columns to match its rows.
+public struct GlassTableHead<Content: View>: View {
+    private let content: Content
+
+    public init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .glassType(GlassTokens.TypeScale.eyebrow)
+            .foregroundStyle(GlassColor.textTertiary)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -216,7 +307,7 @@ public struct GlassSectionRule: View {
                 .foregroundStyle(GlassColor.accentText)
                 .fixedSize()
                 .accessibilityAddTraits(.isHeader)
-            Rectangle().fill(GlassColor.ink(0.14)).frame(height: 0.5)
+            GlassHairline(GlassColor.ink(0.14))
         }
         .padding(.top, GlassTokens.Space.s3)
     }
@@ -235,9 +326,13 @@ public struct GlassNotice<Content: View>: View {
         self.content = content()
     }
 
+    static var titleGap: CGFloat { GlassTokens.Space.s3 }
+
     public var body: some View {
         GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // Title to body: space-3 (#1146 `.tc-notice`); the title stays
+            // secondary text, its tone carried by the dot.
+            VStack(alignment: .leading, spacing: Self.titleGap) {
                 if let title {
                     GlassStatusLabel(title, status: tone).fontWeight(.semibold)
                 }

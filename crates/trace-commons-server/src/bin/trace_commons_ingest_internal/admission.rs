@@ -852,7 +852,7 @@ pub(super) async fn challenge_handler(
         tenant.safe_auth_method(),
         tenant.principal_ref(),
     );
-    if !ACCOUNT_RATE_LIMITER.check(&format!("admission-challenge:{key}"), 10) {
+    if !ACCOUNT_RATE_LIMITER.check_principal(&format!("admission-challenge:{key}"), 10) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let config = state.admission.as_ref().ok_or_else(denied)?;

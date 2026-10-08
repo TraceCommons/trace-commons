@@ -149,7 +149,7 @@ pub struct NearAiLoginPending {
     pub nonce_hex: String,
     /// The S256 challenge from start; finish presents the verifier for it.
     pub code_challenge: String,
-    /// The device public key this ceremony enrols, base64.
+    /// The device public key this ceremony enrolls, base64.
     pub device_public_key: String,
     /// Unix seconds. Enforced by the row's own expiry as well, so a stale
     /// ceremony is unusable even if this field were ignored.
@@ -161,10 +161,18 @@ pub struct NearAiLoginPending {
 /// row, and a bind row's extra fields make it fail [`NearAiLoginPending`]'s
 /// `deny_unknown_fields`. The storage layer refuses to mix the two ceremonies
 /// before the preimage domains ever get the chance to.
+///
+/// `Enrol` is the same ceremony run by a session whose account is already
+/// `bound` (a further Mac signing in with a synced passkey): finish attaches
+/// the device only if the login's anchor is that account's own. The purpose is
+/// fixed at start from the binding state then, and finish refuses if the state
+/// no longer matches it, so a ceremony started as one never finishes as the
+/// other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NearAiBindPurpose {
     Bind,
+    Enrol,
 }
 
 /// A NEAR AI bind ceremony between `bind/start` and `bind/finish` (Z2 native
@@ -215,7 +223,7 @@ pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
 /// The device key is already registered under a different tenant.
 ///
 /// `device_keys.device_key_id` is a global primary key, so provisioning (and
-/// bind, which enrols the same daemon key) cannot place the key under this
+/// bind, which enrolls the same daemon key) cannot place the key under this
 /// tenant, and the key would go on authenticating into the tenant that holds
 /// it. Named, so it is not one more `near_provisioning_refused`; label-only,
 /// because which tenant holds the key is exactly what must not be disclosed.
@@ -228,6 +236,23 @@ pub const DEVICE_KEY_REGISTERED_ELSEWHERE: &str =
 /// [`DEVICE_KEY_REGISTERED_ELSEWHERE`] refusal.
 pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
+}
+
+/// An enrollment's login does not resolve to the session's own account.
+///
+/// Decided inside the account's own tenant, under RLS, so the check never
+/// reads another tenant: an anchor held by some other account and no anchor
+/// at all are the same refusal. Label-only, and the same value whatever the
+/// login resolves to elsewhere, because which account (if any) holds the
+/// login is exactly what must not be disclosed. Carried as
+/// `DatabaseError::Pool(NEAR_AI_ENROL_ACCOUNT_MISMATCH)`; test it with
+/// [`is_near_ai_enrol_account_mismatch`].
+pub const NEAR_AI_ENROL_ACCOUNT_MISMATCH: &str = "near_ai_enrol_account_mismatch";
+
+/// Whether an enrollment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
+/// refusal.
+pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) -> bool {
+    matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

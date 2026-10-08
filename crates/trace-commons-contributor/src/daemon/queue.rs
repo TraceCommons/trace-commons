@@ -446,6 +446,17 @@ pub struct QueueEntry {
     /// survives an exclusion the way it does today.
     #[serde(default)]
     pub approved_unattended: bool,
+    /// A person approved this session from the first-run past-session
+    /// picker (`include_past_sessions`). Such an entry does not count
+    /// against the watcher's queue cap ([`counts_against_the_cap`]): a
+    /// person's choice of their own past sessions must not stop the watcher
+    /// offering new ones (owner decision, 2026-10-05). Their own total is
+    /// bounded instead, by `past_sessions::MAX_LIVE_INCLUDED_SESSIONS`.
+    ///
+    /// `#[serde(default)]`, and left out of the file when `false`, so a queue
+    /// written before this field existed loads, and reads as the watcher's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person_included: bool,
     /// How many delegated subagent transcripts this entry's session hash
     /// covers, and how many were left out because the conversation exceeded
     /// the source's raw byte budget.
@@ -592,7 +603,7 @@ pub struct QueueEntry {
     /// card, an unenrolled build, or any build that pins nothing. Read back
     /// only while `previewed_envelope_digest` names the same digest
     /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
-    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// after an enrollment, a filter change, a revoked approval -- reads as
     /// not yet scrubbed with nothing to clear by hand.
     ///
     /// Counts and a digest, never content.
@@ -740,6 +751,14 @@ impl QueueEntry {
 /// A stable id for a queue entry, derived from the session hash so the same
 /// session keeps the same id across daemon restarts and across a queue file
 /// rewritten from scratch.
+/// Whether `e` takes one of the watcher's `max_queue_entries` places: a
+/// live (`Pending` or `Approved`) entry the watcher offered. A session a
+/// person included from the past-session picker does not
+/// ([`QueueEntry::person_included`]).
+pub fn counts_against_the_cap(e: &QueueEntry) -> bool {
+    matches!(e.state, QueueState::Pending | QueueState::Approved) && !e.person_included
+}
+
 pub fn entry_id_for(session_hash: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, session_hash.as_bytes())
 }
@@ -1201,7 +1220,7 @@ impl Queue {
         let live = self
             .entries
             .iter()
-            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .filter(|e| counts_against_the_cap(e))
             .count();
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             bail!("unknown-entry-id");
@@ -1232,6 +1251,45 @@ impl Queue {
         Ok(())
     }
 
+    /// Offer an aged-out session again, because a person chose it in the
+    /// first-run picker: `Expired` back to `Pending`, dated `now` as
+    /// [`Self::undo_keep`] dates its return, so expiry counts afresh.
+    ///
+    /// Only `Expired` moves. A kept, dismissed, waiting or decided entry
+    /// answers `false` and is left exactly as it was: a keep or a dismissal
+    /// is the contributor's own answer and the picker never overrides it.
+    /// No queue cap: an explicit selection is not the watcher offering more.
+    pub fn revive_expired(&mut self, entry_id: Uuid, now: DateTime<Utc>) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Expired {
+            return false;
+        }
+        e.state = QueueState::Pending;
+        e.reason_label = None;
+        e.discovered_at = now;
+        e.retry_after = None;
+        e.approved_scopes = None;
+        e.approved_verdict = None;
+        e.approved_correction = None;
+        e.approved_inputs = None;
+        e.approved_at = None;
+        e.approved_unattended = false;
+        e.previewed_envelope_digest = None;
+        e.attested_inference = None;
+        e.would_send_bytes = None;
+        true
+    }
+
+    /// Mark `entry_id` as a session a person included from the past-session
+    /// picker. See [`QueueEntry::person_included`].
+    pub fn mark_person_included(&mut self, entry_id: Uuid) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.person_included = true;
+        }
+    }
+
     pub fn pending(&self) -> Vec<&QueueEntry> {
         self.entries
             .iter()
@@ -1257,7 +1315,7 @@ impl Queue {
         let live = self
             .entries
             .iter()
-            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .filter(|e| counts_against_the_cap(e))
             .count();
         if live >= max_entries {
             bail!("queue-full");
@@ -2147,7 +2205,13 @@ impl Queue {
     /// drains below the cap will do anyway.
     pub fn load_can_land(&self, path: &Path, max_entries: usize) -> bool {
         let live = |e: &QueueEntry| matches!(e.state, QueueState::Pending | QueueState::Approved);
-        if self.entries.iter().filter(|e| live(e)).count() < max_entries {
+        if self
+            .entries
+            .iter()
+            .filter(|e| counts_against_the_cap(e))
+            .count()
+            < max_entries
+        {
             return true;
         }
         self.at_path(path).any(live)
@@ -2206,10 +2270,7 @@ impl Queue {
             let live = self
                 .entries
                 .iter()
-                .filter(|e| {
-                    matches!(e.state, QueueState::Pending | QueueState::Approved)
-                        && !stale.contains(&e.entry_id)
-                })
+                .filter(|e| counts_against_the_cap(e) && !stale.contains(&e.entry_id))
                 .count();
             if live >= max_entries {
                 bail!("queue-full");
@@ -2379,6 +2440,9 @@ impl Queue {
 ///   decision, not unattended approval. Kept entries themselves are excluded.
 /// - [`ProjectPolicy::waits_for_a_person_at_send`] -- backlog held back by
 ///   the automatic grant or an arming from now.
+/// - A trajectory export (`entry.source == SOURCE_TRAJECTORY`): the
+///   watcher never approves one unattended, so uncounted it would sit
+///   unseen until it expired.
 ///
 /// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
 /// that is the ordinary Ask-me case the badge exists for.
@@ -2415,6 +2479,10 @@ fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: Scrub
         ProjectMode::NotifyOnly => true,
         ProjectMode::AutoUpload => {
             scrub_check == ScrubCheck::Manual
+                // A trajectory export is never approved unattended
+                // (`watcher::visit_session`'s `from_trajectory`), so in an
+                // armed folder it waits for a person like any Ask-me offer.
+                || entry.source == crate::source::SOURCE_TRAJECTORY
                 || policy
                     .waits_for_a_person_at_send(&entry.project_key, &entry.path.to_string_lossy())
         }
@@ -3753,7 +3821,7 @@ mod tests {
         assert!(q.record_scrub(id, "sha256:envelope", counts));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
 
-        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // Re-pinned to a new build (a filter change, a re-enrollment): the
         // old count no longer describes what would be sent.
         assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
@@ -4523,6 +4591,33 @@ mod tests {
         );
     }
 
+    /// The first-run picker revives an aged-out offer, and nothing else: a
+    /// kept session stays kept, and a waiting one is not re-dated.
+    #[test]
+    fn revive_expired_returns_false_for_a_kept_entry() {
+        let mut q = queue_of(vec![entry("sha256:k", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:k");
+        let now = at("2026-10-01T00:00:00Z");
+        assert!(!q.revive_expired(id, now), "a Pending entry is not expired");
+        q.keep(id).unwrap();
+        assert!(!q.revive_expired(id, now), "a kept entry stays kept");
+        assert!(q.get(id).unwrap().is_kept());
+        assert!(!q.revive_expired(entry_id_for("sha256:none"), now));
+
+        let mut q = queue_of(vec![entry("sha256:e", "2026-08-01T00:00:00Z")]);
+        let id = entry_id_for("sha256:e");
+        assert_eq!(q.expire(at("2026-09-15T00:00:00Z"), 30, false), 1);
+        assert!(q.revive_expired(id, now));
+        let e = q.get(id).unwrap();
+        assert_eq!(e.state, QueueState::Pending);
+        assert_eq!(
+            e.discovered_at, now,
+            "dated now, so it does not expire again at once"
+        );
+        assert!(e.reason_label.is_none());
+        assert_eq!(q.expire(at("2026-10-02T00:00:00Z"), 30, false), 0);
+    }
+
     // -- `decisions_owed` (K6): the badge's exact count -----------------
 
     /// An Ask-me folder is the ordinary case the badge exists for: every
@@ -4612,6 +4707,37 @@ mod tests {
         let q = queue_of(vec![settling, left_by_manual]);
         assert_eq!(q.pending().len(), 2);
         assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+    }
+
+    /// A trajectory export always waits for a person, even in an armed
+    /// folder: the watcher never approves one unattended
+    /// (`watcher::visit_session`'s `from_trajectory`). So it is a decision
+    /// owed, and the badge says so -- otherwise it sits uncounted until it
+    /// expires.
+    #[test]
+    fn decisions_owed_counts_a_trajectory_export_in_an_armed_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut export = entry_in("/w/armed", QueueState::Pending);
+        export.source = crate::source::SOURCE_TRAJECTORY.to_string();
+        let native = {
+            let mut e = entry_in("/w/armed", QueueState::Pending);
+            e.session_hash = "sha256:native".into();
+            e.path = PathBuf::from("/w/armed/native.jsonl");
+            e
+        };
+        let q = queue_of(vec![export, native]);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "the export is owed a decision; the native session goes unattended"
+        );
     }
 
     /// An Automatic Scrub check hold needs a person even in an armed folder.

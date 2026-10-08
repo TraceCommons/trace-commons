@@ -286,7 +286,7 @@ pub struct ConsentMetadata {
     /// as written -- the semantic redaction passes are deliberately skipped,
     /// because a placeholder destroys the thing the correction exists to
     /// carry -- so this flag is the only declaration that the envelope holds
-    /// unredacted prose, and it is what enrols the trace in the PII backstop
+    /// unredacted prose, and it is what enrolls the trace in the PII backstop
     /// hold and floors it at Medium residual risk.
     ///
     /// `#[serde(default)]` because every envelope submitted before this field
@@ -298,7 +298,7 @@ pub struct ConsentMetadata {
     /// Whether the envelope carries routing and cost metadata about the
     /// inference hops that produced the session.
     ///
-    /// A fourth content class. Unlike `correction_included` it does NOT enrol
+    /// A fourth content class. Unlike `correction_included` it does NOT enroll
     /// the trace in the PII backstop hold and does not floor residual risk:
     /// the class is numbers and labels -- a backend id, a rung, a token count,
     /// a price -- and carries no prose from the session.
@@ -1275,7 +1275,7 @@ fn replay_value_is_populated(value: &Value) -> bool {
 /// the rescrub driver already classifies keys (`redact_envelope_side_channels`
 /// rewrites them, and the prose backstop reads them), so ignoring keys here
 /// meant the one component that would catch key-borne content never got
-/// enrolled: enrolment is what this predicate decides.
+/// enrolled: enrollment is what this predicate decides.
 ///
 /// The allow-list is what makes that safe. An exclusion list of "harmless"
 /// key names would be exactly the guess this function must not make, because
@@ -6602,7 +6602,7 @@ pub fn derive_envelope_content_presence(
 ///    consumes these flags as PERMISSION -- authorization lives in
 ///    `consent.scopes` -- but both consumers are protective controls:
 ///    [`residual_risk`] floors a declaring envelope at Medium, and the
-///    ingest PII-backstop hold enrols on either flag. An upward correction
+///    ingest PII-backstop hold enrolls on either flag. An upward correction
 ///    that fires wrongly costs a needless quarantine; a downward correction
 ///    that fires wrongly removes the backstop hold and the Medium floor from
 ///    a trace that does carry content. `derive_envelope_content_presence` is
@@ -14148,7 +14148,7 @@ mod tests {
         // content in the KEY declared nothing: all-boolean values, no
         // payload, no PII-backstop hold, Low-risk acceptance. The rescrub
         // driver classifies keys, so the component that would catch this
-        // never got enrolled -- enrolment is what this predicate decides.
+        // never got enrolled -- enrollment is what this predicate decides.
         for payload in [
             serde_json::json!({"someone@example.com": true}),
             serde_json::json!({"/Users/someone/notes.txt": null}),

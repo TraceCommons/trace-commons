@@ -223,8 +223,8 @@ pub enum Disclosure {
     /// recognises, is true.
     ModelScrubbed,
     /// Only the fixed patterns can be relied on. The wording for this is
-    /// `consent_copy::AUTO_PATTERNS_ONLY_*`, drafted for the Tauri grant
-    /// screen and not yet approved (the spec's Open list).
+    /// `consent_copy::AUTO_PATTERNS_ONLY_*`, written for the Tauri grant
+    /// screen and approved 2026-10-06.
     ///
     /// It is what [`disclosure`] always answers, and so what the pre-grant
     /// screen shows, correctly: [`disclosure`] reads configuration only,
@@ -370,7 +370,7 @@ mod tests {
     fn cfg(tenant: &str, scopes: &[&str], witness: bool, pii: Option<&str>) -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(false),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),

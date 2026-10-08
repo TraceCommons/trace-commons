@@ -26,11 +26,15 @@ ROUTE_RULES = (
     (re.compile(r"^/\.well-known/"), ("STA-005", "CMP-001")),
     (re.compile(r"^/v1/community/"), ("COM-001", "COM-002")),
     (re.compile(r"^/v1/admin/community/"), ("COM-001", "LIF-003")),
+    # Session-scoped progress; not the public, non-personalized catalogue.
+    (re.compile(r"^/v1/account/activity-missions/status$"), ("AUTH-001", "AUTH-004")),
     (re.compile(r"^/(v1/)?account/"), ("AUTH-001", "AUTH-004")),
     (re.compile(r"^/v1/contributors/"), ("STA-001", "CRD-004")),
     (re.compile(r"^/v1/traces"), ("SUB-001", "LIF-001")),
     (re.compile(r"^/v1/admission/"), ("AUTH-001", "SUB-001")),
     (re.compile(r"^/v1/attestation-collateral"), ("BND-004", "OPS-006")),
+    # Read-only catalogue of activity eligibility; rewards remain off.
+    (re.compile(r"^/v1/activity-missions$"), ("EXP-004", "CRD-004")),
     (re.compile(r"^/v1/missions"), ("EXP-004", "CRD-004")),
     (re.compile(r"^/v1/public/"), ("STA-001", "CMP-001")),
     (re.compile(r"^/v1/research/"), ("EXP-004", "CMP-001")),
@@ -118,6 +122,10 @@ def classify_table(name: str) -> tuple[str, ...] | None:
 
 
 def source_routes(path: Path) -> list[str]:
+    # Existing coverage is literal Router.route registrations only: typed
+    # AccountRoutes.get/post/... registrations are not discovered here. Their
+    # classifiers still record the authentication family; widening discovery
+    # needs a separate inventory review, not a catch-all classification rule.
     source = path.read_text()
     return sorted(set(re.findall(r'\.route\(\s*"([^"]+)"', source, re.DOTALL)))
 

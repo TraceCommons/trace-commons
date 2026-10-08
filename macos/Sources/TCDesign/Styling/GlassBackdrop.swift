@@ -94,14 +94,13 @@ struct GlassBackdrop: NSViewRepresentable {
     }
 }
 
-/// A pane's whole fill.
+/// A pane's whole fill: the native material with #1146's veil and pane
+/// gradient over it, as #1146's `html.tc-native-glass .tc-pane` draws it
+/// (owner ruling, 2026-10-07: the pane gradient, veil and edge from #1146,
+/// on macOS 26 too).
 ///
-/// - On macOS 26, Liquid Glass alone. No veil and no sheen: the regular
-///   variant keeps its own contents legible and draws its own highlights,
-///   and Apple reserves a dimming layer for the clear variant and tinting
-///   for primary actions.
-/// - Before 26, the HUD material with the veil and sheen over it: a painted
-///   approximation of the glass, as the spec gives it.
+/// - On macOS 26, Liquid Glass under the veil and the gradient.
+/// - Before 26, the HUD material under the same two.
 /// - In the content layer, the opaque base.
 struct GlassPaneFill: View {
     let radius: CGFloat
@@ -110,11 +109,9 @@ struct GlassPaneFill: View {
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
         switch GlassMaterial.current(content: content) {
-        case .liquidGlass:
-            GlassBackdrop(material: .liquidGlass, cornerRadius: radius)
-        case .vibrancy:
+        case .liquidGlass, .vibrancy:
             ZStack {
-                GlassBackdrop(material: .vibrancy, cornerRadius: radius)
+                GlassBackdrop(material: GlassMaterial.current(content: content), cornerRadius: radius)
                 shape.fill(GlassTokens.Color.glassVeil.color)
                 shape.fill(GlassTokens.Gradient.paneFill.linear)
             }
@@ -127,9 +124,9 @@ struct GlassPaneFill: View {
     }
 }
 
-/// The blur under a floating surface before macOS 26: the HUD material
-/// blended within the window, so it blurs the map or pane the surface floats
-/// on. The spec's popover tier asks for blur 24 at 170% saturation; the
+/// The blur under a floating surface: the HUD material blended within the
+/// window, so it blurs the map or pane the surface floats on (#1146's
+/// `backdrop-filter` on its floating controls, popovers and node cards). The spec's popover tier asks for blur 24 at 170% saturation; the
 /// system material is the nearest native equivalent, and it adapts with the
 /// system, Reduce Transparency included.
 struct GlassFloatingBlur: NSViewRepresentable {

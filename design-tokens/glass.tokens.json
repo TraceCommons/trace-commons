@@ -1,5 +1,9 @@
 {
   "$comment": "Trace Commons glass design tokens: the one source for the native macOS app (and, later, any other shell). Light and dark: every colour has a dark value and, where it differs, a light one, and follows the person's system appearance (D2 revised), purple brand (D3), SF Pro and SF Mono (R2): every type step is a macOS text style, so it follows the system text size, and its size is that style's size at the default setting (number was 28 in #1146; largeTitle is 26). Seeded from #1146's tauri-desktop/frontend/src/design-system/tokens at 09a26c0d. Edit here, then run scripts/design-tokens/generate.py; a Swift test fails if the generated file drifts.",
+  "$notes": [
+    "Window tier: #1146's window-level tokens (--tc-blur-window, --tc-blur-popover, --tc-blur-scrim, --tc-rim-window, --tc-rim-width, --tc-shadow-window and the three --tc-scene-glow colours) have no entry here. On macOS the native material does that work: panes are Liquid Glass on macOS 26 and the HUD vibrancy material before it, the window has no rim of ours, and the scene is the desktop. A shell with no native material would need them back.",
+    "Opacity: disabled (0.45) is the one disabled dimming for every control, #1146's --tc-cta-disabled-opacity; the submit pill and the checkbox, which #1146 dims to .55 and .7, use it too. The submit pill keeps its statusOff ink when disabled. rowOff (0.6) is a list row that is off, #1146's .tc-list-row[data-off]. At 0.6 a faded textTertiary sub-line is about 3.9:1 on the pane, so an off row sets its sub-line in textSecondary, which faded clears 4.5:1 (TextContrastTests)."
+  ],
   "version": 1,
   "color": {
     "purple": { "hex": "#6d14f3", "note": "Brand purple from the Trace logo; the one action." },
@@ -11,6 +15,7 @@
     "textTertiary": { "hex": "#b4b4bc", "note": "Raised from #a9a9b0 for 4.5:1 on glass. Light: 4.8:1 or more on every light ground it is drawn on (the scene, a well, the map field); #6a6a71 was 4.12 on mapFieldOuter.", "light": { "hex": "#5c5c63" } },
     "textSecondaryHighContrast": { "hex": "#e6e6ec", "note": "textSecondary under Increase Contrast.", "light": { "hex": "#2a2a2e" } },
     "textTertiaryHighContrast": { "hex": "#d6d6dc", "note": "textTertiary under Increase Contrast.", "light": { "hex": "#3c3c42" } },
+    "placeholder": { "hex": "#ffffff", "alpha": 0.46, "note": "A text field's prompt: #1146's .tc-input::placeholder, white, raised from #1146's 30% to the least that clears 4.5:1 on the field fill over every ground a field is drawn on (owner ruling, 2026-10-07: hold the WCAG floors; a prompt is text). Dark 4.61 or more (30% was 2.60); light 4.52 or more (30% was 2.03).", "light": { "hex": "#000000", "alpha": 0.57 } },
     "hairlineHighContrast": { "hex": "#ffffff", "alpha": 0.4, "note": "hairline under Increase Contrast. Light: 3:1 or more on every light ground (0.4 was 2.82).", "light": { "hex": "#000000", "alpha": 0.45 } },
     "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).", "light": { "hex": "#1d1d1f", "alpha": 0.55 } },
     "textOnAccent": { "hex": "#ffffff" },
@@ -21,7 +26,8 @@
     "statusOutside": { "hex": "#ff6b6b", "note": "Leaves for an outside model, no proof.", "light": { "hex": "#d0342c" } },
     "statusOnText": { "hex": "#3ddc84", "note": "statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.", "light": { "hex": "#11613a" } },
     "statusAskText": { "hex": "#f5c142", "note": "statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.", "light": { "hex": "#7a4a06" } },
-    "statusOutsideText": { "hex": "#ff6b6b", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusOutside.", "light": { "hex": "#a3221c" } },
+    "statusOutsideText": { "hex": "#ff9494", "note": "statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.", "light": { "hex": "#a3221c" } },
+    "destructiveText": { "hex": "#ff8a8a", "note": "The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.", "light": { "hex": "#c62828" } },
     "badgeFill": { "hex": "#ff6b6b", "note": "The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.", "light": { "hex": "#e04a42" } },
     "dataShared": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
     "dataKept": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
@@ -32,15 +38,23 @@
     "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec).", "light": { "hex": "#f2f3f6" } },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast.", "light": { "hex": "#ffffff", "alpha": 0.3 } },
     "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
-    "controlHover": { "hex": "#ffffff", "alpha": 0.16, "light": { "hex": "#000000", "alpha": 0.08 } },
+    "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.", "light": { "hex": "#ebebed", "alpha": 0.84 } },
+    "cardHover": { "hex": "#ffffff", "alpha": 0.1, "note": "Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.", "light": { "hex": "#ffffff", "alpha": 0.86 } },
+    "rowHover": { "hex": "#ffffff", "alpha": 0.05, "note": "Hover on an unselected list row (#1146 .tc-list-row:hover). Never over a selected row.", "light": { "hex": "#000000", "alpha": 0.04 } },
+    "toolbarExpanded": { "hex": "#55555a", "note": "A toolbar button whose menu is open (#1146 .tc-btn--icon[aria-expanded=true]). textPrimary on it clears 4.5:1 in both appearances.", "light": { "hex": "#d1d1d6" } },
+    "toolbarGlyph": { "hex": "#e6e6ec", "note": "A toolbar button's glyph (#1146 monitor-toolbar.tsx).", "light": { "hex": "#1d1d1f" } },
+    "toolbarGlyphHidden": { "hex": "#83838c", "note": "A toolbar glyph whose pane is hidden (#1146 .tc-btn--icon[aria-pressed=false]). Dark is #1146's #7c7c86 lightened the least that clears the 3:1 glyph floor on both control-fill stops (3.03; #7c7c86 was 2.76), owner ruling, 2026-10-07: hold the WCAG floors. Light keeps #1146's value (3.35 or more).", "light": { "hex": "#8a8a90" } },
     "controlSelected": { "hex": "#ffffff", "alpha": 0.16, "light": { "hex": "#ffffff" } },
+    "controlSelectedFloating": { "hex": "#ffffff", "alpha": 0.18, "note": "The chosen segment of a floating segmented control (the map's view tabs), drawn with no edge: #1146 .tc-segmented--floating .tc-segmented__item[aria-selected].", "light": { "hex": "#ffffff" } },
     "toggleOn": { "hex": "#3a7bd5", "light": { "hex": "#2f6bc4" } },
     "toggleOff": { "hex": "#ffffff", "alpha": 0.18, "light": { "hex": "#000000", "alpha": 0.16 } },
     "toggleOnSettings": { "hex": "#8a3dff", "light": { "hex": "#7a2cf5" } },
-    "watchOn": { "hex": "#3ddc84", "light": { "hex": "#28b463" } },
+    "watchOn": { "hex": "#3ddc84", "note": "The watch switch's track when on: statusOn in both appearances, as #1146's --tc-watch-on is var(--tc-status-on). The knob is white on it, as #1146 draws it, with switchKnobEdge inside it.", "light": { "hex": "#1a8f4c" } },
+    "switchKnobEdge": { "hex": "#000000", "alpha": 0.65, "note": "A 1pt ring inside the white switch knob, drawn on the watch switch when on (owner ruling, 2026-10-07: hold the WCAG floors). #1146 draws the knob white on every track; on the bright dark-appearance watch green white is about 1.8:1, so the knob is told apart from its track by this ring, which over the white knob clears 3:1 against the track (3.9; SwitchContrastTests). Light needs no help (the knob alone clears 3:1) and keeps a faint ring.", "light": { "hex": "#000000", "alpha": 0.18 } },
     "hairline": { "hex": "#ffffff", "alpha": 0.07, "note": "Rows inside a list only; never around a container.", "light": { "hex": "#000000", "alpha": 0.08 } },
-    "popoverFill": { "hex": "#22242a", "alpha": 0.78, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
-    "menuFill": { "hex": "#22242a", "alpha": 0.72, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
+    "rule": { "hex": "#ffffff", "alpha": 0.12, "note": "The 0.5pt rule under a modal's header and over its footer, and over the Traces graph footer (#1146 rgba(255,255,255,0.12)).", "light": { "hex": "#000000", "alpha": 0.12 } },
+    "popoverFill": { "hex": "#22242a", "alpha": 0.94, "light": { "hex": "#f7f7f9", "alpha": 0.84 } },
+    "menuFill": { "hex": "#22242a", "alpha": 0.94, "light": { "hex": "#f7f7f9", "alpha": 0.8 } },
     "menuHover": { "hex": "#3a7bd5", "alpha": 0.85, "note": "Light: deep enough for menuHoverText at 4.5:1 (4.91).", "light": { "hex": "#2a62b5", "alpha": 0.9 } },
     "menuHoverText": { "hex": "#f2f2f4", "note": "A menu item's text on menuHover: textPrimary in dark, white in light, as the macOS menu selection.", "light": { "hex": "#ffffff" } },
     "menuSelection": { "hex": "#2f6ac0", "note": "The menu-row hover behind white text. Dark is the selection colour, so white clears 4.5:1 (5.3; white on blue #3a7bd5 was 4.22); light is deeper so white clears 4.5:1 (5.98; blue's light value was 4.37 under it).", "light": { "hex": "#2a62b5" } },
@@ -54,9 +68,10 @@
     "menuChipKept": { "hex": "#3aa0ff", "alpha": 0.35, "light": { "hex": "#2f6bc4", "alpha": 0.18 } },
     "menuNoProof": { "hex": "#ff8a8a", "light": { "hex": "#c62828" } },
     "menuSeparator": { "hex": "#ffffff", "alpha": 0.14, "light": { "hex": "#000000", "alpha": 0.1 } },
-    "nodeCardFill": { "hex": "#14161c", "alpha": 0.72, "light": { "hex": "#ffffff", "alpha": 0.84 } },
-    "scrim": { "hex": "#000000", "alpha": 0.4, "light": { "hex": "#000000", "alpha": 0.25 } },
-    "selection": { "hex": "#2f6ac0", "note": "Darker than blue so white row text clears 4.5:1 (5.3:1); white on #3a7bd5 was 4.22:1.", "light": { "hex": "#2f6bc4" } },
+    "nodeCardFill": { "hex": "#14161c", "alpha": 0.92, "light": { "hex": "#ffffff", "alpha": 0.84 } },
+    "scrim": { "hex": "#000000", "alpha": 0.35, "note": "The general scrim, #1146's --tc-scrim at .35. modalScrim, behind a GlassModal, is #1146's --tc-modal-scrim at .40.", "light": { "hex": "#000000", "alpha": 0.25 } },
+    "modalScrim": { "hex": "#000000", "alpha": 0.4, "note": "Behind a GlassModal, over a within-window blur of size.modalScrimBlur (#1146 --tc-modal-scrim and --tc-modal-scrim-blur). Light is lighter so the light panes are dimmed, not blacked out.", "light": { "hex": "#000000", "alpha": 0.25 } },
+    "selection": { "hex": "#3275d3", "note": "#1146's --tc-selection, var(--tc-blue) #3a7bd5, darkened the least, at the same hue, that white row text clears 4.5:1 (4.55; #3a7bd5 was 4.22), owner ruling, 2026-10-07: hold the WCAG floors. Light keeps blue's value (5.22).", "light": { "hex": "#2f6bc4" } },
     "mapIdle": { "hex": "#ffffff", "alpha": 0.35, "light": { "hex": "#000000", "alpha": 0.3 } },
     "mapNodeOff": { "hex": "#5d5d63", "light": { "hex": "#a1a1a6" } },
     "mapHub": { "hex": "#8e8e96", "note": "The map's centre node.", "light": { "hex": "#8a8a92" } },
@@ -67,6 +82,9 @@
     "mapRuleIgnoreFill": { "hex": "#3a3a3e", "light": { "hex": "#e4e4e7" } },
     "mapRuleUnsetFill": { "hex": "#2a2a2c", "light": { "hex": "#ededf0" } },
     "mapCredentialOn": { "hex": "#2c7a5b", "light": { "hex": "#27a06b" } },
+    "graphFocusOn": { "hex": "#4da3ff", "note": "The graph footer's focus glyph while the map is focused on a tool (#1146 traces-graph.tsx).", "light": { "hex": "#1f6fd1" } },
+    "graphFocusIdle": { "hex": "#d6d6dc", "note": "The focus glyph when a tool can be focused.", "light": { "hex": "#3c3c42" } },
+    "graphFocusOff": { "hex": "#6b6b70", "note": "The focus glyph with nothing selected to focus on.", "light": { "hex": "#a1a1a6" } },
     "consentFill": { "hex": "#000000", "alpha": 0.25, "light": { "hex": "#000000", "alpha": 0.04 } },
     "fieldFill": { "hex": "#000000", "alpha": 0.25, "light": { "hex": "#000000", "alpha": 0.05 } },
     "tintOn": { "hex": "#3ddc84", "alpha": 0.18, "light": { "hex": "#1a8f4c", "alpha": 0.14 } },
@@ -101,15 +119,15 @@
       { "hex": "#ffffff", "alpha": 0.14, "at": 0, "light": { "hex": "#ffffff", "alpha": 0.92 } },
       { "hex": "#ffffff", "alpha": 0.07, "at": 1, "light": { "hex": "#ffffff", "alpha": 0.72 } }
     ] },
-    "ctaFill": { "angle": 180, "stops": [
+    "ctaFill": { "angle": 180, "note": "Translucent in dark, as #1146. Opaque in light: a translucent purple over a light pane washes out under its white label (under 4.5:1), so the light stops are the solid brand purples.", "stops": [
       { "hex": "#8a3dff", "alpha": 0.72, "at": 0, "light": { "hex": "#7a2cf5" } },
       { "hex": "#6d14f3", "alpha": 0.62, "at": 1, "light": { "hex": "#6d14f3" } }
     ] },
-    "ctaSecondaryFill": { "angle": 180, "stops": [
+    "ctaSecondaryFill": { "angle": 180, "note": "Opaque in light, for the same reason as ctaFill.", "stops": [
       { "hex": "#4a0ea6", "alpha": 0.6, "at": 0, "light": { "hex": "#5a12c9" } },
       { "hex": "#320878", "alpha": 0.55, "at": 1, "light": { "hex": "#4a0ea6" } }
     ] },
-    "checkboxOnFill": { "angle": 180, "stops": [
+    "checkboxOnFill": { "angle": 180, "note": "Opaque in light, so the white check clears 4.5:1 on it.", "stops": [
       { "hex": "#8a3dff", "alpha": 0.8, "at": 0, "light": { "hex": "#7a2cf5" } },
       { "hex": "#6d14f3", "alpha": 0.7, "at": 1, "light": { "hex": "#6d14f3" } }
     ] }
@@ -174,6 +192,9 @@
       { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.24 } },
       { "y": 10, "blur": 30, "hex": "#000000", "alpha": 0.28, "light": { "hex": "#000000", "alpha": 0.126 } }
     ],
+    "barTrackEdge": [
+      { "y": 1, "hex": "#ffffff", "alpha": 0.14, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.5 } }
+    ],
     "consentEdge": [
       { "y": 1, "hex": "#ffffff", "alpha": 0.1, "inset": true, "light": { "hex": "#ffffff", "alpha": 0.2 } }
     ]
@@ -186,7 +207,7 @@
     "tile": 6,
     "checkbox": 5,
     "pill": 999,
-    "menuPanel": 18,
+    "menuPanel": 14,
     "menuStatePill": 22
   },
   "space": {
@@ -201,14 +222,20 @@
     "s9": 20,
     "s10": 24,
     "paneGap": 10,
-    "windowPadding": 10,
+    "windowPadding": 0,
     "windowControlsInset": 30,
     "windowControlsWidth": 78,
     "panePadding": 12,
+    "inspectorPaddingHorizontal": 16,
+    "inspectorPaddingVertical": 18,
+    "treeInset": 8,
+    "mapOverlayInset": 14,
     "cardPaddingVertical": 12,
     "cardPaddingHorizontal": 14,
     "cardGap": 10,
-    "inlineGap": 6
+    "inlineGap": 6,
+    "modalInsetTop": 52,
+    "modalInset": 28
   },
   "size": {
     "control": 26,
@@ -231,7 +258,9 @@
     "toolLogoLarge": 20,
     "listRow": 40,
     "paneLeftWidth": 400,
+    "paneLeftCompactWidth": 360,
     "mapWidth": 600,
+    "mapMinWidth": 360,
     "inspectorWidth": 300,
     "windowWidth": 1320,
     "windowHeight": 760,
@@ -241,15 +270,28 @@
     "inspectorBreakpoint": 900,
     "windowMinWidth": 760,
     "windowMinHeight": 560,
-    "nodeCardWidth": 260
+    "nodeCardWidth": 260,
+    "modalWidth": 780,
+    "modalNarrowWidth": 450,
+    "modalNavWidth": 180,
+    "modalScrimBlur": 8,
+    "spinner": 12,
+    "spinnerStroke": 1.5,
+    "skeletonHeight": 12,
+    "textAreaMinHeight": 56,
+    "radio": 15,
+    "radioDot": 5
   },
   "opacity": {
     "disabled": 0.45,
-    "rowOff": 0.7
+    "disabledSubmit": 0.55,
+    "disabledCheck": 0.7,
+    "rowOff": 0.6,
+    "skeletonDim": 0.5
   },
   "type": {
     "micro": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 13 },
-    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "semibold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
+    "eyebrow": { "textStyle": "caption2", "size": 10, "weight": "bold", "lineHeight": 14, "tracking": 0.8, "uppercase": true },
     "caption": { "textStyle": "subheadline", "size": 11, "weight": "regular", "lineHeight": 16 },
     "label": { "textStyle": "callout", "size": 12, "weight": "medium", "lineHeight": 16 },
     "body": { "textStyle": "body", "size": 13, "weight": "regular", "lineHeight": 18 },
@@ -269,6 +311,8 @@
     "easeX1": 0.2,
     "easeY1": 0.8,
     "easeX2": 0.2,
-    "easeY2": 1
+    "easeY2": 1,
+    "spin": 0.8,
+    "pulse": 1.6
   }
 }

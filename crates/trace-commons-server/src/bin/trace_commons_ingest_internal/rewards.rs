@@ -149,8 +149,8 @@ fn account_slot_in(
         ctx.tenant_id,
         ctx.account_id.as_uuid()
     );
-    if !ACCOUNT_RATE_LIMITER.check("reward-account-global", 1_200)
-        || !ACCOUNT_RATE_LIMITER.check(&key, 120)
+    if !ACCOUNT_RATE_LIMITER.check_global("reward-account-global", 1_200)
+        || !ACCOUNT_RATE_LIMITER.check_principal(&key, 120)
     {
         return None;
     }
@@ -171,7 +171,7 @@ fn database(state: &AppState) -> Result<&dyn trace_commons_server::db::Database,
 }
 
 fn public_slot(headers: &HeaderMap, resource: &str) -> Option<[ConcurrencyGuard<'static>; 2]> {
-    if !ACCOUNT_RATE_LIMITER.check(&format!("reward-{resource}-global"), 2_000)
+    if !ACCOUNT_RATE_LIMITER.check_global(&format!("reward-{resource}-global"), 2_000)
         || !ACCOUNT_RATE_LIMITER.check(
             &format!("reward-{resource}-ip:{}", client_ip_for_rate_limit(headers)),
             120,

@@ -2,7 +2,7 @@
 //!
 //! `admission_control_visible` is unit-tested next to itself in
 //! `ui::preview`, and a mutation inside it goes red there. The wiring that
-//! hands it the enrolment is not: it lives on a `gtk::Button` inside a
+//! hands it the enrollment is not: it lives on a `gtk::Button` inside a
 //! `Sheet` that cannot be built without a display, so a call site that
 //! passed a literal `true` for `required` -- offering the button to a
 //! contributor enrolled by invite, whose only possible outcome is a refusal

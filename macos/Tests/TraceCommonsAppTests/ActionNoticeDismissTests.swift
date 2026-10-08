@@ -34,16 +34,21 @@ import XCTest
 ///   surface saying nothing about a state that still holds.
 /// - `AppModel.summaryErrors[id]`, `credentialAttempt` and
 ///   `harnessExposureRequest` are each cleared on their own completion path.
-/// - `SettingsView.loginItemActionError`, `SettingsView.consentSaveError`,
-///   `OnboardingRootsView.failure` and `PreviewSheet.failure` are view-local
-///   `@State`, cleared at the top of each attempt and gone with the view.
+/// - `AppModel.loginItemActionError` and `AppModel.consentWriteRefused` are
+///   cleared at the top of each attempt, like the readouts above; they live
+///   on the model only so that switching Settings section cannot drop them.
+/// - `PreviewSheet.failure` is view-local `@State`, cleared at the top of
+///   each attempt and gone with the view.
+/// - `FirstRunRunner.failure` lives as long as the first-run host and is
+///   cleared at the start of each commit; what must outlive the host is
+///   handed to `firstRunNotice` (scanned here).
 ///
 /// What made the notice different is that only two actions ever assign it and
 /// nothing anywhere assigns `nil`, so nothing in the app's own operation could
 /// ever take it off the screen.
 final class ActionNoticeDismissTests: XCTestCase {
     /// The published properties that reach a contributor as a banner.
-    private static let messageProperties = ["lastActionError", "lastActionNotice"]
+    private static let messageProperties = ["lastActionError", "lastActionNotice", "firstRunNotice"]
 
     /// Every render of an action message goes through the dismissible banner,
     /// and each banner clears the very property whose presence drew it.
@@ -61,6 +66,7 @@ final class ActionNoticeDismissTests: XCTestCase {
             "only \(sources.count) sources were scanned; the whole app target is expected")
 
         var sites: [String: Int] = [:]
+        var glassSites = 0
         var failures: [String] = []
         for (path, text) in sources.sorted(by: { $0.key < $1.key }) {
             let lines = text.components(separatedBy: "\n")
@@ -69,11 +75,18 @@ final class ActionNoticeDismissTests: XCTestCase {
                     line.contains("if let") && line.contains("model.\($0)")
                 }) else { continue }
                 sites[property, default: 0] += 1
-                let rendered = lines[(index + 1)...].prefix(3).joined(separator: " ")
+                // A glass notice draws the same message in a `GlassNotice`
+                // whose dismiss button sits a few lines below it; the
+                // clear-the-same-property half applies to it unchanged.
+                let glass = (lines.dropFirst(index + 1).first ?? "").contains("GlassNotice(")
+                let rendered = lines[(index + 1)...].prefix(glass ? 12 : 3).joined(separator: " ")
                 let location = "\(path):\(index + 1) (\(property))"
-                if !rendered.contains("ActionMessageBanner(") {
+                if glass { glassSites += 1 }
+                // The legacy banner left with the legacy shell (R15): every
+                // render site is a glass notice.
+                if !glass {
                     failures.append(
-                        "\(location) renders without a dismiss control: \(rendered.trimmed)")
+                        "\(location) renders outside a dismissible GlassNotice: \(rendered.trimmed)")
                 } else if !rendered.contains("model.\(property) = nil") {
                     failures.append(
                         "\(location) has a banner whose dismiss does not clear \(property): "
@@ -90,7 +103,27 @@ final class ActionNoticeDismissTests: XCTestCase {
                 sites[property] ?? 0, 0,
                 "no render site was found for \(property) -- this scan proved nothing about it")
         }
+        // The Projects section's glass notice is scanned, not skipped.
+        XCTAssertGreaterThan(glassSites, 0, "no GlassNotice render site was scanned")
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+
+    /// The Projects error notice is never undismissable: its button is drawn
+    /// unconditionally, in the banner's own shape -- an x whose name is the
+    /// banner's word. It never borrows Traces' dismiss verb, which removes a
+    /// session for good, and never draws the VoiceOver sentence as its text.
+    func testTheProjectsErrorNoticeAlwaysHasADismissButton() throws {
+        let sources = try Self.appSources()
+        let text = try XCTUnwrap(sources["Views/Settings/ProjectsSection.swift"])
+        XCTAssertTrue(text.contains("if let error = model.lastActionError {"))
+        XCTAssertTrue(text.contains("Button { model.lastActionError = nil } label: {"),
+                      "the dismiss button must be drawn unconditionally and clear the error")
+        XCTAssertTrue(text.contains("Image(systemName: \"xmark\")"))
+        XCTAssertTrue(text.contains(".accessibilityLabel(ActionNoticeWords.dismissWord)"))
+        XCTAssertFalse(text.contains("MonitorTracesCopy"), "the Traces dismiss verb is borrowed")
+        XCTAssertFalse(text.contains("dismissLabel"))
+        XCTAssertFalse(text.contains("Button(ActionNoticeWords.dismissWord"),
+                       "the VoiceOver sentence is drawn as visible text")
     }
 
     /// The dismiss closure's own precondition: the notice is externally

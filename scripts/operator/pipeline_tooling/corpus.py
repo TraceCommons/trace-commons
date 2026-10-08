@@ -315,6 +315,25 @@ def safe_report_value(value):
     return value
 
 
+def evidence_digests(report):
+    """`(corpus_digest, input_digest)`: the two digests the corpus harness's
+    evidence carries beside its counts, for an attestation to sign (P5-D14),
+    recomputed here from the validated `report`.
+
+    `corpus_digest` is the digest of the normalized direct corpus the run
+    loaded: the one partition's own digest (the SHA-256 of its file), or, for
+    the two partitions of an HF pin, the canonical hash of the list of both
+    digests in order. `input_digest` is the canonical hash of the list of
+    every fixture's `request_content_hash`, in the order the run posted them.
+    `corpus_evidence_digests` in `pipeline_corpus_pg_tests.rs` computes the
+    same two values (each pins the same vectors)."""
+    sections = report["partitions"]
+    corpus_digests = [section["corpus_digest"] for section in sections]
+    requests = [item["request_content_hash"] for section in sections for item in section["fixtures"]]
+    corpus_digest = corpus_digests[0] if len(corpus_digests) == 1 else sha256_digest(canonical(corpus_digests))
+    return corpus_digest, sha256_digest(canonical(requests))
+
+
 def fixture_mismatches(item):
     """The labels of every expectation `item` misses, in the harness's
     order: the same rule `pipeline_corpus_pg_tests::fixture_mismatches`

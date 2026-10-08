@@ -33,7 +33,7 @@ public static class SessionRootsCopy
         + "or say you do not use it.";
 
     /// <summary>The label on the "I don't use this agent" choice.</summary>
-    public const string DoNotUse = "I don't use this agent";
+    public const string DoNotUse = "Not used";
 
     /// <summary>
     /// Shown on every row, whether or not discovery found anything.

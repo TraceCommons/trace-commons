@@ -1,6 +1,6 @@
 //! Onboarding: the six screens from the shared design spec.
 //!
-//! Until this existed the Linux app could not enrol anyone. It detected the
+//! Until this existed the Linux app could not enroll anyone. It detected the
 //! unenrolled state and said so -- [`copy::UNENROLLED_PREVIEW`] -- and then
 //! offered no way to leave it, so an app-only contributor was stuck and had
 //! to be sent to the CLI. macOS is the reference implementation
@@ -72,6 +72,10 @@ impl Step {
 #[derive(Clone, Debug, serde::Deserialize)]
 struct ScopeOption {
     name: String,
+    /// The core's title for the scope. Required, with no default: a list
+    /// carrying a scope without one does not parse, so no row is drawn under
+    /// words this shell made up (owner ruling, 2026-10-06).
+    title: String,
     #[serde(default)]
     description: String,
     #[serde(default)]
@@ -205,7 +209,7 @@ pub use trace_commons_contributor::commands::invite_from_deep_link;
 
 /// Hold an invite from the command line until onboarding is built.
 ///
-/// Note what this does *not* do: it does not enrol. A link someone clicked
+/// Note what this does *not* do: it does not enroll. A link someone clicked
 /// in mail still lands on the Connect screen with the instance shown and
 /// the button un-pressed, because the decision this screen exists to ask
 /// for is which commons to join -- and a URL handler is not a person
@@ -766,13 +770,9 @@ fn render_scopes(onboarding: &Rc<Onboarding>, scopes: &[ScopeOption]) {
             let text = gtk::Box::new(gtk::Orientation::Vertical, space::XXS);
             let title_label = gtk::Label::builder()
                 .label(if scope.always_on {
-                    format!(
-                        "{}  {}",
-                        copy::scope_title(&scope.name),
-                        copy::ONBOARD_ALWAYS_ON_TAG
-                    )
+                    format!("{}  {}", scope.title, copy::ONBOARD_ALWAYS_ON_TAG)
                 } else {
-                    copy::scope_title(&scope.name)
+                    scope.title.clone()
                 })
                 .xalign(0.0)
                 .wrap(true)

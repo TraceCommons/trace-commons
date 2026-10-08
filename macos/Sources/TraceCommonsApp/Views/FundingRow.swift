@@ -1,4 +1,5 @@
-// INTEGRATION: add FundingRow(copy:) inside CredentialSection. AppModel supplies
+// INTEGRATION: FundingRow(copy:) is its own card on the Inference tab, after the
+// balance panel (#1146's funding panel). AppModel supplies
 // nearAiFunding(expected: FundingDestination?) async -> FundingStatus? and must
 // return nil after awaiting if its captured client is no longer current or the
 // task was cancelled. PrivateInferenceCopy supplies fundingTitle, fundingWhat,
@@ -9,6 +10,7 @@
 
 import Foundation
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The exact Cloud organization and credential revision displayed to the user.
@@ -113,14 +115,19 @@ struct FundingRow: View {
     @State private var visible = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.fundingTitle)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            // #1146's funding panel: the billing eyebrow at the top of its
+            // own card, after the balance panel.
+            Text(copy.fundingTitle)
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
             Text(status?.view.message ?? copy.fundingUnavailable)
-                .font(TC.Font_.body)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(copy.fundingWhat)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button {
                 load(opening: status?.destination)
@@ -128,7 +135,7 @@ struct FundingRow: View {
                 Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
                     .frame(minHeight: 44)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(GlassButtonStyle(.glass))
             .disabled(model.credentialBusy || request != nil)
         }
         .onAppear {

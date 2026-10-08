@@ -206,6 +206,14 @@ final class TypeScaleTests: XCTestCase {
             XCTAssertEqual(step.scale, step.textStyle.resolvedSize / step.size, accuracy: 0.0001, "type.\(name)")
             XCTAssertEqual(step.resolvedTracking, step.tracking * step.scale, accuracy: 0.0001, "type.\(name)")
             XCTAssertGreaterThanOrEqual(step.lineSpacing, 0, "type.\(name)")
+            // Derived from the resolved size, not a literal: the stated line
+            // height less 1.2x the size, moved by the same scale.
+            XCTAssertEqual(step.lineSpacing, max(0, (step.lineHeight - step.size * 1.2) * step.scale),
+                           accuracy: 0.0001, "type.\(name)")
+            if step.lineHeight > step.size * 1.2 {
+                XCTAssertEqual(step.lineSpacing / step.scale, step.lineHeight - step.size * 1.2,
+                               accuracy: 0.0001, "type.\(name) leading is not scale-invariant")
+            }
         }
     }
 
@@ -245,6 +253,36 @@ final class FixedPointTypeTests: XCTestCase {
             }
         }
         XCTAssertEqual(allowed, 1, "glassGlyph's own font was not found; this scan proved nothing")
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+}
+
+/// A hairline is one device pixel: 0.5pt on Retina, a whole point at 1x,
+/// where a 0.5pt fill blends into the glass and drops out. No source draws
+/// a 0.5pt rule by hand.
+final class HairlineTests: XCTestCase {
+    func test_aHairlineIsOneDevicePixel() {
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 1), 1)
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 2), 0.5)
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 3), 0.5, "never thinner than half a point")
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 0), 1)
+    }
+
+    func test_noSourceDrawsAHalfPointRuleByHand() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 50, "the sources were not found")
+        var failures: [String] = []
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for needle in [".frame(height: 0.5)", ".frame(width: 0.5)"] where text.contains(needle) {
+                failures.append("\(file.lastPathComponent) draws \(needle); use GlassHairline")
+            }
+        }
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
     }
 }

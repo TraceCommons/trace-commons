@@ -5,6 +5,8 @@
 mod account_routes;
 #[path = "trace_commons_ingest_internal/account_trust_growth.rs"]
 mod account_trust_growth_routes;
+#[path = "trace_commons_ingest_internal/activity_missions.rs"]
+mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
@@ -109,6 +111,7 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::invite_lookup::lookup_client_key;
 use trace_commons_server::near_account_identity::{
     NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
 };
@@ -260,13 +263,20 @@ use trace_commons_server::trace_score_attestation::{
     sign_versioned_score_attestation,
 };
 use trace_commons_server::versioned_pipeline::{
-    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_SUBMISSION_INOPERABLE_LABEL,
-    PgPipelineStore, PipelineAdmissionLimits, PipelineFollowUps, PipelineIndexRebuildReport,
-    PipelineLeaseConfig, PipelineNearPayoutControls, PipelineNearSettlementMode,
-    PipelineNoveltyUtilityChecks, PipelineQuotaScope, PipelineReceiptRequest,
-    PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction, PipelineReviewClaim,
-    PipelineReviewClaimOutcome, PipelineService, PipelineWithdrawalFollowUpState,
-    PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper, is_pipeline_score_object_ref,
+    AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+    PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore, PipelineAdmissionLimits,
+    PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig, PipelineNearPayoutControls,
+    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
+    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
+    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
+    is_pipeline_score_object_ref,
+};
+use trace_commons_server::versioned_pipeline_activation::{
+    NewReceiptRoute, NewReceiptRouting, PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+    PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL, PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+    PIPELINE_TENANT_NOT_SERVED_LABEL, PipelineActivationStore, ReceiptOwner, RoutingState,
+    decide_new_receipt_route,
 };
 use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
 use trace_commons_server::versioned_pipeline_product::{
@@ -277,6 +287,10 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineProcessingStatus, PipelineProductStore, PipelineReconciliationRows,
     is_pipeline_export_manifest_purpose_code, pipeline_export_manifest_purpose_code,
 };
+use trace_commons_server::versioned_pipeline_qualification::{
+    BundlePackageTrustStore, CheckResultTrustStore, DEPLOYED_CODE_REVISION_HASH,
+    PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL, PipelineQualificationStore,
+};
 use uuid::Uuid;
 
 const DEFAULT_BIND: &str = "127.0.0.1:3907";
@@ -285,6 +299,15 @@ const DEFAULT_BIND: &str = "127.0.0.1:3907";
 /// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
 const MAX_INGEST_BODY_BYTES: usize =
     trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Bundle `begin` (a manifest) and `put` (one attachment, envelope included)
+/// refuse anything over the attachment cap in their handlers, so a larger body
+/// is never useful there and must not be buffered first. `finalize` carries a
+/// whole envelope and keeps `MAX_INGEST_BODY_BYTES`.
+const MAX_TOKEN_BUNDLE_BODY_BYTES: usize =
+    trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+/// Ordinary API requests do not need envelope-sized buffering. Large bodies
+/// are enabled only on the authenticated upload method routers below.
+const DEFAULT_API_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Ingest must accept every envelope the contributor is willing to build.
 /// These were independent constants once and they drifted -- the client
 /// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
@@ -1637,6 +1660,8 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 
 #[derive(Clone)]
 struct AppState {
+    activity_missions_policy:
+        Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -1670,6 +1695,61 @@ struct AppState {
     /// pipeline run (retention maintenance, ruling RB-30) queue the
     /// pipeline's follow-up through it, for a runtime to process.
     pipeline_store: Option<Arc<PgPipelineStore>>,
+    /// The tenants' committed routing rows and each submission id's
+    /// permanent owner, on the same PostgreSQL backend as `pipeline_store`
+    /// and present exactly when it is. With a pipeline runtime injected,
+    /// every new upload reads its tenant's routing row through it, and the
+    /// legacy path claims a submission id through it before its first write
+    /// (`decide_upload_route`, `route_pipeline_receipt`).
+    pipeline_activation: Option<Arc<PipelineActivationStore>>,
+    /// The tenants' bundle qualifications, on the same PostgreSQL backend as
+    /// `pipeline_activation` and present exactly when it is. Written only by
+    /// `POST /v1/admin/pipeline/qualifications`, through
+    /// `qualify_bundle_attested` (`pipeline_activation`).
+    pipeline_qualification: Option<Arc<PipelineQualificationStore>>,
+    /// The keys whose signatures make a bundle package trusted, from the JSON
+    /// file `TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH` names; `None`
+    /// when the variable is unset, and then the qualification and activation
+    /// routes refuse with `pipeline_trust_store_missing`.
+    pipeline_package_trust: Option<Arc<BundlePackageTrustStore>>,
+    /// The keys whose signatures make a check result count, from
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`; `None` when unset.
+    /// Startup refuses a check key that is also a package key
+    /// (`pipeline_trust_store_overlap`).
+    pipeline_check_trust: Option<Arc<CheckResultTrustStore>>,
+    /// The code revision this binary was built from
+    /// (`DEPLOYED_CODE_REVISION_HASH`, P5-D17): the revision a qualification
+    /// records and an activation requires, and the revision a new upload of
+    /// a `pipeline` tenant needs a qualification of its active bundle on
+    /// (`decide_upload_route`). `None` in a build without it, and then every
+    /// qualification and every activation is refused with
+    /// `bundle_runtime_revision_unknown`, and so is every such upload on a
+    /// process with a runtime that is not started for unqualified routing
+    /// (tests only; that process reads no qualification). A revision that is
+    /// set is a `sha256:` digest: startup refuses any other value
+    /// (`pipeline_activation::deployed_code_revision`).
+    pipeline_code_revision_hash: Option<String>,
+    /// `main`'s gate configuration as ingest parsed it at start
+    /// (`pipeline_main_gate_config_from_env`). The activation routes check a
+    /// bundle activated after start against it (`check_runnable_package`),
+    /// as startup checks every tenant bundle it knows.
+    pipeline_main_gate: MainGateConfig,
+    /// Test builds only: the infrastructure profile the activation routes use
+    /// in place of `infrastructure_profile_from_state`. A test deployment has
+    /// development storage and static tokens, so without it no test could
+    /// pass the gate through a route. The field does not exist in a shipped
+    /// binary.
+    #[cfg(test)]
+    pipeline_infrastructure_override: Option<
+        trace_commons_server::versioned_pipeline_qualification::ProductionInfrastructureProfile,
+    >,
+    /// Whether a tenant with no routing row on the receipts list is routed
+    /// to the pipeline: `TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`,
+    /// the setting of a process started for tests. The injected service
+    /// holds the same value (`assemble_ingest_pipeline_runtime` refuses one
+    /// that does not), because its receipt transaction checks the routing
+    /// again.
+    pipeline_unqualified_routing: bool,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -3957,6 +4037,7 @@ impl AppState {
             pipeline_lease_config,
             pipeline_tenants_processed,
             pipeline_allow_test_dependencies,
+            pipeline_allow_test_dependencies,
             credit_settlement_near_contract_id.as_deref(),
             pipeline_near_confirmation_interval_from_env(pipeline_runtime_assembler.is_some())?,
             PipelineNearPayoutControls {
@@ -3989,6 +4070,39 @@ impl AppState {
         let pipeline_store = db_connections
             .as_ref()
             .map(|connections| Arc::new(PgPipelineStore::new(connections.postgres.clone())));
+        let pipeline_activation = db_connections.as_ref().map(|connections| {
+            Arc::new(PipelineActivationStore::new(connections.postgres.clone()))
+        });
+        let pipeline_qualification = db_connections.as_ref().map(|connections| {
+            Arc::new(PipelineQualificationStore::new(
+                connections.postgres.clone(),
+            ))
+        });
+        // Task 10: the two trust stores the qualification and activation
+        // routes verify against. A set variable whose file does not hold a
+        // valid key list, or a check key that is also a package key, refuses
+        // the start; an empty variable is unset.
+        let pipeline_trust_stores = pipeline_activation::pipeline_trust_stores_from_env()?;
+        // The build's code revision, which those routes compare with a
+        // qualification's: one that is set and is not a `sha256:` digest
+        // refuses the start.
+        let pipeline_code_revision_hash =
+            pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
+        // Review round 1, point 3: a new upload of a `pipeline` tenant needs
+        // a qualification of its active bundle on this revision. Say at the
+        // start which listed tenants have none; this only logs, and all
+        // its reads together have one time limit, so it holds the start for
+        // that limit at most.
+        if !pipeline_allow_test_dependencies {
+            if let Some(activation) = pipeline_activation.as_deref() {
+                pipeline_activation::warn_pipeline_tenants_not_qualified(
+                    activation,
+                    &tenant_rollout_gates,
+                    pipeline_code_revision_hash.as_deref(),
+                )
+                .await;
+            }
+        }
         let pipeline_worker_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let near_credit_submitter_config = trace_near_credit_submitter_from_env()?;
         let near_credit_submitter_timeout_ms = near_credit_submitter_config
@@ -4221,7 +4335,7 @@ impl AppState {
         )?;
         let account_trust_shadow_policy =
             account_trust_growth_routes::shadow_policy_from_env()?.map(Arc::new);
-        if account_admission.is_some() {
+        if let Some(account_config) = account_admission.as_ref() {
             let db = db_mirror
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("account_admission_database_unavailable"))?;
@@ -4231,6 +4345,21 @@ impl AppState {
                 .map_err(|_| anyhow::anyhow!("account_admission_readiness_unavailable"))?
             {
                 anyhow::bail!("account_admission_permissions_or_linkage_not_ready");
+            }
+            if account_config.policy.external_growth().is_some() {
+                // Gate writes invalidate evaluations only once this is on;
+                // the readiness check below refuses if it did not take.
+                db.enable_external_account_trust_growth()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?;
+            }
+            if account_config.policy.external_growth().is_some()
+                && !db
+                    .external_account_trust_runtime_ready()
+                    .await
+                    .map_err(|_| anyhow::anyhow!("external_account_trust_readiness_unavailable"))?
+            {
+                anyhow::bail!("external_account_trust_contract_not_ready");
             }
             // Static contributor credentials are not necessarily represented
             // by a device row. Validate the local replica's inventory as well.
@@ -4487,6 +4616,17 @@ impl AppState {
             pipeline_service,
             pipeline_product,
             pipeline_store,
+            pipeline_activation,
+            pipeline_qualification,
+            pipeline_package_trust: pipeline_trust_stores.package,
+            pipeline_check_trust: pipeline_trust_stores.check,
+            pipeline_code_revision_hash,
+            pipeline_main_gate,
+            // `cfg(test)` because the field is; `None` unconditionally, so no
+            // configuration reaches it.
+            #[cfg(test)]
+            pipeline_infrastructure_override: None,
+            pipeline_unqualified_routing: pipeline_allow_test_dependencies,
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
@@ -4623,6 +4763,7 @@ impl AppState {
             account_native_codes,
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
+            activity_missions_policy: activity_missions::policy_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8099,6 +8240,10 @@ fn account_route_groups() -> (account_routes::AccountRoutes, account_routes::Acc
         )
         .get("/v1/account/credit-summary", account_credit_summary_handler)
         .get(
+            "/v1/account/activity-missions/status",
+            activity_missions::status,
+        )
+        .get(
             "/v1/account/traces/{submission_id}",
             account_trace_detail_handler,
         )
@@ -8248,9 +8393,12 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
+    let large_body_auth =
+        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
+        .route("/v1/activity-missions", get(activity_missions::catalogue))
         .route(
             "/v1/missions/{mission_id}",
             get(rewards::mission_publication),
@@ -8266,15 +8414,27 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/token-bundles",
-            post(token_bundles::begin).get(token_bundles::capabilities),
+            get(token_bundles::capabilities).merge(
+                post(token_bundles::begin)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}",
-            get(token_bundles::status).post(token_bundles::finalize),
+            get(token_bundles::status).merge(
+                post(token_bundles::finalize)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}/{artifact}",
-            axum::routing::put(token_bundles::put).get(token_bundles::read),
+            get(token_bundles::read).merge(
+                axum::routing::put(token_bundles::put)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route("/health", get(health_handler))
         .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
@@ -8285,8 +8445,12 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/traces",
             get(list_traces_handler)
-                .post(submit_trace_handler)
-                .delete(revoke_trace_body_handler),
+                .delete(revoke_trace_body_handler)
+                .merge(
+                    post(submit_trace_handler)
+                        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        .layer(large_body_auth),
+                ),
         )
         .route(
             "/v1/admission/challenge",
@@ -8335,6 +8499,44 @@ fn app(state: Arc<AppState>) -> Router {
         .route(
             "/v1/admin/pipeline/operational-summary",
             get(pipeline_operational_summary_handler),
+        )
+        // PR 5 (P5-D11): qualification, routing, and policy interventions,
+        // each behind an admin credential, for the credential's tenant only
+        // (`pipeline_activation`). Each carries its own 1 MiB body limit
+        // (`pipeline_admin_body_limit`), inside the router-wide one below.
+        .route(
+            "/v1/admin/pipeline/routing",
+            get(pipeline_routing_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/qualifications",
+            post(pipeline_qualify_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/activate",
+            post(pipeline_activate_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/rollback",
+            post(pipeline_rollback_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/contain",
+            post(pipeline_contain_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/deactivate",
+            post(pipeline_deactivate_handler).layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/policy-interventions",
+            get(pipeline_policy_interventions_handler)
+                .post(pipeline_policy_intervention_handler)
+                .layer(pipeline_admin_body_limit()),
+        )
+        .route(
+            "/v1/admin/pipeline/legacy-drain",
+            get(pipeline_legacy_drain_handler).layer(pipeline_admin_body_limit()),
         )
         .route(
             "/v1/admin/pipeline/runs/{run_id}/forensic",
@@ -8986,7 +9188,74 @@ fn app(state: Arc<AppState>) -> Router {
         // trust anything, so it cannot sit behind enrollment.
         .merge(attestation_collateral_routes())
         .with_state(state)
-        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_API_BODY_BYTES))
+}
+
+/// Reject a missing or invalid bearer before a large upload extractor is
+/// allowed to poll the body, then bound how many upload bodies that principal,
+/// and the deployment, may be buffering at once. Both slots are held until the
+/// handler returns, which is after the body has been read and dropped.
+/// Handlers authenticate again on purpose: their existing rate-limit,
+/// tenant-access-grant, and admission ordering remains the authoritative
+/// authorization path, while this middleware is only the cheap pre-body gate.
+///
+/// Concurrency only, no per-minute rate: a token bundle may carry up to
+/// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
+/// legitimate bundle fits under bounds nothing. Memory is what an in-flight
+/// cap bounds.
+async fn authenticate_large_body_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let tenant = match authenticate_ctx(state.as_ref(), request.headers()) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let principal_key = large_body_principal_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    };
+    next.run(request).await
+}
+
+/// Most upload bodies one principal may have in flight at once, across every
+/// large-body route. Above the submit handler's own concurrency of 2, so a
+/// contributor submitting while a bundle uploads is never refused here first.
+const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
+/// Most upload bodies in flight across the deployment. Bounds what uploads can
+/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
+/// (~650 MB), whatever the number of valid tokens.
+const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
+
+fn large_body_principal_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    format!(
+        "large-body:{}",
+        submit_principal_rate_limit_key(tenant_id, auth_method, principal_ref)
+    )
+}
+
+/// Take the principal's slot first, so a principal at its own cap never
+/// spends a deployment-wide slot.
+fn large_body_slots_for<'a>(
+    limiter: &'a AccountRateLimiter,
+    principal_key: &str,
+) -> Option<[ConcurrencyGuard<'a>; 2]> {
+    let principal = limiter.acquire(
+        principal_key,
+        large_body_principal_concurrency(principal_key),
+    )?;
+    let global = limiter.acquire(LARGE_BODY_GLOBAL_KEY, LARGE_BODY_GLOBAL_CONCURRENCY)?;
+    Some([principal, global])
 }
 
 fn default_data_dir() -> PathBuf {
@@ -12649,6 +12918,21 @@ struct TraceCommonsConfigStatusResponse {
     pipeline_runtime_configured: bool,
     pipeline_runtime_required: bool,
     pipeline_runtime_production_qualified: bool,
+    /// Whether this process routes a listed tenant that has no routing row
+    /// to the pipeline (`TRACE_COMMONS_PIPELINE_ALLOW_TEST_DEPENDENCIES`): a
+    /// setting for a process started for tests.
+    pipeline_unqualified_routing_allowed: bool,
+    /// Whether this binary holds a build code revision
+    /// (`TRACE_COMMONS_BUILD_CODE_REVISION_HASH`); the pipeline
+    /// qualification, activation, and rollback routes need one. Never the
+    /// revision itself.
+    pipeline_code_revision_configured: bool,
+    /// Whether each trust store of those routes was loaded at start
+    /// (`TRACE_COMMONS_PIPELINE_PACKAGE_TRUSTED_KEYS_PATH`,
+    /// `TRACE_COMMONS_PIPELINE_CHECK_TRUSTED_KEYS_PATH`). Never a path, a
+    /// key id, or a key.
+    pipeline_package_trust_store_loaded: bool,
+    pipeline_check_trust_store_loaded: bool,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -12916,6 +13200,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
             .pipeline_service
             .as_deref()
             .is_some_and(pipeline_runtime_is_production_qualified),
+        pipeline_unqualified_routing_allowed: state.pipeline_unqualified_routing,
+        pipeline_code_revision_configured: state.pipeline_code_revision_hash.is_some(),
+        pipeline_package_trust_store_loaded: state.pipeline_package_trust.is_some(),
+        pipeline_check_trust_store_loaded: state.pipeline_check_trust.is_some(),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -14180,15 +14468,19 @@ async fn reject_conflicting_witness_retry(
     Ok(())
 }
 
-/// The pipeline runtime for a tenant routed to `PipelineReceipts`, if any.
+/// The pipeline runtime for a tenant on the `PipelineReceipts` list, if any:
+/// the list is the scope of this process, not the decision.
 ///
 /// `Some` only when the tenant is in the `PipelineReceipts` rollout set AND a
-/// runtime was injected -- the same two conditions `route_pipeline_receipt`
-/// and the completed-admission branch of `submit_trace_handler` both gate
-/// on; shared here so the two cannot drift. A tenant listed without an
-/// injected runtime is refused at startup instead
-/// (`validate_pipeline_receipt_rollout`), so it can never reach either
-/// caller with `state.pipeline_service` still `None`.
+/// runtime was injected. It says whether this process may serve the tenant's
+/// new receipts, and so is the `on_receipts_list` input of
+/// `decide_new_receipt_route`: the tenant's committed routing row decides
+/// where a new receipt goes inside this scope (`route_pipeline_receipt`), and
+/// a row that names the pipeline for a tenant that is not listed is a
+/// refusal, not a route. `pipeline_runtime_for_replay`, which a retry uses,
+/// builds on it and adds the drain list. A tenant listed without an injected
+/// runtime is refused at startup instead (`validate_pipeline_receipt_rollout`),
+/// so it can never reach a caller with `state.pipeline_service` still `None`.
 fn pipeline_runtime_for_tenant<'a>(
     state: &'a AppState,
     tenant: &TenantCtx,
@@ -14301,10 +14593,15 @@ async fn pipeline_owned_submission_receipt(
             // `ContentConflict` result (`replay_result`, over a run it
             // found); any other variant fails closed rather than letting
             // the upload reach the legacy upsert.
+            // Neither routing result is ever built by `replay_receipt`: a
+            // replay is answered in every routing state, so it names no
+            // routing and no legacy owner.
             PipelineReceiptResult::Created(_)
             | PipelineReceiptResult::Tombstoned
             | PipelineReceiptResult::QuotaExceeded(_)
-            | PipelineReceiptResult::SourceSessionWithdrawn => {
+            | PipelineReceiptResult::SourceSessionWithdrawn
+            | PipelineReceiptResult::LegacyOwned
+            | PipelineReceiptResult::NotRouted(_) => {
                 Err(internal_error("pipeline_replay_result_unexpected"))
             }
         };
@@ -14324,19 +14621,280 @@ async fn pipeline_owned_submission_receipt(
     Ok(None)
 }
 
-/// Routes a receipt to the versioned pipeline instead of the legacy corpus
-/// path, for a `PipelineReceipts`-rollout tenant with an injected runtime.
+/// `pipeline_owned_submission_receipt` for a new upload (the call before the
+/// legacy record read), with the routing read that `decide_upload_route`
+/// needs when this function already made it (review round 1, amendment A11).
+///
+/// A process that may not replay the tenant's pipeline receipts (no runtime,
+/// or a tenant on neither pipeline list) asks the database whether a run owns
+/// the id, as `main` does. With the routing store that one statement also
+/// reads the tenant's routing (`run_and_routing_for_upload`), so the route
+/// decision of such a process adds no transaction to the upload. A run that
+/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before.
+///
+/// A read that fails: a process with no runtime answers as `main` answers its
+/// failed run read (`internal_error`); a process with a runtime answers `503
+/// pipeline_routing_unavailable`, as `decide_upload_route` answers a routing
+/// row that it cannot read. Neither goes on to the legacy path. The second
+/// answer is a change from `main` for a process with a runtime and a tenant
+/// on neither pipeline list: `main` answered `500` there, from its run read.
+///
+/// With a runtime that may replay the tenant's receipts, or with no routing
+/// store, this is `pipeline_owned_submission_receipt` and no routing read:
+/// `decide_upload_route` then reads the row itself.
+async fn pipeline_owner_and_routing_for_new_upload(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<(Option<TraceSubmissionReceipt>, Option<NewReceiptRouting>)> {
+    if pipeline_runtime_for_replay(state, tenant).is_none() {
+        if let Some(activation) = state.pipeline_activation.as_ref() {
+            let (has_pipeline_run, routing) = activation
+                .run_and_routing_for_upload(
+                    tenant.tenant_id(),
+                    submission_id,
+                    state.pipeline_code_revision_hash.as_deref(),
+                )
+                .await
+                .map_err(|error| {
+                    if state.pipeline_service.is_some() {
+                        routing_read_failed(&error)
+                    } else {
+                        internal_error(error)
+                    }
+                })?;
+            if has_pipeline_run {
+                return Err(api_error(
+                    StatusCode::CONFLICT,
+                    SUBMISSION_OWNED_BY_PIPELINE_RUN,
+                ));
+            }
+            return Ok((None, Some(routing)));
+        }
+    }
+    let receipt = pipeline_owned_submission_receipt(
+        state,
+        tenant,
+        submission_id,
+        raw_body,
+        ownership_conflict,
+    )
+    .await?;
+    Ok((receipt, None))
+}
+
+/// `503 pipeline_routing_unavailable` for a routing read that failed, with a
+/// hash-only log line.
+fn routing_read_failed(error: &impl std::fmt::Display) -> (StatusCode, Json<ApiError>) {
+    tracing::warn!(
+        error_hash = %safe_display_error_hash(error),
+        "Trace Commons pipeline routing read failed"
+    );
+    api_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+    )
+}
+
+/// Where a new upload goes, decided by `decide_upload_route`.
+enum UploadRoute<'a> {
+    /// The legacy path. `claim`: the legacy path claims the submission id
+    /// before its first write (`claim_legacy_receipt`).
+    Legacy { claim: bool },
+    /// The pipeline, through this service.
+    Pipeline(&'a Arc<PipelineService>),
+}
+
+/// Decides where a new upload goes, from its tenant's committed routing row
+/// (`decide_new_receipt_route`). The `PipelineReceipts` list is the scope of
+/// this process; the row decides inside it. In this order:
+///
+/// 1. No routing store (a process with no database): the legacy path with no
+///    claim, as `main`. A runtime with no routing store is a build that
+///    cannot read the rows: `503 pipeline_routing_unavailable`, for a
+///    remediation too.
+/// 2. The row, with the Admission policy and the qualification of the
+///    tenant's active bundle (`NewReceiptRouting`): `routing`, when the
+///    caller already read it (`pipeline_owner_and_routing_for_new_upload`),
+///    else `PipelineActivationStore::routing_for_new_receipt`, with no lock.
+///    A row that cannot be read is `503 pipeline_routing_unavailable`, never
+///    the legacy path.
+/// 3. `contained`: `503 pipeline_receipt_intake_contained`. For every upload:
+///    a remediation and a process with no runtime too (review round 1,
+///    point 4).
+/// 4. `pipeline` for a tenant that this process does not serve (no runtime,
+///    or the tenant is not on the receipts list): `503
+///    pipeline_tenant_not_served`, for a remediation too. A row cannot widen
+///    the scope, and the upload is not sent to the legacy path.
+/// 5. A remediation otherwise (`remediating`: a remediation of a legacy
+///    quarantine record this handler already holds): the legacy path, which
+///    owns the id, with a claim for a tenant in scope or with a row. It never
+///    answers the pipeline, and the Admission policy and the qualification
+///    are not looked at (they concern a pipeline receipt).
+/// 6. No runtime otherwise (the stock binary; the row is `legacy` or there is
+///    none): the legacy path, with a claim for a tenant with a row.
+/// 7. `pipeline` for a listed tenant: the pipeline. Unless this process was
+///    started for unqualified routing (`pipeline_unqualified_routing`, tests
+///    only), the tenant's active bundle needs a qualification row for the
+///    revision this binary was built from (review round 1, point 3): a build
+///    with no revision is `503 bundle_runtime_revision_unknown`, a bundle
+///    with no such row is `503 pipeline_bundle_not_qualified`. The check
+///    proves that the row exists, not what `activate` and `rollback` compare
+///    beside it. Then a suspended Admission policy of that bundle is `503
+///    bundle_policy_not_runnable` (final fix wave G1).
+/// 8. `legacy`, or no row: the legacy path, with a claim of the submission id
+///    for a tenant in scope or with a row. Only a listed tenant with no row
+///    and a process started for tests is routed to the pipeline.
+///
+/// `submit_trace_handler` calls this once for a new upload, before the
+/// admission attempt is marked processing, so that a refusal here releases
+/// the attempt (an attempt that is still `reserved` is released, and a
+/// bounded account's charge is refunded, by the handler's own
+/// `attempt.finish(false)`), and carries the answer to `route_pipeline_receipt`
+/// after the legacy checks. A retry of an existing receipt is answered
+/// before this (`pipeline_owned_submission_receipt`, the legacy record
+/// read), so a routing change never moves a retry to another owner, and a
+/// retry is checked against no qualification. A refusal that only the receipt
+/// transaction finds (a routing row or a policy that changes after this read:
+/// a `contain` or a `suspend` that commits while the upload is in flight)
+/// comes after `attempt.processing`, as `main`'s quota refusal does: the
+/// attempt then stays `processing` until its lease ends, because
+/// `Attempt::finish` releases an attempt only from `reserved`. A legacy
+/// upload that passed this decision before a `contain` committed completes on
+/// the legacy path: the legacy claim reads no routing.
+async fn decide_upload_route<'a>(
+    state: &'a AppState,
+    tenant: &TenantCtx,
+    remediating: bool,
+    routing: Option<NewReceiptRouting>,
+) -> ApiResult<UploadRoute<'a>> {
+    let in_scope = pipeline_runtime_for_replay(state, tenant).is_some();
+    let Some(activation) = state.pipeline_activation.as_ref() else {
+        // A runtime without a routing store is a build that cannot read the
+        // rows: the upload is refused, as for a row that cannot be read.
+        if state.pipeline_service.is_some() {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_ROUTING_UNAVAILABLE_LABEL,
+            ));
+        }
+        return Ok(UploadRoute::Legacy { claim: false });
+    };
+    let NewReceiptRouting {
+        routing,
+        admission_runnable,
+        active_bundle_qualified,
+    } = match routing {
+        Some(routing) => routing,
+        None => activation
+            .routing_for_new_receipt(
+                tenant.tenant_id(),
+                state.pipeline_code_revision_hash.as_deref(),
+            )
+            .await
+            .map_err(|error| routing_read_failed(&error))?,
+    };
+    let has_row = routing.is_some();
+    let routing_state = routing.map(|row| row.routing_state);
+    let served = pipeline_runtime_for_tenant(state, tenant);
+    // The two refusals that hold for every upload of the tenant, whatever
+    // path it would take: a contained tenant takes no upload, and a tenant
+    // that an operator moved to the pipeline is not written on the legacy
+    // path by a process that does not serve it.
+    match routing_state {
+        Some(RoutingState::Contained) => {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+            ));
+        }
+        Some(RoutingState::Pipeline) if served.is_none() => {
+            return Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_TENANT_NOT_SERVED_LABEL,
+            ));
+        }
+        _ => {}
+    }
+    // A remediation rewrites a legacy record that this handler has in hand:
+    // the legacy path owns the id.
+    if remediating {
+        return Ok(UploadRoute::Legacy {
+            claim: in_scope || has_row,
+        });
+    }
+    let Some(pipeline_service) = state.pipeline_service.as_ref() else {
+        return Ok(UploadRoute::Legacy { claim: has_row });
+    };
+    match decide_new_receipt_route(
+        routing_state,
+        served.is_some(),
+        state.pipeline_unqualified_routing,
+    ) {
+        NewReceiptRoute::Legacy => Ok(UploadRoute::Legacy {
+            claim: in_scope || has_row,
+        }),
+        NewReceiptRoute::Contained => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+        )),
+        NewReceiptRoute::NotServed => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_TENANT_NOT_SERVED_LABEL,
+        )),
+        // The gate is checked when an operator activates a bundle. A deploy
+        // changes the revision and no routing row, so the qualification is
+        // read again here, for each new receipt: a bundle that nobody
+        // qualified on the revision this binary was built from takes none.
+        // A process started for unqualified routing (tests only) skips this,
+        // as it skips the gate.
+        NewReceiptRoute::Pipeline
+            if !state.pipeline_unqualified_routing
+                && state.pipeline_code_revision_hash.is_none() =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PACKAGE_RUNTIME_REVISION_UNKNOWN_LABEL,
+            ))
+        }
+        NewReceiptRoute::Pipeline
+            if !state.pipeline_unqualified_routing && !active_bundle_qualified =>
+        {
+            Err(api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PIPELINE_BUNDLE_NOT_QUALIFIED_LABEL,
+            ))
+        }
+        // An operator suspended the Admission policy of the tenant's active
+        // bundle: the receipt would be refused in its own transaction, after
+        // the attempt is `processing` and after the re-scrub, the classifier,
+        // and the encryption. Refused here instead, for the whole suspension.
+        NewReceiptRoute::Pipeline if !admission_runnable => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+        )),
+        NewReceiptRoute::Pipeline => Ok(UploadRoute::Pipeline(pipeline_service)),
+    }
+}
+
+/// Acts on the route `decide_upload_route` chose for a new upload: the legacy
+/// path (after its claim of the submission id, when it has one) or a receipt
+/// to the versioned pipeline instead of the legacy corpus path.
 ///
 /// Called from `submit_trace_handler` only after the legacy handler's
 /// authentication, submit rate limit, admission reservation,
-/// tenant-access-grant check, envelope validation, and server re-scrub have
-/// all already run (D15) -- this function does none of that itself and
-/// trusts its caller for it. `envelope` is that re-scrubbed envelope.
-/// Returns `Ok(None)` -- meaning "stay on the legacy path" -- unless the
-/// tenant is in the `PipelineReceipts` rollout set AND a runtime was
-/// injected; a tenant listed without an injected runtime is refused at
-/// startup instead (`validate_pipeline_receipt_rollout`), so it can never
-/// reach this function.
+/// tenant-access-grant check, envelope validation, server re-scrub,
+/// tombstone check, and submission quota have all already run (D15) -- this
+/// function does none of that itself and trusts its caller for it.
+/// `envelope` is that re-scrubbed envelope. Returns `Ok(None)` -- meaning
+/// "stay on the legacy path" -- for a legacy route, once the claim (if any)
+/// found the legacy path as the owner.
+///
+/// The receipt transaction checks the tenant's routing again and stays the
+/// authority on a race: a row that changed since the decision is answered by
+/// what the transaction found (see the arms below).
 ///
 /// A `Replayed` outcome always means a run already exists for this key. A
 /// `ContentConflict` outcome usually does too, but not always: it can also
@@ -14356,9 +14914,14 @@ async fn route_pipeline_receipt(
     raw_body: &[u8],
     residual_risk_basis: &[ResidualRiskCondition],
     source_claim: Option<(Uuid, [u8; 32])>,
+    route: UploadRoute<'_>,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
-    let Some(pipeline_service) = pipeline_runtime_for_tenant(state, tenant) else {
-        return Ok(None);
+    let pipeline_service = match route {
+        UploadRoute::Legacy { claim } => {
+            return claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, claim)
+                .await;
+        }
+        UploadRoute::Pipeline(pipeline_service) => pipeline_service,
     };
     let idempotency_key = envelope.submission_id.to_string();
     let result = pipeline_service
@@ -14377,7 +14940,22 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(internal_error)?;
+        .map_err(|error| {
+            // An operator suspended the Admission policy of the tenant's
+            // bundle (`intervene_policy`): the receipt stored nothing and is
+            // refused with its label, as the containment refusal is, so a
+            // contributor's client sees a blocked reason to retry later
+            // rather than an internal error (STA-002). The text is compared
+            // whole: only the label itself, never an error that carries it.
+            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+                )
+            } else {
+                internal_error(error)
+            }
+        })?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
@@ -14438,6 +15016,59 @@ async fn route_pipeline_receipt(
         PipelineReceiptResult::SourceSessionWithdrawn => {
             Err(api_error(StatusCode::CONFLICT, "source_session_withdrawn"))
         }
+        // The legacy path owns the submission id (its ownership row, or a
+        // legacy submission row): the receipt stored nothing here and the
+        // legacy path goes on.
+        PipelineReceiptResult::LegacyOwned => Ok(None),
+        // The routing row changed between this handler's read and the receipt
+        // transaction's own check. The transaction's answer is the one that
+        // holds: a contained tenant is refused; one returned to the legacy
+        // path is claimed for it.
+        PipelineReceiptResult::NotRouted(RoutingState::Contained) => Err(api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PIPELINE_RECEIPT_INTAKE_CONTAINED_LABEL,
+        )),
+        PipelineReceiptResult::NotRouted(RoutingState::Legacy) => {
+            claim_legacy_receipt(state, tenant, envelope.submission_id, raw_body, true).await
+        }
+        // The transaction refuses a receipt for routing that is not
+        // `pipeline`; it never reports `pipeline` as the reason.
+        PipelineReceiptResult::NotRouted(RoutingState::Pipeline) => {
+            Err(internal_error("pipeline_routing_result_unexpected"))
+        }
+    }
+}
+
+/// Claims `submission_id` for the legacy path before its first write, when
+/// `claim` (the tenant is in this process's pipeline scope or has a routing
+/// row). `Ok(None)`: the legacy path goes on. A pipeline run that owns the id
+/// is answered as `pipeline_owned_submission_receipt` answers it.
+async fn claim_legacy_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    claim: bool,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let (true, Some(activation)) = (claim, state.pipeline_activation.as_ref()) else {
+        return Ok(None);
+    };
+    match activation
+        .claim_legacy_receipt(tenant.tenant_id(), submission_id)
+        .await
+        .map_err(internal_error)?
+    {
+        ReceiptOwner::Legacy => Ok(None),
+        ReceiptOwner::Pipeline => pipeline_owned_submission_receipt(
+            state,
+            tenant,
+            submission_id,
+            raw_body,
+            "submission id already belongs to another principal",
+        )
+        .await?
+        .map(Some)
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, SUBMISSION_OWNED_BY_PIPELINE_RUN)),
     }
 }
 
@@ -14465,7 +15096,7 @@ async fn submit_trace_handler(
         authenticated_tenant.principal_ref(),
     );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
-    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
@@ -14591,15 +15222,18 @@ async fn submit_trace_handler(
         // admission still in progress). It is answered as `main` answers a
         // retry of an existing record, before the tenant policy and quota
         // checks.
-        if let Some(receipt) = pipeline_owned_submission_receipt(
+        // A process that may not replay this tenant's pipeline receipts
+        // reads the tenant's routing in the same statement; the route
+        // decision below uses it.
+        let (pipeline_receipt, routing_read) = pipeline_owner_and_routing_for_new_upload(
             state.as_ref(),
             &tenant,
             envelope.submission_id,
             &raw_body,
             "submission id already belongs to another principal",
         )
-        .await?
-        {
+        .await?;
+        if let Some(receipt) = pipeline_receipt {
             return Ok(Json(receipt));
         }
 
@@ -14690,6 +15324,28 @@ async fn submit_trace_handler(
         // that it stays above the rescrub.
         let witness = verified_witness_for_submission(state.as_ref(), &headers, &raw_body);
 
+        // Tenant routing decision (D3, D15): the `PipelineReceipts` list is
+        // the scope of this process and the tenant's committed routing row
+        // decides inside it. Decided here, before the admission attempt is
+        // marked processing, so that a refusal (contained, not served, no
+        // qualification on this build's revision, a suspended Admission
+        // policy, or routing unavailable) leaves the attempt reserved and
+        // the `attempt.finish(false)` below releases it, refunding a bounded
+        // account's charge, instead of leaving it processing with a live
+        // lease. The row is read once for an upload: above, with the run
+        // read, or by the decision. A retry was answered above and is not
+        // decided here. A remediation is: a contained tenant takes none, and
+        // otherwise the legacy path owns its id.
+        // `route_pipeline_receipt` acts on the decision after every legacy
+        // check.
+        let upload_route = decide_upload_route(
+            state.as_ref(),
+            &tenant,
+            remediating_prior.is_some(),
+            routing_read,
+        )
+        .await?;
+
         // The basis is a return value of the pass, never a field on the
         // envelope: the envelope is deserialised from contributor input, so a
         // basis carried there would be client-asserted by construction.
@@ -14730,13 +15386,20 @@ async fn submit_trace_handler(
         // 0.0: the contributor's figure is the gate's, once it has scored.
         apply_credit_estimate_to_envelope(&mut envelope);
 
-        // Tenant rollout gate (D3, D15): every legacy check above --
+        // Tenant routing gate (D3, D15): every legacy check above --
         // authentication, the submit rate limit, admission reservation, the
-        // tenant-access-grant check, envelope validation, and the server
-        // re-scrub -- has already run, so a `PipelineReceipts`-listed tenant
-        // with an injected runtime can be hived off to the pipeline here.
-        // Every other tenant falls through unchanged to the legacy path
-        // below.
+        // tenant-access-grant check, envelope validation, the server
+        // re-scrub, the tombstone check, and the submission quota -- has
+        // already run, so a receipt goes to the pipeline only after all of
+        // them. The route was decided above (`decide_upload_route`): a new
+        // receipt goes to the pipeline, or stays on the legacy path after the
+        // legacy path claims its submission id, and a refusal never gets
+        // here. A retry of an existing receipt was answered earlier and never
+        // gets here either; a remediation of a legacy quarantine record
+        // stays on the legacy path. With no pipeline runtime injected
+        // nothing here reads a row, and an id is claimed only for a tenant
+        // that has a routing row; an upload of a tenant with none falls
+        // through unchanged.
         if let Some(receipt) = route_pipeline_receipt(
             state.as_ref(),
             &tenant,
@@ -14744,6 +15407,7 @@ async fn submit_trace_handler(
             &raw_body,
             &residual_risk_basis,
             source_claim,
+            upload_route,
         )
         .await?
         {
@@ -14769,8 +15433,8 @@ async fn submit_trace_handler(
         // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
         // keeps its pending credit intact for the eventual release to Accepted; the
         // consumer/Accepted gates enforce the hold purely off the stored status.
-        // No enrol row is written: the `awaiting_pii_backstop` status is the
-        // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+        // No enroll row is written: the `awaiting_pii_backstop` status is the
+        // enrollment (the driver enumeration tolerates an absent bookkeeping row).
         let held_without_a_witness = corpus_status_with_pii_backstop_hold(
             corpus_status,
             &envelope.consent,
@@ -18305,7 +18969,7 @@ async fn account_credit_summary_handler(
     // often this new route can trigger it is not. Collapses to a generic 429,
     // like every other account surface: no enumeration, no size signal.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("credit-summary-account:{account_key}"),
         CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
     ) {
@@ -18603,7 +19267,7 @@ async fn account_trace_content_handler(
     // `_content_slot` drops at function return, on every path including the
     // fail-closed error returns below.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
@@ -19737,7 +20401,8 @@ async fn native_authorize_start_handler(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT)
+    {
         return native_generic_deny();
     }
 
@@ -19801,6 +20466,15 @@ use pipeline_runtime::{
     IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
     pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
+};
+
+#[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
+mod pipeline_activation;
+use pipeline_activation::{
+    pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
+    pipeline_deactivate_handler, pipeline_legacy_drain_handler,
+    pipeline_policy_intervention_handler, pipeline_policy_interventions_handler,
+    pipeline_qualify_handler, pipeline_rollback_handler, pipeline_routing_handler,
 };
 
 /// Complete the native half of a browser redeem: mint the one-time code and
@@ -19871,7 +20545,7 @@ async fn native_token_inner(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
         return native_generic_deny();
     }
 
@@ -20101,6 +20775,20 @@ const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
+/// Header-independent blast-radius ceiling on interstitial renders. A botnet
+/// can rotate real source addresses, so the per-client bucket alone is not a
+/// deployment-wide bound. The render is stateless and in memory (no database,
+/// no code consumption), so the ceiling only has to bound CPU; set low, it is
+/// a cheap switch that turns every emailed login link into a 429. 12,000 takes
+/// 100 addresses at the per-IP cap to exhaust. Confirm's 600 global
+/// (`CONFIRM_GLOBAL_LIMIT`) is the budget-bearing gate for login itself.
+const INTERSTITIAL_GLOBAL_LIMIT: u32 = 12_000;
+// Compile-time, so a later edit cannot quietly turn the interstitial back into
+// a cheap kill switch, or size it past what the anonymous table holds without
+// folding the per-IP keys that exhaust it.
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT / INTERSTITIAL_PER_IP_LIMIT >= 100);
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT >= 10 * CONFIRM_GLOBAL_LIMIT);
+const _: () = assert!((INTERSTITIAL_GLOBAL_LIMIT as usize) < MAX_ACCOUNT_RATE_WINDOWS);
 /// Per-IP cap on `POST /account/login/confirm` attempts per window.
 const CONFIRM_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on confirm attempts per window across ALL callers — a
@@ -20184,15 +20872,26 @@ static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
 > = std::sync::OnceLock::new();
 
-fn submit_rate_limits(key: &str) -> (u32, u32) {
-    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+fn configured_rate_limits(key: &str) -> Option<(u32, u32)> {
+    SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
         limits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .copied()
-    });
-    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+    })
+}
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    configured_rate_limits(key)
+        .unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+/// The principal's in-flight upload cap. Shared fixture principals get the
+/// same explicit test override as their submit key; see
+/// `SUBMIT_RATE_LIMIT_TEST_LIMITS`.
+fn large_body_principal_concurrency(key: &str) -> u32 {
+    configured_rate_limits(key).map_or(LARGE_BODY_PER_PRINCIPAL_CONCURRENCY, |(_, c)| c)
 }
 
 #[cfg(test)]
@@ -20217,36 +20916,166 @@ struct RateWindow {
     window_start: std::time::Instant,
 }
 
+/// Most independent fixed-window keys retained at once. Excess keys share one
+/// stricter overflow bucket, so rotating addresses or public identifiers
+/// cannot turn the limiter itself into an unbounded memory sink.
+const MAX_ACCOUNT_RATE_WINDOWS: usize = 16_384;
+const ACCOUNT_RATE_OVERFLOW_KEY: &str = "rate-limit-overflow";
+/// The shared overflow bucket deliberately uses the smallest normal
+/// credential-guessing allowance. Under a key-cardinality flood, unfamiliar
+/// callers fail closed rather than inheriting a high-volume public-read cap.
+const ACCOUNT_RATE_OVERFLOW_LIMIT: u32 = 5;
+/// A full-table stale-entry scan is O(N), so it may run at most once per second
+/// even while every request presents a fresh key.
+const ACCOUNT_RATE_PRUNE_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
+struct AccountRateWindows {
+    entries: std::collections::HashMap<String, RateWindow>,
+    last_prune: Option<std::time::Instant>,
+    #[cfg(test)]
+    prune_runs: u64,
+}
+
+impl AccountRateWindows {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            last_prune: None,
+            #[cfg(test)]
+            prune_runs: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last_prune = None;
+        self.prune_runs = 0;
+    }
+}
+
 /// In-process fixed-window rate limiter keyed by an opaque string (IP / account
 /// id / code_hash / a fixed global key). Single-instance only (see the module
 /// note above). The map keys hold NO cleartext secrets: IPs, account ids, and
 /// `code_hash` (already a sha256) are all non-secret or pre-hashed.
+///
+/// Two independently bounded tables: `windows` holds keys an anonymous caller
+/// can mint (per-IP, per-code-hash, per-credential) plus the fixed global
+/// ceilings; `principal_windows` holds keys derived from an authenticated
+/// principal or account. A key-cardinality flood on the public surfaces fills
+/// only the first, so it cannot fold a contributor into the anonymous overflow
+/// bucket.
 struct AccountRateLimiter {
-    windows: std::sync::Mutex<std::collections::HashMap<String, RateWindow>>,
+    windows: std::sync::Mutex<AccountRateWindows>,
+    principal_windows: std::sync::Mutex<AccountRateWindows>,
     concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    max_windows: usize,
 }
 
 impl AccountRateLimiter {
     fn new() -> Self {
+        Self::with_max_windows(MAX_ACCOUNT_RATE_WINDOWS)
+    }
+
+    fn with_max_windows(max_windows: usize) -> Self {
         Self {
-            windows: std::sync::Mutex::new(std::collections::HashMap::new()),
+            windows: std::sync::Mutex::new(AccountRateWindows::new()),
+            principal_windows: std::sync::Mutex::new(AccountRateWindows::new()),
             concurrency: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_windows,
         }
+    }
+
+    #[cfg(test)]
+    fn with_max_windows_for_test(max_windows: usize) -> Self {
+        Self::with_max_windows(max_windows)
     }
 
     /// Record one hit against `key` and report whether it is WITHIN `limit` for
     /// the current `ACCOUNT_RATE_WINDOW`. Returns `true` when allowed, `false`
     /// when the limit is exceeded. A poisoned lock fails CLOSED (denies).
     fn check(&self, key: &str, limit: u32) -> bool {
-        let now = std::time::Instant::now();
-        let mut windows = match self.windows.lock() {
+        self.check_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a fixed, code-built deployment-wide key
+    /// (`"confirm-global"`, `"reward-{resource}-global"`). Such a key never
+    /// falls into the shared overflow bucket when the table is full: a
+    /// global ceiling must keep its own limit during an address-rotation
+    /// flood, which is when it matters. The set of these keys is fixed by
+    /// the code, so they can push the table past `max_windows` only by that
+    /// small constant. Never pass a key that carries caller input.
+    fn check_global(&self, key: &str, limit: u32) -> bool {
+        self.check_global_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a key derived from an AUTHENTICATED principal
+    /// or account (`submit-principal:…`, `content-account:{uuid}`). Such keys
+    /// live in their own bounded table, so an anonymous key flood cannot push
+    /// a contributor into the anonymous overflow bucket. Never pass a key an
+    /// unauthenticated caller can choose.
+    fn check_principal(&self, key: &str, limit: u32) -> bool {
+        self.check_principal_at(key, limit, std::time::Instant::now())
+    }
+
+    fn check_principal_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(
+            &self.principal_windows,
+            self.max_windows,
+            key,
+            limit,
+            now,
+            false,
+        )
+    }
+
+    fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, false)
+    }
+
+    fn check_global_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, true)
+    }
+
+    fn record_at(
+        windows: &std::sync::Mutex<AccountRateWindows>,
+        max_windows: usize,
+        key: &str,
+        limit: u32,
+        now: std::time::Instant,
+        global: bool,
+    ) -> bool {
+        let mut table = match windows.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        // Opportunistic GC: drop entries whose window has fully elapsed so the
-        // map cannot grow unbounded across many distinct keys.
-        windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
-        let entry = windows
+        let new_key_at_capacity =
+            !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows;
+        if new_key_at_capacity
+            && table.last_prune.is_none_or(|last| {
+                now.saturating_duration_since(last) >= ACCOUNT_RATE_PRUNE_INTERVAL
+            })
+        {
+            table.last_prune = Some(now);
+            #[cfg(test)]
+            {
+                table.prune_runs = table.prune_runs.saturating_add(1);
+            }
+            table.entries.retain(|_, window| {
+                now.saturating_duration_since(window.window_start) < ACCOUNT_RATE_WINDOW
+            });
+        }
+        let (key, limit) =
+            if !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows {
+                (
+                    ACCOUNT_RATE_OVERFLOW_KEY,
+                    limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
+                )
+            } else {
+                (key, limit)
+            };
+        let entry = table
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| RateWindow {
                 count: 0,
@@ -20297,9 +21126,11 @@ impl AccountRateLimiter {
     /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
     #[cfg(test)]
     pub fn reset_for_test(&self) {
-        match self.windows.lock() {
-            Ok(mut windows) => windows.clear(),
-            Err(poisoned) => poisoned.into_inner().clear(),
+        for table in [&self.windows, &self.principal_windows] {
+            table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         match self.concurrency.lock() {
             Ok(mut concurrency) => concurrency.clear(),
@@ -20316,13 +21147,44 @@ impl AccountRateLimiter {
 
     #[cfg(test)]
     fn count_for_test(&self, key: &str) -> u32 {
-        match self.windows.lock() {
-            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .get(key)
-                .map_or(0, |window| window.count),
-        }
+        [&self.windows, &self.principal_windows]
+            .into_iter()
+            .map(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entries
+                    .get(key)
+                    .map_or(0, |window| window.count)
+            })
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn in_flight_for_test(&self, key: &str) -> u32 {
+        self.concurrency
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn tracked_windows_for_test(&self) -> usize {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
+    #[cfg(test)]
+    fn prune_runs_for_test(&self) -> u64 {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prune_runs
     }
 }
 
@@ -20400,26 +21262,30 @@ impl Drop for ConcurrencyGuard<'_> {
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
-/// Extract the client IP for rate-limit keying from the first `X-Forwarded-For`
-/// hop.
+/// Extract the canonical client IP rate-limit key from `X-Forwarded-For`.
 ///
 /// TRUST ASSUMPTION: the single-host pilot sits behind a trusted reverse proxy /
-/// load balancer (GCP) that sets `X-Forwarded-For`. The leftmost hop is the
-/// client; we do NOT trust it for any authorization decision — it keys a
-/// best-effort rate-limit bucket ONLY. When the header is absent (no proxy, or a
-/// direct caller) every such request shares the single `"xff-absent"` bucket,
-/// which is conservative (stricter), not permissive. `axum::serve` is not wired
-/// with `ConnectInfo`, so the connection peer addr is intentionally not used
-/// here; wiring it would require a broad make-service change out of Task 11
-/// scope.
+/// load balancer whose Caddy edge OVERWRITES `X-Forwarded-For` with the peer it
+/// observed. The rightmost hop of the last header line is therefore the trusted
+/// value; caller-supplied hops to its left never allocate a bucket. IPv6 keys
+/// are coarsened to /64 so cheap interface-id rotation does not evade the cap.
+/// Missing or malformed values share the conservative `"unattributed"` bucket.
+///
+/// This is not safe for a directly public application listener. Ingest binds
+/// loopback in the pilot, and the Caddy overwrite is load-bearing. The key is
+/// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|hop| hop.trim().to_string())
-        .filter(|hop| !hop.is_empty())
-        .unwrap_or_else(|| "xff-absent".to_string())
+    lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+fn interstitial_rate_limit_allows(limiter: &AccountRateLimiter, client_ip: &str) -> bool {
+    limiter.check(
+        &format!("interstitial-ip:{client_ip}"),
+        INTERSTITIAL_PER_IP_LIMIT,
+    ) && limiter.check_global("interstitial-global", INTERSTITIAL_GLOBAL_LIMIT)
 }
 
 /// Sleep until at least `REDEEM_MIN_LATENCY` has elapsed since `start`. A no-op
@@ -20575,10 +21441,7 @@ async fn login_interstitial_handler(
     // per-cause detail, no enumeration). This GET does NOT consume the code, so a
     // 429 here only throttles interstitial renders; the deny is generic.
     let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("interstitial-ip:{client_ip}"),
-        INTERSTITIAL_PER_IP_LIMIT,
-    ) {
+    if !interstitial_rate_limit_allows(&ACCOUNT_RATE_LIMITER, &client_ip) {
         let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
         response.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -20722,7 +21585,7 @@ async fn confirm_login_inner(
     if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-ip:{client_ip}"), CONFIRM_PER_IP_LIMIT) {
         return redeem_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("confirm-global", CONFIRM_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("confirm-global", CONFIRM_GLOBAL_LIMIT) {
         return redeem_generic_deny();
     }
 
@@ -22368,7 +23231,7 @@ async fn account_passkey_login_start_handler(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -22551,7 +23414,7 @@ async fn account_passkey_login_finish_inner(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -22793,7 +23656,7 @@ async fn account_near_login_start_handler(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -22885,7 +23748,7 @@ async fn account_near_login_finish_inner(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -23903,6 +24766,14 @@ const AUDIT_CHAIN_REPAIR_AUDIT_KIND: &str =
 /// tombstone rows it wrote from file tombstones. Hash-only.
 const TOMBSTONE_REPAIR_AUDIT_KIND: &str = "tombstone_repair";
 
+/// The file audit event recording one change through the pipeline admin
+/// routes (`pipeline_activation`): a qualification, an activation, a
+/// rollback, a containment, a deactivation, or a policy suspension or
+/// resumption. Its DB row is a `PolicyUpdate` row with `Maintenance`
+/// metadata whose surface is this kind and whose one count is the action's
+/// label. Hash-only and label-only: no bundle, reason, or record id.
+const PIPELINE_ACTIVATION_AUDIT_KIND: &str = "pipeline_activation";
+
 fn trace_maintenance_audit_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -23911,6 +24782,7 @@ fn trace_maintenance_audit_kind(kind: &str) -> bool {
             | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
             | AUDIT_CHAIN_REPAIR_AUDIT_KIND
             | TOMBSTONE_REPAIR_AUDIT_KIND
+            | PIPELINE_ACTIVATION_AUDIT_KIND
             | "maintenance"
             | "near_credit_outbox_submit"
             | "near_credit_outbox_confirm"
@@ -54663,6 +55535,24 @@ async fn retention_maintenance_handler(
                 )
             })?;
     }
+    if state.account_admission.is_some() {
+        let db = state.db_mirror.as_ref().ok_or_else(|| {
+            api_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "account_trust_retention_unavailable",
+            )
+        })?;
+        // Internal lock rows only exist once external growth is on; the
+        // database prunes those idle for a week. Same fixed batch bound.
+        db.prune_account_trust_dependency_locks(1000, body.dry_run)
+            .await
+            .map_err(|_| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "account_trust_retention_unavailable",
+                )
+            })?;
+    }
     Ok(Json(response))
 }
 
@@ -54730,10 +55620,10 @@ async fn revocation_propagation_worker_handler(
 
 /// Per-IP cap on `GET /v1/public/register-stats` per window.
 ///
-/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
-/// hop, which any caller can set, so this bucket is trivially escaped by
-/// anyone who wants to. It keeps one ordinary misbehaving client from being
-/// the whole load; the global cap below is what actually bounds the endpoint.
+/// The pilot's loopback-only Caddy edge overwrites `X-Forwarded-For`, and
+/// `client_ip_for_rate_limit` validates and canonicalizes that observation.
+/// It keeps one ordinary misbehaving client from being the whole load; the
+/// global cap below remains the bound against distributed callers.
 const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
 /// The real bound: a cap no per-request header can escape, so a distributed
 /// flood is limited too.
@@ -54880,7 +55770,7 @@ async fn register_stats_handler(
     ) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
 
@@ -62550,7 +63440,7 @@ fn status_for_risk(
 /// The driver was never the gap: `rescrub_envelope_prose_pii_with` already
 /// classifies every string leaf and object key of each `structured_payload`,
 /// and fails closed to High via `coverage_incomplete` when it cannot finish.
-/// Only enrolment ignored payloads.
+/// Only enrollment ignored payloads.
 ///
 /// Two things this deliberately does NOT do. It does not make tool payloads
 /// safe to turn on: a held trace is released by the driver to whatever
@@ -62571,10 +63461,10 @@ fn status_for_risk(
 /// carry -- so the backstop classifier is the only pass that reads it for PII
 /// at all. Nothing sets that flag yet, so this changes no behaviour today.
 ///
-/// The `awaiting_pii_backstop` status IS the enrolment: the driver's
+/// The `awaiting_pii_backstop` status IS the enrollment: the driver's
 /// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
 /// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
-/// bookkeeping row on first failure. No explicit enrol write is required here.
+/// bookkeeping row on first failure. No explicit enroll write is required here.
 ///
 /// Callers must pass consent that has already been through
 /// `reconcile_consent_declarations` (both call sites run
@@ -73838,7 +74728,7 @@ fn audit_backfill_storage_projection(
             StorageTraceAuditAction::BenchmarkConvert
         }
         "process_evaluation" => StorageTraceAuditAction::ProcessEvaluate,
-        "tenant_policy_update" | "tenant_access_grant_update" => {
+        "tenant_policy_update" | "tenant_access_grant_update" | PIPELINE_ACTIVATION_AUDIT_KIND => {
             StorageTraceAuditAction::PolicyUpdate
         }
         "export_job_recovery" => StorageTraceAuditAction::ExportJobRecovery,
@@ -73948,6 +74838,7 @@ fn audit_backfill_storage_projection(
         | RETENTION_PURGED_ARTIFACT_INVALIDATION_AUDIT_KIND
         | AUDIT_CHAIN_REPAIR_AUDIT_KIND
         | TOMBSTONE_REPAIR_AUDIT_KIND
+        | PIPELINE_ACTIVATION_AUDIT_KIND
         | "vector_index" => {
             trace_maintenance_audit_metadata_from_reason(&event.kind, event.reason.as_deref())
                 .unwrap_or(StorageTraceAuditSafeMetadata::Empty)
@@ -76400,6 +77291,12 @@ struct ApiError {
     error: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_seconds: Option<i64>,
+    /// The blockers of a promotion decision that is not ready, labels only:
+    /// set by the pipeline qualification, activation, and rollback routes
+    /// on their refusal of such a decision (`pipeline_activation`), and
+    /// absent from every other answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blockers: Option<Vec<String>>,
 }
 
 fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -76408,6 +77305,7 @@ fn api_error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Jso
         Json(ApiError {
             error: message.into(),
             retry_after_seconds: None,
+            blockers: None,
         }),
     )
 }
@@ -76422,6 +77320,7 @@ fn api_error_with_retry(
         Json(ApiError {
             error: message.into(),
             retry_after_seconds,
+            blockers: None,
         }),
     )
 }
@@ -80170,6 +81069,34 @@ impl TraceCommonsAuditEvent {
             export_count: None,
             export_id: Some(record.export_job_id),
             decision_inputs_hash: Some(reason_hash.to_string()),
+            previous_event_hash: None,
+            event_hash: None,
+        }
+    }
+
+    /// One change through a pipeline admin route (`pipeline_activation`):
+    /// the action's label as the purpose (hashed) and as the one count. The
+    /// event names no submission, bundle, reason, or record id.
+    fn pipeline_activation(auth: &TenantAuth, action_label: &str) -> Self {
+        let purpose_hash = sha256_prefixed(action_label);
+        let action_counts = BTreeMap::from([(action_label.to_string(), 1)]);
+        Self {
+            event_id: Uuid::new_v4(),
+            tenant_id: auth.tenant_id.clone(),
+            submission_id: Uuid::nil(),
+            kind: PIPELINE_ACTIVATION_AUDIT_KIND.to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(auth.role),
+            actor_principal_ref: Some(auth.principal_ref.clone()),
+            reason: Some(trace_maintenance_audit_reason(
+                Some(&purpose_hash),
+                false,
+                &action_counts,
+            )),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
             previous_event_hash: None,
             event_hash: None,
         }

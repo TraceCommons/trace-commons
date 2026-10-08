@@ -119,3 +119,30 @@ async fn invalid_finish_has_only_safe_error_and_no_provisioned_identity() {
     assert_eq!(error.to_string(), "near_provisioning_refused");
     assert!(!format!("{error:?}").contains("alice"));
 }
+
+#[test]
+fn external_policy_requires_explicit_bounded_controls() {
+    let fixture = serde_json::json!({"version":"test-v1","processing_cost_bound":3,"bounded_allowance":12,"period":{"mode":"lifetime"},"growth_rule":"external","growth_policy_version":"external-fixture-v1","allowance_ceiling":24,"evaluation_max_age_seconds":60});
+    assert!(parse_bounded_policy(&fixture.to_string(), &["test-v1"]).is_ok());
+    for field in [
+        "growth_policy_version",
+        "allowance_ceiling",
+        "evaluation_max_age_seconds",
+    ] {
+        let mut missing = fixture.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(parse_bounded_policy(&missing.to_string(), &["test-v1"]).is_err());
+    }
+    for (field, value) in [
+        ("growth_policy_version", serde_json::json!("bad version")),
+        ("allowance_ceiling", serde_json::json!(11)),
+        ("allowance_ceiling", serde_json::json!(i64::MAX)),
+        ("evaluation_max_age_seconds", serde_json::json!(0)),
+        ("evaluation_max_age_seconds", serde_json::json!(i64::MAX)),
+        ("growth_rule", serde_json::json!("none")),
+    ] {
+        let mut invalid = fixture.clone();
+        invalid[field] = value;
+        assert!(parse_bounded_policy(&invalid.to_string(), &["test-v1"]).is_err());
+    }
+}

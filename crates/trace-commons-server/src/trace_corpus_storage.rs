@@ -2140,7 +2140,7 @@ pub struct TraceGateDecisionRow {
     /// `None` means NOT INSTRUMENTED: every decision written before V53, and
     /// any path that records a decision without scoring it. It is not `Some(0)`
     /// — a below-floor trace earns a genuine composite of 0, and conflating
-    /// the two would enrol unmeasured rows into the sample as real
+    /// the two would enroll unmeasured rows into the sample as real
     /// observations. Readers MUST NOT default it.
     pub composite_score_micros: Option<i64>,
     /// Which vector-index shard the novelty score was computed against
@@ -2751,6 +2751,21 @@ pub trait TraceCorpusStore: Send + Sync {
         cursor: Option<TraceSubmissionKeysetCursor>,
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// Read-only activity projection under one statement snapshot. Tenant and
+    /// principals MUST come from account authentication, never a request body.
+    async fn account_activity_days(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: &[String],
+        _starts_at: DateTime<Utc>,
+        _observed_at: DateTime<Utc>,
+        _qualification: trace_commons_protocol::activity_missions::Qualification,
+    ) -> Result<Vec<trace_commons_protocol::activity_missions::ActivityDay>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "activity_missions_source_unavailable".into(),
+        ))
+    }
 
     async fn upsert_trace_tenant_policy(
         &self,

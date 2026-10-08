@@ -56,15 +56,12 @@ final class AccessibilityTests: XCTestCase {
         }
     }
 
-    /// Floating glass is the regular variant, untinted (tint is for primary
-    /// actions), and Liquid Glass carries no veil or sheen of ours.
-    func test_floatingGlassIsUntintedRegular() throws {
+    /// Floating surfaces are #1146's painted tiers over a blur, never a
+    /// tinted or clear glass of their own (owner ruling, 2026-10-07).
+    func test_floatingSurfacesArePaintedOverABlur() throws {
         let style = try Self.source("GlassStyle.swift")
         XCTAssertFalse(style.contains(".regular.tint("), "floating glass is tinted")
-        XCTAssertFalse(style.contains(".clear"), "the clear variant needs a dimming layer and is not used")
-        let backdrop = try Self.source("GlassBackdrop.swift")
-        let liquid = try XCTUnwrap(backdrop.range(of: "case .liquidGlass:\n            GlassBackdrop(material: .liquidGlass, cornerRadius: radius)\n        case .vibrancy:"))
-        XCTAssertFalse(backdrop[liquid].contains("glassVeil"))
+        XCTAssertFalse(style.contains(".glassEffect("), "a floating surface draws Liquid Glass, not #1146's tier")
     }
 
     // MARK: Helpers

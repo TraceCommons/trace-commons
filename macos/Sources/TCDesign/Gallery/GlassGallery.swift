@@ -19,6 +19,14 @@ public struct GlassGallery: View {
     @State private var expanded = true
     @State private var field = "8463"
     @State private var hovered: String?
+    @State private var select = "watch"
+    @State private var radio = "quick"
+    @State private var consent = false
+    @State private var notes = ""
+    @State private var secret = ""
+    @State private var showModal = false
+    @State private var showConfirm = false
+    @State private var choice = "graph"
 
     private let scrolls: Bool
     private let scene: Bool
@@ -42,6 +50,7 @@ public struct GlassGallery: View {
         }
         .frame(minWidth: 900, minHeight: 700)
         .background(scene ? GlassTokens.Color.sceneBase.color : .clear)
+        .glassModalHost()
     }
 
     private var sections: some View {
@@ -50,6 +59,9 @@ public struct GlassGallery: View {
             section("Materials") { materials }
             section("Type") { type }
             section("Controls") { controls }
+            section("Forms") { forms }
+            section("Feedback") { feedback }
+            section("Modal") { modal }
             section("Navigation") { navigation }
             section("Indicators") { indicators }
             section("Patterns") { patterns }
@@ -140,12 +152,20 @@ public struct GlassGallery: View {
                 Button("Submit·3") {}.buttonStyle(GlassButtonStyle(.submit(done: false)))
                 Button("Sent") {}.buttonStyle(GlassButtonStyle(.submit(done: true)))
                 Button("Link") {}.buttonStyle(GlassButtonStyle(.link))
+                Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive))
+            }
+            // A set of glass buttons, one chosen (selected), as #1146's
+            // aria-pressed.
+            HStack(spacing: 6) {
+                ForEach(["graph", "map", "list"], id: \.self) { name in
+                    Button(name) { choice = name }.buttonStyle(GlassButtonStyle(.glass, selected: choice == name))
+                }
             }
             HStack(spacing: 10) {
                 GlassRoundButton("Settings", systemImage: "gearshape") {}
                 GlassPillIconButton("previous", systemImage: "chevron.left") {}
                 GlassToolbarGroup {
-                    GlassToolbarButton("view", systemImage: "line.3.horizontal") {}
+                    GlassToolbarButton("view", systemImage: "line.3.horizontal", expanded: true) {}
                     GlassToolbarButton("graph", systemImage: "chart.bar", pressed: true) {}
                     GlassToolbarButton("map", systemImage: "map", pressed: false) {}
                     GlassToolbarButton("inspector", systemImage: "sidebar.right", pressed: true) {}
@@ -175,6 +195,119 @@ public struct GlassGallery: View {
                 GlassExpander("Decisions", isOpen: $expanded).frame(width: 140)
             }
             GlassTextField("Port", text: $field).frame(width: 220)
+        }
+    }
+
+    private var forms: some View {
+        HStack(alignment: .top, spacing: 24) {
+            VStack(alignment: .leading, spacing: 12) {
+                GlassTextField("Invalid", text: $field, invalid: true).frame(width: 220)
+                GlassTextField("Passphrase", text: $secret, prompt: "prompt", secure: true).frame(width: 220)
+                GlassTextField("Disabled", text: $field).frame(width: 220).disabled(true)
+                GlassTextArea("Notes", text: $notes, prompt: "prompt").frame(width: 260)
+            }
+            VStack(alignment: .leading, spacing: 12) {
+                GlassSelect(
+                    "rule",
+                    selection: $select,
+                    options: [
+                        GlassPickerOption("Watch", value: "watch", dot: .on),
+                        GlassPickerOption("Ask", value: "ask", dot: .ask),
+                    ]
+                )
+                GlassRadioGroup(
+                    "mode",
+                    selection: $radio,
+                    options: [
+                        GlassRadioOption("Quick", value: "quick", sub: "sub"),
+                        GlassRadioOption("Custom", value: "custom"),
+                        GlassRadioOption("Disabled", value: "disabled", isEnabled: false),
+                    ]
+                )
+                GlassCheckRow("consent", isOn: $consent).frame(width: 220)
+            }
+            GlassCard(flush: true) {
+                VStack(spacing: 0) {
+                    GlassTableHead {
+                        HStack {
+                            Text("Name")
+                            Spacer()
+                            Text("Count")
+                        }
+                    }
+                    GlassTableRow { Text("row").foregroundStyle(GlassColor.textPrimary) }
+                    GlassTableRow { Text("row").foregroundStyle(GlassColor.textPrimary) }
+                }
+            }
+            .frame(width: 240)
+        }
+    }
+
+    private var feedback: some View {
+        HStack(alignment: .center, spacing: 20) {
+            GlassSpinner("Loading")
+            GlassSpinner(size: 20)
+            VStack(alignment: .leading, spacing: 6) {
+                GlassSkeleton(width: 180)
+                GlassSkeleton(width: 120)
+            }
+            GlassWarningGlyph("Warning").foregroundStyle(GlassTokens.Color.statusAskText.color)
+            GlassWarningGlyph(size: 16).foregroundStyle(GlassTokens.Color.statusOutsideText.color)
+            GlassCard(interactive: true) {
+                Text("interactive").glassType(GlassTokens.TypeScale.mono).foregroundStyle(GlassColor.textTertiary)
+            }
+            .frame(width: 160)
+        }
+    }
+
+    /// A modal drawn in place, then buttons that raise one over the whole
+    /// gallery and a confirmation over that.
+    private var modal: some View {
+        HStack(alignment: .top, spacing: 20) {
+            GlassModal(
+                title: "Rename",
+                subtitle: "subtitle",
+                width: .narrow,
+                closeLabel: "Close",
+                actions: [
+                    .cancel("Cancel") {},
+                    GlassModalAction("Rename", isDefault: true) {},
+                ],
+                onCancel: {}
+            ) {
+                GlassTextField("Name", text: $field).padding(18)
+            }
+            // Drawn in place, it is not raised, so it takes no keys.
+            .environment(\.glassModalIsTopmost, false)
+            VStack(alignment: .leading, spacing: 10) {
+                Button("Modal") { showModal = true }.buttonStyle(GlassButtonStyle(.glass))
+                Button("Confirm") { showConfirm = true }.buttonStyle(GlassButtonStyle(.glass))
+            }
+        }
+        .glassModal(isPresented: $showModal) {
+            GlassModal(
+                title: "Preview",
+                closeLabel: "Close",
+                actions: [
+                    .cancel("Cancel") { showModal = false },
+                    .destructive("Delete") { showConfirm = true },
+                    GlassModalAction("Done", isDefault: true) { showModal = false },
+                ],
+                onCancel: { showModal = false }
+            ) {
+                GlassSkeleton().padding(18)
+            }
+            .glassModal(isPresented: $showConfirm) {
+                GlassConfirmation(
+                    title: "Delete",
+                    message: "message",
+                    actions: [
+                        .cancel("Cancel") { showConfirm = false },
+                        .destructive("Delete") { showConfirm = false; showModal = false },
+                    ],
+                    onCancel: { showConfirm = false }
+                )
+            }
         }
     }
 
@@ -262,9 +395,10 @@ public struct GlassGallery: View {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
                     GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
                     GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
                 }
             }
-            .frame(width: 420, height: 150)
+            .frame(width: 420, height: 190)
             VStack(alignment: .leading, spacing: 10) {
                 GlassEyebrowCard("History", action: {}) {
                     Text("accessory").glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)

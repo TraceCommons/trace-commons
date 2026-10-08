@@ -141,41 +141,45 @@ final class SkillLearningRenderingTests: XCTestCase {
     func testSkillReviewControlsExposeLabelsAndMinimumTargets() throws {
         let source = try skillLearningViewSource()
 
+        // `GlassTextField` names its field with its first argument
+        // (`TextField(label, ...)`, labels hidden), so the label is the
+        // component's own; only the target is checked here, adjacent.
+        XCTAssertTrue(source.contains(
+            "GlassTextField(copy.name, text: $draft.name)\n                .frame(minHeight: 44)\n"))
+        // `GlassTextArea` names its editor with its first argument, as
+        // `GlassTextField` does, so the label is the component's own.
         assertControl(
             in: source,
-            from: #"TextField("", text: $draft.name)"#,
+            from: "GlassTextArea(copy.applicability, text: $draft.description",
             to: "fieldLabel(",
-            label: ".accessibilityLabel(copy.name)",
-            minimumHeight: 44
-        )
-        assertControl(
-            in: source,
-            from: "TextEditor(text: $draft.description)",
-            to: "fieldLabel(",
-            label: ".accessibilityLabel(copy.applicability)",
+            label: "GlassTextArea(copy.applicability,",
             minimumHeight: 96
         )
         assertControl(
             in: source,
-            from: "TextEditor(text: $draft.procedure)",
-            to: "DisclosureGroup(copy.sourceEvidence)",
-            label: ".accessibilityLabel(copy.procedure)",
+            from: "GlassTextArea(copy.procedure, text: $draft.procedure",
+            to: "GlassExpander(copy.sourceEvidence, isOpen:",
+            label: "GlassTextArea(copy.procedure,",
             minimumHeight: 240
         )
         assertControl(
             in: source,
-            from: "DisclosureGroup(copy.sourceEvidence)",
+            from: "GlassExpander(copy.sourceEvidence, isOpen:",
             to: "evaluationContract(candidate)",
             label: ".accessibilityLabel(copy.sourceEvidence)",
             minimumHeight: 44
         )
         assertControl(
             in: source,
-            from: "DisclosureGroup(copy.inspectRuns)",
+            from: "GlassExpander(copy.inspectRuns, isOpen:",
             to: "private struct SkillTrialRow",
             label: ".accessibilityLabel(copy.inspectRuns)",
             minimumHeight: 44
         )
+        // `GlassExpander` speaks its title as a native disclosure
+        // (`accessibilityRepresentation`); only the target is checked here.
+        XCTAssertTrue(source.contains(
+            "GlassExpander(copy.modelOutput, isOpen: $showsOutput)\n                .frame(minHeight: 44, alignment: .leading)\n"))
         assertControl(
             in: source,
             from: "Link(copy.openFixtureSource, destination: trial.sourceURL)",

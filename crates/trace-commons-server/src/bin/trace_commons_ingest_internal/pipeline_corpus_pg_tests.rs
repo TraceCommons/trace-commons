@@ -1,9 +1,9 @@
 // Copyright (C) 2026 K&Z Partners LLC
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-//! `pipeline.py run` and `pipeline.py package` (P4-D3: no launcher binary,
-//! no cargo feature). Two ignored tests are the implementation, and
-//! `pipeline.py` starts each one with `--ignored --exact`:
+//! `pipeline.py run`, `package`, `keygen`, and the signing step of `qualify`
+//! (P4-D3: no launcher binary, no cargo feature). Four ignored tests are the
+//! implementation, and `pipeline.py` starts each one with `--ignored --exact`:
 //!
 //! - `pipeline_corpus_run` serves the shared ingest app
 //!   (`pipeline_runtime::run_pipeline_app`, the router and worker ingest
@@ -16,6 +16,11 @@
 //!   emits one check result.
 //! - `pipeline_package_write` builds a named bundle's package, signs it, and
 //!   writes the signed package and its trusted key.
+//! - `pipeline_check_attestations_write` signs each check result of a run
+//!   (`<check_id>.attestation.json`) with a PKCS#8 Ed25519 key, then verifies
+//!   every file it wrote (P5-D13). It needs no database.
+//! - `pipeline_signing_key_write` generates that key and its trusted key
+//!   (`pipeline.py keygen`).
 //!
 //! Ported from `ef97a459:crates/trace-commons-server/src/bin/trace-commons-pipeline-local.rs`:
 //! the corpus file and report types (lines 292-470), the request builder
@@ -32,8 +37,9 @@ use std::path::{Path, PathBuf};
 use super::pipeline_http_pg_tests::{
     PassThroughPipelinePrivacyBoundary, TEST_PIPELINE_CREDIT_ISSUER, account_owner_backend,
     allow_all_test_authority, compatibility_reference_package, join_within, mains_database,
-    minimal_storage_rebate_package, post_submission_status, post_trace, runtime_backend, send_http,
-    serve_pipeline_app, wait_for_pipeline_ready,
+    minimal_storage_rebate_package, post_submission_status, post_trace,
+    qualification_candidate_package, runtime_backend, send_http, serve_pipeline_app,
+    wait_for_pipeline_ready,
 };
 use trace_commons_gate_api::pipeline::{
     AtomicUnits, BundlePackage, InstrumentId, ReasonCode, ReviewRecommendation,
@@ -57,19 +63,25 @@ use trace_commons_server::versioned_pipeline_product::{
     PipelineForensicTrace, PipelineProductStore,
 };
 use trace_commons_server::versioned_pipeline_qualification::{
-    BundlePackageTrustStore, PipelineCheckEmitter, SignedBundlePackage, TrustedBundleKey,
-    package_digests, sign_bundle_package, trusted_key_for_pkcs8,
+    BundlePackageTrustStore, CheckResultTrustStore, PipelineCheckAttestation, PipelineCheckEmitter,
+    PipelineCheckResult, PipelineCheckStatus, QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS,
+    SignedBundlePackage, TrustedBundleKey, evidence_hash, package_digests, sign_bundle_package,
+    sign_check_result, trusted_key_for_pkcs8,
 };
 
 const CORPUS_SCHEMA: &str = "trace_commons.pipeline_corpus.v1";
 const CORPUS_REPORT_SCHEMA: &str = "trace_commons.pipeline_corpus_report.v1";
+
+/// The corpus check whose result names no package (P5-D15): it serves a
+/// test bundle, not the qualification candidate.
+const MINIMAL_CORPUS_CHECK_ID: &str = "pipeline_http_corpus_minimal";
 
 /// The check ids `pipeline_corpus_run` may emit. `pipeline.py` chooses one:
 /// `_<bundle>` for a built-in bundle, `_package` for a signed package, and
 /// `_hf_local` for an HF pin (two partitions). `pipeline_http_corpus_package`
 /// is not a required check (controller ruling PF-1).
 const CORPUS_CHECK_IDS: [&str; 4] = [
-    "pipeline_http_corpus_minimal",
+    MINIMAL_CORPUS_CHECK_ID,
     "pipeline_http_corpus_compatibility",
     "pipeline_http_corpus_hf_local",
     "pipeline_http_corpus_package",
@@ -100,6 +112,22 @@ const PACKAGE_OUTPUT_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT";
 const TRUSTED_KEY_OUTPUT_VAR: &str = "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT";
 const PACKAGE_SIGNING_KEY_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_SIGNING_KEY_PATH";
 const PACKAGE_KEY_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID";
+/// The signing step of `pipeline.py qualify --signing-key`: the directory of
+/// the run's check results, the staging directory the attestations are written
+/// to, the ids of the checks the run accepted (comma separated), the PKCS#8
+/// key and its id, and the maximum age the signer gives each result.
+const CHECK_RESULT_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR";
+const CHECK_ATTESTATION_DIR_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_ATTESTATION_DIR";
+const CHECK_IDS_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_IDS";
+const CHECK_SIGNING_KEY_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_PATH";
+const CHECK_SIGNING_KEY_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_SIGNING_KEY_ID";
+const CHECK_MAX_AGE_SECONDS_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS";
+/// `pipeline.py keygen`: where to write the key and the trusted key, and the
+/// key's id.
+const KEYGEN_OUTPUT_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_OUTPUT";
+const KEYGEN_KEY_ID_VAR: &str = "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_KEY_ID";
+const KEYGEN_TRUSTED_KEY_OUTPUT_VAR: &str =
+    "TRACE_COMMONS_PIPELINE_CHECK_KEYGEN_TRUSTED_KEY_OUTPUT";
 
 /// The tenant routed to the pipeline, and a configured tenant that is not:
 /// its credentials must see nothing of the first tenant's runs.
@@ -473,18 +501,16 @@ impl CorpusRunConfig {
 }
 
 /// The built-in bundles, by name: PR 2's minimal package with the
-/// `storage_rebate` award, and the compatibility package over
-/// `local_reference()` with a 2_500_000 microcredit `NoveltyUtility` delta.
+/// `storage_rebate` award, and the qualification candidate, the
+/// compatibility package over `local_reference()` with a 2_500_000
+/// microcredit `NoveltyUtility` delta (`qualification_candidate_package`).
 fn corpus_bundle_package(bundle: &str) -> anyhow::Result<BundlePackage> {
-    let scorer = ReferencePerplexityScorer::new();
-    let embedder = ReferenceEmbedder::new();
     match bundle {
-        "minimal" => minimal_storage_rebate_package(&scorer, &embedder),
-        "compatibility" => compatibility_reference_package(
-            COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
-            &scorer,
-            &embedder,
+        "minimal" => minimal_storage_rebate_package(
+            &ReferencePerplexityScorer::new(),
+            &ReferenceEmbedder::new(),
         ),
+        "compatibility" => qualification_candidate_package(),
         _ => anyhow::bail!("corpus_bundle_invalid"),
     }
 }
@@ -552,6 +578,7 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
         .with_novelty_utility_checks(context.novelty_utility_checks)
         .with_authority(allow_all_test_authority())
         .with_privacy(Arc::new(PassThroughPipelinePrivacyBoundary))
+        .with_unqualified_routing(context.unqualified_routing_allowed)
         .build()?;
         Ok(Arc::new(service))
     }
@@ -585,6 +612,7 @@ fn assemble_corpus_service(
         Some(&ConfiguredTraceArtifactStore::legacy(artifacts)),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
         true,
         true,
         None,
@@ -1273,8 +1301,325 @@ pub(super) fn write_atomically(path: &Path, bytes: &[u8]) {
     std::fs::rename(&temporary, path).expect("pipeline_output_unwritable");
 }
 
+/// The two digests the corpus check's evidence carries beside its counts, for
+/// the attestation to sign (P5-D14): `corpus_digest`, the digest of the
+/// normalized direct corpus the run loaded (the digest of that one corpus
+/// file's bytes, or, for the two partitions of an HF pin, the canonical hash
+/// of the list of both digests in order); and `input_digest`, the canonical
+/// hash of the list of every fixture's request-content hash, in the order the
+/// run posted them. Both come from the report's own fields, so
+/// `pipeline.py` recomputes them from the report and requires the evidence to
+/// say the same (`corpus.evidence_digests`; each pins the same vectors).
+fn corpus_evidence_digests(report: &serde_json::Value) -> Result<(String, String), String> {
+    let invalid = || "corpus_report_digests_invalid".to_string();
+    let sections = report["partitions"].as_array().ok_or_else(invalid)?;
+    let mut corpus_digests = Vec::new();
+    let mut requests = Vec::new();
+    for section in sections {
+        corpus_digests.push(section["corpus_digest"].as_str().ok_or_else(invalid)?);
+        for fixture in section["fixtures"].as_array().ok_or_else(invalid)? {
+            requests.push(
+                fixture["request_content_hash"]
+                    .as_str()
+                    .ok_or_else(invalid)?,
+            );
+        }
+    }
+    if corpus_digests.is_empty() || requests.is_empty() {
+        return Err(invalid());
+    }
+    let corpus_digest = match corpus_digests.as_slice() {
+        [only] => (*only).to_string(),
+        several => evidence_hash(&serde_json::json!(several))?,
+    };
+    Ok((corpus_digest, evidence_hash(&serde_json::json!(requests))?))
+}
+
 // ---------------------------------------------------------------------------
-// The two ignored tools.
+// The signing tools: `pipeline.py qualify --signing-key` and `keygen`.
+// ---------------------------------------------------------------------------
+
+/// The files of `dir` whose names end in `suffix`, in name order.
+fn files_ending_in(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>, String> {
+    let mut found = std::fs::read_dir(dir)
+        .map_err(|_| "check_result_dir_unreadable".to_string())?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(suffix))
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    Ok(found)
+}
+
+/// The corpus and input digests an evidence value names, for the attestation
+/// to carry: both when it holds both keys, neither when it holds neither.
+/// Holding exactly one is refused: the harness writes both or none, and one
+/// alone would leave a digest that no attestation covers.
+fn attested_digests(
+    evidence: &serde_json::Value,
+) -> Result<(Option<String>, Option<String>), String> {
+    let digest = |key: &str| {
+        evidence
+            .get(key)
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "check_evidence_digest_invalid".to_string())
+            })
+            .transpose()
+    };
+    match (digest("corpus_digest")?, digest("input_digest")?) {
+        (None, None) => Ok((None, None)),
+        (Some(corpus), Some(input)) => Ok((Some(corpus), Some(input))),
+        _ => Err("check_evidence_digests_incomplete".to_string()),
+    }
+}
+
+/// Signs the check results of `results_dir` with the PKCS#8 key `pkcs8` (key
+/// id `key_id`) and writes `<check_id>.attestation.json` for each into
+/// `attestation_dir` (a staging directory: the caller moves the files once
+/// the run is done with them), and returns how many it wrote.
+///
+/// `accepted` is the set of check ids the run accepted
+/// (`require_current_pass_results`). The results directory must hold a result
+/// file for each of them and for no other id: an extra file is refused
+/// (`check_result_unexpected`), as is a missing one (`check_result_missing`),
+/// before anything is signed. Each result's evidence file must hash to the
+/// result's `evidence_hash`. All results are signed before any file is
+/// written, and each file is reserved with `create_new` (a repeat is refused,
+/// as the emitter refuses one) and then written under a temporary name and
+/// renamed. Last, every attestation file in `attestation_dir` is read back,
+/// must equal what was signed, and must verify with a trust store built from
+/// the same key; their count must equal the number of accepted checks. Every
+/// refusal is a label: no path, key byte, or result value.
+fn write_check_attestations(
+    results_dir: &Path,
+    attestation_dir: &Path,
+    accepted: &BTreeSet<String>,
+    pkcs8: &[u8],
+    key_id: &str,
+    maximum_age_seconds: u64,
+) -> Result<usize, String> {
+    let result_files = files_ending_in(results_dir, ".result.json")?;
+    if result_files.is_empty() {
+        return Err("check_attestation_no_results".to_string());
+    }
+    let mut results = Vec::new();
+    for result_path in &result_files {
+        let result: PipelineCheckResult = serde_json::from_slice(
+            &std::fs::read(result_path).map_err(|_| "check_result_unreadable".to_string())?,
+        )
+        .map_err(|_| "check_result_invalid".to_string())?;
+        result
+            .validate()
+            .map_err(|_| "check_result_invalid".to_string())?;
+        if result_path.file_name().and_then(|name| name.to_str())
+            != Some(format!("{}.result.json", result.check_id).as_str())
+        {
+            return Err("check_result_name_mismatch".to_string());
+        }
+        results.push(result);
+    }
+    let present = results
+        .iter()
+        .map(|result| result.check_id.clone())
+        .collect::<BTreeSet<_>>();
+    if !present.is_subset(accepted) {
+        return Err("check_result_unexpected".to_string());
+    }
+    if !accepted.is_subset(&present) {
+        return Err("check_result_missing".to_string());
+    }
+    let mut signed = Vec::new();
+    for result in results {
+        let check_id = result.check_id.clone();
+        let evidence: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(results_dir.join(format!("{check_id}.evidence.json")))
+                .map_err(|_| "check_evidence_unreadable".to_string())?,
+        )
+        .map_err(|_| "check_evidence_invalid".to_string())?;
+        if evidence_hash(&evidence).map_err(|_| "check_evidence_invalid".to_string())?
+            != result.evidence_hash
+        {
+            return Err("check_evidence_hash_mismatch".to_string());
+        }
+        let (corpus_digest, input_digest) = attested_digests(&evidence)?;
+        let attestation = sign_check_result(
+            result,
+            maximum_age_seconds,
+            corpus_digest,
+            input_digest,
+            key_id,
+            pkcs8,
+        )
+        .map_err(|_| "check_attestation_signing_failed".to_string())?;
+        signed.push((
+            attestation_dir.join(format!("{check_id}.attestation.json")),
+            attestation,
+        ));
+    }
+    for (path, attestation) in &signed {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| "check_attestation_already_written".to_string())?;
+        write_atomically(
+            path,
+            &serde_json::to_vec(attestation)
+                .map_err(|_| "check_attestation_invalid".to_string())?,
+        );
+    }
+
+    let store = CheckResultTrustStore::new([trusted_key_for_pkcs8(key_id, pkcs8)
+        .map_err(|_| "check_attestation_signing_failed".to_string())?])?;
+    let read_back = verified_attestations(attestation_dir, &store, accepted.len())?;
+    for (_, attestation) in &signed {
+        if !read_back.contains(attestation) {
+            return Err("check_attestation_changed_on_disk".to_string());
+        }
+    }
+    Ok(read_back.len())
+}
+
+/// The check ids of `list` (comma separated labels), each once.
+fn parse_accepted_ids(list: &str) -> Result<BTreeSet<String>, String> {
+    let mut ids = BTreeSet::new();
+    for id in list.split(',') {
+        let is_label = !id.is_empty()
+            && id.len() <= 64
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+        if !is_label || !ids.insert(id.to_string()) {
+            return Err("check_attestation_ids_invalid".to_string());
+        }
+    }
+    Ok(ids)
+}
+
+/// Every `.attestation.json` file in `dir`, read back: there must be exactly
+/// `expected` of them, each must parse, and all must verify with `store`.
+fn verified_attestations(
+    dir: &Path,
+    store: &CheckResultTrustStore,
+    expected: usize,
+) -> Result<Vec<PipelineCheckAttestation>, String> {
+    let written = files_ending_in(dir, ".attestation.json")?;
+    if written.len() != expected {
+        return Err("check_attestation_count_mismatch".to_string());
+    }
+    let mut read_back = Vec::new();
+    for path in &written {
+        read_back.push(
+            serde_json::from_slice::<PipelineCheckAttestation>(
+                &std::fs::read(path).map_err(|_| "check_attestation_unreadable".to_string())?,
+            )
+            .map_err(|_| "check_attestation_invalid".to_string())?,
+        );
+    }
+    if store.verify_all(&read_back)?.evidence.len() != expected {
+        return Err("check_attestation_count_mismatch".to_string());
+    }
+    Ok(read_back)
+}
+
+/// Creates `path` and writes `bytes`, refusing an existing file (a dangling
+/// link included). A private file is created with mode 0600 and no wider.
+fn create_new_output(path: &Path, bytes: &[u8], private: bool) -> Result<(), &'static str> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    if private {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        return Err("signing_key_mode_unsupported");
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|_| "signing_key_output_unwritable")?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|_| "signing_key_output_unwritable")
+}
+
+/// `pipeline.py keygen`: generates an Ed25519 PKCS#8 key with `ring`, as
+/// `pipeline_package_write` generates one, writes it to `key_output` (mode
+/// 0600) and the [`TrustedBundleKey`] to `trusted_output`, and refuses either
+/// path if it already exists. Its assertion: a result signed with the written
+/// key verifies with the written trusted key.
+fn write_signing_key_pair(
+    key_output: &Path,
+    key_id: &str,
+    trusted_output: &Path,
+) -> Result<(), String> {
+    use ring::signature::Ed25519KeyPair;
+
+    if key_output == trusted_output {
+        return Err("keygen_outputs_must_differ".to_string());
+    }
+    // `symlink_metadata`: a dangling link is something to refuse as well.
+    if std::fs::symlink_metadata(key_output).is_ok()
+        || std::fs::symlink_metadata(trusted_output).is_ok()
+    {
+        return Err("signing_key_output_exists".to_string());
+    }
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .map_err(|_| "signing_key_generation_failed".to_string())?;
+    let trusted = trusted_key_for_pkcs8(key_id, pkcs8.as_ref())
+        .map_err(|_| "signing_key_generation_failed".to_string())?;
+    // The key id is checked here, before a file exists: the trust store
+    // refuses an id that is not an identifier, and a refused id leaves
+    // neither the key nor the trusted key behind.
+    CheckResultTrustStore::new([trusted.clone()])
+        .map_err(|_| "signing_key_id_invalid".to_string())?;
+    create_new_output(key_output, pkcs8.as_ref(), true)?;
+    let trusted_bytes = serde_json::to_vec_pretty(&trusted)
+        .map_err(|_| "signing_key_generation_failed".to_string())?;
+    if let Err(label) = create_new_output(trusted_output, &trusted_bytes, false) {
+        // Leave no private key without its trusted key behind.
+        let _ = std::fs::remove_file(key_output);
+        return Err(label.to_string());
+    }
+
+    let written = zeroize::Zeroizing::new(
+        std::fs::read(key_output).map_err(|_| "signing_key_unreadable".to_string())?,
+    );
+    let written_key: TrustedBundleKey = serde_json::from_slice(
+        &std::fs::read(trusted_output).map_err(|_| "trusted_key_unreadable".to_string())?,
+    )
+    .map_err(|_| "trusted_key_invalid".to_string())?;
+    let probe = PipelineCheckResult {
+        schema: "trace_commons.pipeline_check_result.v1".to_string(),
+        run_id: "qkeygen".to_string(),
+        check_id: "pipeline_signing_key_probe".to_string(),
+        status: PipelineCheckStatus::Pass,
+        code_revision_hash: sha256_bytes(b"keygen"),
+        package_hash: None,
+        configuration_digest: None,
+        dependency_digest: None,
+        observed_at: Utc::now(),
+        evidence_hash: sha256_bytes(b"keygen"),
+        safe_blockers: Vec::new(),
+    };
+    let attestation = sign_check_result(probe, 60, None, None, key_id, &written)
+        .map_err(|_| "signing_key_invalid".to_string())?;
+    CheckResultTrustStore::new([written_key])
+        .and_then(|store| store.verify_all(&[attestation]).map(|_| ()))
+        .map_err(|_| "signing_key_pair_mismatch".to_string())
+}
+
+// ---------------------------------------------------------------------------
+// The ignored tools.
 // ---------------------------------------------------------------------------
 
 /// `pipeline.py run`. Its assertions are the test: every fixture meets its
@@ -1383,6 +1728,7 @@ async fn pipeline_corpus_run() {
     let state_mut = Arc::make_mut(&mut state);
     state_mut.tokens = Arc::new(tokens);
     state_mut.pipeline_service = Some(service);
+    state_mut.pipeline_activation = routing_store(&runtime);
     state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
     state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
         TraceTenantRolloutFeature::PipelineReceipts,
@@ -1443,6 +1789,10 @@ async fn pipeline_corpus_run() {
     // The report names each fixture's mismatches.
     assert_eq!(report["failure_count"], 0, "corpus_fixture_mismatch");
 
+    // The corpus loaded and the requests posted: what an attestation signs
+    // for this check beside its result (P5-D14).
+    let (corpus_digest, input_digest) =
+        corpus_evidence_digests(&report).unwrap_or_else(|label| panic!("{label}"));
     let evidence = serde_json::json!({
         "fixtures": report["fixture_count"],
         "completed": report["completed_fixture_count"],
@@ -1450,6 +1800,8 @@ async fn pipeline_corpus_run() {
         "changed_content_refused": report["changed_content_refused_count"],
         "tenant_isolation": report["tenant_isolation"],
         "report_hash": sha256_bytes(&report_bytes),
+        "corpus_digest": corpus_digest,
+        "input_digest": input_digest,
     });
     assert!(
         !contains_probe(
@@ -1459,7 +1811,12 @@ async fn pipeline_corpus_run() {
         ),
         "corpus_probe_in_evidence"
     );
-    PipelineCheckEmitter::emit_pass_from_env(&config.check_id, Some(&package), evidence);
+    // The minimal corpus check serves a test bundle, so its result names no
+    // package (P5-D15); the compatibility, HF-local, and signed-package
+    // checks name the package they served. The report keeps its own
+    // digests either way.
+    let named = (config.check_id != MINIMAL_CORPUS_CHECK_ID).then_some(&package);
+    PipelineCheckEmitter::emit_pass_from_env(&config.check_id, named, evidence);
 }
 
 /// `pipeline.py package`: builds the named bundle's package, signs it with
@@ -1528,9 +1885,576 @@ async fn pipeline_package_write() {
         .expect("the written package verifies with the written key");
 }
 
+/// The signing step of `pipeline.py qualify --signing-key`: signs the check
+/// results the run accepted into a staging directory and verifies what it
+/// wrote (see [`write_check_attestations`]). Needs no database. The key path
+/// is read here and never printed: every failure is a label.
+#[test]
+#[ignore = "the implementation of the signing step of `pipeline.py qualify`: run it through that command"]
+fn pipeline_check_attestations_write() {
+    let var = |name: &str| std::env::var(name).ok();
+    let (results_dir, attestation_dir, accepted, key_path, key_id, maximum_age) = match (
+        var(CHECK_RESULT_DIR_VAR),
+        var(CHECK_ATTESTATION_DIR_VAR),
+        var(CHECK_IDS_VAR),
+        var(CHECK_SIGNING_KEY_PATH_VAR),
+        var(CHECK_SIGNING_KEY_ID_VAR),
+        var(CHECK_MAX_AGE_SECONDS_VAR),
+    ) {
+        (None, None, None, None, None, None) => return,
+        (
+            Some(results_dir),
+            Some(attestation_dir),
+            Some(accepted),
+            Some(key_path),
+            Some(key_id),
+            Some(maximum_age),
+        ) => (
+            PathBuf::from(results_dir),
+            PathBuf::from(attestation_dir),
+            accepted,
+            key_path,
+            key_id,
+            maximum_age,
+        ),
+        _ => panic!("check_attestation_environment_incomplete"),
+    };
+    let accepted = parse_accepted_ids(&accepted).unwrap_or_else(|label| panic!("{label}"));
+    let maximum_age: u64 = maximum_age
+        .parse()
+        .unwrap_or_else(|_| panic!("check_attestation_max_age_invalid"));
+    assert!(
+        (1..=QUALIFICATION_EVIDENCE_AGE_CEILING_SECONDS).contains(&maximum_age),
+        "check_attestation_max_age_invalid"
+    );
+    assert!(attestation_dir.is_dir(), "check_attestation_dir_missing");
+    let pkcs8 = zeroize::Zeroizing::new(
+        std::fs::read(key_path).unwrap_or_else(|_| panic!("check_signing_key_unreadable")),
+    );
+    let written = write_check_attestations(
+        &results_dir,
+        &attestation_dir,
+        &accepted,
+        &pkcs8,
+        &key_id,
+        maximum_age,
+    )
+    .unwrap_or_else(|label| panic!("{label}"));
+    assert_eq!(written, accepted.len(), "check_attestation_count_mismatch");
+}
+
+/// `pipeline.py keygen`: writes a new Ed25519 key (mode 0600) and its trusted
+/// key (see [`write_signing_key_pair`]).
+#[test]
+#[ignore = "the implementation of `pipeline.py keygen`: run it through that command"]
+fn pipeline_signing_key_write() {
+    let var = |name: &str| std::env::var(name).ok();
+    let (output, key_id, trusted_output) = match (
+        var(KEYGEN_OUTPUT_VAR),
+        var(KEYGEN_KEY_ID_VAR),
+        var(KEYGEN_TRUSTED_KEY_OUTPUT_VAR),
+    ) {
+        (None, None, None) => return,
+        (Some(output), Some(key_id), Some(trusted_output)) => {
+            (PathBuf::from(output), key_id, PathBuf::from(trusted_output))
+        }
+        _ => panic!("keygen_environment_incomplete"),
+    };
+    write_signing_key_pair(&output, &key_id, &trusted_output)
+        .unwrap_or_else(|label| panic!("{label}"));
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests (no database).
 // ---------------------------------------------------------------------------
+
+/// A directory of check results as a run leaves them: one passing result and
+/// its evidence for each of `evidence`'s `(check_id, evidence)` pairs.
+fn emitted_results(evidence: &[(&str, serde_json::Value)]) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let emitter = PipelineCheckEmitter::new(
+        dir.path().to_path_buf(),
+        "qattest01",
+        &sha256_bytes(b"code-revision"),
+    )
+    .expect("emitter builds");
+    for (check_id, observed) in evidence {
+        emitter
+            .emit(
+                check_id,
+                PipelineCheckStatus::Pass,
+                None,
+                &[],
+                observed.clone(),
+            )
+            .expect("the check result is written");
+    }
+    dir
+}
+
+fn generated_signing_key() -> zeroize::Zeroizing<Vec<u8>> {
+    zeroize::Zeroizing::new(
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+            .expect("a key generates")
+            .as_ref()
+            .to_vec(),
+    )
+}
+
+/// A run as the signing step sees it: the check results in one directory, an
+/// empty staging directory for the attestations, and the ids the run accepted
+/// (here, every result emitted).
+struct StagedRun {
+    results: tempfile::TempDir,
+    staging: tempfile::TempDir,
+    accepted: BTreeSet<String>,
+}
+
+impl StagedRun {
+    fn new(evidence: &[(&str, serde_json::Value)]) -> Self {
+        Self {
+            results: emitted_results(evidence),
+            staging: tempfile::TempDir::new().expect("temp dir"),
+            accepted: evidence.iter().map(|(id, _)| (*id).to_string()).collect(),
+        }
+    }
+
+    fn sign(&self, pkcs8: &[u8], key_id: &str) -> Result<usize, String> {
+        write_check_attestations(
+            self.results.path(),
+            self.staging.path(),
+            &self.accepted,
+            pkcs8,
+            key_id,
+            3_600,
+        )
+    }
+
+    fn staged(&self) -> Vec<PathBuf> {
+        files_ending_in(self.staging.path(), ".attestation.json").unwrap()
+    }
+}
+
+#[test]
+fn check_attestations_are_written_once_and_verify_with_the_signing_key() {
+    let corpus = sha256_bytes(b"corpus");
+    let input = sha256_bytes(b"input");
+    let run = StagedRun::new(&[
+        (
+            "pipeline_http_corpus_minimal",
+            serde_json::json!({"fixtures": 5, "corpus_digest": corpus, "input_digest": input}),
+        ),
+        ("pipeline_crash_matrix", serde_json::json!({"runs": 3})),
+        ("pipeline_lease_renewal", serde_json::json!({"renewals": 2})),
+    ]);
+    let pkcs8 = generated_signing_key();
+    assert_eq!(run.sign(&pkcs8, "unit_check_key"), Ok(3));
+    assert_eq!(
+        files_ending_in(run.results.path(), ".attestation.json").unwrap(),
+        Vec::<PathBuf>::new(),
+        "the attestations go to the staging directory, not beside the results"
+    );
+
+    let read = |check_id: &str| -> PipelineCheckAttestation {
+        serde_json::from_slice(
+            &std::fs::read(
+                run.staging
+                    .path()
+                    .join(format!("{check_id}.attestation.json")),
+            )
+            .expect("the attestation was written"),
+        )
+        .expect("the attestation parses")
+    };
+    let corpus_check = read("pipeline_http_corpus_minimal");
+    assert_eq!(corpus_check.corpus_digest.as_deref(), Some(corpus.as_str()));
+    assert_eq!(corpus_check.input_digest.as_deref(), Some(input.as_str()));
+    assert_eq!(corpus_check.maximum_age_seconds, 3_600);
+    assert_eq!(corpus_check.signature.key_id, "unit_check_key");
+    let mechanics = read("pipeline_crash_matrix");
+    assert_eq!(
+        (mechanics.corpus_digest, mechanics.input_digest),
+        (None, None)
+    );
+    let result: PipelineCheckResult = serde_json::from_slice(
+        &std::fs::read(run.results.path().join("pipeline_crash_matrix.result.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        mechanics.result, result,
+        "the result inside is the result file"
+    );
+
+    // Another key does not verify what was written.
+    let other = generated_signing_key();
+    let other_store =
+        CheckResultTrustStore::new([trusted_key_for_pkcs8("unit_check_key", &other).unwrap()])
+            .unwrap();
+    assert!(other_store.verify_all(&[corpus_check]).is_err());
+
+    // A second run into the same staging directory refuses and writes
+    // nothing new.
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_attestation_already_written".to_string())
+    );
+
+    // What is read back is checked against the key the files were signed
+    // with: the right store verifies all three; a store of another key, or of
+    // none, does not, and the number of files must be the one expected.
+    let own_store =
+        CheckResultTrustStore::new([trusted_key_for_pkcs8("unit_check_key", &pkcs8).unwrap()])
+            .unwrap();
+    let staging = run.staging.path();
+    assert_eq!(
+        verified_attestations(staging, &own_store, 3).map(|all| all.len()),
+        Ok(3)
+    );
+    assert_eq!(
+        verified_attestations(staging, &own_store, 2).map(|all| all.len()),
+        Err("check_attestation_count_mismatch".to_string())
+    );
+    assert_eq!(
+        verified_attestations(staging, &other_store, 3).map(|all| all.len()),
+        Err("check_attestation_signature_invalid".to_string())
+    );
+    let empty_store = CheckResultTrustStore::new(std::iter::empty()).unwrap();
+    assert_eq!(
+        verified_attestations(staging, &empty_store, 3).map(|all| all.len()),
+        Err("check_attestation_signer_untrusted".to_string())
+    );
+    std::fs::write(
+        staging.join("pipeline_crash_matrix.attestation.json"),
+        b"not json",
+    )
+    .unwrap();
+    assert_eq!(
+        verified_attestations(staging, &own_store, 3).map(|all| all.len()),
+        Err("check_attestation_invalid".to_string())
+    );
+}
+
+/// The signer signs the checks the run accepted, no other: a result file of
+/// another id, and an accepted check without a result file, are refused
+/// before anything is signed. The attestation directory may also be the
+/// results directory (the signer does not mind).
+#[test]
+fn check_attestations_cover_exactly_the_accepted_checks() {
+    let pkcs8 = generated_signing_key();
+    let crash = ("pipeline_crash_matrix", serde_json::json!({"runs": 3}));
+    let lease = ("pipeline_lease_renewal", serde_json::json!({"renewals": 2}));
+
+    // A result file the run did not accept (a stray one in the directory).
+    let mut run = StagedRun::new(&[crash.clone(), lease.clone()]);
+    run.accepted.remove("pipeline_lease_renewal");
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_result_unexpected".to_string())
+    );
+    assert!(run.staged().is_empty(), "nothing was signed");
+
+    // An accepted check with no result file.
+    let mut run = StagedRun::new(std::slice::from_ref(&crash));
+    run.accepted.insert("pipeline_lease_renewal".to_string());
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_result_missing".to_string())
+    );
+    assert!(run.staged().is_empty(), "nothing was signed");
+
+    // Both at once: the extra file is named first.
+    let mut run = StagedRun::new(std::slice::from_ref(&crash));
+    run.accepted = ["pipeline_lease_renewal".to_string()].into();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_result_unexpected".to_string())
+    );
+
+    // Exactly the accepted checks: signed, in the results directory too.
+    let run = StagedRun::new(&[crash, lease]);
+    assert_eq!(
+        write_check_attestations(
+            run.results.path(),
+            run.results.path(),
+            &run.accepted,
+            &pkcs8,
+            "unit_check_key",
+            3_600
+        ),
+        Ok(2)
+    );
+
+    // The list of ids the tool passes.
+    assert_eq!(
+        parse_accepted_ids("pipeline_crash_matrix,pipeline_lease_renewal"),
+        Ok([
+            "pipeline_crash_matrix".to_string(),
+            "pipeline_lease_renewal".to_string()
+        ]
+        .into())
+    );
+    for broken in [
+        "",
+        ",",
+        "a,,b",
+        "a,a",
+        "Not_A_Label",
+        "a b",
+        "pipeline_crash_matrix,",
+        &"x".repeat(65),
+    ] {
+        assert_eq!(
+            parse_accepted_ids(broken),
+            Err("check_attestation_ids_invalid".to_string()),
+            "{broken}"
+        );
+    }
+}
+
+#[test]
+fn check_attestations_refuse_evidence_that_is_not_the_results() {
+    let pkcs8 = generated_signing_key();
+    let crash = || ("pipeline_crash_matrix", serde_json::json!({"runs": 3}));
+
+    // Evidence changed after the result was written.
+    let run = StagedRun::new(&[crash()]);
+    std::fs::write(
+        run.results
+            .path()
+            .join("pipeline_crash_matrix.evidence.json"),
+        br#"{"runs": 4}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_evidence_hash_mismatch".to_string())
+    );
+    assert!(run.staged().is_empty(), "nothing was signed");
+
+    // An attestation file that this run did not write (another run's, left
+    // in the staging directory) makes the count wrong: the step refuses.
+    let run = StagedRun::new(&[crash()]);
+    std::fs::write(
+        run.staging
+            .path()
+            .join("pipeline_old_check.attestation.json"),
+        b"{}",
+    )
+    .unwrap();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_attestation_count_mismatch".to_string())
+    );
+
+    // Missing evidence, an unreadable result, and an empty directory.
+    let run = StagedRun::new(&[crash()]);
+    std::fs::remove_file(
+        run.results
+            .path()
+            .join("pipeline_crash_matrix.evidence.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_evidence_unreadable".to_string())
+    );
+    let run = StagedRun::new(&[crash()]);
+    std::fs::write(
+        run.results.path().join("pipeline_crash_matrix.result.json"),
+        b"",
+    )
+    .unwrap();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_result_invalid".to_string())
+    );
+    let empty = StagedRun::new(&[]);
+    assert_eq!(
+        empty.sign(&pkcs8, "unit_check_key"),
+        Err("check_attestation_no_results".to_string())
+    );
+
+    // A result file named for another check.
+    let run = StagedRun::new(&[crash()]);
+    std::fs::rename(
+        run.results.path().join("pipeline_crash_matrix.result.json"),
+        run.results
+            .path()
+            .join("pipeline_lease_renewal.result.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        run.sign(&pkcs8, "unit_check_key"),
+        Err("check_result_name_mismatch".to_string())
+    );
+
+    // Exactly one of the two digests, or one that is not a string or not a
+    // digest: the attestation would carry a digest it does not cover.
+    for (what, evidence, label) in [
+        (
+            "only the corpus digest",
+            serde_json::json!({"corpus_digest": sha256_bytes(b"c")}),
+            "check_evidence_digests_incomplete",
+        ),
+        (
+            "only the input digest",
+            serde_json::json!({"input_digest": sha256_bytes(b"i")}),
+            "check_evidence_digests_incomplete",
+        ),
+        (
+            "a digest that is a number",
+            serde_json::json!({"corpus_digest": 7, "input_digest": sha256_bytes(b"i")}),
+            "check_evidence_digest_invalid",
+        ),
+        (
+            "a digest that is not a digest",
+            serde_json::json!({"corpus_digest": "not-a-digest", "input_digest": sha256_bytes(b"i")}),
+            "check_attestation_signing_failed",
+        ),
+    ] {
+        let run = StagedRun::new(&[("pipeline_http_corpus_minimal", evidence)]);
+        assert_eq!(
+            run.sign(&pkcs8, "unit_check_key"),
+            Err(label.to_string()),
+            "{what}"
+        );
+        assert!(run.staged().is_empty(), "{what}");
+    }
+
+    // A key that is not a key, and a key id that is not an identifier.
+    let run = StagedRun::new(&[crash()]);
+    assert_eq!(
+        run.sign(b"not a key", "unit_check_key"),
+        Err("check_attestation_signing_failed".to_string())
+    );
+    assert_eq!(
+        run.sign(&pkcs8, "key id with spaces"),
+        Err("check_attestation_signing_failed".to_string())
+    );
+    assert!(run.staged().is_empty());
+}
+
+#[test]
+fn a_signing_key_pair_is_written_private_and_never_over_an_existing_file() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let key = dir.path().join("check-key.pk8");
+    let trusted = dir.path().join("check-key.json");
+    write_signing_key_pair(&key, "unit_check_key", &trusted).expect("a key pair is written");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is private to its owner");
+    }
+    let trusted_key: TrustedBundleKey =
+        serde_json::from_slice(&std::fs::read(&trusted).unwrap()).unwrap();
+    assert_eq!(trusted_key.key_id, "unit_check_key");
+    assert!(
+        !std::fs::read_to_string(&trusted)
+            .unwrap()
+            .contains("PRIVATE"),
+        "the trusted key file holds the public key only"
+    );
+    let pkcs8 = std::fs::read(&key).unwrap();
+    assert_eq!(
+        trusted_key,
+        trusted_key_for_pkcs8("unit_check_key", &pkcs8).unwrap(),
+        "the trusted key is the written key's public half"
+    );
+
+    // Nothing is overwritten: not the key, not the trusted key, not a link.
+    let before = (
+        std::fs::read(&key).unwrap(),
+        std::fs::read(&trusted).unwrap(),
+    );
+    let other = dir.path().join("other.json");
+    let other_key = dir.path().join("other.pk8");
+    for (key_path, trusted_path) in [(&key, &other), (&other_key, &trusted), (&key, &trusted)] {
+        assert_eq!(
+            write_signing_key_pair(key_path, "unit_check_key", trusted_path),
+            Err("signing_key_output_exists".to_string())
+        );
+    }
+    assert!(!other.exists() && !other_key.exists());
+    assert_eq!(
+        before,
+        (
+            std::fs::read(&key).unwrap(),
+            std::fs::read(&trusted).unwrap()
+        )
+    );
+    #[cfg(unix)]
+    {
+        let link = dir.path().join("dangling.pk8");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+        assert_eq!(
+            write_signing_key_pair(&link, "unit_check_key", &other),
+            Err("signing_key_output_exists".to_string())
+        );
+        assert!(!other.exists());
+    }
+    assert_eq!(
+        write_signing_key_pair(&other_key, "unit_check_key", &other_key),
+        Err("keygen_outputs_must_differ".to_string())
+    );
+    // A key id that is not an identifier leaves no key behind: neither file
+    // exists afterwards, and the label names the id.
+    assert_eq!(
+        write_signing_key_pair(&other_key, "bad key id", &other),
+        Err("signing_key_id_invalid".to_string())
+    );
+    assert!(
+        !other_key.exists() && !other.exists(),
+        "a refused key id leaves neither the key nor the trusted key"
+    );
+}
+
+/// `corpus.evidence_digests` in `scripts/operator/pipeline_tooling/corpus.py`
+/// pins the same three literals.
+#[test]
+fn corpus_evidence_digests_name_the_corpus_and_the_requests() {
+    let digest = |digit: char| format!("sha256:{}", digit.to_string().repeat(64));
+    let report = |sections: &[(char, &[char])]| {
+        serde_json::json!({
+            "partitions": sections
+                .iter()
+                .map(|(corpus, requests)| serde_json::json!({
+                    "corpus_digest": digest(*corpus),
+                    "fixtures": requests
+                        .iter()
+                        .map(|request| serde_json::json!({"request_content_hash": digest(*request)}))
+                        .collect::<Vec<_>>(),
+                }))
+                .collect::<Vec<_>>(),
+        })
+    };
+    assert_eq!(
+        corpus_evidence_digests(&report(&[('1', &['a', 'b'])])),
+        Ok((
+            digest('1'),
+            "sha256:b7cc444b1f09d1e380d2a82f6ae10447932ce3b91f31b0ab2e659f7a7fdea15f".to_string()
+        )),
+        "one partition: its own corpus digest"
+    );
+    assert_eq!(
+        corpus_evidence_digests(&report(&[('1', &['a', 'b']), ('2', &['c'])])),
+        Ok((
+            "sha256:636d591478be5cb76f2025a46b17a229fa29ef91724891793005baa9eef2100e".to_string(),
+            "sha256:208dcba10edb6eea7324c3be4765e976cb578c1d9715d91e60d4042df6650461".to_string()
+        )),
+        "two partitions: the hash of both digests, and every request in order"
+    );
+    // A report that is not a report names no digests.
+    for broken in [
+        serde_json::json!({}),
+        serde_json::json!({"partitions": []}),
+        serde_json::json!({"partitions": [{"corpus_digest": digest('1'), "fixtures": []}]}),
+        serde_json::json!({"partitions": [{"corpus_digest": 5, "fixtures": []}]}),
+    ] {
+        assert!(corpus_evidence_digests(&broken).is_err(), "{broken}");
+    }
+}
 
 pub(super) fn main_corpus_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

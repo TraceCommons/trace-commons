@@ -17,6 +17,14 @@ public sealed class ConsentOption
     [JsonPropertyName("name")]
     public string Name { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The core's short bold label for the scope. Null when the daemon sent
+    /// none; a shell then does not offer the scope (owner ruling,
+    /// 2026-10-06: no shell keeps its own table of titles).
+    /// </summary>
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
+
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
 

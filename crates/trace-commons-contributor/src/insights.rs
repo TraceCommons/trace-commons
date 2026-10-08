@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     /// The CLI's hand-written `value_parser` string lists
-    /// (`contributor_cli/insights.rs`) must accept exactly the wire form of
+    /// (`cli/insights.rs`) must accept exactly the wire form of
     /// every variant. This does not touch the CLI directly (it lives in a
     /// separate binary crate) but pins the wire strings the CLI list is
     /// required to mirror, so a diff here is a signal to update it too.

@@ -320,7 +320,7 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 /// shipped so far (see `docs/operator/settlement-mode.md`), so a bare figure
 /// would be read as money that exists.
 ///
-/// **DRAFT, NEEDS APPROVAL** on the project clause: K9 (#1118) rewords it to
+/// Approved 2026-10-06, the project clause too: K9 (#1118) rewords it to
 /// match the WYSIWYG design's Flow 2/3 evening-digest alerts exactly --
 /// "1 session contributed from orchard-api. 6.0 credit pending." and
 /// "2 sessions contributed. 10.5 credit pending." The design names a project

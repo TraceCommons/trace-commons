@@ -5,6 +5,8 @@ use super::*;
 
 #[path = "tests/account_binding_gate_tests.rs"]
 mod account_binding_gate_tests;
+#[path = "tests/activity_missions_tests.rs"]
+mod activity_missions_tests;
 #[path = "tests/legacy_invite_link_tests.rs"]
 mod legacy_invite_link_tests;
 #[path = "tests/mission_catalog_tests.rs"]
@@ -266,7 +268,9 @@ async fn source_offer_is_served_without_credentials() {
     assert_eq!(value["build_version"], env!("CARGO_PKG_VERSION"));
 }
 
-fn test_state(root: PathBuf) -> Arc<AppState> {
+/// `pub(super)`: the unit tests of `pipeline_activation`, a sibling of this
+/// module, build their state from it.
+pub(super) fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
 
@@ -327,6 +331,14 @@ async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     // (cleaned per-test via `cleanup_pg_trace_tenant`) still serialize those tests.
     reset_account_rate_limiter_for_db_test().await;
     Some(backend)
+}
+
+/// The routing store a booted ingest builds over the connection its
+/// pipeline runtime uses (`AppState::pipeline_activation`), for a test state
+/// that injects a `PipelineService`: with a service and no store, a new upload
+/// is refused as `pipeline_routing_unavailable`.
+fn routing_store(backend: &Arc<PgBackend>) -> Option<Arc<PipelineActivationStore>> {
+    Some(Arc::new(PipelineActivationStore::new(backend.clone())))
 }
 
 async fn cleanup_pg_trace_tenant(backend: &PgBackend, tenant_id: &str) {
@@ -5759,6 +5771,8 @@ fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAu
         let key =
             submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
         configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+        let key = large_body_principal_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
     }
 }
 
@@ -6105,6 +6119,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     configure_unbounded_submit_limits_for_test(&tokens);
     Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
+        activity_missions_policy: None,
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -6129,6 +6144,17 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_service: None,
         pipeline_product: None,
         pipeline_store: None,
+        pipeline_activation: None,
+        pipeline_qualification: None,
+        pipeline_package_trust: None,
+        pipeline_check_trust: None,
+        pipeline_code_revision_hash: None,
+        pipeline_main_gate: TEST_MAIN_GATE,
+        pipeline_infrastructure_override: None,
+        // The test assemblers build their services with this flag set
+        // (`unqualified_routing_allowed`); a test of production routing
+        // builds its state and its service with it off.
+        pipeline_unqualified_routing: true,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -10104,6 +10130,7 @@ fn required_ingest_pipeline_runtime_fails_closed_without_assembly() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -10502,9 +10529,16 @@ fn minimal_pipeline_service(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     Ok(Arc::new(
-        minimal_pipeline_service_builder(backend, artifact_store, object_store_name)?.build()?,
+        minimal_pipeline_service_builder(
+            backend,
+            artifact_store,
+            object_store_name,
+            unqualified_routing,
+        )?
+        .build()?,
     ))
 }
 
@@ -10514,6 +10548,7 @@ fn minimal_pipeline_service_builder(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<trace_commons_server::versioned_pipeline::PipelineServiceBuilder> {
     use trace_commons_gate_api::{ReferenceEmbedder, ReferencePerplexityScorer};
     use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
@@ -10547,7 +10582,8 @@ fn minimal_pipeline_service_builder(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -10571,6 +10607,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
                 context.backend,
                 context.artifact_store,
                 self.pass_the_name.then_some(context.object_store_name),
+                context.unqualified_routing_allowed,
             )
         }
     }
@@ -10591,6 +10628,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         Some(&configured_store),
         false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        false,
         false,
         false,
         None,
@@ -10616,6 +10654,7 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -10628,6 +10667,87 @@ async fn pipeline_assembly_requires_the_configured_object_store_name() {
         service.object_store_name(),
         TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE
     );
+}
+
+/// P5-D5: ingest hands the process's unqualified-routing setting to the
+/// assembly, and the service it returns must hold the same value, because the
+/// service's receipt transaction checks the routing again. An assembler that
+/// ignores `context.unqualified_routing_allowed` (its service keeps the
+/// default, off) is refused when the setting is on, and one that always turns
+/// it on is refused when the setting is off; one that follows the context
+/// starts either way.
+#[tokio::test]
+async fn the_assembly_refuses_a_service_with_another_unqualified_routing_flag() {
+    struct FlagAssembler {
+        /// `None` follows the context; `Some(flag)` ignores it.
+        fixed: Option<bool>,
+    }
+    impl IngestPipelineRuntimeAssembler for FlagAssembler {
+        fn assemble(
+            &self,
+            context: pipeline_runtime::IngestPipelineRuntimeContext,
+        ) -> anyhow::Result<Arc<PipelineService>> {
+            minimal_pipeline_service(
+                context.backend,
+                context.artifact_store,
+                Some(context.object_store_name),
+                self.fixed.unwrap_or(context.unqualified_routing_allowed),
+            )
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    let configured_store = ConfiguredTraceArtifactStore::legacy(test_artifact_store(dir.path()));
+    let assemble = |assembler: &FlagAssembler, unqualified_routing_allowed: bool| {
+        assemble_ingest_pipeline_runtime(
+            Some(assembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+            false,
+            false,
+            unqualified_routing_allowed,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+    };
+
+    for (assembler, allowed, case) in [
+        (
+            FlagAssembler { fixed: Some(false) },
+            true,
+            "a service that ignores the setting while it is on",
+        ),
+        (
+            FlagAssembler { fixed: Some(true) },
+            false,
+            "a service that turns the setting on while it is off",
+        ),
+    ] {
+        let refused = assemble(&assembler, allowed)
+            .err()
+            .unwrap_or_else(|| panic!("{case} is refused"));
+        assert_eq!(
+            refused.to_string(),
+            "pipeline_runtime_unqualified_routing_mismatch",
+            "{case}"
+        );
+    }
+    for allowed in [true, false] {
+        let service = assemble(&FlagAssembler { fixed: None }, allowed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(service.unqualified_routing(), allowed);
+    }
 }
 
 /// Wraps `ReferencePerplexityScorer` and overrides `production_qualified` to
@@ -10933,6 +11053,7 @@ fn qualified_pipeline_service(
     )>,
     extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
     extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     qualified_pipeline_service_with_privacy(
         backend,
@@ -10948,6 +11069,7 @@ fn qualified_pipeline_service(
         payout,
         extra_scorer,
         extra_settlement_adapter,
+        unqualified_routing,
     )
 }
 
@@ -10967,6 +11089,7 @@ fn qualified_pipeline_service_with_privacy(
     )>,
     extra_scorer: Option<Arc<dyn trace_commons_gate_api::IdentifiedPerplexityScorer>>,
     extra_settlement_adapter: Option<Arc<dyn trace_commons_gate_api::SettlementAdapter>>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11014,7 +11137,8 @@ fn qualified_pipeline_service_with_privacy(
         },
     )
     .with_scorer(scorer)
-    .with_embedder(embedder);
+    .with_embedder(embedder)
+    .with_unqualified_routing(unqualified_routing);
     if let Some(extra_scorer) = extra_scorer {
         builder = builder.with_scorer(extra_scorer);
     }
@@ -11043,6 +11167,7 @@ fn pipeline_service_with_unqualified_named_scorer(
     backend: Arc<PgBackend>,
     artifact_store: Arc<dyn TraceArtifactStore>,
     object_store_name: Option<String>,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11088,7 +11213,8 @@ fn pipeline_service_with_unqualified_named_scorer(
     .with_scorer(scorer)
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
-    .with_privacy(Arc::new(QualifiedTestPrivacy));
+    .with_privacy(Arc::new(QualifiedTestPrivacy))
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11104,6 +11230,7 @@ fn qualified_compatibility_pipeline_service(
     config: &trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig,
     object_store_name: Option<String>,
     checks: PipelineNoveltyUtilityChecks,
+    unqualified_routing: bool,
 ) -> anyhow::Result<Arc<PipelineService>> {
     use trace_commons_gate_api::SettlementAdapter;
     use trace_commons_gate_api::pipeline::InstrumentId;
@@ -11141,7 +11268,8 @@ fn qualified_compatibility_pipeline_service(
     .with_embedder(embedder)
     .with_authority(Arc::new(QualifiedTestAuthority))
     .with_privacy(Arc::new(QualifiedTestPrivacy))
-    .with_novelty_utility_checks(checks);
+    .with_novelty_utility_checks(checks)
+    .with_unqualified_routing(unqualified_routing);
     if let Some(object_store_name) = object_store_name {
         builder = builder.with_object_store_name(object_store_name);
     }
@@ -11168,6 +11296,7 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
             config,
             None,
             PipelineNoveltyUtilityChecks::default(),
+            true,
         )
         .expect("build a qualified compatibility service")
     };
@@ -11251,6 +11380,7 @@ impl IngestPipelineRuntimeAssembler for CompatibilityAssembler {
             &config,
             Some(context.object_store_name),
             context.novelty_utility_checks,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11273,6 +11403,7 @@ async fn pipeline_runtime_compatibility_holds_mains_gate_configuration() {
             Some(&configured_store),
             false,
             PipelineLeaseConfig::default(),
+            false,
             false,
             false,
             None,
@@ -11361,6 +11492,7 @@ async fn pipeline_runtime_refuses_a_compatibility_bundle_without_the_credit_issu
             PipelineLeaseConfig::default(),
             tenants_processed,
             false,
+            false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
@@ -11414,6 +11546,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert!(pipeline_runtime_is_production_qualified(
@@ -11434,6 +11567,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert!(validate_pipeline_privacy_filter_requirement(true, &without_a_boundary).is_err());
@@ -11453,6 +11587,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     assert_eq!(
@@ -11480,6 +11615,7 @@ async fn a_required_privacy_filter_needs_a_boundary_that_classifies_prose_pii() 
         None,
         None,
         None,
+        true,
     )
     .unwrap();
     validate_pipeline_privacy_filter_requirement(true, &classifier)
@@ -11502,6 +11638,7 @@ impl IngestPipelineRuntimeAssembler for UnqualifiedAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11524,6 +11661,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssembler {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11549,6 +11687,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutAuthority {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11572,6 +11711,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithoutPrivacy {
             None,
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11599,6 +11739,7 @@ impl IngestPipelineRuntimeAssembler for QualifiedAssemblerWithAnUnnamedUnqualifi
                 trace_commons_gate_api::ReferencePerplexityScorer::new(),
             ))),
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11633,6 +11774,7 @@ impl IngestPipelineRuntimeAssembler
                     "none",
                 ),
             ),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11652,6 +11794,7 @@ impl IngestPipelineRuntimeAssembler for AssemblerWithAnUnqualifiedNamedScorer {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -11671,6 +11814,7 @@ async fn an_unqualified_scorer_the_default_bundle_does_not_name_does_not_block_s
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11698,6 +11842,7 @@ async fn an_unqualified_adapter_for_an_instrument_the_bundle_does_not_pin_does_n
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11724,6 +11869,7 @@ async fn an_unqualified_scorer_the_default_bundle_names_blocks_startup() {
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11774,6 +11920,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_rou
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11809,6 +11956,7 @@ async fn pipeline_runtime_refuses_an_unqualified_dependency_when_tenants_are_onl
             false,
             PipelineLeaseConfig::default(),
             tenants_processed,
+            false,
             false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11852,6 +12000,7 @@ async fn pipeline_runtime_allows_an_unqualified_dependency_with_the_test_opt_in(
         PipelineLeaseConfig::default(),
         true,
         true,
+        true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11879,6 +12028,7 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         PipelineLeaseConfig::default(),
         false,
         true,
+        true,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11891,6 +12041,103 @@ async fn pipeline_runtime_refuses_the_test_opt_in_together_with_required() {
         error.to_string(),
         "pipeline_test_dependencies_not_allowed_when_required"
     );
+}
+
+/// PR 5 (Task 2's deferred item, done in Task 10): unqualified routing, the
+/// setting of a process started for tests, never combines with
+/// `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` either, whatever the test opt-in
+/// says and before any assembler runs.
+#[tokio::test]
+async fn pipeline_runtime_refuses_unqualified_routing_together_with_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    for assembler in [
+        None,
+        Some(&QualifiedAssembler as &dyn IngestPipelineRuntimeAssembler),
+    ] {
+        let error = assemble_ingest_pipeline_runtime(
+            assembler,
+            Some(&connections),
+            Some(&configured_store),
+            true,
+            PipelineLeaseConfig::default(),
+            false,
+            false,
+            true,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+        .err()
+        .expect("unqualified routing never combines with the required flag");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_unqualified_routing_not_allowed_when_required"
+        );
+    }
+}
+
+/// Final fix wave (G9): unqualified routing, the setting of a process started
+/// for tests, never combines with a runtime whose dependencies are
+/// production-qualified (`pipeline_runtime_is_production_qualified`), with or
+/// without routed tenants and the test opt-in: a production-like process
+/// refuses to start rather than route a tenant with no routing row. A runtime
+/// of test doubles with the opt-in still starts with it.
+#[tokio::test]
+async fn pipeline_runtime_refuses_unqualified_routing_with_a_qualified_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let (connections, configured_store) = pipeline_runtime_fail_closed_fixture(&dir).await;
+    for (tenants_processed, allow_test_dependencies) in
+        [(true, true), (false, true), (false, false)]
+    {
+        let error = assemble_ingest_pipeline_runtime(
+            Some(&QualifiedAssembler),
+            Some(&connections),
+            Some(&configured_store),
+            false,
+            PipelineLeaseConfig::default(),
+            tenants_processed,
+            allow_test_dependencies,
+            true,
+            None,
+            TEST_NEAR_CONFIRMATION_INTERVAL,
+            TEST_NEAR_PAYOUT_CONTROLS,
+            &PipelineNoveltyUtilityChecks::default(),
+            TEST_MAIN_GATE,
+        )
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "a qualified runtime with unqualified routing is refused \
+                 (tenants {tenants_processed}, opt-in {allow_test_dependencies})"
+            )
+        });
+        assert_eq!(
+            error.to_string(),
+            "pipeline_unqualified_routing_with_production_runtime"
+        );
+    }
+    let service = assemble_ingest_pipeline_runtime(
+        Some(&UnqualifiedAssembler),
+        Some(&connections),
+        Some(&configured_store),
+        false,
+        PipelineLeaseConfig::default(),
+        true,
+        true,
+        true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks::default(),
+        TEST_MAIN_GATE,
+    )
+    .expect("a runtime of test doubles with the opt-in starts")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+    assert!(service.unqualified_routing());
 }
 
 /// A qualified runtime with routed tenants and no
@@ -11908,6 +12155,7 @@ async fn pipeline_runtime_starts_a_qualified_dependency_with_routed_tenants() {
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -11939,6 +12187,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_auth
         PipelineLeaseConfig::default(),
         true,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -11967,6 +12216,7 @@ async fn pipeline_runtime_refuses_an_otherwise_qualified_dependency_with_no_priv
         false,
         PipelineLeaseConfig::default(),
         true,
+        false,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12014,6 +12264,39 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
         self.0.confirmation(idempotency_key)
     }
+}
+
+/// A qualified pipeline service over a backend that never connects, with its
+/// payout enabled on `TEST_PAYOUT_NEAR_CONTRACT` in `settlement_mode` when one
+/// is given. For the unit tests of `pipeline_activation` (a sibling of this
+/// module), which read only what the service reports of itself
+/// (`payout_enabled`, `payout_controls`).
+pub(super) async fn qualified_test_service_with_payout(
+    dir: &tempfile::TempDir,
+    settlement_mode: Option<PipelineNearSettlementMode>,
+) -> Arc<PipelineService> {
+    qualified_pipeline_service(
+        pg_backend_without_a_database().await,
+        test_artifact_store(dir.path()),
+        None,
+        true,
+        true,
+        settlement_mode.map(|settlement_mode| {
+            let mut config = payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT));
+            config.controls.settlement_mode = settlement_mode;
+            (
+                Arc::new(QualifiedTestNearAdapter(
+                    trace_commons_server::versioned_pipeline_credit::RecordingNearAdapter::authenticated(),
+                ))
+                    as Arc<dyn trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter>,
+                config,
+            )
+        }),
+        None,
+        None,
+        false,
+    )
+    .expect("the qualified service builds")
 }
 
 /// The NEAR credit contract the payout tests configure.
@@ -12120,6 +12403,7 @@ impl IngestPipelineRuntimeAssembler for PayoutAssembler {
             )),
             None,
             None,
+            context.unqualified_routing_allowed,
         )
     }
 }
@@ -12139,6 +12423,7 @@ async fn pipeline_runtime_payout_uses_the_configured_near_contract() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             configured,
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12198,6 +12483,7 @@ impl IngestPipelineRuntimeAssembler for NoveltyUtilityChecksAssembler {
             context.backend,
             context.artifact_store,
             Some(context.object_store_name),
+            context.unqualified_routing_allowed,
         )?;
         if self.forward {
             builder = builder.with_novelty_utility_checks(context.novelty_utility_checks);
@@ -12237,6 +12523,7 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
             PipelineLeaseConfig::default(),
             false,
             false,
+            false,
             None,
             TEST_NEAR_CONFIRMATION_INTERVAL,
             TEST_NEAR_PAYOUT_CONTROLS,
@@ -12273,6 +12560,7 @@ async fn pipeline_runtime_payout_polls_at_mains_near_scheduler_cadence() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12326,6 +12614,7 @@ async fn pipeline_runtime_payout_follows_mains_near_payout_controls() {
             false,
             PipelineLeaseConfig::default(),
             true,
+            false,
             false,
             Some(TEST_PAYOUT_NEAR_CONTRACT),
             TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12396,6 +12685,7 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
             enabled.then(|| (adapter, payout_test_config(Some(TEST_PAYOUT_NEAR_CONTRACT)))),
             None,
             None,
+            true,
         )
         .expect("build the pipeline service")
     };
@@ -12595,6 +12885,7 @@ async fn pipeline_runtime_starts_an_unqualified_dependency_when_no_tenants_are_r
         PipelineLeaseConfig::default(),
         false,
         false,
+        false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
@@ -12614,6 +12905,7 @@ async fn pipeline_service_without_a_database() -> Arc<PipelineService> {
         pg_backend_without_a_database().await,
         test_artifact_store(dir.path()),
         None,
+        true,
     )
     .unwrap()
 }
@@ -28734,6 +29026,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     );
     let state = Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
+        activity_missions_policy: None,
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -28758,6 +29051,17 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_service: None,
         pipeline_product: None,
         pipeline_store: None,
+        pipeline_activation: None,
+        pipeline_qualification: None,
+        pipeline_package_trust: None,
+        pipeline_check_trust: None,
+        pipeline_code_revision_hash: None,
+        pipeline_main_gate: TEST_MAIN_GATE,
+        pipeline_infrastructure_override: None,
+        // The test assemblers build their services with this flag set
+        // (`unqualified_routing_allowed`); a test of production routing
+        // builds its state and its service with it off.
+        pipeline_unqualified_routing: true,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -40482,6 +40786,33 @@ async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runt
         .expect_err("no pipeline runtime is injected in this test state");
     assert_eq!(error.0, StatusCode::NOT_FOUND);
     assert_eq!(error.1.0.error, "pipeline runtime not configured");
+}
+
+/// PR 5, Task 11: the rebuild's failures map to fixed labels. A run's
+/// writes that passed their deadline (`index_unavailable`) and a fence
+/// write that failed (`index_rebuild_fence_unavailable`) are both `503`, a
+/// service fault a rerun can clear; a tampered command stays `409`.
+#[test]
+fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
+    use pipeline_runtime::pipeline_index_rebuild_error;
+    use trace_commons_server::versioned_pipeline::{
+        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+    };
+    for (label, status) in [
+        (
+            PIPELINE_INDEX_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        ("index_command_invalid", StatusCode::CONFLICT),
+    ] {
+        let (mapped, body) = pipeline_index_rebuild_error(anyhow::anyhow!(label));
+        assert_eq!(mapped, status, "{label}");
+        assert_eq!(body.0.error, label);
+    }
 }
 
 /// Zaki's re-review of #1166, Low: the rebuild route runs one rebuild per
@@ -78782,6 +79113,547 @@ fn account_rate_limiter_caps_per_key() {
     assert!(limiter.check("other-key", CONFIRM_PER_CODE_LIMIT));
 }
 
+/// The pilot edge overwrites X-Forwarded-For, so the last value Caddy wrote is
+/// the only rate-limit identity the application may use. Caller-supplied hops
+/// to its left must not create fresh buckets.
+#[test]
+fn account_rate_limit_client_key_uses_the_rightmost_valid_proxy_hop() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("attacker-chosen, 192.0.2.44"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&headers), "192.0.2.44");
+
+    headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.17"));
+    assert_eq!(client_ip_for_rate_limit(&headers), "198.51.100.17");
+}
+
+/// One IPv6 subscriber can rotate interface identifiers cheaply. Every
+/// address in its /64 must therefore spend the same bucket, while malformed
+/// and absent proxy values share one conservative unattributed bucket.
+#[test]
+fn account_rate_limit_client_key_coarsens_ipv6_and_rejects_non_addresses() {
+    let mut first = HeaderMap::new();
+    first.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678::1"),
+    );
+    let mut second = HeaderMap::new();
+    second.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678:ffff::abcd"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&first), "2001:db8:1234:5678::/64");
+    assert_eq!(
+        client_ip_for_rate_limit(&first),
+        client_ip_for_rate_limit(&second)
+    );
+
+    let mut malformed = HeaderMap::new();
+    malformed.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("not-an-address"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&malformed), "unattributed");
+    assert_eq!(
+        client_ip_for_rate_limit(&malformed),
+        client_ip_for_rate_limit(&HeaderMap::new())
+    );
+}
+
+/// Rotating rate-limit keys must not grow the process table without bound.
+/// Excess callers share one deliberately stricter overflow bucket.
+#[test]
+fn account_rate_limiter_bounds_distinct_keys_and_overflow_fails_closed() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(
+            limiter.check_at(&format!("surface:rotated-{index}"), 30, now),
+            "the shared overflow bucket admits only its small fixed allowance"
+        );
+    }
+    assert!(!limiter.check_at("surface:another", 30, now));
+    assert_eq!(limiter.tracked_windows_for_test(), 3);
+}
+
+/// A full table must not fold a fixed, code-built global ceiling into the
+/// shared overflow bucket: that would cut every surface's deployment-wide
+/// cap to the overflow allowance, and spend the overflow bucket on global
+/// traffic, exactly when an address-rotation flood is in progress.
+#[test]
+fn account_rate_limiter_keeps_global_ceilings_out_of_the_overflow_bucket() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for hit in 0..30 {
+        assert!(
+            limiter.check_global_at("surface-global", 30, now),
+            "global hit {hit} is held to the global limit, not the overflow allowance"
+        );
+    }
+    assert!(!limiter.check_global_at("surface-global", 30, now));
+    assert_eq!(limiter.count_for_test(ACCOUNT_RATE_OVERFLOW_KEY), 0);
+    assert_eq!(limiter.count_for_test("surface-global"), 31);
+}
+
+/// Anonymous callers can mint per-IP keys; they cannot mint authenticated
+/// principals. A key-cardinality flood on the public surfaces must therefore
+/// not push an authenticated principal into the anonymous overflow bucket,
+/// or it throttles trace submission for every contributor not already in the
+/// table.
+#[test]
+fn account_rate_limiter_keeps_principal_keys_out_of_the_anonymous_overflow() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(4);
+    let now = std::time::Instant::now();
+    for index in 0..64 {
+        limiter.check_at(
+            &format!("interstitial-ip:192.0.2.{index}"),
+            INTERSTITIAL_PER_IP_LIMIT,
+            now,
+        );
+    }
+    let submit_key =
+        submit_principal_rate_limit_key("tenant-a", TraceAuthMethod::StaticToken, "principal-a");
+    for hit in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        assert!(
+            limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now),
+            "submission {hit} keeps the principal's own budget during an anonymous key flood"
+        );
+    }
+    assert!(!limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now));
+    assert_eq!(
+        limiter.count_for_test(&submit_key),
+        SUBMIT_PER_PRINCIPAL_LIMIT + 1
+    );
+}
+
+/// The principal table is still bounded: enrollment is cheap enough that
+/// principals are not a fixed population, so new principals past the table
+/// size share their own overflow bucket rather than growing memory.
+#[test]
+fn account_rate_limiter_bounds_the_principal_table_separately() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_principal_at("submit-principal:one", 30, now));
+    assert!(limiter.check_principal_at("submit-principal:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(limiter.check_principal_at(&format!("submit-principal:rotated-{index}"), 30, now));
+    }
+    assert!(!limiter.check_principal_at("submit-principal:another", 30, now));
+    assert!(
+        limiter.check_at("interstitial-ip:192.0.2.1", 30, now),
+        "principal overflow does not spend the anonymous table"
+    );
+}
+
+/// Filling the table repeatedly may prune at most once per cadence, rather
+/// than rescanning every bucket for every attacker-controlled key.
+#[test]
+fn account_rate_limiter_prunes_at_most_once_per_cadence() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(1);
+    let start = std::time::Instant::now();
+    assert!(limiter.check_at("surface:first", 30, start));
+    assert!(limiter.check_at("surface:overflow-a", 30, start));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at(
+        "surface:overflow-b",
+        30,
+        start + StdDuration::from_millis(999)
+    ));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at("surface:overflow-c", 30, start + StdDuration::from_secs(1)));
+    assert_eq!(limiter.prune_runs_for_test(), 2);
+}
+
+/// The public login interstitial needs a header-independent ceiling in
+/// addition to its per-client bucket, just like the confirm endpoint.
+#[test]
+fn interstitial_rate_limit_has_a_global_blast_radius_ceiling() {
+    let limiter = AccountRateLimiter::new();
+    for index in 0..INTERSTITIAL_GLOBAL_LIMIT {
+        assert!(interstitial_rate_limit_allows(
+            &limiter,
+            &format!("192.0.2.{index}")
+        ));
+    }
+    assert!(!interstitial_rate_limit_allows(&limiter, "198.51.100.1"));
+}
+
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. A malformed anonymous body therefore gets the uniform auth
+/// refusal, never an extractor error that proves the server buffered it.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_body_extraction() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = app(test_state(temp.path().to_path_buf()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} must reject auth before reading the body"
+        );
+    }
+}
+
+/// Only the explicit upload methods receive the envelope-sized body limit.
+/// Ordinary JSON routes retain a small ceiling even though one upload may be
+/// much larger.
+#[tokio::test]
+async fn ordinary_api_routes_keep_the_small_body_ceiling() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/token-bundles/query")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Each upload method keeps its own explicit body ceiling instead of the
+/// small router default: envelope-sized for `POST /v1/traces` and bundle
+/// `finalize`, which both carry a whole envelope, and attachment-sized for
+/// bundle `begin` and `put`, whose handlers refuse anything larger anyway.
+fn large_upload_route_ceilings() -> [(&'static str, &'static str, usize); 4] {
+    let attachment = trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+    [
+        ("POST", "/v1/traces", MAX_INGEST_BODY_BYTES),
+        ("POST", "/v1/token-bundles", attachment),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            attachment,
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+            MAX_INGEST_BODY_BYTES,
+        ),
+    ]
+}
+
+async fn authenticated_upload_status(method: &str, path: &str, body_bytes: usize) -> StatusCode {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; body_bytes]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// The small router default must not override the explicit cap on upload
+/// methods. A body just above 2 MiB reaches each extractor/handler (and fails
+/// there for fixture-specific reasons) rather than being refused by the
+/// ordinary API ceiling -- or by the pre-body gate, which would make a
+/// non-413 status prove nothing.
+#[tokio::test]
+async fn large_upload_routes_retain_the_upload_body_ceiling() {
+    for (method, path, _) in large_upload_route_ceilings() {
+        let status = authenticated_upload_status(method, path, 2 * 1024 * 1024 + 1).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&status),
+            "{method} {path} must pass the gate and retain its upload body ceiling, got {status}"
+        );
+    }
+}
+
+/// The documented maximum is admitted and one byte more is refused, per
+/// route.
+#[tokio::test]
+async fn large_upload_routes_admit_exactly_their_ceiling() {
+    for (method, path, ceiling) in large_upload_route_ceilings() {
+        let at_ceiling = authenticated_upload_status(method, path, ceiling).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&at_ceiling),
+            "{method} {path} must admit a body of exactly {ceiling} bytes, got {at_ceiling}"
+        );
+        assert_eq!(
+            authenticated_upload_status(method, path, ceiling + 1).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {path} must refuse a body of {} bytes",
+            ceiling + 1
+        );
+    }
+}
+
+/// Serve the real router on a loopback port, for probes that must control
+/// exactly which request bytes reach the server.
+async fn serve_ingest_for_test(
+    state: Arc<AppState>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener binds");
+    let addr = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app(state)).await;
+    });
+    (addr, server)
+}
+
+/// Send an upload's headers, declaring a body that is never sent. A handler
+/// that polls the body waits on it; one that answers first does so without it.
+async fn send_upload_headers_without_body(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects to the test server");
+    let authorization = bearer
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    stream
+        .write_all(
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: ingest.test\r\n{authorization}\
+                 Content-Type: application/json\r\nContent-Length: 1024\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request headers write");
+    stream
+}
+
+/// The status line of the response, or `None` if the server has not answered
+/// within `wait`.
+async fn response_status_within(
+    stream: &mut tokio::net::TcpStream,
+    wait: StdDuration,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = vec![0u8; 64];
+    let read = tokio::time::timeout(wait, stream.read(&mut buffer))
+        .await
+        .ok()?
+        .expect("response reads");
+    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    text.lines().next().map(str::to_owned)
+}
+
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. An anonymous upload whose body is never sent is answered
+/// anyway, so the refusal cannot have waited on the body; the authenticated
+/// control proves the probe would notice if it had.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_polling_the_body() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (addr, server) = serve_ingest_for_test(test_state(temp.path().to_path_buf())).await;
+    for (method, path, _) in large_upload_route_ceilings() {
+        let mut anonymous = send_upload_headers_without_body(addr, method, path, None).await;
+        assert_eq!(
+            response_status_within(&mut anonymous, StdDuration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("HTTP/1.1 401 Unauthorized"),
+            "{method} {path} must refuse an anonymous upload without reading its body"
+        );
+    }
+    let mut control =
+        send_upload_headers_without_body(addr, "POST", "/v1/traces", Some("token-a")).await;
+    assert_eq!(
+        response_status_within(&mut control, StdDuration::from_millis(500)).await,
+        None,
+        "an authenticated upload waits for its body, so the probe can see a body read"
+    );
+    server.abort();
+}
+
+/// A valid token must not be able to buffer unbounded upload bodies: past the
+/// per-principal in-flight cap the next upload is refused before its body is
+/// read, and finished uploads give their slots back.
+#[tokio::test]
+async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
+    // Holding the lock keeps the focused submit tests' resets of the shared
+    // limiter out of the way.
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    const TOKEN: &str = "large-body-gate-token";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "tenant-a", TOKEN, TokenRole::Contributor);
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let key = large_body_principal_key(
+        "tenant-a",
+        TraceAuthMethod::StaticToken,
+        &static_token_principal_ref(TOKEN),
+    );
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let cap = LARGE_BODY_PER_PRINCIPAL_CONCURRENCY;
+
+    // Some tests reset the shared limiter without that lock, and a reset
+    // zeroes in-flight counts. An attempt that a reset interrupts proves
+    // nothing either way, so it is retried. In an undisturbed attempt, the
+    // stalled uploads still hold every slot when the next upload is answered,
+    // and that upload must be refused. Without a cap, the next upload would
+    // also stall, unanswered, and the assertion below fails.
+    let mut undisturbed_status = None;
+    for _attempt in 0..5 {
+        let mut stalled = Vec::new();
+        for _ in 0..cap {
+            stalled.push(
+                send_upload_headers_without_body(addr, "POST", "/v1/traces", Some(TOKEN)).await,
+            );
+        }
+        let held = tokio::time::timeout(StdDuration::from_secs(2), async {
+            while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < cap {
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !held {
+            continue;
+        }
+        let mut next = send_upload_headers_without_body(
+            addr,
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            Some(TOKEN),
+        )
+        .await;
+        let status = response_status_within(&mut next, StdDuration::from_secs(2)).await;
+        if ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) >= cap {
+            undisturbed_status = Some(status);
+            break;
+        }
+    }
+    assert_eq!(
+        undisturbed_status.expect("in some attempt the stalled uploads held every principal slot"),
+        Some("HTTP/1.1 429 Too Many Requests".to_string()),
+        "an upload past the principal's in-flight cap is refused before its body is read"
+    );
+
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned uploads release their principal slots");
+    server.abort();
+}
+
+/// The deployment-wide in-flight bound holds across principals, and each
+/// principal's own bound holds before it.
+#[test]
+fn large_upload_slots_bound_each_principal_and_the_deployment() {
+    let limiter = AccountRateLimiter::new();
+    let mut held = Vec::new();
+    for _ in 0..LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
+        held.push(large_body_slots_for(&limiter, "large-body:first").expect("within the cap"));
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:first").is_none(),
+        "one principal is held to its own in-flight cap"
+    );
+    let mut principal = 0;
+    while (held.len() as u32) < LARGE_BODY_GLOBAL_CONCURRENCY {
+        principal += 1;
+        if let Some(slots) = large_body_slots_for(&limiter, &format!("large-body:p{principal}")) {
+            held.push(slots);
+        }
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:fresh").is_none(),
+        "a fresh principal is refused once the deployment-wide bound is full"
+    );
+    assert_eq!(limiter.in_flight_for_test("large-body:fresh"), 0);
+    held.pop();
+    assert!(large_body_slots_for(&limiter, "large-body:fresh").is_some());
+}
+
+/// Accepted: on the merged upload routes an anonymous request with a method
+/// the route does not serve reaches the pre-body gate (axum layers the merged
+/// fallback too) and gets 401, not 405. That discloses less about routing,
+/// not more; pinned so it is not later read as a regression.
+#[tokio::test]
+async fn anonymous_unknown_methods_on_upload_routes_get_the_auth_refusal() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/v1/traces")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
 /// The concurrency guard caps in-flight slots and releases on drop.
 #[test]
 fn account_rate_limiter_concurrency_cap_and_release() {
@@ -87202,7 +88074,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
 // mode -- arguments and results with prose withheld, which is the shape a
 // consumer rebuilding runnable tasks asks for (#298) -- went straight into
 // the corpus with no backstop pass at all. The driver always covered
-// structured payloads; only enrolment did not.
+// structured payloads; only enrollment did not.
 #[test]
 fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
     assert_eq!(
@@ -96893,7 +97765,7 @@ mod admission_pg_tests;
 #[path = "migrated_pg_fixture.rs"]
 mod migrated_pg_fixture;
 
-/// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
+/// The NEAR AI enrollment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this
 /// suite with `cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests
@@ -96932,6 +97804,14 @@ mod pipeline_corpus_pg_tests;
 /// `pub(super)` helpers it reuses.
 #[path = "pipeline_restore_pg_tests.rs"]
 mod pipeline_restore_pg_tests;
+
+/// The legacy drain report (PR 5, Task 6): the pending work the legacy path
+/// still owes, counted from `main`'s tables for the submissions no pipeline
+/// run owns, and the rehearsal that does that work through the legacy routes
+/// until the report reads zero. Nested here beside the modules above, whose
+/// `pub(super)` helpers it reuses.
+#[path = "pipeline_activation_pg_tests.rs"]
+mod pipeline_activation_pg_tests;
 
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two

@@ -72,6 +72,9 @@ jobs:
           scripts/ci/check-release-credential-store.sh check
           scripts/ci/check-release-credential-store.sh self-test
 
+      - name: Offline network recording privacy projections
+        run: python3 -m unittest discover -s scripts/operator/tests -p test_anonymize_network_recording.py
+
   postgres-suites:
     name: database suites against a real PostgreSQL
     runs-on: ubuntu-latest
@@ -91,6 +94,7 @@ jobs:
         admission_test_onboarding
         admission_test_ledger
         admission_test_account_ledger
+        admission_test_account_trust_external
         admission_test_migration
         admission_test_ingest
         admission_test_invite
@@ -103,6 +107,7 @@ jobs:
         admission_test_account_trust_route
         admission_test_witness_evidence
         admission_test_source_sessions
+        admission_test_activity_missions
         admission_test_inference_connection
         admission_test_inference_connection_route
         admission_test_walletv2
@@ -370,6 +375,14 @@ jobs:
         run: cargo test -p trace-commons-server --test trace_session_withdrawal_pg
         env:
           TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_source_sessions
+      # Activity progress uses the owner URL only to migrate and seed fixtures.
+      # Its account-history SELECT grants stay in this fresh test database;
+      # the reader SET ROLEs to trace_ingest_runtime and asserts NOBYPASSRLS,
+      # no superuser privileges, and no rows without tenant context.
+      - name: activity_missions_pg
+        run: cargo test --locked -p trace-commons-server --test activity_missions_pg -- --nocapture
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_activity_missions
       # The R1 measurement script (scripts/operator/r1-pipeline-measurement.sql)
       # run through the real psql against a current and a pre-V76 schema. The
       # suite creates and drops databases of its own, so the xact_commit guard
@@ -524,6 +537,10 @@ jobs:
         env:
           TRACE_COMMONS_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_ledger
           TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_ledger
+      - name: account_trust_external_pg
+        run: cargo test -p trace-commons-server --test account_trust_external_pg -- --ignored --test-threads=1
+        env:
+          TRACE_COMMONS_ACCOUNT_ADMISSION_PG_TEST_URL: postgres://trace@127.0.0.1:5432/admission_test_account_trust_external
       - name: the invite-free path, end to end
         run: cargo test --bin trace-commons-ingest admission_pg_tests -- --ignored
         env:
@@ -695,6 +712,15 @@ jobs:
     # pull request and in the merge queue, and it blocks nothing until the
     # owner promotes it. `pipeline.py` starts its own digest-pinned
     # PostgreSQL container, so this job has no `services:` block.
+    #
+    # The run is signed with a throwaway check key that the job makes
+    # itself (`pipeline.py keygen`, then `qualify --signing-key`), so that the
+    # key writer and the signing step, which an unsigned run never reaches,
+    # run on every pull request. The key is trusted nowhere: no trust store
+    # holds its public key, and it is gone with the runner. It is written
+    # under the runner's temp directory, outside the checkout (so the code
+    # revision does not see it) and outside the paths the failure step
+    # uploads.
     name: pipeline qualification and restore
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -716,8 +742,17 @@ jobs:
           python-version: '3.12'
       - name: pipeline tooling self-tests
         run: python3 scripts/operator/test_pipeline_tooling.py
+      - name: pipeline check key (throwaway)
+        run: |
+          python3 scripts/operator/pipeline.py keygen \
+            --output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --key-id ci_check_key \
+            --trusted-key-output "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.trusted.json"
       - name: pipeline qualify
-        run: python3 scripts/operator/pipeline.py qualify
+        run: |
+          python3 scripts/operator/pipeline.py qualify \
+            --signing-key "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
+            --signing-key-id ci_check_key
       # A failed run prints only its label and a log path on this runner.
       # Keep the run directories `pipeline.py` writes (`Run.create`:
       # `.local/pipeline/runs/<run id>/`) -- the protected step logs, results,

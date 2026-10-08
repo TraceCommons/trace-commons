@@ -123,7 +123,7 @@ impl ScrubCounts {
 /// A [`ScrubCounts`] bound to the exact bytes it describes: the digest of
 /// the envelope the entry is pinned to. Stored on the queue entry; read back
 /// only while the entry's pin still names the same digest, so a released,
-/// replaced or revoked pin -- a re-enrolment, a filter change, an approval
+/// replaced or revoked pin -- a re-enrollment, a filter change, an approval
 /// revoked and re-offered -- turns the entry back into not yet scrubbed
 /// without anyone having to remember to clear it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

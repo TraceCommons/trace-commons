@@ -1,4 +1,6 @@
 import SwiftUI
+import TCDesign
+import TCShellCore
 
 /// How the limits of automatic scrubbing are told to a contributor.
 ///
@@ -43,6 +45,8 @@ import SwiftUI
 ///
 /// ## Copy provenance
 ///
+/// The words are the core's (`shell_words_copy::scrubbing_words`, through
+/// `ShellWords`) since #1146 parity (2026-10-07); this file holds none.
 /// `canonical` is the shared design spec's sentence, unchanged, and must
 /// stay that way. The `rowLine` sentences are new: they were written for
 /// this pass because the row needed something session-specific to say. They
@@ -58,21 +62,24 @@ import SwiftUI
 /// merely present in all three. Recorded here so the divergence is a
 /// decision on the record rather than an oversight.
 enum ScrubbingCaveat {
+    private static var words: ShellWordsCopy.Scrubbing? { ShellWords.table?.scrubbing }
+
     /// The spec's sentence. Verbatim, load-bearing, not to be reworded.
-    static let canonical =
-        "Scrubbing is pattern-based. It misses things it hasn't seen before."
+    static var canonical: String { words?.canonical ?? "" }
+
+    /// Leads the canonical sentence's accessible name at Contribute.
+    static var beforeYouContribute: String { words?.beforeYouContribute ?? "" }
 
     /// What to say on one card, given what scrubbing actually did to it.
     static func rowLine(redactionCount: Int) -> String {
-        redactionCount == 0
-            ? "Nothing matched a pattern. That is not the same as nothing being there -- search it for anything you need to be sure isn't in it."
-            : "Removed by pattern matching. Anything the patterns don't know is still in there."
+        redactionCount == 0 ? words?.nothingMatched ?? "" : words?.removed ?? ""
     }
 
     /// A card where scrubbing found nothing is the one worth slowing down
-    /// on, so it is the one case that gets a visible marker.
-    static func tone(redactionCount: Int) -> TC.Tone {
-        redactionCount == 0 ? .attention : .neutral
+    /// on, so it is the one case that gets a visible marker. The marker is a
+    /// status dot beside the row line's words, never a colour alone.
+    static func status(redactionCount: Int) -> GlassStatus {
+        redactionCount == 0 ? .ask : .off
     }
 }
 
@@ -80,14 +87,14 @@ enum ScrubbingCaveat {
 /// the mechanism rather than to any single session.
 struct ScrubbingCaveatNote: View {
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
+        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
             Image(systemName: "info.circle")
-                .imageScale(.small)
-                .foregroundStyle(.tertiary)
+                .glassGlyph(11)
+                .foregroundStyle(GlassColor.textTertiary)
                 .accessibilityHidden(true)
             Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.caption)
-                .foregroundStyle(TC.inkSecondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -95,21 +102,12 @@ struct ScrubbingCaveatNote: View {
 
 /// The canonical sentence at the point of no return, sitting against the
 /// Contribute button rather than somewhere a person has already scrolled
-/// past. Weighted to be read: a rule above it, and the amber this app
-/// otherwise spends sparingly.
+/// past. Weighted to be read: the ask status dot leads it.
 struct ScrubbingCaveatAtCommit: View {
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: TC.Space.s) {
-            Image(systemName: TC.Tone.attention.symbol)
-                .imageScale(.small)
-                .foregroundStyle(TC.Tone.attention.color)
-                .accessibilityHidden(true)
-            Text(ScrubbingCaveat.canonical)
-                .font(TC.Font_.caption)
-                .foregroundStyle(TC.inkSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Before you contribute. \(ScrubbingCaveat.canonical)")
+        GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(ScrubbingCaveat.beforeYouContribute + " " + ScrubbingCaveat.canonical)
     }
 }

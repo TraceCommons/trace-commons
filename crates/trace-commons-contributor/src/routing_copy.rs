@@ -161,8 +161,10 @@ pub const IRONWIRE_OVERRIDE_TITLE: &str = "Set the port and folder yourself";
 ///
 /// Discovery reads one small file and opens no connection, so offering to
 /// repeat it costs nothing. It is offered rather than polled: this surface
-/// does not go looking at a file on a timer.
-pub const IRONWIRE_LOOK_AGAIN: &str = "Look again";
+/// does not go looking at a file on a timer. Ron's #1146 word
+/// (`routing-controls.tsx`); his "proxy" and "route" labels are not taken,
+/// because this surface does not name the mechanism (see the sweep below).
+pub const IRONWIRE_LOOK_AGAIN: &str = "Check now";
 
 pub const IRONWIRE_PORT_TITLE: &str = "Port";
 pub const IRONWIRE_PORT_NOTE: &str =
@@ -228,7 +230,7 @@ pub fn ironwire_folder_note_here() -> String {
 }
 
 pub const IRONWIRE_APPLY: &str = "Apply and check";
-pub const IRONWIRE_CHECKING: &str = "Checking...";
+pub const IRONWIRE_CHECKING: &str = "Checking\u{2026}";
 
 /// The check itself could not be run -- not a fact about IronWire, so it
 /// must not send anybody to look at a port or a file that is fine.

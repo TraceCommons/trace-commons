@@ -128,7 +128,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("autostart.rs", 2),
     ("backend.rs", 1),
     ("bin/probe.rs", 4),
-    ("copy.rs", 222),
+    ("copy.rs", 216),
     ("main.rs", 2),
     ("model.rs", 4),
     ("notify.rs", 4),
@@ -137,7 +137,7 @@ const WORDING_BASELINE: &[(&str, usize)] = &[
     ("ui/onboarding.rs", 2),
     ("ui/preview.rs", 10),
     ("ui/queue.rs", 8),
-    ("ui/settings.rs", 23),
+    ("ui/settings.rs", 22),
     ("update.rs", 2),
     ("worker.rs", 1),
 ];

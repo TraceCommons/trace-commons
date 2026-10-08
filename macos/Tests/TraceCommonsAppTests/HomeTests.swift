@@ -1,3 +1,4 @@
+import TCBridge
 @testable import TCShellCore
 import XCTest
 
@@ -7,19 +8,51 @@ import XCTest
 /// C1's sample sets.
 @MainActor
 final class HomeTests: XCTestCase {
-    /// History says a submission in its own core words, waiting to be
-    /// scored, and not the shared "Submitted" label; every other status
-    /// keeps the shared label, and an unlabelled one gets no tag.
-    func test_historySaysASubmissionAsWaitingToBeScored() throws {
-        let words = try XCTUnwrap(MonitorWords.table)
-        let shared: (String) -> String? = { $0 == "submitted" ? "Submitted" : ($0 == "accepted" ? "Accepted into the commons" : nil) }
-        XCTAssertEqual(HomeFormat.statusWord("submitted", table: words, fallback: shared), words.historySubmitted)
-        XCTAssertNotEqual(words.historySubmitted, "Submitted")
-        XCTAssertEqual(HomeFormat.statusWord("accepted", table: words, fallback: shared), "Accepted into the commons")
-        // A status with no label gets no tag, never its raw wire value.
-        XCTAssertNil(HomeFormat.statusWord("purged", table: words, fallback: shared))
-        // Before the core's words load, the shared label stands in.
-        XCTAssertEqual(HomeFormat.statusWord("submitted", table: nil, fallback: shared), "Submitted")
+    /// History reads every status through the core's one table
+    /// (`historyStatusLabel`): a submission is "Waiting to be scored", and a
+    /// missing, empty or unnamed status reads the core's unavailable word,
+    /// never the raw wire token.
+    func test_statusWordsComeFromTheCoresOneTable() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        let label: (String?) -> String? = { HomeFormat.historyStatusLabel(copy: copy, $0) }
+        XCTAssertEqual(HomeFormat.statusWord("submitted", label: label), "Waiting to be scored")
+        XCTAssertEqual(HomeFormat.statusWord("accepted", label: label), "In the commons")
+        XCTAssertEqual(HomeFormat.statusWord("future_state", label: label), "Status unavailable")
+        XCTAssertEqual(HomeFormat.statusWord(nil, label: label), "Status unavailable")
+        XCTAssertEqual(HomeFormat.statusWord("", label: label), "Status unavailable")
+        // With no core copy decoded there is no tag at all.
+        XCTAssertNil(HomeFormat.statusWord("submitted", label: { _ in nil }))
+        XCTAssertNil(HomeFormat.statusWord(nil, label: { _ in nil }))
+    }
+
+    /// The one function the window and the menu pass: nil, empty and unknown
+    /// read the unavailable word; no copy reads no word.
+    func test_historyStatusLabelAnswersTheCoresWordsOnly() throws {
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: TCPublicRun.copyJSON() ?? ""))
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, nil), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, ""), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "future_state"), "Status unavailable")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "processing"), "Waiting to be scored")
+        XCTAssertEqual(HomeFormat.historyStatusLabel(copy: copy, "accepted"), "In the commons")
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, "accepted"))
+        XCTAssertNil(HomeFormat.historyStatusLabel(copy: nil, nil))
+    }
+
+    /// An unknown or missing status is neutral, never a failure tone.
+    func test_unknownStatusToneIsNeutral() {
+        XCTAssertEqual(HomeFormat.tone("processing"), .ask)
+        XCTAssertEqual(HomeFormat.tone(nil), .neutral)
+        XCTAssertEqual(HomeFormat.tone("future_state"), .neutral)
+    }
+
+    func test_monitorWindowReadsTheHistoryTable() throws {
+        let src = try String(
+            contentsOfFile: #filePath.replacingOccurrences(
+                of: "Tests/TraceCommonsAppTests/HomeTests.swift",
+                with: "Sources/TraceCommonsApp/Views/MonitorWindowView.swift"),
+            encoding: .utf8)
+        XCTAssertTrue(src.contains("HomeFormat.historyStatusLabel(copy:"))
+        XCTAssertFalse(src.contains("contributionStatusLabel(for:"))
     }
 
     private func store(_ set: SampleDaemonClient.SampleSet) async -> HomeStore {
@@ -146,8 +179,42 @@ final class HomeTests: XCTestCase {
         XCTAssertFalse(HomeFormat.meta(row, compact: true).contains(MonitorWords.withdrawn))
         let full = HomeFormat.meta(row, compact: false)
         XCTAssertTrue(full.hasPrefix(day))
-        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .file)), full)
+        XCTAssertTrue(full.contains(ByteCountFormatter.string(fromByteCount: 48213, countStyle: .memory)), full)
         XCTAssertTrue(full.contains(MonitorWords.withdrawn), full)
+    }
+
+    /// Ron's History row says its tool, then its day; the size, the
+    /// withdrawal and how it was approved are the opened row's.
+    func test_aHistoryRowSaysToolThenDay() throws {
+        let row = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(
+            #"{"submission_id":"a","submitted_at":"2026-03-14T15:00:00Z","source":"claude-code","uploaded_bytes":48213,"revoked_at":"2026-09-30T09:00:00Z"}"#.utf8))
+        let day = try XCTUnwrap(row.submittedAt).formatted(.dateTime.month(.abbreviated).day())
+        let meta = HomeFormat.rowMeta(row)
+        XCTAssertEqual(meta, InferenceTabView.toolName("claude-code") + " \u{00B7} " + day)
+        XCTAssertFalse(meta.contains(MonitorWords.withdrawn))
+        let bare = try DaemonDataDecoding.decoder().decode(DaemonData.HistoryRow.self, from: Data(#"{"submission_id":"b"}"#.utf8))
+        XCTAssertEqual(HomeFormat.rowMeta(bare), "\u{2014}")
+    }
+
+    /// Ron's filter wraps onto a second line when the pane is too narrow
+    /// for all five, rather than scrolling the rest out of sight.
+    func test_theFilterWrapsOntoASecondLine() {
+        let sizes = Array(repeating: CGSize(width: 90, height: 24), count: 5)
+        let narrow = HistoryFilterFlow.lines(width: 300, sizes: sizes, spacing: 4)
+        XCTAssertEqual(narrow.map(\.items), [[0, 1, 2], [3, 4]])
+        XCTAssertEqual(narrow.first?.width, 278)
+        let wide = HistoryFilterFlow.lines(width: 1000, sizes: sizes, spacing: 4)
+        XCTAssertEqual(wide.map(\.items), [[0, 1, 2, 3, 4]])
+        // An item wider than the line still gets a line of its own.
+        let tight = HistoryFilterFlow.lines(width: 50, sizes: sizes, spacing: 4)
+        XCTAssertEqual(tight.count, 5)
+    }
+
+    /// The community's accept rate is a whole percentage, and a dash when
+    /// the commons did not say.
+    func test_theAcceptRateIsAPercentage() {
+        XCTAssertEqual(HomeFormat.rate(nil), "\u{2014}")
+        XCTAssertEqual(HomeFormat.rate(0.5), 0.5.formatted(.percent.precision(.fractionLength(0))))
     }
 
     /// A full page of History says how many of the total it shows, in the

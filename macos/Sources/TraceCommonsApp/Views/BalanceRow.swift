@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// What is left in the account this destination spends from.
@@ -14,31 +15,19 @@ import TCShellCore
 /// balance is healthy. A low figure painted red would be this app inventing a
 /// limit nobody set, on an account whose ceiling may not exist at all.
 ///
-/// Drawn inside `CredentialSection` rather than beside it: the balance is
-/// what the key above is for, and a contributor who has just signed in should
-/// find it on the same card.
+/// The body of #1146's balance panel (`PrivateAIBalanceCard`), which draws
+/// the heading and the re-read link above it. It draws no button: the
+/// sign-in a balance needs is the credential card's own `obtain` -- the same
+/// ceremony, the same browser, the same key -- drawn there beside the
+/// provider chooser it uses (`BalanceSurface.actionToDraw`).
 struct BalanceRow: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
-    /// What the sign-in row is already offering, so this row does not draw
-    /// the same button a second time. The decision is
-    /// `BalanceSurface.actionToDraw`'s.
-    let credentialAction: CredentialAction
-    /// The sign-in row's own handler. Reused rather than reimplemented: this
-    /// row's `obtain` IS that row's `obtain` -- the same ceremony, the same
-    /// browser, the same key -- and a second implementation would be a second
-    /// thing to keep in agreement.
-    let run: (CredentialAction) -> Void
 
     var body: some View {
         let status = model.balanceStatus
-        let tone = PrivateInferenceIndicator.palette(
-            BalanceSurface.tone(status, calls: model.balanceCalls))
-        let action = BalanceSurface.actionToDraw(
-            balance: BalanceSurface.action(status, calls: model.balanceCalls),
-            credential: credentialAction)
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            TCSectionHeader(title: copy.balanceTitle)
+        let tone = BalanceSurface.tone(status, calls: model.balanceCalls)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             // A sentence OR the figures, never both: every state but the one
             // that was read has null figures behind it, and the sentence for
             // a null remaining amount is about an uncapped account, which is
@@ -46,9 +35,7 @@ struct BalanceRow: View {
             if let sentence = BalanceSurface.stateLine(
                 status, copy: copy, calls: model.balanceCalls)
             {
-                Label(sentence, systemImage: tone.symbol)
-                    .font(TC.Font_.body)
-                    .foregroundStyle(tone.textColor)
+                GlassStatusLabel(sentence, status: PrivateInferenceIndicator.status(tone))
                     .fixedSize(horizontal: false, vertical: true)
             } else if BalanceSurface.showsFigures(status, calls: model.balanceCalls) {
                 figures(status)
@@ -57,10 +44,9 @@ struct BalanceRow: View {
             // in every state: it qualifies the heading, which names an
             // account, as much as it qualifies any number under it.
             Text(copy.balanceWhat)
-                .font(TC.Font_.meta)
-                .foregroundStyle(.secondary)
+                .glassType(GlassTokens.TypeScale.caption)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            actionButton(action)
         }
     }
 
@@ -74,50 +60,37 @@ struct BalanceRow: View {
     /// answer to the heading's question and not a footnote to it.
     @ViewBuilder
     private func figures(_ status: BalanceStatus) -> some View {
-        VStack(alignment: .leading, spacing: TC.Space.xs) {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
             switch BalanceSurface.remaining(status, copy: copy, calls: model.balanceCalls) {
             case .figure(let amount):
-                // Monospaced digits so a figure that changes under a poll
+                // Tabular digits so a figure that changes under a poll
                 // does not reflow the line it sits on.
                 Text(amount)
-                    .font(TC.Font_.metricValueMono)
-                    .monospacedDigit()
+                    .glassType(GlassTokens.TypeScale.number)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .textSelection(.enabled)
             case .sentence(let sentence):
                 Text(sentence)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             // The ceiling and the running total, each drawn only when the
             // account has one. Absent is no line; a zero is a real $0.00 and
             // keeps its line, and the difference is the Rust's.
             if let limit = BalanceSurface.limitLine(status, calls: model.balanceCalls) {
-                Text(limit).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(limit).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
             if let spent = BalanceSurface.spentLine(status, calls: model.balanceCalls) {
-                Text(spent).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(spent).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
             // When the question was put -- not when the service updated
             // anything, which is a claim nothing here supports.
             if let observed = BalanceSurface.observedLine(
                 status, now: Date(), calls: model.balanceCalls)
             {
-                Text(observed).font(TC.Font_.meta).foregroundStyle(.secondary)
+                Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
-        }
-    }
-
-    /// The one button this row may offer, or none.
-    ///
-    /// `.none` draws nothing rather than a disabled control, for
-    /// `CredentialSection.actionButton`'s reason. It is also what a duplicate
-    /// of the sign-in row's own button becomes.
-    @ViewBuilder
-    private func actionButton(_ action: CredentialAction) -> some View {
-        if let label = CredentialSurface.actionLabel(action, copy: copy) {
-            Button(label) { run(action) }
-                .buttonStyle(.bordered)
-                .disabled(model.credentialBusy)
         }
     }
 }
