@@ -18,6 +18,7 @@ pub mod comparison_tasks;
 pub mod episode_store;
 pub mod episodes;
 pub mod goals;
+pub mod ledger_series;
 pub mod lever;
 pub mod markers;
 pub mod models;

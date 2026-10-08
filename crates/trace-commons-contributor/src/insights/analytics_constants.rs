@@ -138,6 +138,28 @@ pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
 /// Owner decision D5, open.
 pub const LEDGER_MONEY_IN_INSIGHTS: bool = false;
 
+/// Whether the daemon setting `insights_ledger_feed` starts on. While it is
+/// off nothing reads the proxy ledger for Insights: `insights_glance` answers
+/// `enabled: false`, `inference_calls` carries no `tokens`, and
+/// `usage_changed` is never published. Owner decision D3, open.
+pub const LEDGER_FEED_DEFAULT_ON: bool = false;
+
+/// The context tip reads at most this many of the current session's newest
+/// calls, so a side call (a title, a compaction, a subagent) cannot make it
+/// flap. Owner decision D10, open.
+pub const CONTEXT_TIP_RECENT_CALLS: usize = 5;
+/// ...made within this many seconds. A session with no call this recent has
+/// no tip. Owner decision D10, open.
+pub const CONTEXT_TIP_WINDOW_SECS: i64 = 600;
+/// The tip is lit when context reaches this share of the user's threshold.
+/// Owner decision D10, open; shown nowhere until owner decision D2.
+pub const CONTEXT_TIP_RATIO: Ratio = Ratio::new(9, 10);
+
+/// A glance whose ledger last answered longer ago than this is stale, and a
+/// shell hides the card rather than show an old figure. Owner decision D10,
+/// open.
+pub const LEDGER_GLANCE_STALE_SECS: i64 = 600;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +238,15 @@ mod tests {
         const { assert!(DEDUPE_TURNS_BY_MSG_KEY) };
         const { assert!(!LEDGER_MONEY_IN_INSIGHTS) };
         assert_eq!(DIGEST_KEY_CUSTODY, DigestKeyCustody::OsKeychain);
+    }
+
+    #[test]
+    fn ledger_glance_constants() {
+        const { assert!(!LEDGER_FEED_DEFAULT_ON) };
+        assert_eq!(CONTEXT_TIP_RECENT_CALLS, 5);
+        assert_eq!(CONTEXT_TIP_WINDOW_SECS, 600);
+        assert_eq!(CONTEXT_TIP_RATIO, Ratio::new(9, 10));
+        assert_eq!(LEDGER_GLANCE_STALE_SECS, 600);
     }
 
     #[test]
