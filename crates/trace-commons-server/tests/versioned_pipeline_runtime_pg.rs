@@ -43928,6 +43928,130 @@ async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
     assert_ne!(pipeline_decision, legacy_decision);
 }
 
+/// Spec C-D3 / O-C3, the admin perplexity re-score
+/// (`/v1/admin/rescore-perplexity`): its enumeration
+/// (`list_submissions_with_gate_decision`, as `trace_gate_driver`) leaves a
+/// pipeline submission out, even one that also holds a legacy row, so the
+/// re-score never rewrites the gate verdict the pipeline's Score awarded
+/// credit on; a legacy submission in the same tenant is still listed.
+#[tokio::test]
+async fn perplexity_rescore_enumeration_skips_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rescore-list-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let mixed = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(mixed.state, PipelineRunState::Complete, "{mixed:?}");
+    insert_legacy_gate_decision(&tenant, mixed.submission_id).await;
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    insert_legacy_gate_decision(&tenant, legacy_submission).await;
+
+    let listed: BTreeSet<uuid::Uuid> = gate
+        .list_submissions_with_gate_decision(i64::MAX)
+        .await
+        .expect("enumerate as the gate driver")
+        .into_iter()
+        .filter(|item| item.tenant_id == tenant)
+        .map(|item| item.submission_id)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([legacy_submission]),
+        "the legacy submission is listed and neither pipeline submission is"
+    );
+}
+
+/// Spec C-D3 / O-C3, the re-score's two writers: called directly for a
+/// pipeline submission (a re-score enumerated before Settle committed),
+/// `update_trace_gate_decision_perplexity` and
+/// `update_trace_gate_decision_author_perplexity` leave the pipeline row as
+/// Settle wrote it, so its verdict still matches the Score that awarded the
+/// credit and its per-author columns stay NULL (O-C2).
+#[tokio::test]
+async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rescore-write-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].source, "pipeline_settle");
+    assert!(before[0].agent_prose_perplexity_micros.is_none());
+    let rewritten = before[0].perplexity_micros + 1_234_567;
+
+    backend
+        .update_trace_gate_decision_perplexity(
+            &tenant,
+            run.submission_id,
+            rewritten,
+            Some(rewritten),
+            !before[0].perplexity_passed,
+        )
+        .await
+        .expect("the re-score writer runs under the runtime role");
+    backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant,
+            run.submission_id,
+            [Some(1), Some(2), Some(3), Some(4), Some(5)],
+        )
+        .await
+        .expect("the author re-score writer runs under the runtime role");
+
+    let after = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].perplexity_micros, before[0].perplexity_micros);
+    assert_eq!(
+        after[0].peak_perplexity_micros,
+        before[0].peak_perplexity_micros
+    );
+    assert_eq!(after[0].perplexity_passed, before[0].perplexity_passed);
+    assert_eq!(after[0].agent_prose_perplexity_micros, None);
+    assert_eq!(after[0].attributed_token_fraction_micros, None);
+
+    // The same writers still reach a legacy submission's latest row.
+    let owner = owner_backend().await;
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    insert_legacy_gate_decision(&tenant, legacy_submission).await;
+    backend
+        .update_trace_gate_decision_perplexity(
+            &tenant,
+            legacy_submission,
+            7_000_000,
+            Some(8_000_000),
+            false,
+        )
+        .await
+        .unwrap();
+    backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant,
+            legacy_submission,
+            [Some(1), Some(2), Some(3), Some(4), Some(5)],
+        )
+        .await
+        .unwrap();
+    let legacy = gate_decision_rows(&tenant, legacy_submission).await;
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].perplexity_micros, 7_000_000);
+    assert_eq!(legacy[0].peak_perplexity_micros, Some(8_000_000));
+    assert!(!legacy[0].perplexity_passed);
+    assert_eq!(legacy[0].agent_prose_perplexity_micros, Some(1));
+    assert_eq!(legacy[0].attributed_token_fraction_micros, Some(5));
+}
+
 /// Regression on `main`'s gate enumeration (`db/postgres.rs`): a pipeline
 /// submission is never listed for `main`'s gate driver, whether its run is
 /// still in flight (no row yet) or complete (with its pipeline row).

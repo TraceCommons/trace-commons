@@ -5520,6 +5520,16 @@ impl Database for PgBackend {
                  FROM trace_submissions s
                  JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 -- A submission the pipeline's Settle wrote a row for is left
+                 -- out, even if it also holds a legacy row: the re-score would
+                 -- rewrite the verdict its Score awarded credit on (spec
+                 -- 2026-10-08, Slice C, O-C3). V116 grants trace_gate_driver
+                 -- this column.
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions p
+                      WHERE p.tenant_id = s.tenant_id
+                        AND p.submission_id = s.submission_id
+                        AND p.source = 'pipeline_settle')
                  ORDER BY s.received_at ASC
                  LIMIT $1",
                 &[&limit],

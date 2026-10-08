@@ -2332,7 +2332,11 @@ The vector entry and snapshot ids, the per-author columns and every column a
 sweep fills (dedup, contributor cap, correction, composite score) start
 NULL; the sweeps fill theirs on their next pass. The credit-quality sweep
 (`POST /v1/admin/score-credit-quality`) skips pipeline rows, since the Score
-already computed their credit quality under the bundle. A Settle commit
+already computed their credit quality under the bundle. The perplexity
+re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
+submission with a pipeline row: rewriting its perplexity would leave the
+row's verdict disagreeing with the Score that awarded the credit and with
+its `attestation_chain_hash`, and its per-author columns stay NULL. A Settle commit
 whose compatibility Score evidence lacks a field the row needs refuses with
 `pipeline_gate_decision_evidence_incomplete` and writes nothing.
 
