@@ -3455,7 +3455,10 @@ impl PgPipelineStore {
     /// caller's transaction: Settle's index dispatch records `complete` or
     /// `cancelled` in the transaction that holds the submission guard
     /// (`submission_guard_on_tx`), so the record commits together with the
-    /// release of that lock.
+    /// release of that lock. That transaction is held across the index
+    /// write, so the lease is compared with `clock_timestamp()`, not with
+    /// `NOW()` (the transaction's start), as the Score commit's is (PR #1283
+    /// review, finding 7).
     pub async fn set_index_write_state_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
@@ -3467,7 +3470,7 @@ impl PgPipelineStore {
                 "UPDATE pipeline_runs
                  SET index_write_state = $3, updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
-                   AND lease_token = $4 AND lease_expires_at > NOW()
+                   AND lease_token = $4 AND lease_expires_at > clock_timestamp()
                  RETURNING *",
                 &[
                     &run.tenant_id,

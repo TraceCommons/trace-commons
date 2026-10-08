@@ -386,6 +386,39 @@ async fn stale_lease_cannot_commit_after_reclaim() {
     );
 }
 
+/// PR #1283 review, finding 7: the index-write state is set on a
+/// transaction held across the index write, so its lease check reads the
+/// database clock (`clock_timestamp()`), as the Score commit's does. A
+/// lease that ended after the transaction began is stale; `NOW()`, the
+/// transaction's start, would still call it live.
+#[tokio::test]
+async fn the_index_write_state_lease_check_reads_the_database_clock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("index-write-clock-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    // The transaction began inside the lease; the lease ends while it is
+    // open.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let stale = PgPipelineStore::set_index_write_state_on_tx(&tx, &claimed, "pending")
+        .await
+        .expect_err("a lease that ended during the transaction is stale");
+    assert!(
+        stale.to_string().contains("pipeline lease is stale"),
+        "{stale}"
+    );
+    tx.rollback().await.unwrap();
+}
+
 /// The token-only fence. `record_lease_expired` is fenced by the lease
 /// token alone, with no expiry predicate (unlike every other lease-checked
 /// write) -- but once another claim has moved the run onto a new token, the
