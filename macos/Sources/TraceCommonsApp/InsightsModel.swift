@@ -752,3 +752,163 @@ enum InsightsOverviewWords {
         return first.formatted(style) + " \u{2013} " + last.formatted(style)
     }
 }
+
+/// The Patterns tab ("Where tokens went") over the saved snapshots (feed S).
+@Observable @MainActor
+final class InsightsPatternsModel {
+    private let service: InsightsModel.Service
+    private var task: Task<Void, Never>?
+    private var token = UUID()
+    private var active = false
+    private(set) var busy = false
+    private(set) var failed = false
+    private(set) var patterns: InsightsWeekPatterns?
+    /// The sessions behind one card, while its list is open.
+    private(set) var sessions: InsightsPatternSessions?
+    /// The week asked for; `nil` is the current week.
+    private(set) var requestedWeek: String?
+
+    init(service: @escaping InsightsModel.Service) { self.service = service }
+
+    func open() { active = true; load() }
+    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false; sessions = nil }
+    func reload() { load() }
+    func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
+
+    /// Read the sessions behind the card of `kind` in the week on screen.
+    func showSessions(_ kind: String) {
+        guard active, let week = patterns?.week_start else { return }
+        run(.init("pattern_sessions", weekStart: week, tz: InsightsOverviewModel.offset, pattern: kind)) { model, response in
+            guard let found = response.pattern_sessions, found.pattern == kind else { throw InsightsError.invalidResponse }
+            model.sessions = found
+        }
+    }
+    func hideSessions() { sessions = nil }
+
+    private func load() {
+        guard active else { return }
+        sessions = nil
+        run(.init("patterns", weekStart: requestedWeek, tz: InsightsOverviewModel.offset)) { model, response in
+            guard let patterns = response.patterns else { throw InsightsError.invalidResponse }
+            model.patterns = patterns
+        }
+    }
+
+    private func run(_ operation: InsightsRequest.Operation,
+                     apply: @escaping @MainActor (InsightsPatternsModel, InsightsResponse) throws -> Void) {
+        task?.cancel()
+        token = UUID(); let current = token
+        busy = true
+        let listing = operation.type == "pattern_sessions"
+        if !listing { failed = false }
+        let service = service
+        task = Task { [weak self] in
+            do {
+                let response = try await service(.init(operation: operation))
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                guard response.type == operation.type else { throw InsightsError.invalidResponse }
+                try apply(self, response)
+                self.busy = false
+            } catch {
+                guard let self, self.active, self.token == current, !Task.isCancelled else { return }
+                // A failed session list closes only itself; a failed week
+                // read never keeps the old figures.
+                if !listing { self.patterns = nil; self.failed = true }
+                self.sessions = nil; self.busy = false
+            }
+        }
+    }
+}
+
+/// The core's Patterns words, filled with the core's figures. Nothing here
+/// composes a sentence.
+enum InsightsPatternsWords {
+    private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
+    private static func count(_ value: UInt32?, _ copy: [String: String]) -> String {
+        value.map(String.init) ?? dash(copy)
+    }
+
+    /// The card's name, by its wire kind.
+    static func title(_ kind: String, copy: [String: String]) -> String {
+        text("analytics_pattern_" + kind, copy)
+    }
+
+    /// The line under the headline: the core's count sentence, or the
+    /// long-context threshold line.
+    static func countLine(_ card: InsightsPatternCard, threshold: UInt64, copy: [String: String]) -> String {
+        let fill = InsightsOverviewWords.fill
+        switch card.kind {
+        case "repeated_reads":
+            return fill(text("analytics_pattern_repeated_reads_count", copy),
+                        ["r": count(card.count, copy), "f": count(card.files, copy)])
+        case "retried_calls":
+            return fill(text("analytics_pattern_retried_calls_count", copy), ["c": count(card.count, copy)])
+        case "edit_fail_edit":
+            return fill(text("analytics_pattern_edit_fail_edit_count", copy), ["l": count(card.count, copy)])
+        case "long_context":
+            return fill(text("analytics_pattern_long_context_line", copy),
+                        ["threshold": InsightsOverviewWords.figure(threshold, copy: copy)])
+        default:
+            return dash(copy)
+        }
+    }
+
+    /// How the figure was arrived at: the inferred label first, then the basis.
+    static func basisLines(_ card: InsightsPatternCard, copy: [String: String]) -> [String] {
+        var lines: [String] = []
+        if card.inferred { lines.append(text("analytics_inferred_from_order", copy)) }
+        switch card.basis {
+        case "estimate_from_result_size": lines.append(text("analytics_estimate_from_result_size", copy))
+        case "from_counters": lines.append(text("analytics_from_counters", copy))
+        default: break
+        }
+        return lines
+    }
+
+    /// "vs last week". Only feed T sends a figure; anything else is the dash.
+    static func change(_ card: InsightsPatternCard, copy: [String: String]) -> String {
+        guard let permille = card.change else { return dash(copy) }
+        let percent = String((abs(permille) + 5) / 10)
+        let key = permille < 0 ? "analytics_change_down" : "analytics_change_up"
+        return InsightsOverviewWords.fill(text(key, copy), ["p": percent])
+    }
+
+    struct Bar: Identifiable, Equatable {
+        let week: String
+        /// `nil` is a gap: no bar is drawn, never a zero.
+        let tokens: UInt64?
+        var id: String { week }
+    }
+
+    /// Every week the card covers, oldest first, gaps included.
+    static func bars(_ card: InsightsPatternCard) -> [Bar] {
+        card.weeks.map { Bar(week: $0.week_start, tokens: $0.tokens) }
+    }
+
+    /// The bars to draw: weeks with a figure only.
+    static func drawnBars(_ card: InsightsPatternCard) -> [Bar] {
+        bars(card).filter { $0.tokens != nil }
+    }
+
+    static func seeSessions(_ card: InsightsPatternCard, copy: [String: String]) -> String {
+        InsightsOverviewWords.fill(text("analytics_see_sessions", copy), ["n": String(card.sessions)])
+    }
+
+    /// "File B · .rs", or "File B" with no extension.
+    static func fileLabel(_ row: InsightsRereadRow, copy: [String: String]) -> String {
+        guard let ext = row.ext else {
+            return InsightsOverviewWords.fill(text("analytics_file_label_no_ext", copy), ["letter": row.letter])
+        }
+        return InsightsOverviewWords.fill(text("analytics_file_label", copy), ["letter": row.letter, "ext": ext])
+    }
+
+    /// "Claude Code sessions only: {k} of {n}." when another harness is in
+    /// the week; `nil` otherwise.
+    static func claudeOnlyLine(_ patterns: InsightsWeekPatterns, copy: [String: String]) -> String? {
+        guard patterns.claude_only else { return nil }
+        return InsightsOverviewWords.fill(text("analytics_claude_sessions_only", copy), [
+            "k": String(patterns.claude_sessions), "n": String(patterns.sessions),
+        ])
+    }
+}

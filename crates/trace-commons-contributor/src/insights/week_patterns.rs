@@ -84,8 +84,8 @@ pub struct PatternCard {
     pub change_unavailable: Option<Unavailable>,
 }
 
-/// One row of "Most re-read files": a letter and the extension, never a
-/// path, a basename or a digest.
+/// One row of "Most re-read files": a letter and the extension with its dot
+/// (".rs"), never a path, a basename or a digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RereadRow {
     pub letter: String,
@@ -329,7 +329,7 @@ pub fn week_patterns(
                 .enumerate()
                 .map(|(position, file)| RereadRow {
                     letter: letter_label(position),
-                    ext: file.path_ext.clone(),
+                    ext: file.path_ext.as_ref().map(|ext| format!(".{ext}")),
                     reads: file.reads,
                     after_shrink: file.after_shrink,
                     tokens: file.figure.estimated_tokens(),
@@ -691,8 +691,8 @@ mod tests {
         assert_eq!(
             rows,
             [
-                ("B", Some("rs"), 2, Some(20_000)),
-                ("A", Some("rs"), 1, Some(0)),
+                ("B", Some(".rs"), 2, Some(20_000)),
+                ("A", Some(".rs"), 1, Some(0)),
             ]
         );
         let wire = serde_json::to_value(&week).unwrap();

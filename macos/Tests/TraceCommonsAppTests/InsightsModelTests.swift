@@ -448,3 +448,179 @@ private actor FlipReader {
         return week
     }
 }
+
+/// The Patterns tab's model and words: every figure is the core's, an absent
+/// week is a gap and never a zero bar, files are letters, and no week is
+/// compared under the saved feed.
+final class InsightsPatternsTests: XCTestCase {
+    static let words: [String: String] = [
+        "analytics_unavailable": "\u{2014}",
+        "analytics_pattern_repeated_reads": "REPEATED",
+        "analytics_pattern_repeated_reads_count": "{r} reads of {f} files",
+        "analytics_pattern_retried_calls_count": "{c} calls",
+        "analytics_pattern_edit_fail_edit_count": "{l} times",
+        "analytics_pattern_long_context_line": "after {threshold}",
+        "analytics_estimate_from_result_size": "ABOUT",
+        "analytics_from_counters": "COUNTERS",
+        "analytics_inferred_from_order": "INFERRED",
+        "analytics_claude_sessions_only": "Claude only: {k} of {n}.",
+        "analytics_see_sessions": "See {n} sessions",
+        "analytics_file_label": "File {letter} \u{b7} {ext}",
+        "analytics_file_label_no_ext": "File {letter}",
+    ]
+
+    static let patternsJSON = """
+    {"type":"patterns","patterns":{
+      "feed":"saved","generation":7,"week_start":"2026-09-14","week_end":"2026-09-20","tz":0,
+      "coverage":{"known":1,"partial":0,"unknown":0,"reasons":{}},
+      "sessions":2,"claude_sessions":1,"claude_only":true,"long_context_threshold":200000,
+      "cards":[
+        {"kind":"repeated_reads","tokens":20000,"count":3,"files":2,"sessions":1,
+         "basis":"estimate_from_result_size","inferred":false,
+         "weeks":[{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":20000}],
+         "change":null,"change_unavailable":"needs_counter_pass"},
+        {"kind":"retried_calls","tokens":0,"count":0,"files":null,"sessions":0,
+         "basis":"estimate_from_result_size","inferred":false,
+         "weeks":[{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":0}],
+         "change":null,"change_unavailable":"needs_counter_pass"},
+        {"kind":"edit_fail_edit","tokens":null,"count":1,"files":null,"sessions":1,
+         "basis":"estimate_from_result_size","inferred":true,
+         "weeks":[{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":null}],
+         "change":null,"change_unavailable":"needs_counter_pass"},
+        {"kind":"long_context","tokens":530000,"count":2,"files":null,"sessions":1,
+         "basis":"from_counters","inferred":false,
+         "weeks":[{"week_start":"2026-09-07","tokens":null},{"week_start":"2026-09-14","tokens":530000}],
+         "change":null,"change_unavailable":"needs_counter_pass"}],
+      "reread_files":[
+        {"letter":"B","ext":".rs","reads":2,"after_shrink":1,"tokens":20000},
+        {"letter":"A","ext":null,"reads":1,"after_shrink":0,"tokens":null}],
+      "weeks":["2026-09-14"]}}
+    """
+
+    func patterns() throws -> InsightsWeekPatterns {
+        try XCTUnwrap(JSONDecoder().decode(InsightsResponse.self, from: Data(Self.patternsJSON.utf8)).patterns)
+    }
+
+    func testCardsKeepTheCoresOrderAndTheirCountLinesAreTheCoresWordsFilled() throws {
+        let week = try patterns()
+        let copy = Self.words
+        XCTAssertEqual(week.cards.map(\.kind), ["repeated_reads", "retried_calls", "edit_fail_edit", "long_context"])
+        let lines = week.cards.map { InsightsPatternsWords.countLine($0, threshold: week.long_context_threshold, copy: copy) }
+        XCTAssertEqual(lines, ["3 reads of 2 files", "0 calls", "1 times",
+                              "after " + InsightsOverviewWords.figure(200_000, copy: copy)])
+        XCTAssertEqual(InsightsPatternsWords.title("repeated_reads", copy: copy), "REPEATED")
+        // A measured zero stays zero; an unknown figure is the dash.
+        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[1].tokens, copy: copy), "0")
+        XCTAssertEqual(InsightsOverviewWords.figure(week.cards[2].tokens, copy: copy), "\u{2014}")
+    }
+
+    func testDerivationLabelsNameTheBasisAndTheInferredCard() throws {
+        let week = try patterns()
+        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[0], copy: Self.words), ["ABOUT"])
+        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[2], copy: Self.words), ["INFERRED", "ABOUT"])
+        XCTAssertEqual(InsightsPatternsWords.basisLines(week.cards[3], copy: Self.words), ["COUNTERS"])
+    }
+
+    func testAnAbsentWeekIsAGapNeverAZeroBar() throws {
+        let week = try patterns()
+        let bars = InsightsPatternsWords.bars(week.cards[1])
+        XCTAssertEqual(bars.map(\.week), ["2026-09-07", "2026-09-14"])
+        XCTAssertNil(bars[0].tokens)
+        XCTAssertEqual(bars[1].tokens, 0)
+        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[1]).map(\.week), ["2026-09-14"])
+        XCTAssertEqual(InsightsPatternsWords.drawnBars(week.cards[2]).count, 0)
+    }
+
+    func testNoWeekIsComparedUnderTheSavedFeed() throws {
+        let week = try patterns()
+        for card in week.cards {
+            XCTAssertEqual(InsightsPatternsWords.change(card, copy: Self.words), "\u{2014}")
+        }
+    }
+
+    func testFilesAreLettersWithTheirExtensionAndTheOtherHarnessLineIsFilled() throws {
+        let week = try patterns()
+        XCTAssertEqual(week.reread_files.map { InsightsPatternsWords.fileLabel($0, copy: Self.words) },
+                       ["File B \u{b7} .rs", "File A"])
+        XCTAssertEqual(InsightsPatternsWords.claudeOnlyLine(week, copy: Self.words), "Claude only: 1 of 2.")
+        XCTAssertEqual(InsightsPatternsWords.seeSessions(week.cards[0], copy: Self.words), "See 1 sessions")
+    }
+
+    @MainActor
+    func testPatternsModelAsksForTheWeekInTheLocalOffsetAndListsSessions() async throws {
+        let recorder = PatternsRecorder()
+        let model = InsightsPatternsModel(service: { try await recorder.call($0) })
+        model.open()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(model.patterns?.week_start, "2026-09-14")
+        var requests = await recorder.requests
+        XCTAssertEqual(requests.map(\.operation.type), ["patterns"])
+        XCTAssertNil(requests[0].operation.week_start)
+        XCTAssertNil(requests[0].operation.weeks, "the core's six bars by default")
+        XCTAssertEqual(requests[0].operation.tz, Int32(TimeZone.current.secondsFromGMT()))
+
+        model.showSessions("edit_fail_edit")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        requests = await recorder.requests
+        XCTAssertEqual(requests.last?.operation.type, "pattern_sessions")
+        XCTAssertEqual(requests.last?.operation.pattern, "edit_fail_edit")
+        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-14")
+        XCTAssertEqual(model.sessions?.pattern, "edit_fail_edit")
+        XCTAssertNil(model.sessions?.sessions.first?.tokens)
+
+        model.selectWeek("2026-09-07")
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        requests = await recorder.requests
+        XCTAssertEqual(requests.last?.operation.week_start, "2026-09-07")
+        XCTAssertNil(model.sessions, "a new week closes the old session list")
+
+        await recorder.fail()
+        model.reload()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.patterns, "a failed read never keeps the old figures")
+        XCTAssertTrue(model.failed)
+        model.close()
+    }
+
+    @MainActor
+    func testPatternsOverTheRealCoreReadAnAbsentStoreWithoutCreatingIt() async throws {
+        let store = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let model = InsightsPatternsModel(service: { request in
+            try await Task.detached {
+                try TCInsights.call(.init(storeDirectory: store.path, operation: request.operation))
+            }.value
+        })
+        model.open()
+        for _ in 0..<500 where model.busy { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertFalse(model.failed)
+        XCTAssertEqual(model.patterns?.feed, "saved")
+        XCTAssertEqual(model.patterns?.cards.count, 4)
+        XCTAssertEqual(model.patterns?.cards.first?.weeks.count, 6)
+        XCTAssertTrue(model.patterns?.cards.allSatisfy { $0.tokens == nil } ?? false)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.path))
+        model.close()
+    }
+}
+
+private actor PatternsRecorder {
+    var requests: [InsightsRequest] = []
+    private var failing = false
+    func fail() { failing = true }
+    func call(_ request: InsightsRequest) throws -> InsightsResponse {
+        requests.append(request)
+        if failing { throw InsightsError.service("insights-operation-failed") }
+        let json: String
+        if request.operation.type == "pattern_sessions" {
+            json = """
+            {"type":"pattern_sessions","pattern_sessions":{"pattern":"\(request.operation.pattern ?? "")",
+             "feed":"saved","generation":7,"week_start":"2026-09-14","tz":0,
+             "sessions":[{"session_ref":"abc","count":1,"tokens":null,"state":"known","reasons":[]}]}}
+            """
+        } else {
+            json = InsightsPatternsTests.patternsJSON.replacingOccurrences(
+                of: "\"2026-09-14\",\"week_end\"",
+                with: "\"\(request.operation.week_start ?? "2026-09-14")\",\"week_end\"")
+        }
+        return try JSONDecoder().decode(InsightsResponse.self, from: Data(json.utf8))
+    }
+}

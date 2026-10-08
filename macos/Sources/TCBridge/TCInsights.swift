@@ -84,6 +84,10 @@ public struct InsightsRequest: Encodable, Sendable {
         public var week_start: String?
         public var tz: Int32?
         public var card: String?
+        /// `patterns`: how many weekly bars (1 to 6; absent is 6).
+        /// `pattern_sessions`: which card's sessions.
+        public var weeks: Int?
+        public var pattern: String?
         public init(_ type: String, source: String? = nil, file: String? = nil,
                     save: Bool? = nil, id: String? = nil, category: String? = nil, outcome: String? = nil,
                     repository: String? = nil, commit: String? = nil, evidenceID: String? = nil,
@@ -93,7 +97,8 @@ public struct InsightsRequest: Encodable, Sendable {
                     displayedMaterialDigest: String? = nil,
                     input: ComparisonSpecificationDraftInput? = nil,
                     specificationID: String? = nil, auditDigest: String? = nil,
-                    weekStart: String? = nil, tz: Int32? = nil, card: String? = nil) {
+                    weekStart: String? = nil, tz: Int32? = nil, card: String? = nil,
+                    weeks: Int? = nil, pattern: String? = nil) {
             self.type = type; self.source = source; self.file = file; self.save = save
             self.id = id; self.category = category; self.outcome = outcome
             self.repository = repository; self.commit = commit; self.evidence_id = evidenceID
@@ -104,6 +109,7 @@ public struct InsightsRequest: Encodable, Sendable {
             self.input = input
             self.specification_id = specificationID; self.audit_digest = auditDigest
             self.week_start = weekStart; self.tz = tz; self.card = card
+            self.weeks = weeks; self.pattern = pattern
         }
     }
 }
@@ -132,13 +138,15 @@ public struct InsightsResponse: Decodable, Sendable {
     public let comparisonResult: DescriptiveComparisonResult?
     public let overview: InsightsWeekOverview?
     public let inputs: InsightsCardInputs?
+    public let patterns: InsightsWeekPatterns?
+    public let pattern_sessions: InsightsPatternSessions?
     public var invalidatedEpisodeIDs: [String] { mutation_effects?.invalidated_episode_ids ?? [] }
     public var staleComparisonTaskIDs: [String] { mutation_effects?.stale_comparison_task_ids ?? [] }
 
     private enum CodingKeys: String, CodingKey {
         case type, insight, insights, deleted, copy, summary, mutation_effects, episode, episodes
         case detail, result, text, task, tasks, specification, specifications
-        case overview, inputs
+        case overview, inputs, patterns, pattern_sessions
     }
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -172,6 +180,8 @@ public struct InsightsResponse: Decodable, Sendable {
         specifications = try values.decodeIfPresent([ComparisonSpecification].self, forKey: .specifications)
         overview = try values.decodeIfPresent(InsightsWeekOverview.self, forKey: .overview)
         inputs = try values.decodeIfPresent(InsightsCardInputs.self, forKey: .inputs)
+        patterns = try values.decodeIfPresent(InsightsWeekPatterns.self, forKey: .patterns)
+        pattern_sessions = try values.decodeIfPresent(InsightsPatternSessions.self, forKey: .pattern_sessions)
     }
 }
 

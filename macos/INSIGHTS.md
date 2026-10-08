@@ -6,9 +6,9 @@ per app launch. Their existing roots, onboarding, and activation checks still
 apply. Returning to Insights does not stop services already activated.
 
 The window has tabs. **Overview** (the default) shows one local week of the
-snapshots you saved, and **Analyze** holds the whole screen described below.
-**Spend** is shown disabled with a "Later" chip; Patterns and Sessions are
-not drawn until their slices land.
+snapshots you saved, **Patterns** shows where that week's tokens went, and
+**Analyze** holds the whole screen described below. **Spend** is shown
+disabled with a "Later" chip; Sessions is not drawn until its slice lands.
 
 Choose a Codex rollout, Claude Code session or trajectory file to analyze it
 locally. Analysis is
@@ -44,6 +44,18 @@ here. By model keeps the core's fixed order (alphabetical, unknown last); By
 project is not available for analyzed files. Every word is the core's
 `ui_copy()` analytics table, marked DRAFT pending approval; every figure is
 the core's. Advice, what-if estimates and costs are not shown.
+
+Patterns reads `patterns` and, for each card's "See sessions", the
+`pattern_sessions` list, over the same saved snapshots. Its four cards are
+repeated reads, retried tool calls, "Edit, failed command, edit" (inferred
+from the order of tool calls) and long context, each with the token figure
+first, the count beneath it and six weekly bars; a week with no counted
+Claude Code session is a gap, never a zero bar. The first three are estimates
+from result size; long context is counted input. The figures overlap and do
+not add up to the week's tokens. Only Claude Code sessions record tool calls,
+so a week with Codex sessions says how many sessions the figures cover. The
+re-read table names files only by a letter and the extension; no path is
+stored or shown. Week-to-week change reads as a dash here.
 
 Local operations run off the UI thread. Closing or leaving the screen discards
 late results; a save or deletion already started can still finish. Reopening

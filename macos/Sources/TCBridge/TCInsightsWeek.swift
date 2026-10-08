@@ -91,3 +91,77 @@ public struct InsightsCardInputs: Decodable, Sendable, Equatable {
     public let coverage: InsightsWeekCoverage
     public let sessions: [InsightsCardSession]
 }
+
+// Patterns ("Where tokens went") over saved snapshots (feed S), as
+// `patterns` and `pattern_sessions` return them. Decode only.
+
+/// One week's bar. `tokens == nil` is a gap, never a zero bar.
+public struct InsightsPatternWeek: Decodable, Sendable, Equatable, Identifiable {
+    public let week_start: String
+    public let tokens: UInt64?
+    public var id: String { week_start }
+}
+
+/// One Patterns card. Its `kind` is a wire label in the core's fixed order.
+public struct InsightsPatternCard: Decodable, Sendable, Equatable, Identifiable {
+    public let kind: String
+    /// The headline; `nil` is unknown, never zero.
+    public let tokens: UInt64?
+    public let count: UInt32?
+    /// Repeated reads only: how many files were read again.
+    public let files: UInt32?
+    public let sessions: UInt32
+    /// `estimate_from_result_size` or `from_counters`.
+    public let basis: String
+    public let inferred: Bool
+    /// Oldest first, ending at the week on screen.
+    public let weeks: [InsightsPatternWeek]
+    /// Per mille against last week; only ever sent under feed T.
+    public let change: Int64?
+    public let change_unavailable: String?
+    public var id: String { kind }
+}
+
+/// A re-read file: a letter and the extension, never a path or a name.
+public struct InsightsRereadRow: Decodable, Sendable, Equatable, Identifiable {
+    public let letter: String
+    public let ext: String?
+    public let reads: UInt32
+    public let after_shrink: UInt32
+    public let tokens: UInt64?
+    public var id: String { letter }
+}
+
+public struct InsightsWeekPatterns: Decodable, Sendable, Equatable {
+    public let feed: String
+    public let week_start, week_end: String
+    public let tz: Int32
+    public let coverage: InsightsWeekCoverage
+    public let sessions: UInt32
+    public let claude_sessions: UInt32
+    /// Another harness is in the week: the figures cover Claude Code only.
+    public let claude_only: Bool
+    public let long_context_threshold: UInt64
+    public let cards: [InsightsPatternCard]
+    public let reread_files: [InsightsRereadRow]
+    /// Weeks with a dated saved session, newest first.
+    public let weeks: [String]
+}
+
+public struct InsightsPatternSession: Decodable, Sendable, Equatable, Identifiable {
+    public let session_ref: String
+    public let count: UInt32
+    public let tokens: UInt64?
+    public let state: String
+    public let reasons: [String]
+    public var id: String { session_ref }
+}
+
+/// The sessions behind one Patterns card, in the core's order.
+public struct InsightsPatternSessions: Decodable, Sendable, Equatable {
+    public let pattern: String
+    public let feed: String
+    public let week_start: String
+    public let tz: Int32
+    public let sessions: [InsightsPatternSession]
+}
