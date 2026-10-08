@@ -15,7 +15,7 @@ check; it is not passed by exception.
 | Stage | What changes | Tenants on the pipeline |
 |---|---|---|
 | 1. Deploy with the pipeline off | New binary and migrations | none |
-| 2. Offline replay | Nothing on the deployment | none |
+| 2. Lab corpus runs | Nothing on the deployment | none |
 | 3. One throwaway tenant | One routing row | one, created for the test |
 | 4. First real tenant | One routing row | one |
 
@@ -31,8 +31,10 @@ first. In short:
   `pipeline_hf_network_canary`) need the production assembly.
 - There is no shadow or dual-run mode. Each receipt has exactly one owner. A
   tenant on the pipeline is not scored by the legacy path, and its
-  pipeline-owned receipts never move back to it. The only side-by-side
-  comparison is the offline replay of stage 2.
+  pipeline-owned receipts never move back to it. No tool compares the two
+  paths on the same traces; stage 3 compares the pipeline's decisions with
+  what the legacy gate recorded for the same synthetic traces on another
+  tenant.
 
 Stages 1 and 2 can run today. Stages 3 and 4 are written down now so that the
 production assembly is built to pass them.
@@ -103,32 +105,45 @@ registered passkeys).
 Pass: all five hold. Stage 1 is also the rollback point: keep the previous
 binaries and the pre-migration backup until stage 4 is done.
 
-## Stage 2: offline replay
+## Stage 2: lab corpus runs
 
-Goal: the pipeline reaches the same decisions as the legacy gate on traces
-like the deployment's, before any tenant depends on it. This runs on a
-workstation or a scratch host against a throwaway PostgreSQL; nothing is sent
-to the deployment.
+Goal: the pipeline build behaves as specified on the repository's corpora,
+before any tenant depends on it. This runs on a workstation in a disposable
+PostgreSQL container ([pipeline-lab.md](pipeline-lab.md)); nothing is sent to
+the deployment, and no deployment trace is used.
 
-1. Build a corpus that covers the cases that matter, not only clean traces:
-   short single-turn sessions, chunk-capped long sessions, two sessions that
-   share their opening events (the duplicate case), a session with residual
-   PII the classifier must catch, a session outside the tenant's consent scope,
-   and a session with a tool the redactor does not know.
-2. Run it through `pipeline.py run --bundle compatibility --corpus <file>`
-   ([pipeline-lab.md](pipeline-lab.md)) with the gate floors, top-k, chunk
-   settings, and credit delta of the deployment.
-3. Score the same traces through the legacy gate with the same settings.
-4. Compare, per trace: admitted or refused, the refusal label, the credit
-   quality, and the pending credit.
+Run both from a checkout of the commit the deployment runs:
 
-Pass:
+```bash
+python3 scripts/operator/pipeline.py run --bundle compatibility
+python3 scripts/operator/pipeline.py run --bundle compatibility \
+  --corpus crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-local.json
+```
 
-- Every trace that the legacy gate refuses for privacy or consent is refused
-  by the pipeline. This is the one comparison with no tolerance: a pipeline
-  gate that is weaker than the legacy gate is a release blocker.
-- Credit quality agrees within the scorer's own run-to-run variation, and
-  every disagreement in admit/refuse is explained in writing.
+Pass, from the reports under `.local/`: every fixture completed,
+`failure_count` 0, every fixture's `mismatches` empty, `replay_same_run_count`
+and `changed_content_refused_count` equal to the fixture count, and
+`tenant_isolation` true. The built-in corpus covers an admitted plan, a locally
+redacted secret, an approved and a rejected privacy quarantine, and a
+high-risk rejection; the harness also refuses any report that carries a
+fixture's secret probe.
+
+What this does not show:
+
+- **Agreement with the legacy gate on the deployment's settings.** The lab
+  scores with the reference scorer, embedder and index (the report's
+  `safe_blockers` say so), and takes no gate floors, top-k, chunk settings or
+  credit delta. Credit quality and pending credit from these runs say nothing
+  about the deployment's. That comparison moves to stage 3 (3a), where the
+  production assembly scores with the deployment's own adapters.
+- **Independent privacy enforcement.** In the compatibility bundle, Admission
+  and Review are pass-through: privacy and consent refusals come from the
+  ingest admission both paths share. A pipeline gate weaker than the legacy one
+  would need a separate implementation to exist; stage 3b checks the
+  refusals on the deployment.
+- **Consent-scope, unknown-tool, and shared-opening (duplicate) cases.** Corpus
+  expectations are keyed by fixture label in the harness's Rust, so these need
+  new fixtures and expectation code, not only a corpus file.
 
 Note the known difference: pipeline submissions write no legacy gate-decision
 row, so features that read that table (duplicate clustering, the contributor
@@ -151,20 +166,35 @@ Preconditions:
 - Vector indexing is running for the tenant: the pipeline's Score phase needs
   a live embedder and index.
 
-Activate the tenant ("Activate, roll back, contain, deactivate" in
-[pipeline-activation.md](pipeline-activation.md)), then run these checks.
+Before activating, build a synthetic trace set that covers the cases that
+matter, not only clean traces: short single-turn sessions, chunk-capped long
+sessions, two sessions that share their opening events (the duplicate case), a
+session with residual PII the classifier must catch, a session outside the
+tenant's consent scope, and a session with a tool the redactor does not know.
+No real contributor's trace goes in it.
+
+Upload the whole set to a **second** throwaway tenant that stays on the legacy
+path, and record per trace: admitted or refused, the refusal label, the
+credit quality, and the pending credit. That is the reference the checks below
+compare with, scored by the deployment's own legacy gate and settings.
+
+Then activate the pipeline tenant ("Activate, roll back, contain, deactivate"
+in [pipeline-activation.md](pipeline-activation.md)), and run these checks.
 
 ### 3a. The happy path
 
-Upload a small set of traces from stage 2's corpus. Each reaches a terminal
-state, the decisions match stage 2's for the same traces, and
-`GET /v1/admin/pipeline/operational-summary` shows no stuck work. The client
-shows the same pending credit the pipeline recorded.
+Upload the clean traces of the set. Each reaches a terminal state and
+`GET /v1/admin/pipeline/operational-summary` shows no stuck work. Compared
+with the legacy tenant's record: the same admit/refuse decision, credit quality
+within the scorer's own run-to-run variation, and every disagreement explained
+in writing. The client shows the same pending credit the pipeline recorded.
 
 ### 3b. The gates refuse what they must
 
-Upload the PII, out-of-scope-consent, and duplicate traces. Each is refused or
-quarantined with the same label as in stage 2, and none earns credit.
+Upload the PII, out-of-scope-consent, unknown-tool and duplicate traces. Each
+is refused or quarantined with the same label the legacy tenant recorded, and
+none earns credit. This comparison has no tolerance: a trace the legacy gate
+refuses for privacy or consent and the pipeline admits is a release blocker.
 
 ### 3c. Failure drills
 
@@ -199,7 +229,7 @@ remove the throwaway tenant.
 ## Stage 4: first real tenant
 
 Agree on the abort rule before activating, and write it in the change record:
-**any credit mismatch with stage 2's expectations, any trace that passes a gate
+**any credit mismatch with the legacy reference from stage 3, any trace that passes a gate
 it must fail, or any stuck run older than its phase budget means
 `contain` at once, then `deactivate`.**
 
