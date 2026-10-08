@@ -89,6 +89,9 @@ pub const ERR_ISO_WEEK_INVALID: &str = "iso-week-invalid";
 pub const UNREADABLE_KEY: &str = "key_unavailable";
 /// The store could not be read; nothing is shown in its place.
 pub const UNREADABLE_STORE: &str = "store_unreadable";
+/// The folder rules could not be read, so the Never folders are unknown;
+/// nothing is shown in their place.
+pub const UNREADABLE_POLICY: &str = "policy_unreadable";
 /// The store could not be written; the rows stay as they were.
 pub const STORE_WRITE_FAILED: &str = "store_write_failed";
 /// The store could not be removed on unenroll.
@@ -846,16 +849,18 @@ fn rollup_value(rollup: &WeekRollup) -> serde_json::Value {
 }
 
 /// Every folder whose own rule is Never.
-fn never_project_keys(shared: &DaemonShared) -> Vec<String> {
-    let Ok(policy) = shared.policy.lock() else {
-        return Vec::new();
-    };
-    policy
-        .projects
-        .keys()
-        .filter(|key| policy.folder_mode(key) == super::policy::ProjectMode::Ignore)
-        .cloned()
-        .collect()
+/// `None` when the folder rules cannot be read: the Never folders are then
+/// unknown, and an unknown is never read as "none".
+fn never_project_keys(shared: &DaemonShared) -> Option<Vec<String>> {
+    let policy = shared.policy.lock().ok()?;
+    Some(
+        policy
+            .projects
+            .keys()
+            .filter(|key| policy.folder_mode(key) == super::policy::ProjectMode::Ignore)
+            .cloned()
+            .collect(),
+    )
 }
 
 /// `insights_week`.
@@ -892,7 +897,20 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
         Err(_) => (false, WeekOptions::default()),
     };
     let never = if enabled {
-        never_project_keys(shared)
+        match never_project_keys(shared) {
+            Some(keys) => keys,
+            None => {
+                return Response::ok(
+                    req.id,
+                    serde_json::json!({
+                        "enabled": true,
+                        "feed": FEED_COUNTER_PASS,
+                        "readable": false,
+                        "reason": UNREADABLE_POLICY,
+                    }),
+                );
+            }
+        }
     } else {
         Vec::new()
     };
@@ -1565,6 +1583,39 @@ mod tests {
         .unwrap();
         assert_eq!(on["readable"], true);
         assert_eq!(on["week_start"], "2026-09-14");
+    }
+
+    /// The Never folders cannot be read, so nothing is shown: a poisoned
+    /// policy lock must not read as "no folder is Never" and let a Never
+    /// folder's rows through.
+    #[test]
+    fn an_unreadable_folder_policy_shows_nothing() {
+        let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = true;
+        std::thread::scope(|scope| {
+            let _ = scope
+                .spawn(|| {
+                    let _held = s.policy.lock().unwrap();
+                    panic!("poison the policy lock");
+                })
+                .join();
+        });
+        assert!(s.policy.is_poisoned());
+        let r = handle_week(
+            &s,
+            &call(serde_json::json!({"iso_week": "2026-W38", "tz": 0})),
+        )
+        .result
+        .unwrap();
+        assert_eq!(
+            r,
+            serde_json::json!({
+                "enabled": true,
+                "feed": "counter_pass",
+                "readable": false,
+                "reason": UNREADABLE_POLICY,
+            })
+        );
     }
 
     #[test]

@@ -3933,7 +3933,9 @@ or its key unreadable:
 { "enabled": true, "feed": "counter_pass", "readable": false, "reason": "store_unreadable" }
 ```
 
-`reason` is `store_unreadable` or `key_unavailable`. `readable: false` is
+`reason` is `store_unreadable`, `key_unavailable`, or `policy_unreadable`
+(the folder rules could not be read, so which folders are Never is unknown).
+`readable: false` is
 never drawn as zero; the next pass starts an unreadable store again from the
 sessions on disk. Otherwise:
 
