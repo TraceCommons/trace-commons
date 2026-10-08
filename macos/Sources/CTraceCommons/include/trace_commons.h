@@ -2143,6 +2143,9 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * with weekly bars (an absent week is null, never 0) and the re-read table as
  * letters plus extensions; weeks is 1-6, else insights_weeks_invalid.
  * pattern_sessions {pattern,week_start?,tz} lists one card's sessions.
+ * Sessions (feed S): session_drill {snapshot_id,tz} returns one saved
+ * session's per-turn counters (an unknown turn is null, never 0) and lettered
+ * markers; Codex series is null as not_recorded. No path, digest or what-if.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;

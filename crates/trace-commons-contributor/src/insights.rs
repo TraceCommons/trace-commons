@@ -28,6 +28,7 @@ pub mod patterns;
 pub mod pricing_catalog;
 pub mod provider;
 pub mod service;
+pub mod session_drill;
 pub mod summary;
 pub mod task_attribution;
 pub mod time_evidence;

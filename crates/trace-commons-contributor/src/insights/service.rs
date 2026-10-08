@@ -579,6 +579,13 @@ pub enum LocalInsightsOperation {
         week_start: Option<chrono::NaiveDate>,
         tz: i32,
     },
+    /// Sessions (drill-in): one saved snapshot turn by turn, with its
+    /// lettered markers. `tz` dates the header. A read: an absent store is
+    /// not created, and an unknown snapshot is `insights_not_found`.
+    SessionDrill {
+        snapshot_id: String,
+        tz: i32,
+    },
 }
 
 /// Fixed labels for a malformed analytics read.
@@ -724,6 +731,9 @@ pub enum LocalInsightsResponse {
     },
     PatternSessions {
         pattern_sessions: Box<super::week_patterns::PatternSessions>,
+    },
+    SessionDrill {
+        session: Box<super::session_drill::SessionDrill>,
     },
 }
 
@@ -1227,6 +1237,15 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
                 )),
             }
         }
+        LocalInsightsOperation::SessionDrill { snapshot_id, tz } => {
+            let tz = super::week_glance::request_tz(tz).ok_or(AnalyticsRequestError::TzInvalid)?;
+            let insight = existing_store(request.store_dir.as_deref())?
+                .ok_or_else(|| anyhow!(InsightsStoreError::NotFound))?
+                .explain(&snapshot_id)?;
+            LocalInsightsResponse::SessionDrill {
+                session: Box::new(super::session_drill::saved_session_drill(&insight, tz)),
+            }
+        }
     })
 }
 
@@ -1631,6 +1650,80 @@ mod tests {
             "type": "patterns", "week_start": "2026-10-05", "tz": 0
         }));
         assert!(empty["patterns"]["cards"][0]["tokens"].is_null());
+    }
+
+    #[test]
+    fn session_drill_reads_one_saved_session_and_leaks_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("store");
+        let call = |operation: serde_json::Value| {
+            dispatch_json(
+                serde_json::json!({"store_dir": store, "operation": operation})
+                    .to_string()
+                    .as_bytes(),
+            )
+        };
+        // An absent store: not found, and nothing is created.
+        let missing = call(serde_json::json!({
+            "type": "session_drill", "snapshot_id": "nope", "tz": 0
+        }))
+        .unwrap_err();
+        assert_eq!(missing.to_string(), "insights_not_found");
+        assert!(!store.exists());
+
+        let file = root.path().join("claude.jsonl");
+        std::fs::write(
+            &file,
+            include_bytes!("../../fixtures/insights/claude-turn-series/session.jsonl"),
+        )
+        .unwrap();
+        let saved: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({
+                "type": "analyze", "source": "claude_code", "file": file, "save": true
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let id = saved["insight"]["id"].as_str().unwrap().to_string();
+        let read: serde_json::Value = serde_json::from_str(
+            &call(serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 0}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(read["type"], "session_drill");
+        let drill = &read["session"];
+        assert_eq!(drill["session_ref"], id.as_str());
+        assert_eq!(drill["feed"], "saved");
+        assert_eq!(drill["source"], "claude_code");
+        assert_eq!(drill["long_context_threshold"], 200_000);
+        assert!(drill["date"].is_string(), "{drill}");
+        assert!(drill["span_secs"].is_u64(), "{drill}");
+        let series = drill["series"].as_array().unwrap();
+        assert_eq!(drill["turns"], series.len());
+        assert!(!series.is_empty());
+        assert!(drill["series_unavailable"].is_null());
+        assert!(drill.get("what_if").is_none());
+        assert!(drill.get("project").is_none());
+        let wire = read.to_string();
+        for private in [
+            "PRIVATE", "msg_", "toolu_", "/Users", "path_key", "args_key",
+        ] {
+            assert!(!wire.contains(private), "{private}");
+        }
+        // An unknown snapshot in an existing store is not found.
+        assert_eq!(
+            call(serde_json::json!({"type": "session_drill", "snapshot_id": "nope", "tz": 0}))
+                .unwrap_err()
+                .to_string(),
+            "insights_not_found"
+        );
+        for refused in [
+            serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 19 * 3600}),
+            serde_json::json!({"type": "session_drill", "snapshot_id": id, "tz": 0, "file": "/tmp/x"}),
+            serde_json::json!({"type": "session_drill", "tz": 0}),
+        ] {
+            assert!(call(refused).is_err());
+        }
     }
 
     #[test]

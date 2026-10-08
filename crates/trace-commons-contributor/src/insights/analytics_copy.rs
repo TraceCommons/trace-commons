@@ -301,6 +301,13 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_marker_reread_detail",
         "No edit tool call to it since the last read.",
     ),
+    // A re-read is read from the order of tool calls, not from usage
+    // counters, so its card carries this label instead. Not in the spec's
+    // list; added so no shell authors it.
+    (
+        "analytics_marker_from_tool_calls",
+        "From the order of tool calls.",
+    ),
     // 19. Session header.
     (
         "analytics_session_header",

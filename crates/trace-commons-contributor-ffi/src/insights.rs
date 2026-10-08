@@ -45,6 +45,11 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// "repeated_reads|retried_calls|edit_fail_edit|long_context","week_start":
 /// "2026-10-05","tz":3600}` lists the sessions behind one card. Neither
 /// compares weeks under feed S, and neither returns a path or a digest.
+/// One saved session, turn by turn (feed S): `{"type":"session_drill",
+/// "snapshot_id":"...","tz":3600}` returns its header figures, per-turn
+/// counters (an unknown turn is `null`, never 0) and lettered markers. A Codex
+/// session's series is `null` with `series_unavailable: "not_recorded"`. An
+/// unknown snapshot is `insights_not_found`. No path, digest or what-if.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also
@@ -462,6 +467,42 @@ mod tests {
             .unwrap_err(),
             "insights_weeks_invalid"
         );
+    }
+
+    #[test]
+    fn a_codex_session_drill_crosses_the_abi_as_not_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("insights");
+        assert_eq!(
+            json_call(
+                &store,
+                serde_json::json!({"type":"session_drill","snapshot_id":"nope","tz":0}),
+            )
+            .unwrap_err(),
+            "insights_not_found"
+        );
+        assert!(!store.exists());
+        let source = temp.path().join("rollout.jsonl");
+        codex_rollout(&source, 150);
+        let saved = json_call(
+            &store,
+            serde_json::json!({"type":"analyze","source":"codex","file":source,"save":true}),
+        )
+        .unwrap();
+        let id = saved["insight"]["id"].clone();
+        let read = json_call(
+            &store,
+            serde_json::json!({"type":"session_drill","snapshot_id":id,"tz":0}),
+        )
+        .unwrap();
+        assert_eq!(read["type"], "session_drill");
+        let drill = &read["session"];
+        assert_eq!(drill["source"], "codex");
+        assert!(drill["series"].is_null());
+        assert!(drill["turns"].is_null());
+        assert_eq!(drill["series_unavailable"], "not_recorded");
+        assert_eq!(drill["markers"], serde_json::json!([]));
+        assert!(!read.to_string().contains("PRIVATE_SESSION_ID"));
     }
 
     #[test]
