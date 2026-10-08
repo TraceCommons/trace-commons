@@ -995,6 +995,17 @@ jobs:
           set -euo pipefail
           cargo test -p trace-commons-server --features gcs-client --lib trace_artifact_gcs 2>&1 | tee gcs-client-tests.log
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-tests.log
+      # The production pipeline assembly's usearch index, and the
+      # near-ai-scorer arm of its end-to-end test, compile only under this
+      # feature, so no other job runs them. No network: the tests build no
+      # NEAR AI scorer and load no fastembed model. A filter that matches
+      # nothing passes with "0 passed", so the step requires at least one.
+      - name: production assembly tests (near-ai-scorer)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --features near-ai-scorer --bin trace-commons-ingest production_assembly 2>&1 | tee production-assembly-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' production-assembly-tests.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.

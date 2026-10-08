@@ -250,31 +250,33 @@ qualification and activation routes call it over signed results (see
 passing result for each of the 22 checks in `PROMOTION_REQUIRED_CHECKS`: the 19
 that `qualify` produces, and three promotion-only checks
 (`pipeline_production_adapters`, `pipeline_remote_restore`,
-`pipeline_hf_network_canary`) that need the production assembly. No code in
-this repository emits those three (see "What local evidence is not"). It
-also requires:
+`pipeline_hf_network_canary`) that need the production assembly. The deployed
+production assembly emits `pipeline_production_adapters` at startup (see
+[pipeline-activation.md](pipeline-activation.md), "The production assembly");
+no code in this repository emits the other two yet (see "What local evidence
+is not"). It also requires:
 
 - every result to carry the same `code_revision_hash`
   (`qualification_evidence_mixed_revision` otherwise);
-- the 19 results that `qualify` produces to carry the same `run_id`
+- the 15 mechanics results to carry one `run_id` and the seven
+  package-bearing results (`PROMOTION_PACKAGE_CHECKS`) to carry one `run_id`
   (`qualification_evidence_mixed_run` otherwise). The evidence of a bundle is
-  the output of one `qualify` run plus the three promotion-only results. A set
-  cannot take one result from one `qualify` run and the rest from another run,
-  on the same revision or not. The three promotion-only results can come from
-  other runs: their run ids are not compared. `PROMOTION_ONLY_CHECKS` holds
-  the three ids. The rule applies at the qualification, at the activation, and
-  at the rollback;
+  two runs of one revision: the mechanics run (`qualify`, reference
+  dependencies, no network) and the production run (against the production
+  assembly). A set cannot take one mechanics result from one run and the rest
+  from another, nor split the package-bearing results across runs. The rule
+  applies at the qualification, at the activation, and at the rollback;
 - no result to carry a safe blocker, a passing one included. Each blocker is
   listed as `<label>:<check_id>`. A local restore drill passes with the blocker
   `filesystem_restore_local_only`, so a local result set is never ready;
-- each of the four checks that test the candidate package to name it, with all
-  three digests. `PROMOTION_PACKAGE_CHECKS` holds them:
+- each of the seven checks that test the candidate package to name it, with
+  all three digests. `PROMOTION_PACKAGE_CHECKS` holds them:
   `pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`,
-  `pipeline_http_corpus_hf_local`, and `pipeline_restore_drill`. A candidate
-  check that names fewer digests adds
+  `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`, and the three
+  promotion-only checks. A candidate check that names fewer digests adds
   `qualification_evidence_package_missing:<check_id>`;
-- every other check, a mechanics check or a promotion-only check, to name no
-  package. A result that carries any digest adds
+- every other check, a mechanics check, to name no package. A result that
+  carries any digest adds
   `qualification_evidence_package_unexpected:<check_id>`;
 - the packages that the results name to be one
   (`qualification_evidence_mixed_package` otherwise).
@@ -284,9 +286,9 @@ Its decision names the one revision and the one package, and its
 evidence hash (not the evaluation time, so the same evidence gives the same
 hash). Three consequences:
 
-- A decision is ready only when the four candidate checks name one package and
+- A decision is ready only when the seven candidate checks name one package and
   no other result names any. A decision in which no check names a package is
-  not ready: it carries four `qualification_evidence_package_missing`
+  not ready: it carries seven `qualification_evidence_package_missing`
   blockers.
 - A `qualify` run names exactly one package. The corpus runs for the
   compatibility and HF-local checks and the restore drill serve it, and so does
@@ -304,8 +306,8 @@ hash). Three consequences:
   the whole set (`qualification_evidence_mixed_revision`,
   `qualification_evidence_mixed_run`). A ready decision needs each of the 22
   ids once, each `pass`, each inside its maximum age, one revision, one run
-  for the 19 results of `qualify`, the package named by the four candidate
-  checks only, and no safe blocker.
+  for the mechanics results and one for the package-bearing results, the
+  package named by the seven candidate checks only, and no safe blocker.
 
 ## Signed check results
 
@@ -477,10 +479,12 @@ Closing these is promotion work, not part of `qualify`:
 `evaluate_promotion` also requires three promotion-only checks:
 `pipeline_production_adapters`, `pipeline_remote_restore`, and
 `pipeline_hf_network_canary`. Their results come from a production run, not a
-local one. No code in this repository emits them, and no local or CI run passes
-them. So a decision over the results of a local `qualify` run is never ready: it
-lacks these three results, and its restore drill carries the blocker
-`filesystem_restore_local_only`.
+local one. The deployed production assembly emits the first at startup; no code
+in this repository emits the other two yet, and no local or CI run passes any of
+them. A local `qualify` run's package is the reference one, which no production
+assembly holds, so its four package-bearing results can never be the evidence
+of a production package. A decision over the results of a local `qualify` run
+is therefore never ready.
 
 ## Package trust and `qualify_bundle`
 
