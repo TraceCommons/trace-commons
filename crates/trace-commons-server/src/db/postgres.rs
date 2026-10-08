@@ -1746,6 +1746,15 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "external_account_trust_evaluations",
         include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
     ),
+    // V114's frontier backfill read trace_accounts with no tenant context, so a
+    // migrator without BYPASSRLS seeded no row for any existing account. Re-run
+    // it as the evaluation guard under a policy that lives only for the
+    // statement; rows the trigger made since V114 keep their generations.
+    (
+        115,
+        "account_trust_frontier_backfill",
+        include_str!("../../../../migrations/V115__account_trust_frontier_backfill.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

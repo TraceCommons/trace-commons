@@ -283,6 +283,25 @@ change nothing. The runtime has no path back. Turning it off again is an owner
 action, safe only once no ingest runs an external policy, and the next enable
 invalidates every evaluation again.
 
+Every account needs a frontier row before external growth is enabled: the
+writer refuses an account without one, so that account can never record an
+evaluation. The trigger creates a row only when an account is inserted, so
+accounts that existed before V114 depend on V114's backfill. That backfill read
+`trace_accounts` with no tenant context, and a migrator that is neither
+superuser nor `BYPASSRLS` (the pilot's `app`, for one) seeded no row. V115
+re-runs it as the evaluation guard and leaves existing rows alone. Do not
+enable external growth on a database below V115. To confirm, as a role that
+sees every tenant's rows:
+
+```sql
+SELECT count(*) FROM trace_accounts a
+ WHERE NOT EXISTS (SELECT 1 FROM trace_account_trust_frontiers f
+                    WHERE f.tenant_id = a.tenant_id AND f.account_id = a.account_id);
+```
+
+The count must be 0. Run as `app` with no tenant set, it is always 0, because
+`app` sees no account; that result proves nothing.
+
 Contribution status reads the generation through the non-locking
 `trace_account_trust_input_generation`; only a reservation takes the frontier
 lock.
