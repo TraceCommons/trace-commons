@@ -20,7 +20,11 @@
 //!   passkey, so Ron's "Losing it means losing access" claimed more than is
 //!   true (Kristi's review of #1252).
 //! - Frame adds `undo`, which takes back a passkey or near.ai chosen on Join
-//!   and not yet acted on.
+//!   and not yet acted on, and `back`, the first-run footer's Back on every
+//!   step after Join (owner, 2026-10-08, reversing Ron's review of #1235,
+//!   item 9) and the passkey popups' Back alike.
+//! - Folders has no line for a tool missing from this Mac: its row asks
+//!   nothing and offers "Get {tool}" (owner, 2026-10-08).
 //! - Join adds `invite_dead` for a real invite the daemon refused,
 //!   `pay_range_points` and `pay_range_points_one` to word the invite's
 //!   credit range in the one unit the daemon accepts, `passkey_chosen` and
@@ -107,6 +111,9 @@ pub struct FrameCopy {
     /// What an unanswered picker reads: Ron's design-system `Picker`
     /// placeholder. The picker's question stays its accessible label.
     pub choose: &'static str,
+    /// The footer's Back on every step after Join, and the passkey popups'
+    /// Back. Approved 2026-10-08.
+    pub back: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -195,7 +202,6 @@ pub struct FoldersCopy {
     /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
     /// the tool's own install page, over https.
     pub install_urls: InstallUrls,
-    pub not_installed: &'static str,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
     /// Runs discovery again after `discovery_failed`.
@@ -262,8 +268,8 @@ pub struct RulesCopy {
     pub never_count: &'static str,
     pub never_label: &'static str,
     /// The folders could not be read; Continue stays disabled, and the
-    /// card offers `retry`. No screen has a Back (Ron's review of #1235,
-    /// item 9), so it does not say to go back. Approved 2026-10-06.
+    /// card offers `retry` beside it, so the line points at no other way
+    /// on. Approved 2026-10-06.
     pub unavailable: &'static str,
     /// Reads the folders again after `unavailable`: Rules' own word, not
     /// Folders' `retry`. Approved 2026-10-06.
@@ -329,7 +335,6 @@ pub struct UsesCopy {
 /// and P-6 are system sheets macOS draws, so they have no row.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PasskeyCopy {
-    pub back: &'static str,
     pub close: &'static str,
     pub cancel: &'static str,
     pub choose_title: &'static str,
@@ -417,6 +422,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             session_count: "{count} sessions",
             undo: "Undo",
             choose: "Choose…",
+            back: "Back",
         },
         join: JoinCopy {
             title_light: "Get started on ",
@@ -468,7 +474,6 @@ pub fn first_run_copy() -> FirstRunCopy {
                 cline: "https://cline.bot/",
                 opencode: "https://opencode.ai/",
             },
-            not_installed: "Install it, then this row asks again.",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
@@ -537,7 +542,6 @@ pub fn first_run_copy() -> FirstRunCopy {
             complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
         },
         passkey: PasskeyCopy {
-            back: "Back",
             close: "Close",
             cancel: "Cancel",
             choose_title: "Continue with passkey",
@@ -693,8 +697,8 @@ mod tests {
         );
     }
 
-    /// No first-run screen has a Back, so nothing tells the person to go
-    /// back.
+    /// Back is a button in the footer, never an instruction: no line tells
+    /// the person to go back.
     #[test]
     fn no_line_says_to_go_back() {
         let json = serde_json::to_string(&first_run_copy()).unwrap();
@@ -732,8 +736,8 @@ mod tests {
         assert!(!join.unknown.chars().any(|c| c.is_ascii_digit()));
     }
 
-    /// The Rules screen has no Back link, so its unavailable line points at
-    /// no way back: the screen offers a retry beside it instead.
+    /// Rules' unavailable line points at no way back: the screen offers a
+    /// retry beside it.
     #[test]
     fn unreadable_rules_point_at_no_back_link() {
         let copy = first_run_copy();
@@ -743,6 +747,20 @@ mod tests {
         // Rules has its own retry word, not Folders' "Look again".
         assert_eq!(copy.rules.retry, "Try again");
         assert_ne!(copy.rules.retry, copy.folders.retry);
+    }
+
+    /// Back is the frame's one word, read by the first-run footer and the
+    /// passkey popups alike (one string, one key). A tool missing from this
+    /// Mac has no line of its own (owner, 2026-10-08).
+    #[test]
+    fn back_is_the_frames_and_a_missing_tool_has_no_line() {
+        let copy = first_run_copy();
+        assert_eq!(copy.frame.back, "Back");
+        let json = serde_json::to_value(&copy).unwrap();
+        assert!(json["passkey"].get("back").is_none());
+        assert!(json["folders"].get("not_installed").is_none());
+        let text = json.to_string();
+        assert!(!text.contains("this row asks again"), "{text}");
     }
 
     /// Enroll runs only after the invite was looked up and accepted, so its

@@ -159,8 +159,8 @@ struct FoldersScreen: View {
         .task {
             if discovery == .loading { refreshDiscovery() }
         }
-        // A tool installed while the app was in the background shows when the
-        // person comes back, as the missing row's line promises.
+        // A tool installed while the app was in the background is asked
+        // about when the person comes back.
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshDiscovery()
         }

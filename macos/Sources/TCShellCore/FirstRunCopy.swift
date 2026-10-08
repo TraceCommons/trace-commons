@@ -25,6 +25,9 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let undo: String
         /// What an unanswered picker reads (Ron's `Picker` placeholder).
         public let choose: String
+        /// The footer's Back on every step after Join, and the passkey
+        /// popups' Back.
+        public let back: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
@@ -106,7 +109,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
             guard let url = URL(string: raw), url.scheme == "https" else { return nil }
             return url
         }
-        public let notInstalled: String
         /// Discovery returned no row the shell could read.
         public let discoveryFailed: String
         public let retry: String
@@ -206,7 +208,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {
-        public let back: String
         public let close: String
         public let cancel: String
         public let chooseTitle: String

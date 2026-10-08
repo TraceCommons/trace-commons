@@ -82,13 +82,25 @@ enum FirstRunFrameLayout {
         FirstRunNavigation.steps(for: state.tier).firstIndex(of: state.step) ?? 0
     }
 
-    /// "Custom setup instead" sits on Quick's Folders only (#1030
-    /// `tool-screens.tsx`): it is the one place Quick asks something Custom
-    /// asks differently. It is withdrawn while a commit runs: the runner
-    /// moves the step on from wherever the state is when its calls finish,
-    /// so a switch mid-commit would skip Custom's Tools.
+    /// "Customize" (switch to Custom setup) sits on Quick's Folders only
+    /// (#1030 `tool-screens.tsx`): it is the one place Quick asks something
+    /// Custom asks differently. It is a secondary button in the footer, just
+    /// left of Continue (owner, 2026-10-08). It is withdrawn while a commit
+    /// runs: the runner moves the step on from wherever the state is when
+    /// its calls finish, so a switch mid-commit would skip Custom's Tools.
     static func offersCustomSetupInstead(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
         !isCommitting && state.tier == .quick && state.step == .folders
+    }
+
+    /// Back, at the footer's left, on every step after Join in either tier
+    /// (owner, 2026-10-08, reversing Ron's review of #1235, item 9): the
+    /// frame draws it, so every step that is not the first has it, and Join
+    /// never does. It goes to the previous step with every answer kept
+    /// (`FirstRunNavigation.back`). Like the tier switch it is withdrawn
+    /// while a commit runs, so the runner never moves the step on from a
+    /// step the person has already left.
+    static func offersBack(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
+        !isCommitting && current(state) > 0
     }
 
     /// The tier tag in the pane's bar is Custom setup's only: Quick setup
@@ -109,12 +121,12 @@ enum FirstRunFrameLayout {
 /// Ron's first-run frame (#1030 `ftux-frame.tsx`) in glass: one pane with
 /// the tier on the right of its bar, the step progress, the screen's fixed
 /// header (its title), the cards scrolling beneath it with the runner's
-/// failure after them as a notice, and the footer. No screen has a Back
-/// (Ron's review of #1235, item 9).
+/// failure after them as a notice, and the footer: Back on its left after
+/// Join, the step's action on its right (owner, 2026-10-08).
 ///
 /// `notice` is the sentence a screen maps the runner's failure to; the
 /// frame shows it and decides nothing about it. `isCommitting` withdraws
-/// the tier switch while the runner's calls are in flight.
+/// Back and the tier switch while the runner's calls are in flight.
 struct FirstRunFrame<Header: View, Content: View>: View {
     private let copy: FirstRunCopy
     @Binding private var state: FirstRunState
@@ -185,17 +197,26 @@ struct FirstRunFrame<Header: View, Content: View>: View {
 
     private var footerRow: some View {
         HStack(spacing: GlassTokens.Space.s6) {
-            if FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting) {
-                Button(copy.frame.customSetupInstead) {
-                    state = FirstRunNavigation.switchTier(state, to: .custom)
+            // The secondary buttons are TCDesign's neutral glass pill, the
+            // folder picker's style.
+            if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {
+                Button(copy.frame.back) {
+                    state = FirstRunNavigation.back(state)
                 }
-                .buttonStyle(GlassButtonStyle(.link))
-            } else if let note = footer.note {
+                .buttonStyle(GlassButtonStyle(.glass))
+            }
+            if let note = footer.note {
                 Text(note)
                     .glassType(GlassTokens.TypeScale.caption)
                     .foregroundStyle(GlassColor.textTertiary)
             }
             Spacer(minLength: 0)
+            if FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting) {
+                Button(copy.frame.customSetupInstead) {
+                    state = FirstRunNavigation.switchTier(state, to: .custom)
+                }
+                .buttonStyle(GlassButtonStyle(.glass))
+            }
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
                     .buttonStyle(GlassButtonStyle(.secondary))

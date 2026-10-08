@@ -153,12 +153,10 @@ struct ToolAnswerRow: View {
                             }
                         }
                     } else {
-                        // Not on this Mac: not asked. Ron's install line, and
-                        // "Get {tool}" only with an install page.
-                        Text(copy.notInstalled)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        // Not on this Mac: not asked, and no line of its own
+                        // (owner, 2026-10-08); "Get {tool}" only with an
+                        // install page.
+                        Spacer(minLength: 0)
                         if ToolAnswerRowLayout.offersGetTool(candidate, installURL: installURL, in: state),
                             let installURL
                         {
@@ -169,7 +167,9 @@ struct ToolAnswerRow: View {
                                     ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source),
                                     systemImage: "arrow.down.to.line")
                             }
-                            .buttonStyle(GlassButtonStyle(.secondary, small: true))
+                            // Neutral, not coloured: the folder picker's
+                            // glass pill (owner, 2026-10-08).
+                            .buttonStyle(GlassButtonStyle(.glass))
                             .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
                         }
                     }

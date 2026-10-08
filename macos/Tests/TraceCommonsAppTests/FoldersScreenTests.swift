@@ -64,11 +64,17 @@ final class FoldersScreenTests: XCTestCase {
         ToolAnswerRowLayout.select(.dontUse, for: found, in: &answered)
         XCTAssertTrue(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
 
-        // The row's words are the core's: Ron's install line and "Get {tool}".
+        // The row's words are the core's: "Get {tool}", and no install line
+        // (owner, 2026-10-08). The button is the folder picker's neutral
+        // glass pill, not a coloured one.
         let folders = try copy().folders
         let row = try Self.source("ToolAnswerRow.swift")
-        XCTAssertTrue(row.contains("copy.notInstalled"))
+        XCTAssertFalse(row.contains("copy.notInstalled"))
         XCTAssertTrue(row.contains("copy.getTool"))
+        let getTool = try XCTUnwrap(row.range(of: "ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source)"))
+        let getStyle = String(row[getTool.upperBound...].prefix(400))
+        XCTAssertTrue(getStyle.contains(".buttonStyle(GlassButtonStyle(.glass))"), getStyle)
+        XCTAssertFalse(row.contains("GlassButtonStyle(.secondary"))
         XCTAssertTrue(folders.getTool.contains("{tool}"))
         XCTAssertTrue(row.contains("GlassToolTile("))
         XCTAssertTrue(row.contains("large: true"))

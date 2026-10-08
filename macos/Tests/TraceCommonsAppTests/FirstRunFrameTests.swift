@@ -67,13 +67,64 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertEqual(offered.map(\.tier), [.quick])
         XCTAssertEqual(offered.map(\.step), [.folders])
 
-        // The link exists once, behind that guard, and switches the tier.
+        // Withdrawn while a commit runs.
+        XCTAssertFalse(
+            FirstRunFrameLayout.offersCustomSetupInstead(
+                FirstRunState(tier: .quick, step: .folders), isCommitting: true))
+
+        // The button exists once, behind that guard, and switches the tier.
         let source = try Self.source()
         XCTAssertEqual(source.components(separatedBy: "copy.frame.customSetupInstead").count - 1, 1)
         let guardRange = try XCTUnwrap(source.range(of: "FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting)"))
         let linkRange = try XCTUnwrap(source.range(of: "copy.frame.customSetupInstead"))
         XCTAssertLessThan(guardRange.lowerBound, linkRange.lowerBound)
         XCTAssertTrue(source.contains("FirstRunNavigation.switchTier(state, to: .custom)"))
+
+        // Owner, 2026-10-08: in the footer's right side, immediately left of
+        // Continue, as the neutral secondary button, not a link.
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let rowBody = String(source[row.upperBound...])
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        let customize = try XCTUnwrap(rowBody.range(of: "copy.frame.customSetupInstead"))
+        let primary = try XCTUnwrap(rowBody.range(of: "Button(action: footer.action)"))
+        XCTAssertLessThan(spacer.lowerBound, customize.lowerBound)
+        XCTAssertLessThan(customize.lowerBound, primary.lowerBound)
+        let customizeBody = String(rowBody[customize.upperBound...].prefix(200))
+        XCTAssertTrue(customizeBody.contains(".buttonStyle(GlassButtonStyle(.glass))"), customizeBody)
+        XCTAssertFalse(source.contains("GlassButtonStyle(.link)"))
+    }
+
+    /// Owner, 2026-10-08 (reversing Ron's review of #1235, item 9): Back on
+    /// the footer's left on every step after Join, in either tier, never on
+    /// Join, withdrawn while a commit runs, in the core's word, as the
+    /// neutral secondary button. It goes to the previous step.
+    func test_backIsOfferedOnEveryStepAfterJoin() throws {
+        var offered: [FirstRunState] = []
+        for tier in [FirstRunTier.quick, .custom] {
+            for step in FirstRunNavigation.steps(for: tier) {
+                let state = FirstRunState(tier: tier, step: step)
+                XCTAssertFalse(FirstRunFrameLayout.offersBack(state, isCommitting: true), "\(tier) \(step)")
+                if FirstRunFrameLayout.offersBack(state) { offered.append(state) }
+            }
+        }
+        XCTAssertEqual(offered.map(\.step), [.folders, .uses, .tools, .rules, .uses])
+        XCTAssertFalse(offered.contains { $0.step == .join })
+
+        // Back from Quick's Folders is Join, from Quick's Uses is Folders.
+        XCTAssertEqual(FirstRunNavigation.back(FirstRunState(tier: .quick, step: .folders)).step, .join)
+        XCTAssertEqual(FirstRunNavigation.back(FirstRunState(tier: .quick, step: .uses)).step, .folders)
+
+        XCTAssertEqual(try copy().frame.back, "Back")
+        let source = try Self.source()
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let rowBody = String(source[row.upperBound...])
+        let back = try XCTUnwrap(rowBody.range(of: "if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {"))
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        XCTAssertLessThan(back.lowerBound, spacer.lowerBound, "Back sits on the left")
+        let backBody = String(rowBody[back.upperBound..<spacer.lowerBound])
+        XCTAssertTrue(backBody.contains("Button(copy.frame.back)"))
+        XCTAssertTrue(backBody.contains("state = FirstRunNavigation.back(state)"))
+        XCTAssertTrue(backBody.contains(".buttonStyle(GlassButtonStyle(.glass))"))
     }
 
     /// Ron's Continue carries "Answer every tool above to continue" as its
@@ -210,14 +261,13 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(body.contains(".accessibilityAddTraits(.isHeader)"), "FirstRunTitle must carry the header trait")
     }
 
-    /// Ron's review of #1235, items 9 to 12: no Back on any screen, the
-    /// tier label on the right of the bar, the 450pt pane, titles fixed
-    /// while only the cards scroll, and an error notice in the body after
-    /// the cards.
+    /// Ron's review of #1235, items 10 to 12: the tier label on the right
+    /// of the bar, the 450pt pane, titles fixed while only the cards
+    /// scroll, and an error notice in the body after the cards. Back is the
+    /// frame's alone (owner, 2026-10-08): no screen draws one of its own.
     func test_theFrameMatchesRonsLayout() throws {
         let frame = try Self.source()
-        XCTAssertFalse(frame.contains("onBack"), "no Back on any screen")
-        XCTAssertFalse(frame.contains("copy.passkey.back"))
+        XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
         // The tier label sits on the right: a spacer, then the eyebrow.
         let bar = try XCTUnwrap(frame.range(of: "private var bar: some View {"))
         let barBody = String(frame[bar.upperBound...].prefix(400))
@@ -239,6 +289,8 @@ final class FirstRunFrameTests: XCTestCase {
         for screen in Self.screens {
             let source = try Self.appSource("Views/FirstRun/\(screen.file)")
             XCTAssertFalse(source.contains("onBack"), screen.file)
+            XCTAssertFalse(source.contains("copy.frame.back"), screen.file)
+            XCTAssertFalse(source.contains("FirstRunNavigation.back("), screen.file)
             XCTAssertFalse(source.contains("ScrollView"), "\(screen.file): only the frame scrolls")
             // The frame's header closure, between its footer and
             // `content:`, holds the title.
@@ -266,9 +318,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(tools.contains("dash: [4, 3]"))
         XCTAssertTrue(tools.contains("GlassTokens.Color.purpleText"))
         XCTAssertFalse(tools.contains(".opacity(dragging"))
-        // "Get {tool}": the small secondary button with the download icon.
+        // "Get {tool}": the neutral glass pill with the download icon.
         let row = try Self.appSource("Views/FirstRun/ToolAnswerRow.swift")
-        XCTAssertTrue(row.contains("GlassButtonStyle(.secondary, small: true)"))
+        XCTAssertTrue(row.contains("GlassButtonStyle(.glass)"))
         XCTAssertTrue(row.contains("systemImage: \"arrow.down.to.line\""))
         // Start sharing shows a spinner while it runs.
         let uses = try Self.appSource("Views/FirstRun/UsesScreen.swift")
