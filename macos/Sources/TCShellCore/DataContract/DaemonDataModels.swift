@@ -687,6 +687,12 @@ extension DaemonData {
         public let opencodeSourceMode: String?
         /// The declared trajectory folder's mode; the path is never sent.
         public let trajectorySourceMode: String?
+        /// Decode-only until the Insights glance draws it: whether Insights
+        /// may read the proxy ledger (owner decision D3, open; off by default).
+        public let insightsLedgerFeed: Bool?
+        /// Decode-only until the Insights settings draw it: the user's own
+        /// context-tip threshold in tokens; `nil` is unset, never a default.
+        public let insightsContextThreshold: Int?
 
         public enum CodingKeys: String, CodingKey, CaseIterable {
             case quiescenceSecs = "quiescence_secs"
@@ -709,6 +715,8 @@ extension DaemonData {
             case clineSourceMode = "cline_source_mode"
             case opencodeSourceMode = "opencode_source_mode"
             case trajectorySourceMode = "trajectory_source_mode"
+            case insightsLedgerFeed = "insights_ledger_feed"
+            case insightsContextThreshold = "insights_context_threshold"
         }
 
         public var scrubCheckMode: ScrubCheckMode? { scrubCheck.flatMap(ScrubCheckMode.init(rawValue:)) }
