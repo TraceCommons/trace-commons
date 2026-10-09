@@ -4339,6 +4339,81 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
 }
 
 #[tokio::test]
+async fn account_traces_list_pages_past_a_received_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_db(temp.path().to_path_buf(), db_mirror);
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = static_token_principal_ref("token-a");
+
+    // Insert oldest first, so the list reads newest first: accepted,
+    // received, accepted, accepted. The received row is not a list item.
+    let mut accepted = Vec::new();
+    for status in [
+        StorageTraceCorpusStatus::Accepted,
+        StorageTraceCorpusStatus::Accepted,
+        StorageTraceCorpusStatus::Received,
+        StorageTraceCorpusStatus::Accepted,
+    ] {
+        let is_accepted = matches!(status, StorageTraceCorpusStatus::Accepted);
+        let id = insert_account_test_submission_with_status(
+            backend.as_ref(),
+            "tenant-a",
+            &device_principal,
+            status,
+        )
+        .await;
+        if is_accepted {
+            accepted.push(id);
+        }
+    }
+
+    let mut pages = Vec::new();
+    let mut cursor = None;
+    loop {
+        let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+        let Json(page) = account_traces_list_handler(
+            State(state.clone()),
+            ext,
+            Query(AccountTracesListQuery {
+                limit: Some(2),
+                cursor: cursor.take(),
+            }),
+        )
+        .await
+        .expect("page");
+        cursor = page.next_cursor.clone();
+        pages.push(page);
+        assert!(pages.len() <= 4, "paging must end");
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(pages[0].items.len(), 1, "the received row is not an item");
+    assert!(
+        pages.len() > 1,
+        "the first page has a cursor although it holds fewer items than the limit"
+    );
+    let mut seen: Vec<Uuid> = pages
+        .iter()
+        .flat_map(|page| page.items.iter().map(|item| item.submission_id))
+        .collect();
+    seen.sort();
+    accepted.sort();
+    assert_eq!(seen, accepted, "the pages hold each accepted row one time");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
 async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uniform_404() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;

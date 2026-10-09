@@ -18729,7 +18729,8 @@ struct AccountTracesListQuery {
 }
 
 /// One keyset page of account-owned submission metadata. `next_cursor` is
-/// `Some` only when a further page may exist (a full page was returned).
+/// `Some` only when a further page may exist (the raw page was full). A page
+/// can hold fewer items than `limit`, or none, and still have a cursor.
 #[derive(Debug, Serialize)]
 struct AccountTracesPage {
     items: Vec<TraceCommonsTraceListItem>,
@@ -18873,19 +18874,28 @@ async fn account_traces_list_handler(
         )
         .await
         .map_err(internal_error)?;
+    // The cursor comes from the raw page, before the filter below drops rows
+    // that are not list items. A filtered page can be short and still have more.
+    let raw_len = records.len();
+    let last_raw = records
+        .last()
+        .map(|record| (record.received_at, record.submission_id));
     let records = records
         .into_iter()
         .filter_map(trace_commons_record_from_storage_submission)
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(internal_error)?;
 
-    // A full page implies there may be more; emit a continuation cursor from the
-    // last row. The derived map is intentionally empty: this is a metadata-only
-    // surface and the DTO's derived fields are skip-if-empty.
-    let next_cursor = (records.len() == limit)
-        .then(|| records.last())
-        .flatten()
-        .map(|record| encode_account_traces_cursor(record.received_at, record.submission_id));
+    // A full raw page implies there may be more; emit a continuation cursor from
+    // the last raw row. The derived map is intentionally empty: this is a
+    // metadata-only surface and the DTO's derived fields are skip-if-empty.
+    let next_cursor =
+        (raw_len == limit)
+            .then_some(last_raw)
+            .flatten()
+            .map(|(received_at, submission_id)| {
+                encode_account_traces_cursor(received_at, submission_id)
+            });
     let empty_derived = BTreeMap::new();
     let items = records
         .into_iter()
