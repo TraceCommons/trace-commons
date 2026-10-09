@@ -2354,9 +2354,10 @@ fn allow_all_authority() -> Arc<dyn PipelineAuthorityProvider> {
 /// intended production behaviour, but it silently overrides a fixture that
 /// force-sets `residual_pii_risk` to simulate Quarantine/Reject without a
 /// real finding. `DeterministicPipelinePrivacyBoundary` keeps its own unit
-/// tests in `versioned_pipeline_authority.rs`; the four Task 2 tests below
-/// that need a specific boundary (`FailingPrivacyBoundary`,
-/// `MarkerRedactingBoundary`) still build their own.
+/// tests in `versioned_pipeline_authority.rs`; the tests below that need a
+/// specific boundary (`FailingPrivacyBoundary`,
+/// `CountingSlowClassifierBoundary`, `MarkerRedactingBoundary`) still build
+/// their own.
 struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
@@ -5712,9 +5713,14 @@ async fn authority_allowlist_rejects_a_disallowed_use() {
     assert!(service.process_one(&tenant).await.unwrap().is_none());
 }
 
-/// A privacy boundary whose classifier half always fails -- the classifier-outage
-/// case `submit` must fail closed on, storing nothing.
-struct FailingPrivacyBoundary;
+/// A privacy boundary with one failing half. With `fail_deterministic` its
+/// deterministic half fails -- the case the receipt must refuse closed on,
+/// storing nothing -- and its classifier half is a no-op. Without it the
+/// deterministic half is a no-op and the classifier half fails: the
+/// classifier-outage case the Review-start privacy pass handles.
+struct FailingPrivacyBoundary {
+    fail_deterministic: bool,
+}
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
@@ -5722,6 +5728,9 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        if self.fail_deterministic {
+            anyhow::bail!("deterministic redactor failed (test double)")
+        }
         Ok(Vec::new())
     }
 
@@ -5729,15 +5738,108 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
-        anyhow::bail!("privacy classifier unavailable (test double)")
+        if !self.fail_deterministic {
+            anyhow::bail!("privacy classifier unavailable (test double)")
+        }
+        Ok(Vec::new())
     }
 }
 
-/// Task 2: a rescrub failure fails the receipt closed -- no run, no staged
-/// artifact, no artifact file. The rescrub runs before the attempt's object
-/// is even prepared, so a failing classifier costs no encryption either.
+/// Counts each half's calls on per-test counters. Its classifier half
+/// sleeps 60 s, so a receipt that called it would not finish inside a
+/// short timeout.
+struct CountingSlowClassifierBoundary {
+    deterministic_calls: Arc<AtomicUsize>,
+    classifier_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for CountingSlowClassifierBoundary {
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        self.deterministic_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        self.classifier_calls.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        Ok(Vec::new())
+    }
+}
+
+/// The receipt runs the deterministic half only: it completes well inside
+/// a classifier's latency, never calls the classifier, and a replay of the
+/// same key calls neither half again.
 #[tokio::test]
-async fn privacy_boundary_failure_fails_closed() {
+async fn receipt_makes_no_classifier_call() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let deterministic_calls = Arc::new(AtomicUsize::new(0));
+    let classifier_calls = Arc::new(AtomicUsize::new(0));
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(Arc::new(CountingSlowClassifierBoundary {
+            deterministic_calls: deterministic_calls.clone(),
+            classifier_calls: classifier_calls.clone(),
+        })),
+    )
+    .await;
+    let tenant = format!("receipt-no-classifier-{}", uuid::Uuid::new_v4());
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)),
+    )
+    .await
+    .expect("the receipt completes without waiting on the classifier")
+    .unwrap();
+    let PipelineReceiptResult::Created(created) = result else {
+        panic!("the receipt creates a run: {result:?}")
+    };
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    assert_eq!(classifier_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(deterministic_calls.load(Ordering::SeqCst), 1);
+
+    let replay = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS)),
+    )
+    .await
+    .expect("a replay completes")
+    .unwrap();
+    let PipelineReceiptResult::Replayed(replayed) = replay else {
+        panic!("the same key replays the stored receipt: {replay:?}")
+    };
+    assert_eq!(replayed.run_id, created.run_id);
+    assert_eq!(classifier_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        deterministic_calls.load(Ordering::SeqCst),
+        1,
+        "a replay never calls the privacy boundary again"
+    );
+}
+
+/// A deterministic-redactor failure refuses the receipt with
+/// `privacy_rescrub_failed` and stores nothing: no run, no staged
+/// artifact, no artifact file. The rescrub runs before the attempt's
+/// object is prepared, so a failure costs no encryption either.
+#[tokio::test]
+async fn receipt_deterministic_failure_refuses_with_privacy_rescrub_failed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -5747,18 +5849,20 @@ async fn privacy_boundary_failure_fails_closed() {
         artifact_store(&dir),
         minimal_config(false),
         Some(allow_all_authority()),
-        Some(Arc::new(FailingPrivacyBoundary)),
+        Some(Arc::new(FailingPrivacyBoundary {
+            fail_deterministic: true,
+        })),
     )
     .await;
-    let tenant = format!("privacy-failure-{}", uuid::Uuid::new_v4());
+    let tenant = format!("privacy-rescrub-failure-{}", uuid::Uuid::new_v4());
     let env = envelope(uuid::Uuid::new_v4()).await;
     let raw = serde_json::to_vec(&env).unwrap();
     let key = env.submission_id.to_string();
 
     let error = submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
         .await
-        .expect_err("a failing privacy boundary fails the receipt closed");
-    assert_eq!(error.to_string(), "privacy_classification_failed");
+        .expect_err("a failing deterministic redactor fails the receipt closed");
+    assert_eq!(error.to_string(), "privacy_rescrub_failed");
     assert_eq!(count_runs(&backend, &tenant).await, 0);
     assert_eq!(count_staged_artifacts(&backend, &tenant).await, 0);
     assert_eq!(
@@ -5818,11 +5922,12 @@ impl IdentifiedEmbedder for CapturingEmbedder {
     }
 }
 
-/// Review Focus 2 (Task 2): content the privacy boundary transforms. The
-/// stored source is the transformed content, not the raw request -- Score
-/// reads the rescrubbed bytes, and a replay of the identical raw request
-/// bytes still replays the same run (the classifier never runs twice for
-/// one key, since `submit`'s replay check runs before the rescrub).
+/// Review Focus 2 (Task 2): content the privacy boundary's classifier half
+/// transforms. The approved content is the content transformed by the
+/// privacy pass, not the raw request -- Score reads the rescrubbed bytes,
+/// and a replay of the identical raw request bytes still replays the same
+/// run (`submit`'s replay check runs before the deterministic rescrub, and
+/// the receipt never calls the classifier).
 #[tokio::test]
 async fn transformed_content_flows_to_score_and_replay_stays_exact() {
     let Some(backend) = runtime_backend(4).await else {
@@ -5910,8 +6015,8 @@ async fn transformed_content_flows_to_score_and_replay_stays_exact() {
     );
 
     // A replay of the identical raw request bytes still replays the same
-    // run: the replay check in `submit` runs before the rescrub, so a
-    // replay never calls the privacy boundary again.
+    // run: the replay check in `submit` runs before the deterministic
+    // rescrub, so a replay never calls the privacy boundary again.
     let PipelineReceiptResult::Replayed(replayed) =
         submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
             .await
@@ -22211,8 +22316,8 @@ async fn export_snapshots_return_what_a_fresh_read_returns() {
     }
 }
 
-/// An export carries the approved revision, the bytes the privacy boundary
-/// transformed at receipt, and never the raw request. The run goes through
+/// An export carries the approved revision, the bytes transformed by the
+/// privacy pass, and never the raw request. The run goes through
 /// `MarkerRedactingBoundary`, which replaces `MARKER_SECRET` with
 /// `[redacted]`. The item names the run's approved object and its
 /// `approved_content_hash`; that object reads back as the transformed bytes;

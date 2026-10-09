@@ -51,7 +51,7 @@ use crate::trace_corpus_storage::{
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
     PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_AUTHORITY_READ_FAILED_LABEL,
-    PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL, PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
+    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL,
     PipelineAuthorityProvider, PipelinePrivacyBoundary,
 };
 use crate::versioned_pipeline_bundle::{
@@ -902,6 +902,23 @@ pub(crate) fn validate_actor(
         return Err(DatabaseError::Constraint(refusal_label.to_string()));
     }
     Ok(())
+}
+
+/// Maps an envelope's raw residual PII risk onto Admission's scale. A
+/// Medium whose basis is exactly `[ConsentContentFlag]` is a consent fact,
+/// not a PII finding, so it maps to Low; every other Medium stays Medium.
+/// The receipt maps its Admission input through this, and the Review-start
+/// privacy pass maps both the stored receipt-time risk and its own result
+/// through it, so the two sides of its comparison share one scale.
+fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk {
+    match risk {
+        ResidualPiiRisk::Low => PrivacyRisk::Low,
+        ResidualPiiRisk::Medium if matches!(basis, [ResidualRiskCondition::ConsentContentFlag]) => {
+            PrivacyRisk::Low
+        }
+        ResidualPiiRisk::Medium => PrivacyRisk::Medium,
+        ResidualPiiRisk::High => PrivacyRisk::High,
+    }
 }
 
 fn enum_string<T: Serialize>(value: &T) -> anyhow::Result<String> {
@@ -7872,9 +7889,12 @@ impl PipelineServiceBuilder {
         self
     }
 
-    /// The privacy boundary `submit` rescrubs the server envelope through
-    /// before it stages or stores anything. A service built without this
-    /// fails every receipt closed with `privacy_control_missing`.
+    /// The privacy boundary. `submit` runs its deterministic half
+    /// (`rescrub_deterministic`) over the server envelope before it stages
+    /// or stores anything, and never its classifier half: the prose-PII
+    /// classifier (`rescrub_classifier`) runs in the Review-start privacy
+    /// pass. A service built without this fails every receipt closed with
+    /// `privacy_control_missing`.
     pub fn with_privacy(mut self, privacy: Arc<dyn PipelinePrivacyBoundary>) -> Self {
         self.privacy = Some(privacy);
         self
@@ -8973,15 +8993,19 @@ impl PipelineService {
     ///    tombstone, quota -- before any encryption. The staging transaction
     ///    repeats every check, so this one only saves work. A replayed key
     ///    returns here, so a replay never calls the privacy boundary again.
-    /// 3. The rescrub: the privacy boundary transforms a clone of the
+    /// 3. The deterministic rescrub: the privacy boundary's bounded, local
+    ///    redactor (`rescrub_deterministic`) transforms a clone of the
     ///    server envelope and returns any residual-risk conditions it found,
-    ///    merged into the caller's own basis. From here on the transformed
-    ///    envelope replaces `request.server_envelope` everywhere -- the
-    ///    staged and stored source bytes, the retention derivation, and the
-    ///    Admission input -- while `request_content_hash` stays the hash of
-    ///    the raw `request.request_bytes` (replay identity). This runs with
-    ///    no pooled connection held, since a rescrub can call an external
-    ///    classifier.
+    ///    merged into the caller's own basis. A failure refuses the receipt
+    ///    with `privacy_rescrub_failed`. The receipt never calls the
+    ///    prose-PII classifier: that runs in the Review-start privacy pass,
+    ///    over the stored source. From here on the transformed envelope
+    ///    replaces `request.server_envelope` everywhere -- the staged and
+    ///    stored source bytes (the post-deterministic envelope), the
+    ///    retention derivation, and the Admission input -- while
+    ///    `request_content_hash` stays the hash of the raw
+    ///    `request.request_bytes` (replay identity). This runs with no
+    ///    pooled connection held.
     /// 4. The attempt's object -- the (now transformed) server envelope,
     ///    wrapped per decision P1 -- is encrypted under the attempt's own
     ///    object id (`pipeline_receipt_object_id`, a fresh random attempt
@@ -9078,13 +9102,17 @@ impl PipelineService {
             return Ok(refused);
         }
 
-        // 3. The rescrub: after the lock-free precheck (a replay or a
-        // refusal returns before this, so a replay never calls the
-        // classifier again) and before the staging row, with no pooled
-        // connection held. From here on, the transformed envelope replaces
+        // 3. The deterministic rescrub: after the lock-free precheck (a
+        // replay or a refusal returns before this, so a replay never calls
+        // the privacy boundary again) and before the staging row, with no
+        // pooled connection held. Only the bounded, local redactor runs
+        // here; the receipt never calls the prose-PII classifier, which
+        // runs in the Review-start privacy pass over the stored source.
+        // From here on, the transformed envelope replaces
         // `request.server_envelope` everywhere PR 2 used it: the staged and
-        // stored source bytes, the retention derivation, and the Admission
-        // input. `request_content_hash` (above) stays the hash of the raw
+        // stored source bytes (the post-deterministic envelope), the
+        // retention derivation, and the Admission input.
+        // `request_content_hash` (above) stays the hash of the raw
         // `request.request_bytes` -- the replay identity never moves.
         let mut envelope = request.server_envelope.clone();
         let mut consent_scopes = envelope.consent.scopes.clone();
@@ -9096,12 +9124,8 @@ impl PipelineService {
         let deterministic_basis = privacy
             .rescrub_deterministic(&mut envelope)
             .await
-            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?;
-        let classifier_basis = privacy
-            .rescrub_classifier(&mut envelope)
-            .await
-            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?;
-        for condition in deterministic_basis.into_iter().chain(classifier_basis) {
+            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL))?;
+        for condition in deterministic_basis {
             if !residual_risk_basis.contains(&condition) {
                 residual_risk_basis.push(condition);
             }
@@ -9207,19 +9231,10 @@ impl PipelineService {
         // any other Reject, never `MinimalAdmissionPolicy`'s permanent
         // `authority_missing` error (SYS-003, reserved for the missing-
         // source case this receipt already handled).
-        let privacy_risk = match envelope.privacy.residual_pii_risk {
-            ResidualPiiRisk::Low => PrivacyRisk::Low,
-            ResidualPiiRisk::Medium
-                if matches!(
-                    request.residual_risk_basis,
-                    [ResidualRiskCondition::ConsentContentFlag]
-                ) =>
-            {
-                PrivacyRisk::Low
-            }
-            ResidualPiiRisk::Medium => PrivacyRisk::Medium,
-            ResidualPiiRisk::High => PrivacyRisk::High,
-        };
+        let privacy_risk = pipeline_privacy_risk(
+            &envelope.privacy.residual_pii_risk,
+            request.residual_risk_basis,
+        );
         let admission_input = AdmissionInput {
             run_id,
             tenant_storage_ref: tenant_storage_ref.clone(),
@@ -9390,7 +9405,8 @@ impl PipelineService {
         .await?
         {
             // A legacy-owned id or a tenant that is not routed here is
-            // refused before the rescrub, so it costs no classifier call.
+            // refused before the rescrub, so it costs no redactor work and
+            // never creates a run for the privacy pass to classify.
             Some(refused)
         } else if receipt_is_tombstoned(
             &tx,
@@ -15548,5 +15564,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Task 2: the receipt's residual-risk mapping, factored so the
+    /// Review-start privacy pass maps the same way. A Medium whose only
+    /// basis is the consent content flag is not a PII finding (Low); any
+    /// other Medium stays Medium.
+    #[test]
+    fn pipeline_privacy_risk_maps_like_the_receipt() {
+        assert_eq!(
+            pipeline_privacy_risk(&ResidualPiiRisk::Low, &[]),
+            PrivacyRisk::Low
+        );
+        assert_eq!(
+            pipeline_privacy_risk(
+                &ResidualPiiRisk::Medium,
+                &[ResidualRiskCondition::ConsentContentFlag]
+            ),
+            PrivacyRisk::Low
+        );
+        assert_eq!(
+            pipeline_privacy_risk(
+                &ResidualPiiRisk::Medium,
+                &[
+                    ResidualRiskCondition::ConsentContentFlag,
+                    ResidualRiskCondition::FoundAndRemoved,
+                ]
+            ),
+            PrivacyRisk::Medium
+        );
+        assert_eq!(
+            pipeline_privacy_risk(&ResidualPiiRisk::Medium, &[]),
+            PrivacyRisk::Medium
+        );
+        assert_eq!(
+            pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
+            PrivacyRisk::High
+        );
     }
 }
