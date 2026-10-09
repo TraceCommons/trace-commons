@@ -1386,8 +1386,11 @@ the embedder model is loaded once. The pipeline gets:
 - the tenant policies of `TRACE_COMMONS_TENANT_POLICIES` and
   `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` as its authority. A tenant
   whose policy `main` reads from the database
-  (`TRACE_COMMONS_DB_TENANT_POLICY_READS`) has no authority here, and its
-  receipts are refused with `authority_control_missing`;
+  (`TRACE_COMMONS_DB_TENANT_POLICY_READS`, globally or by tenant rollout) has
+  no authority here, so the production start refuses a routed or drained
+  tenant in that state (`pipeline_routed_tenant_db_policy_reads`), and any
+  receipt that still reaches the pipeline without an authority is answered
+  503 `authority_control_missing`;
 - `main`'s privacy filter backend (`TRACE_PRIVACY_FILTER_BACKEND`) and
   `TRACE_COMMONS_PII_CLASSIFY_POLICY`. With no backend the runtime is not
   production-qualified;

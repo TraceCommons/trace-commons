@@ -4098,6 +4098,17 @@ impl AppState {
         };
         let (prebuilt_gate_service, pipeline_gate_components) =
             if pipeline_runtime_selection == PipelineRuntimeSelection::Production {
+                production_assembly::ensure_routed_tenants_have_authority(
+                    &tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts),
+                    &pipeline_drain_tenant_ids,
+                    &|tenant_id: &str| {
+                        tenant_rollout_gates.enabled_for(
+                            TraceTenantRolloutFeature::DbTenantPolicyReads,
+                            db_tenant_policy_reads,
+                            tenant_id,
+                        )
+                    },
+                )?;
                 let rollout = tenant_rollout_gates.clone();
                 let (gate_service, components) =
                     production_assembly::build_near_ai_gate_service_with_pipeline_components(
@@ -15030,6 +15041,32 @@ async fn decide_upload_route<'a>(
     }
 }
 
+/// The answer to a pipeline receipt that failed. Two refusals store nothing
+/// and are answered with their label as a 503, as the containment refusal
+/// is, so a contributor's client sees a blocked reason to retry later rather
+/// than an internal error:
+/// - an operator suspended the Admission policy of the tenant's bundle
+///   (`intervene_policy`, STA-002);
+/// - the tenant has no authority source (`authority_control_missing`): the
+///   production authority answers none for a tenant whose policy `main`
+///   reads from the database (PR #1295 review, Minor 5). The production
+///   start refuses a routed tenant in that state; this covers the rest.
+///
+/// The text is compared whole: only the label itself, never an error that
+/// carries it.
+fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    let text = error.to_string();
+    for label in [
+        PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+    ] {
+        if text == label {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
+        }
+    }
+    internal_error(error)
+}
+
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
 /// path (after its claim of the submission id, when it has one) or a receipt
 /// to the versioned pipeline instead of the legacy corpus path.
@@ -15091,22 +15128,7 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(|error| {
-            // An operator suspended the Admission policy of the tenant's
-            // bundle (`intervene_policy`): the receipt stored nothing and is
-            // refused with its label, as the containment refusal is, so a
-            // contributor's client sees a blocked reason to retry later
-            // rather than an internal error (STA-002). The text is compared
-            // whole: only the label itself, never an error that carries it.
-            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-                )
-            } else {
-                internal_error(error)
-            }
-        })?;
+        .map_err(pipeline_receipt_error)?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)

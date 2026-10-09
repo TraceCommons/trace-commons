@@ -349,6 +349,29 @@ pub(crate) async fn build_near_ai_gate_service_with_pipeline_components(
     anyhow::bail!(PIPELINE_RUNTIME_PRODUCTION_REQUIRES_NEAR_AI_SCORER_LABEL)
 }
 
+pub(crate) const PIPELINE_ROUTED_TENANT_DB_POLICY_READS_LABEL: &str =
+    "pipeline_routed_tenant_db_policy_reads";
+
+/// Refuses the production start when a tenant the pipeline serves (routed
+/// to it, or drained by it) reads its submission policy from the database
+/// (PR #1295 review, Minor 5): the production authority provider answers no
+/// authority for such a tenant, so every receipt of it would be refused
+/// with `authority_control_missing`. The label names no tenant.
+pub(crate) fn ensure_routed_tenants_have_authority(
+    routed: &BTreeSet<String>,
+    drained: &BTreeSet<String>,
+    db_policy_reads: &dyn Fn(&str) -> bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !routed
+            .iter()
+            .chain(drained)
+            .any(|tenant_id| db_policy_reads(tenant_id)),
+        PIPELINE_ROUTED_TENANT_DB_POLICY_READS_LABEL
+    );
+    Ok(())
+}
+
 /// The three `TRACE_COMMONS_PIPELINE_CHECK_*` variables, as read: the
 /// variables `PipelineCheckEmitter::from_env` reads.
 pub(crate) fn pipeline_check_vars_from_env() -> PipelineCheckVars {

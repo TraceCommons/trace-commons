@@ -1594,3 +1594,58 @@ fn production_caps_bound_trace_credit_by_mains_delta() {
         )])
     );
 }
+
+/// PR #1295 review, Minor 5: the authority provider answers no authority
+/// for a tenant whose policy `main` reads from the database, so a routed
+/// tenant under that rollout could never upload. The production start
+/// refuses it, under a safe label that names no tenant, and accepts routed
+/// and drained tenants that read their policy from the environment.
+#[test]
+fn a_routed_tenant_on_db_policy_reads_refuses_the_start() {
+    let db_reads = |tenant_id: &str| tenant_id == "tenant-db";
+    let tenants = |ids: &[&str]| {
+        ids.iter()
+            .map(|id| (*id).to_string())
+            .collect::<BTreeSet<_>>()
+    };
+    ensure_routed_tenants_have_authority(
+        &tenants(&["tenant-a"]),
+        &tenants(&["tenant-b"]),
+        &db_reads,
+    )
+    .unwrap();
+    for (routed, drained) in [
+        (tenants(&["tenant-a", "tenant-db"]), tenants(&[])),
+        (tenants(&["tenant-a"]), tenants(&["tenant-db"])),
+    ] {
+        let refused = ensure_routed_tenants_have_authority(&routed, &drained, &db_reads)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(refused, "pipeline_routed_tenant_db_policy_reads");
+        assert!(trace_commons_server::versioned_pipeline_qualification::is_safe_label(&refused));
+    }
+    // With the reads on for every tenant, any routed tenant refuses.
+    assert!(
+        ensure_routed_tenants_have_authority(&tenants(&["tenant-a"]), &tenants(&[]), &|_| true)
+            .is_err()
+    );
+}
+
+/// PR #1295 review, Minor 5: a receipt refused for a missing authority is a
+/// labelled 503, as a suspended Admission policy is, not an internal error.
+/// The text is compared whole, so an error that only carries the label is
+/// still a 500.
+#[test]
+fn a_receipt_without_authority_is_a_labelled_503() {
+    for label in [
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+        PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+    ] {
+        let (status, body) = crate::pipeline_receipt_error(anyhow::anyhow!(label));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0.error, label);
+    }
+    let (status, _) =
+        crate::pipeline_receipt_error(anyhow::anyhow!("context: authority_control_missing"));
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
