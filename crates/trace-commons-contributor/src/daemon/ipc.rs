@@ -2266,27 +2266,49 @@ impl DaemonShared {
         // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
         // the idle window needs.
         let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
-        let (idle_sessions, idle_candidate_count, idle_mission_fit, idle_credit_estimate) =
-            match idle_window {
-                Some(window) => {
-                    let candidates =
-                        super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
-                    let mission_fit = fitting(&candidates);
-                    let credit_estimate = credit_estimate_sum(&candidates, &estimate_table);
-                    (
-                        Some(idle_sessions_value(
-                            &candidates,
-                            window,
-                            mission_fit,
-                            credit_estimate.clone(),
-                        )),
-                        candidates.len(),
+        let (
+            idle_sessions,
+            idle_candidate_count,
+            idle_mission_fit,
+            idle_credit_estimate,
+            idle_tools,
+        ) = match idle_window {
+            Some(window) => {
+                let candidates =
+                    super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+                let mission_fit = fitting(&candidates);
+                let credit_estimate = credit_estimate_sum(&candidates, &estimate_table);
+                (
+                    Some(idle_sessions_value(
+                        &candidates,
+                        window,
                         mission_fit,
-                        credit_estimate,
-                    )
-                }
-                None => (None, 0, None, None),
-            };
+                        credit_estimate.clone(),
+                    )),
+                    candidates.len(),
+                    mission_fit,
+                    credit_estimate,
+                    batch_tools(&candidates),
+                )
+            }
+            None => (None, 0, None, None, Vec::new()),
+        };
+        // The batches the rendered words describe (`status.nudge.text`),
+        // from the same counts the fields above report.
+        let idle_batch = crate::nudge_render::Batch {
+            count: idle_candidate_count as u64,
+            tools: idle_tools,
+            idle_days: idle_window.map_or(0, |w| w.idle_days as u32),
+            mission_fit: idle_mission_fit.map(|m| m as u64),
+            estimate: idle_credit_estimate.as_ref().and_then(estimate_sum_of),
+        };
+        let backlog_batch = crate::nudge_render::Batch {
+            count: backlog.len() as u64,
+            tools: Vec::new(),
+            idle_days: 0,
+            mission_fit: backlog_mission_fit.map(|m| m as u64),
+            estimate: backlog_credit_estimate.as_ref().and_then(estimate_sum_of),
+        };
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -2319,10 +2341,47 @@ impl DaemonShared {
             notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
         };
         let lead = super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now);
-        let mut nudge = nudge_value(
-            &lead,
-            &super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now),
-        );
+        let mark = super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now);
+        let mut nudge = nudge_value(&lead, &mark);
+        // The words for the leading card and the lit mark, composed in core
+        // (nudge_render) so a shell draws them and composes nothing.
+        let card = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => {
+                Some(crate::nudge_render::idle_card(&idle_batch))
+            }
+            Some(super::nudge::NudgeKind::ReviewBacklog) => {
+                Some(crate::nudge_render::backlog_card(&backlog_batch))
+            }
+            Some(super::nudge::NudgeKind::VerdictsLanded) => lead.verdicts.map(|v| {
+                crate::nudge_render::verdicts_card(&render_verdicts(
+                    v.accepted,
+                    v.held,
+                    v.credit_final_tenths,
+                    v.since,
+                ))
+            }),
+            None => None,
+        };
+        if let Some(card) = card {
+            nudge["text"] = serde_json::to_value(card).unwrap_or_default();
+        }
+        let mark_text = match mark.state {
+            super::nudge::MarkState::News => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
+                crate::nudge_render::mark_news_text(&render_verdicts(
+                    d.newly_accepted,
+                    d.newly_held,
+                    d.credit_final_tenths(),
+                    d.since,
+                ))
+            }),
+            super::nudge::MarkState::Ready => {
+                Some(crate::nudge_render::mark_ready_text(&idle_batch))
+            }
+            _ => None,
+        };
+        if let Some(words) = mark_text {
+            nudge["mark_text"] = serde_json::to_value(words).unwrap_or_default();
+        }
         // Additive (nudge value addendum, 1.3). Read after the lead is
         // chosen and never fed into it (OWNER DECISION V5): the count over
         // the leading kind's own subjects, present only while that kind is
@@ -5344,16 +5403,49 @@ pub(crate) struct NudgeSnapshot {
 /// source the tool table has no name for is left out, never shown as its
 /// raw id), and the threshold in days. Never an id, a path, a folder label
 /// or a session's own age.
+/// The display names of the tools a batch came from, deduplicated and
+/// sorted. A source with no display name is left unnamed.
+fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+    let tools: std::collections::BTreeSet<&'static str> = candidates
+        .iter()
+        .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
+        .collect();
+    tools.into_iter().map(str::to_string).collect()
+}
+
+/// A `credit_estimate` sum as the renderer reads it.
+fn estimate_sum_of(value: &serde_json::Value) -> Option<crate::nudge_render::EstimateSum> {
+    Some(crate::nudge_render::EstimateSum {
+        low: value.get("low")?.as_f64()?,
+        high: value.get("high")?.as_f64()?,
+        known: value.get("known")?.as_u64()?,
+        drawn: value.get("drawn")?.as_bool()?,
+    })
+}
+
+/// Verdict news as the renderer reads it, with the date the news began in
+/// this Mac's local time.
+fn render_verdicts(
+    accepted: u32,
+    held: u32,
+    credit_final_tenths: Option<u64>,
+    since: chrono::DateTime<Utc>,
+) -> crate::nudge_render::Verdicts {
+    crate::nudge_render::Verdicts {
+        accepted,
+        held,
+        credit_final_tenths,
+        since: since.with_timezone(&chrono::Local).date_naive(),
+    }
+}
+
 fn idle_sessions_value(
     candidates: &[&super::queue::QueueEntry],
     window: super::nudge::IdleWindow,
     mission_fit: Option<usize>,
     credit_estimate: Option<serde_json::Value>,
 ) -> serde_json::Value {
-    let tools: std::collections::BTreeSet<&'static str> = candidates
-        .iter()
-        .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
-        .collect();
+    let tools = batch_tools(candidates);
     let mut value = serde_json::json!({
         "count": candidates.len(),
         "tools": tools,
@@ -17862,8 +17954,10 @@ mod tests {
                     "lead",
                     "mark",
                     "mark_kinds",
+                    "mark_text",
                     "since",
-                    "state"
+                    "state",
+                    "text"
                 ],
                 "{nudge}"
             );
@@ -18519,6 +18613,78 @@ mod tests {
             assert!(!text.contains(ASK), "{text}");
             assert!(!text.contains(&a.to_string()), "{text}");
             assert!(!text.contains("nudge-ask"), "{text}");
+        }
+
+        /// Core composes the leading card's words (`status.nudge.text`)
+        /// and, while the mark is lit, the mark's (`status.nudge.mark_text`).
+        /// Shells draw these and compose nothing. Absent with no lead, and
+        /// absent while the mark is dark.
+        #[test]
+        fn status_nudge_carries_the_rendered_words() {
+            use crate::nudge_render::{Batch, backlog_card, idle_card, mark_ready_text};
+            let s = live();
+            let nudge = nudge_of(&s);
+            assert!(nudge.get("text").is_none(), "{nudge}");
+            assert!(nudge.get("mark_text").is_none(), "{nudge}");
+
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "review_backlog", "{nudge}");
+            let want = backlog_card(&Batch {
+                count: NUDGE_BACKLOG_THRESHOLD as u64,
+                tools: vec![],
+                idle_days: 0,
+                mission_fit: None,
+                estimate: None,
+            });
+            assert_eq!(nudge["text"], serde_json::to_value(&want).unwrap());
+
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "idle_sessions", "{nudge}");
+            let batch = Batch {
+                count: 2,
+                tools: vec!["Claude Code".into(), "Codex".into()],
+                idle_days: crate::daemon::nudge::IDLE_DAYS as u32,
+                mission_fit: None,
+                estimate: None,
+            };
+            assert_eq!(
+                nudge["text"],
+                serde_json::to_value(idle_card(&batch)).unwrap()
+            );
+            assert_eq!(nudge["mark"], "ready", "{nudge}");
+            assert_eq!(
+                nudge["mark_text"],
+                serde_json::to_value(mark_ready_text(&batch)).unwrap()
+            );
+        }
+
+        /// Verdict news renders its card and the news mark's words, with
+        /// the date the news began in local time.
+        #[test]
+        fn verdict_news_carries_the_rendered_words() {
+            use crate::nudge_render::{Verdicts, mark_news_text, verdicts_card};
+            let s = live();
+            let at = Utc::now() - chrono::Duration::hours(1);
+            land_verdicts(&s, 2, 1, at);
+            let nudge = nudge_of(&s);
+            let v = Verdicts {
+                accepted: 2,
+                held: 1,
+                credit_final_tenths: None,
+                since: at.with_timezone(&chrono::Local).date_naive(),
+            };
+            assert_eq!(
+                nudge["text"],
+                serde_json::to_value(verdicts_card(&v)).unwrap()
+            );
+            assert_eq!(nudge["mark"], "news", "{nudge}");
+            assert_eq!(
+                nudge["mark_text"],
+                serde_json::to_value(mark_news_text(&v)).unwrap()
+            );
         }
 
         /// The card filter and the status count come from one function:
