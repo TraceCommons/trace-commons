@@ -508,7 +508,7 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(inspector.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
-        for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
+        for needle in ["projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
                        "EligibilitySurface.groupSubmit("] {
             XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
         }

@@ -605,8 +605,13 @@ public struct GlassToggleStyle: ToggleStyle {
         return HStack(spacing: showsLabel ? GlassTokens.Space.s6 : 0) {
             // Hidden or not, the native toggle below carries the label to
             // VoiceOver.
+            // A Settings switch sits on the section's trailing edge, so a
+            // column of them lines up whatever their labels' lengths, and a
+            // long label wraps on the left (Ron, 2026-10-09).
             if showsLabel {
                 configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: kind == .settings ? .infinity : nil, alignment: .leading)
             }
             Button {
                 withAnimation(GlassMotion.systemReducesMotion ? nil : .easeOut(duration: Self.duration(kind))) {

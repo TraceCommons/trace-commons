@@ -184,13 +184,15 @@ struct NudgeOfferCard: View {
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: GlassTokens.Space.s3) {
-                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                // The accept first as a button, the decline after it as a
+                // link: every card's order (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
                     Button(offer.accept) {
                         Task { await store.accept(offer) { await requestAuthorization() } }
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
+                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
+                        .buttonStyle(GlassButtonStyle(.link))
                 }
                 .disabled(store.writing)
             }

@@ -40,8 +40,10 @@ public struct GlassStatCard: View {
     }
 }
 
-/// An error or caution line (#1146 `.tc-alert`): a quiet card carrying the
-/// status colour in its text, never in its fill or edge, and no dot.
+/// A failed request's line: plain caption text in the status colour, with
+/// no frame, drawn under the buttons it is about. Ron, 2026-10-09: a boxed
+/// line (#1146 `.tc-alert`'s quiet card) read as a disabled text field, so
+/// every card says a failure this way, under its buttons.
 public struct GlassAlert: View {
     private let text: String
 
@@ -51,13 +53,10 @@ public struct GlassAlert: View {
 
     public var body: some View {
         Text(text)
-            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+            .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassTokens.Color.statusOutsideText.color)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassTier(.cardQuiet)
     }
 }
 

@@ -12,8 +12,8 @@ import TCShellCore
 
 /// A nudge card: the daemon's title, its body when it has one, and its
 /// buttons in the daemon's order. "Not now" is the lesser action, drawn as
-/// a link, as the undo card's Dismiss is. A refused request is said under
-/// the words, in the core's line for it.
+/// a link after the action, as every card's decline is. A refused request
+/// is said under the buttons, in the core's line for it.
 struct NudgeGlassCard: View {
     let card: NudgeSurface.Card
     let busy: Bool
@@ -40,7 +40,6 @@ struct NudgeGlassCard: View {
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                if let refusal { GlassAlert(refusal) }
                 if !card.actions.isEmpty {
                     HStack(spacing: GlassTokens.Space.s4) {
                         ForEach(Array(card.actions.enumerated()), id: \.offset) { _, action in
@@ -50,6 +49,7 @@ struct NudgeGlassCard: View {
                         }
                     }
                 }
+                if let refusal { GlassAlert(refusal) }
             }
         }
         .accessibilityElement(children: .contain)
@@ -58,8 +58,7 @@ struct NudgeGlassCard: View {
 
 /// Above the Traces tree: the idle filter while it is on, with its way out,
 /// and the order control. Each is drawn only with the core's words for it.
-/// Until an order is chosen neither is selected, and the tree is drawn
-/// newest first as it always was.
+/// Suggested first is selected until another order is chosen.
 struct TracesListControls: View {
     let store: TracesStore
 
@@ -67,7 +66,7 @@ struct TracesListControls: View {
         let copy = store.nudgeCopy
         HStack(spacing: GlassTokens.Space.s4) {
             if store.idleOnly, let label = copy?[.listFilterIdle], let clear = copy?[.listFilterClear] {
-                GlassChip(glass: label)
+                GlassTag(label, tone: .accent)
                 Button(clear) { Task { await store.showIdleOnly(false) } }
                     .buttonStyle(GlassButtonStyle(.link))
                     .fixedSize()
