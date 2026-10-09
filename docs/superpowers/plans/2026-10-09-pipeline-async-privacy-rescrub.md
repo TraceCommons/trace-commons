@@ -139,6 +139,7 @@ pub trait PipelinePrivacyBoundary: Send + Sync {
 pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_review_required";
 pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
 pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_review_rejected_v1";
+pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_already_recorded"; // Task 4: the fence
 const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 const PIPELINE_PRIVACY_PASS_COMMIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
 const PIPELINE_PRIVACY_RETRY_BASE_SECONDS: i64 = 30;
@@ -159,10 +160,14 @@ pub privacy_pass_approval_assessment_hash: Option<String>, // Q2: the approving 
 pub privacy_pass_approval_resolved_reasons: Option<Vec<String>>, // Q2
 // HumanReviewAssessment as loaded by the store gains `recorded_at: DateTime<Utc>`
 // (a store-side wrapper if the gate-api type cannot change: `StoredReviewAssessment { assessment, recorded_at }`).
-fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk;
-fn privacy_pass_object_ref(run, receipt, size_bytes, object_store) -> TraceObjectRefWrite; // ReviewSnapshot, created_by_job_id Some(run_id)
+// Both `pub` (Task 4): RT calls them, and `privacy_pass_object_ref` has no
+// non-test caller until Task 5, so a private fn would fail `-D warnings`.
+pub fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk;
+pub fn privacy_pass_object_ref(run, receipt, size_bytes, object_store) -> TraceObjectRefWrite; // ReviewSnapshot, created_by_job_id Some(run_id)
 // Fields are `pub`: RT is a separate integration-test crate that builds a
 // PrivacyPassRecord (Task 4) and reads a SubmissionReceiptPrivacy (Task 4).
+// `ciphertext_sha256` is the bare hex the staged row holds (a `sha256:`
+// prefix is stripped); it must match `object_ref.content_sha256`.
 pub struct PrivacyPassRecord<'a> { pub object_ref: &'a TraceObjectRefWrite, pub ciphertext_sha256: &'a str,
     pub content_hash: &'a str, pub source_hash: &'a str, pub basis_labels: &'a [String],
     pub outcome: PrivacyPassOutcome,
@@ -379,7 +384,7 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipe
 ```
 
   Expected: compile failure (no variant, no helper, no store method).
-- [ ] **Step 3: Implement** `record_privacy_pass`, modelled on `commit_review`'s single tenant transaction (VP:2360-2580): `ensure_current_lease` (lock order: run row, then submission row, as at VP:2374-2376); `review_submission_is_operable`; `INSERT INTO trace_object_refs ... ON CONFLICT DO NOTHING` (as VP:2410); `UPDATE trace_submissions SET privacy_risk = $, residual_risk_basis = $, redaction_counts = $, redaction_pipeline_version = $, updated_at = NOW()` (labels through `safe_residual_risk_basis_labels`; never `redaction_hash`); `UPDATE pipeline_runs SET privacy_pass_* = ..., privacy_pass_recorded_at = NOW(), updated_at = NOW() WHERE tenant_id AND run_id AND lease_token = $ AND lease_expires_at > NOW() AND privacy_pass_object_ref_id IS NULL RETURNING *` (zero rows -> refused); then
+- [ ] **Step 3: Implement** `record_privacy_pass`, modelled on `commit_review`'s single tenant transaction (VP:2360-2580): `ensure_current_lease` (lock order: run row, then submission row, as at VP:2374-2376); `review_submission_is_operable`; `INSERT INTO trace_object_refs ... ON CONFLICT DO NOTHING` (as VP:2410); `UPDATE trace_submissions SET privacy_risk = $, residual_risk_basis = $, redaction_counts = $, redaction_pipeline_version = $, updated_at = NOW()` (labels through `safe_residual_risk_basis_labels`; never `redaction_hash`); `UPDATE pipeline_runs SET privacy_pass_* = ..., privacy_pass_recorded_at = NOW(), updated_at = NOW() WHERE tenant_id AND run_id AND next_phase = 'review' AND lease_token = $ AND lease_expires_at > NOW() AND privacy_pass_object_ref_id IS NULL RETURNING *` (zero rows -> refused with `PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL`; `ensure_current_lease` already passed under the run lock, so a missing row is the fence); then
 
 ```sql
 UPDATE pipeline_attempt_artifacts

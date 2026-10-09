@@ -20,9 +20,9 @@ use tokio_postgres::NoTls;
 use trace_commons_gate_api::pipeline::{
     AdmissionDecision, AtomicUnits, BundlePackage, IndexMembershipDecision, InstrumentAward,
     InstrumentAwards, InstrumentDescriptor, InstrumentId, InstrumentKind, InstrumentSettlement,
-    InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult, ReasonCode, ReviewDecision,
-    ReviewEvaluation, ReviewEvidence, ReviewOutput, ReviewRecommendation, ScoreEvidence,
-    SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, TenantStorageRef,
+    InstrumentSettlementOutcome, Microcredits, Phase, PhaseResult, PrivacyRisk, ReasonCode,
+    ReviewDecision, ReviewEvaluation, ReviewEvidence, ReviewOutput, ReviewRecommendation,
+    ScoreEvidence, SettleDecision, SettleEvidence, TRACE_CREDIT_DECIMALS, TenantStorageRef,
     UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
@@ -54,6 +54,7 @@ use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuth
 use trace_commons_server::trace_corpus_storage::{
     TraceCorpusStatus, TraceCorpusStore, TraceCreditHoldReason, TraceCreditHoldWrite,
     TraceObjectArtifactKind, TraceObjectRefWrite, TraceSourceSessionStatus, TraceSubmissionWrite,
+    safe_residual_risk_basis_labels,
 };
 use trace_commons_server::versioned_pipeline::*;
 use trace_commons_server::versioned_pipeline_activation::{
@@ -10162,7 +10163,10 @@ async fn stage_and_publish_attempt_artifact(
     let lease_token = run.lease_token.expect("a claim carries a lease");
     let wrapper = wrap_pipeline_artifact_bytes(content);
     let object_id = pipeline_attempt_object_id(artifact.as_str(), run.run_id, lease_token);
-    let kind = if matches!(artifact, PipelineAttemptArtifact::Approved) {
+    let kind = if matches!(
+        artifact,
+        PipelineAttemptArtifact::Approved | PipelineAttemptArtifact::PrivacyPass
+    ) {
         TraceArtifactKind::ContributionEnvelope
     } else {
         TraceArtifactKind::VectorPayload
@@ -44887,4 +44891,608 @@ async fn a_pipeline_row_naming_another_run_refuses_settle() {
         gate_decision_rows(&tenant, scored.submission_id).await,
         before
     );
+}
+
+/// The pass fields of `run` as the store reads them back, for "changed
+/// nothing" comparisons.
+fn privacy_pass_columns(
+    run: &PipelineRunRecord,
+) -> (
+    Option<uuid::Uuid>,
+    Option<String>,
+    Option<String>,
+    Option<Vec<String>>,
+    Option<PrivacyPassOutcome>,
+    Option<chrono::DateTime<chrono::Utc>>,
+) {
+    (
+        run.privacy_pass_object_ref_id,
+        run.privacy_pass_content_hash.clone(),
+        run.privacy_pass_source_hash.clone(),
+        run.privacy_pass_residual_risk_basis.clone(),
+        run.privacy_pass_outcome,
+        run.privacy_pass_recorded_at,
+    )
+}
+
+/// The `trace_submissions` columns the privacy pass writes back, plus
+/// `redaction_hash`, which it must not.
+async fn submission_privacy_columns(
+    backend: &Arc<PgBackend>,
+    tenant: &str,
+    submission_id: uuid::Uuid,
+) -> (
+    String,
+    Option<serde_json::Value>,
+    serde_json::Value,
+    String,
+    String,
+) {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT privacy_risk, residual_risk_basis, redaction_counts,
+                    redaction_pipeline_version, redaction_hash
+               FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (
+        row.get("privacy_risk"),
+        row.get("residual_risk_basis"),
+        row.get("redaction_counts"),
+        row.get("redaction_pipeline_version"),
+        row.get("redaction_hash"),
+    )
+}
+
+/// How many object refs the run's privacy pass recorded for its submission
+/// (`review_snapshot`, `created_by_job_id` = the run).
+async fn count_privacy_pass_refs(backend: &Arc<PgBackend>, run: &PipelineRunRecord) -> i64 {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &run.tenant_id).await;
+    let count: i64 = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2
+                AND artifact_kind = 'review_snapshot' AND created_by_job_id = $3",
+            &[&run.tenant_id, &run.submission_id, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    count
+}
+
+/// Seeds a review-pending run in its own tenant and claims it.
+async fn seed_and_claim_review_run(
+    backend: &Arc<PgBackend>,
+    store: &PgPipelineStore,
+    tenant_prefix: &str,
+) -> PipelineRunRecord {
+    let tenant = format!("{tenant_prefix}-{}", uuid::Uuid::new_v4());
+    let seeded = seed_run(backend, &tenant, uuid::Uuid::new_v4()).await;
+    store
+        .claim_run(&tenant, seeded.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the seeded run is claimable")
+}
+
+/// Task 4: `record_privacy_pass` records the pass on the run, its object
+/// ref, and its staged row in one transaction under the run's lease, and
+/// writes the pass's privacy values back to the submission without
+/// touching `redaction_hash` (so no token bundle is revoked, V68). It
+/// records once: a second call, a stale lease, an inoperable submission,
+/// and a staged row that is missing or names another object are each
+/// refused and change nothing.
+#[tokio::test]
+async fn record_privacy_pass_commits_once_under_the_lease() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let cleanup_after = chrono::Utc::now() + chrono::Duration::hours(1);
+    let content = b"{\"privacy\":\"the pass output\"}".to_vec();
+    let content_hash = dependency_content_hash(&content);
+    let source_hash = dependency_content_hash(b"the source bytes the pass read");
+    let basis = safe_residual_risk_basis_labels(&[
+        ResidualRiskCondition::ConsentContentFlag,
+        ResidualRiskCondition::FoundAndRemoved,
+    ]);
+    let counts: BTreeMap<String, u32> = BTreeMap::from([("prose_pii_name".to_string(), 2)]);
+    let version = "deterministic-test-v1+near-ai-pii-backstop-v1";
+
+    // The committing call.
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-record").await;
+    let tenant = claimed.tenant_id.clone();
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_token_bundles (
+            tenant_id, submission_id, revision, owner_ref, manifest_digest,
+            witness_headers, manifest, state, expires_at
+         ) VALUES ($1,$2,'pass-test','owner',$3,'{}','{}','committed',NOW() + INTERVAL '1 day')",
+        &[&tenant, &claimed.submission_id, &"ab".repeat(32)],
+    )
+    .await
+    .expect("seed a committed token bundle");
+    tx.commit().await.unwrap();
+    let (_, _, _, _, redaction_hash_before) =
+        submission_privacy_columns(&backend, &tenant, claimed.submission_id).await;
+
+    let receipt = stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::PrivacyPass,
+        &content,
+        cleanup_after,
+    )
+    .await;
+    let object_ref = privacy_pass_object_ref(
+        &claimed,
+        &receipt,
+        content.len(),
+        PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+    );
+    let record = || PrivacyPassRecord {
+        object_ref: &object_ref,
+        ciphertext_sha256: &receipt.ciphertext_sha256,
+        content_hash: &content_hash,
+        source_hash: &source_hash,
+        basis_labels: &basis,
+        outcome: PrivacyPassOutcome::Escalated,
+        residual_pii_risk: ResidualPiiRisk::Medium,
+        redaction_counts: &counts,
+        redaction_pipeline_version: version,
+    };
+    let recorded = store
+        .record_privacy_pass(&claimed, record())
+        .await
+        .expect("record the privacy pass");
+    assert_eq!(
+        recorded.privacy_pass_object_ref_id,
+        Some(object_ref.object_ref_id)
+    );
+    assert_eq!(
+        recorded.privacy_pass_content_hash.as_deref(),
+        Some(content_hash.as_str())
+    );
+    assert_eq!(
+        recorded.privacy_pass_source_hash.as_deref(),
+        Some(source_hash.as_str())
+    );
+    assert_eq!(
+        recorded.privacy_pass_residual_risk_basis,
+        Some(basis.clone())
+    );
+    assert_eq!(
+        recorded.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Escalated)
+    );
+    assert!(recorded.privacy_pass_recorded_at.is_some());
+    assert!(recorded.privacy_pass_approval_assessment_hash.is_none());
+    assert_eq!(recorded.attempt_count, claimed.attempt_count);
+    assert_eq!(recorded.next_phase, Some(Phase::Review));
+    assert_eq!(recorded.state, PipelineRunState::Leased);
+    assert_eq!(recorded.lease_token, claimed.lease_token);
+    let reread = store
+        .get_run(&tenant, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(
+        privacy_pass_columns(&reread),
+        privacy_pass_columns(&recorded)
+    );
+
+    // The ref row, and the staged row moved to `committed`.
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let ref_row = tx
+        .query_one(
+            "SELECT artifact_kind, created_by_job_id, object_key, content_sha256
+               FROM trace_object_refs
+              WHERE tenant_id = $1 AND submission_id = $2 AND object_ref_id = $3",
+            &[&tenant, &claimed.submission_id, &object_ref.object_ref_id],
+        )
+        .await
+        .expect("the pass object ref exists");
+    let staged_states: Vec<String> = tx
+        .query(
+            "SELECT state FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact = 'privacy-pass'",
+            &[&tenant, &claimed.run_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
+    tx.commit().await.unwrap();
+    assert_eq!(ref_row.get::<_, String>("artifact_kind"), "review_snapshot");
+    assert_eq!(
+        ref_row.get::<_, Option<uuid::Uuid>>("created_by_job_id"),
+        Some(claimed.run_id)
+    );
+    assert_eq!(ref_row.get::<_, String>("object_key"), receipt.object_key);
+    assert_eq!(
+        ref_row.get::<_, String>("content_sha256"),
+        format!("sha256:{}", receipt.ciphertext_sha256)
+    );
+    assert_eq!(staged_states, vec!["committed".to_string()]);
+
+    // The submission row: the pass's raw risk and values, the deterministic
+    // redaction hash, and the token bundle still committed.
+    let (privacy_risk, residual_risk_basis, redaction_counts, pipeline_version, redaction_hash) =
+        submission_privacy_columns(&backend, &tenant, claimed.submission_id).await;
+    assert_eq!(privacy_risk, "medium");
+    assert_eq!(
+        residual_risk_basis,
+        Some(serde_json::json!([
+            "consent_content_flag",
+            "found_and_removed"
+        ]))
+    );
+    assert_eq!(redaction_counts, serde_json::json!({"prose_pii_name": 2}));
+    assert_eq!(pipeline_version, version);
+    assert_eq!(redaction_hash, redaction_hash_before);
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let bundle_state: String = tx
+        .query_one(
+            "SELECT state FROM trace_token_bundles
+              WHERE tenant_id = $1 AND submission_id = $2 AND revision = 'pass-test'",
+            &[&tenant, &claimed.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(bundle_state, "committed", "no token bundle is revoked");
+
+    // A second call under the same lease is refused by the fence and
+    // changes nothing.
+    let again = store
+        .record_privacy_pass(&claimed, record())
+        .await
+        .expect_err("a recorded pass is never recorded again");
+    assert!(
+        matches!(&again, DatabaseError::Constraint(label) if label == PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL),
+        "unexpected error: {again:?}"
+    );
+    let after = store
+        .get_run(&tenant, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(
+        privacy_pass_columns(&after),
+        privacy_pass_columns(&recorded)
+    );
+    assert_eq!(after.updated_at, recorded.updated_at);
+    assert_eq!(count_privacy_pass_refs(&backend, &claimed).await, 1);
+
+    // A stale lease token is refused.
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-stale").await;
+    let receipt = stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::PrivacyPass,
+        &content,
+        cleanup_after,
+    )
+    .await;
+    let object_ref = privacy_pass_object_ref(
+        &claimed,
+        &receipt,
+        content.len(),
+        PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+    );
+    let stale = PipelineRunRecord {
+        lease_token: Some(uuid::Uuid::new_v4()),
+        ..claimed.clone()
+    };
+    let error = store
+        .record_privacy_pass(
+            &stale,
+            PrivacyPassRecord {
+                object_ref: &object_ref,
+                ciphertext_sha256: &receipt.ciphertext_sha256,
+                content_hash: &content_hash,
+                source_hash: &source_hash,
+                basis_labels: &basis,
+                outcome: PrivacyPassOutcome::Cleared,
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_counts: &counts,
+                redaction_pipeline_version: version,
+            },
+        )
+        .await
+        .expect_err("a stale lease is refused");
+    assert!(
+        error.to_string().contains("pipeline lease is stale"),
+        "unexpected error: {error}"
+    );
+    let unchanged = store
+        .get_run(&claimed.tenant_id, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert!(unchanged.privacy_pass_object_ref_id.is_none());
+    assert_eq!(count_privacy_pass_refs(&backend, &claimed).await, 0);
+
+    // A withdrawn submission is refused.
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-withdrawn").await;
+    let receipt = stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::PrivacyPass,
+        &content,
+        cleanup_after,
+    )
+    .await;
+    let object_ref = privacy_pass_object_ref(
+        &claimed,
+        &receipt,
+        content.len(),
+        PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+    );
+    backend
+        .record_trace_withdrawal(
+            &claimed.tenant_id,
+            claimed.submission_id,
+            chrono::Utc::now(),
+            "received",
+            "not_distributed",
+        )
+        .await
+        .expect("record the withdrawal");
+    let error = store
+        .record_privacy_pass(
+            &claimed,
+            PrivacyPassRecord {
+                object_ref: &object_ref,
+                ciphertext_sha256: &receipt.ciphertext_sha256,
+                content_hash: &content_hash,
+                source_hash: &source_hash,
+                basis_labels: &basis,
+                outcome: PrivacyPassOutcome::Cleared,
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_counts: &counts,
+                redaction_pipeline_version: version,
+            },
+        )
+        .await
+        .expect_err("an inoperable submission is refused");
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_SUBMISSION_INOPERABLE_LABEL),
+        "unexpected error: {error}"
+    );
+    let unchanged = store
+        .get_run(&claimed.tenant_id, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert!(unchanged.privacy_pass_object_ref_id.is_none());
+    assert_eq!(count_privacy_pass_refs(&backend, &claimed).await, 0);
+
+    // No staged row for the pass object: refused, and rolled back.
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-unstaged").await;
+    let lease_token = claimed.lease_token.expect("a claim carries a lease");
+    let unstaged_receipt = EncryptedTraceArtifactReceipt {
+        tenant_storage_ref: pipeline_tenant_storage_ref(&claimed.tenant_id)
+            .as_str()
+            .to_string(),
+        artifact_kind: TraceArtifactKind::ContributionEnvelope,
+        object_key: pipeline_attempt_object_id("privacy-pass", claimed.run_id, lease_token),
+        ciphertext_sha256: "cd".repeat(32),
+        encrypted_at: chrono::Utc::now(),
+    };
+    let object_ref = privacy_pass_object_ref(
+        &claimed,
+        &unstaged_receipt,
+        content.len(),
+        PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+    );
+    let error = store
+        .record_privacy_pass(
+            &claimed,
+            PrivacyPassRecord {
+                object_ref: &object_ref,
+                ciphertext_sha256: &unstaged_receipt.ciphertext_sha256,
+                content_hash: &content_hash,
+                source_hash: &source_hash,
+                basis_labels: &basis,
+                outcome: PrivacyPassOutcome::Escalated,
+                residual_pii_risk: ResidualPiiRisk::High,
+                redaction_counts: &counts,
+                redaction_pipeline_version: version,
+            },
+        )
+        .await
+        .expect_err("a pass with no staged row is refused");
+    assert!(
+        matches!(&error, DatabaseError::Constraint(label) if label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL),
+        "unexpected error: {error:?}"
+    );
+    let unchanged = store
+        .get_run(&claimed.tenant_id, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(
+        privacy_pass_columns(&unchanged),
+        (None, None, None, None, None, None)
+    );
+    assert_eq!(count_privacy_pass_refs(&backend, &claimed).await, 0);
+    let (privacy_risk, residual_risk_basis, _, pipeline_version, _) =
+        submission_privacy_columns(&backend, &claimed.tenant_id, claimed.submission_id).await;
+    assert_eq!(privacy_risk, "low", "the submission write rolled back");
+    assert_eq!(residual_risk_basis, None);
+    assert_eq!(pipeline_version, "v1");
+
+    // A staged row that names another ciphertext hash, or another object
+    // key, is refused the same way.
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-mismatch").await;
+    let receipt = stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::PrivacyPass,
+        &content,
+        cleanup_after,
+    )
+    .await;
+    let other_hash = EncryptedTraceArtifactReceipt {
+        ciphertext_sha256: "cd".repeat(32),
+        ..receipt.clone()
+    };
+    let other_key = EncryptedTraceArtifactReceipt {
+        object_key: format!("{}-other", receipt.object_key),
+        ..receipt.clone()
+    };
+    for mismatched in [other_hash, other_key] {
+        let object_ref = privacy_pass_object_ref(
+            &claimed,
+            &mismatched,
+            content.len(),
+            PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+        );
+        let error = store
+            .record_privacy_pass(
+                &claimed,
+                PrivacyPassRecord {
+                    object_ref: &object_ref,
+                    ciphertext_sha256: &mismatched.ciphertext_sha256,
+                    content_hash: &content_hash,
+                    source_hash: &source_hash,
+                    basis_labels: &basis,
+                    outcome: PrivacyPassOutcome::Cleared,
+                    residual_pii_risk: ResidualPiiRisk::Low,
+                    redaction_counts: &counts,
+                    redaction_pipeline_version: version,
+                },
+            )
+            .await
+            .expect_err("a pass naming another object is refused");
+        assert!(
+            matches!(&error, DatabaseError::Constraint(label) if label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL),
+            "unexpected error: {error:?}"
+        );
+    }
+    let unchanged = store
+        .get_run(&claimed.tenant_id, claimed.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert!(unchanged.privacy_pass_object_ref_id.is_none());
+    assert_eq!(count_privacy_pass_refs(&backend, &claimed).await, 0);
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &claimed.tenant_id).await;
+    let state: String = tx
+        .query_one(
+            "SELECT state FROM pipeline_attempt_artifacts
+              WHERE tenant_id = $1 AND run_id = $2 AND artifact = 'privacy-pass'",
+            &[&claimed.tenant_id, &claimed.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(state, "staged", "the staged row is left for the sweep");
+}
+
+/// Task 4: `load_submission_receipt_privacy` returns the raw risk and basis
+/// labels the receipt stored. A consent-flag-only receipt reads back as raw
+/// Medium with `[consent_content_flag]`, which maps to Admission's Low; a
+/// submission row with no basis reads back an empty list.
+#[tokio::test]
+async fn load_submission_receipt_privacy_reads_the_receipt_values() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        Some(default_privacy_boundary()),
+    )
+    .await;
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("receipt-privacy-{}", uuid::Uuid::new_v4());
+
+    // A Low receipt with no basis.
+    let env = envelope(uuid::Uuid::new_v4()).await;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(low) =
+        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    let read = store
+        .load_submission_receipt_privacy(&tenant, low.submission_id)
+        .await
+        .expect("read the receipt privacy");
+    assert_eq!(read.residual_pii_risk, ResidualPiiRisk::Low);
+    assert!(read.residual_risk_basis.is_empty());
+
+    // A consent-flag-only receipt: stored raw, mapped at Admission.
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let request = PipelineReceiptRequest {
+        residual_risk_basis: &[ResidualRiskCondition::ConsentContentFlag],
+        ..receipt(&tenant, &key, &raw, &env, NO_LIMITS)
+    };
+    let PipelineReceiptResult::Created(consent) =
+        submit_registered(&service, request).await.unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(consent.admission_decision, "admit");
+    let read = store
+        .load_submission_receipt_privacy(&tenant, consent.submission_id)
+        .await
+        .expect("read the receipt privacy");
+    assert_eq!(read.residual_pii_risk, ResidualPiiRisk::Medium);
+    assert_eq!(
+        read.residual_risk_basis,
+        vec!["consent_content_flag".to_string()]
+    );
+    let parsed: Vec<ResidualRiskCondition> = read
+        .residual_risk_basis
+        .iter()
+        .map(|label| ResidualRiskCondition::from_label(label).expect("a known label"))
+        .collect();
+    assert_eq!(
+        pipeline_privacy_risk(&read.residual_pii_risk, &parsed),
+        PrivacyRisk::Low
+    );
+
+    // A submission row whose basis column is NULL (as `seed_run` writes).
+    let seeded_tenant = format!("receipt-privacy-seeded-{}", uuid::Uuid::new_v4());
+    let seeded = seed_run(&backend, &seeded_tenant, uuid::Uuid::new_v4()).await;
+    let read = store
+        .load_submission_receipt_privacy(&seeded_tenant, seeded.submission_id)
+        .await
+        .expect("read the seeded submission");
+    assert_eq!(read.residual_pii_risk, ResidualPiiRisk::Low);
+    assert!(read.residual_risk_basis.is_empty());
 }

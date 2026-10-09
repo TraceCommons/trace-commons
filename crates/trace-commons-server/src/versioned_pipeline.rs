@@ -276,6 +276,11 @@ pub const PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL: &str = "index_rebuild_
 /// there: the commit is refused, and a phase records it as a charged retry
 /// under this label (wave 2, fix round 1; review I2, I3).
 pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_artifact_missing";
+/// Safe label of a `record_privacy_pass` refused because the run already
+/// has a pass recorded (`privacy_pass_object_ref_id IS NOT NULL`): a pass is
+/// recorded once per run and never re-run (decision P7). The refused call
+/// writes nothing.
+pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_already_recorded";
 /// Safe label of a receipt for a submission id that the legacy path owns
 /// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
 /// path, or a legacy submission row holds the id. A conflict with a legacy
@@ -910,7 +915,10 @@ pub(crate) fn validate_actor(
 /// The receipt maps its Admission input through this, and the Review-start
 /// privacy pass maps both the stored receipt-time risk and its own result
 /// through it, so the two sides of its comparison share one scale.
-fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk {
+pub fn pipeline_privacy_risk(
+    risk: &ResidualPiiRisk,
+    basis: &[ResidualRiskCondition],
+) -> PrivacyRisk {
     match risk {
         ResidualPiiRisk::Low => PrivacyRisk::Low,
         ResidualPiiRisk::Medium if matches!(basis, [ResidualRiskCondition::ConsentContentFlag]) => {
@@ -934,11 +942,17 @@ fn enum_strings<T: Serialize>(values: &[T]) -> anyhow::Result<Vec<String>> {
 
 /// A crash point a test build can inject a failure at, to prove the
 /// receipt/runner logic resumes correctly from durable state rather than
-/// from in-memory continuation. Only `AfterArtifactStorage` has a caller in
-/// this task; the rest exist so later tasks share one enum shape.
+/// from in-memory continuation (`PipelineServiceBuilder::with_crash_point`).
+/// Each variant names the durable step it follows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineCrashPoint {
     AfterArtifactStorage,
+    /// In the Review-start privacy pass, after its output object is staged
+    /// and published and before `record_privacy_pass` commits.
+    AfterPrivacyPassArtifactStorage,
+    /// In the Review-start privacy pass, right after `record_privacy_pass`
+    /// commits and before the Review policy runs.
+    AfterPrivacyPassCommit,
     AfterReviewArtifactStorage,
     AfterReviewCommit,
     AfterScoreArtifactStorage,
@@ -1508,6 +1522,44 @@ pub struct ApprovedRevision {
     pub content_hash: String,
     pub source_content_hash: String,
     pub worker_identity: String,
+}
+
+/// What the Review-start privacy pass records with `record_privacy_pass`:
+/// its output object (staged under the claim's lease as `privacy-pass`), the
+/// hashes of its input and output, its merged residual-risk labels, its
+/// outcome, and the post-classifier privacy values written back to the
+/// submission row (decision P5). Hashes, ids, labels and counts only.
+#[derive(Debug, Clone, Copy)]
+pub struct PrivacyPassRecord<'a> {
+    /// `privacy_pass_object_ref`'s write for the published pass object.
+    pub object_ref: &'a TraceObjectRefWrite,
+    /// The pass object's ciphertext hash, as the staged row holds it (bare
+    /// hex, `EncryptedTraceArtifactReceipt::ciphertext_sha256`).
+    pub ciphertext_sha256: &'a str,
+    /// `sha256:` of the pass output (plaintext).
+    pub content_hash: &'a str,
+    /// `sha256:` of the source bytes the pass read.
+    pub source_hash: &'a str,
+    /// The merged basis, as `safe_residual_risk_basis_labels` writes it.
+    pub basis_labels: &'a [String],
+    pub outcome: PrivacyPassOutcome,
+    /// The pass envelope's raw residual risk, written to
+    /// `trace_submissions.privacy_risk` as the receipt writes it (never the
+    /// mapped `PrivacyRisk`).
+    pub residual_pii_risk: ResidualPiiRisk,
+    pub redaction_counts: &'a BTreeMap<String, u32>,
+    pub redaction_pipeline_version: &'a str,
+}
+
+/// The receipt-time privacy values of a submission, raw as
+/// `trace_submissions` stores them. The privacy pass compares against
+/// `pipeline_privacy_risk(&residual_pii_risk, &parsed basis)`, never the raw
+/// value (decision P3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubmissionReceiptPrivacy {
+    pub residual_pii_risk: ResidualPiiRisk,
+    /// The stored basis labels; empty when the column is NULL.
+    pub residual_risk_basis: Vec<String>,
 }
 
 /// A run identity not yet persisted: computed deterministically from the
@@ -2659,6 +2711,223 @@ impl PgPipelineStore {
         }
         tx.commit().await?;
         Ok(updated)
+    }
+
+    /// Records the Review-start privacy pass on `run`, in one tenant
+    /// transaction under the run's lease, modelled on `commit_review`: the
+    /// pass object's ref, the post-classifier privacy values on the
+    /// submission row, the six `privacy_pass_*` columns on the run, and the
+    /// attempt's staged `privacy-pass` row moved to `committed`.
+    ///
+    /// Lock order as `commit_review`: the run row (`ensure_current_lease`),
+    /// then the submission row (`review_submission_is_operable`). No policy
+    /// lock: the pass is a server control, not a bundle policy. The run's
+    /// phase, state, lease and `attempt_count` are left as they are; the
+    /// Review policy runs next under the same lease.
+    ///
+    /// `trace_submissions.redaction_hash` is never written: a withdrawal's
+    /// tombstone is matched on the deterministic envelope's hash, and V68
+    /// revokes every token bundle of a submission whose hash changes
+    /// (decision P5).
+    ///
+    /// Refusals write nothing: a stale lease; an inoperable submission
+    /// (`PIPELINE_SUBMISSION_INOPERABLE_LABEL`); a pass already recorded
+    /// (`PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL`); and a staged row
+    /// that is missing or names another object key or hash
+    /// (`PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL`). Without the last, a
+    /// `privacy-pass` row left `staged` under the lease would make a
+    /// same-dispatch rejection fail, because `commit_review`'s rejection
+    /// branch requires no staged row of the lease to remain.
+    pub async fn record_privacy_pass(
+        &self,
+        run: &PipelineRunRecord,
+        pass: PrivacyPassRecord<'_>,
+    ) -> Result<PipelineRunRecord, DatabaseError> {
+        if run.next_phase != Some(Phase::Review) {
+            return Err(DatabaseError::Constraint(
+                "phase does not match run transition".to_string(),
+            ));
+        }
+        let lease_token = required_lease_token(run)?;
+        let ciphertext_sha256 = pass
+            .ciphertext_sha256
+            .strip_prefix("sha256:")
+            .unwrap_or(pass.ciphertext_sha256);
+        if pass.object_ref.content_sha256 != format!("sha256:{ciphertext_sha256}")
+            || pass.object_ref.tenant_id != run.tenant_id
+            || pass.object_ref.submission_id != run.submission_id
+        {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+            ));
+        }
+        let privacy_risk = enum_string(&pass.residual_pii_risk).map_err(|_| {
+            DatabaseError::Serialization("privacy pass residual risk encode failed".to_string())
+        })?;
+        let residual_risk_basis = serde_json::to_value(pass.basis_labels).map_err(|_| {
+            DatabaseError::Serialization(
+                "privacy pass residual risk basis encode failed".to_string(),
+            )
+        })?;
+        let redaction_counts = serde_json::to_value(pass.redaction_counts).map_err(|_| {
+            DatabaseError::Serialization("privacy pass redaction counts encode failed".to_string())
+        })?;
+
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        ensure_current_lease(&tx, run, lease_token).await?;
+        if !review_submission_is_operable(&tx, &run.tenant_id, run.submission_id).await? {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+
+        tx.execute(
+            "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes, compression,
+                created_by_job_id
+             ) VALUES ($1,$2,$3,'review_snapshot',$4,$5,$6,$7,$8,$9,$10)
+             ON CONFLICT (tenant_id, submission_id, object_ref_id) DO NOTHING",
+            &[
+                &pass.object_ref.tenant_id,
+                &pass.object_ref.submission_id,
+                &pass.object_ref.object_ref_id,
+                &pass.object_ref.object_store,
+                &pass.object_ref.object_key,
+                &pass.object_ref.content_sha256,
+                &pass.object_ref.encryption_key_ref,
+                &pass.object_ref.size_bytes,
+                &pass.object_ref.compression,
+                &pass.object_ref.created_by_job_id,
+            ],
+        )
+        .await?;
+        let updated_submission = tx
+            .execute(
+                "UPDATE trace_submissions
+                 SET privacy_risk = $3, residual_risk_basis = $4, redaction_counts = $5,
+                     redaction_pipeline_version = $6, updated_at = NOW()
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[
+                    &run.tenant_id,
+                    &run.submission_id,
+                    &privacy_risk,
+                    &residual_risk_basis,
+                    &redaction_counts,
+                    &pass.redaction_pipeline_version,
+                ],
+            )
+            .await?;
+        if updated_submission != 1 {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
+            ));
+        }
+        let Some(row) = tx
+            .query_opt(
+                "UPDATE pipeline_runs
+                 SET privacy_pass_object_ref_id = $4,
+                     privacy_pass_content_hash = $5,
+                     privacy_pass_source_hash = $6,
+                     privacy_pass_residual_risk_basis = $7,
+                     privacy_pass_outcome = $8,
+                     privacy_pass_recorded_at = NOW(),
+                     updated_at = NOW()
+                 WHERE tenant_id = $1 AND run_id = $2
+                   AND next_phase = 'review'
+                   AND lease_token = $3 AND lease_expires_at > NOW()
+                   AND privacy_pass_object_ref_id IS NULL
+                 RETURNING *",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &lease_token,
+                    &pass.object_ref.object_ref_id,
+                    &pass.content_hash,
+                    &pass.source_hash,
+                    &residual_risk_basis,
+                    &pass.outcome.as_db(),
+                ],
+            )
+            .await?
+        else {
+            // `ensure_current_lease` passed under the run lock, so the
+            // lease holds: a missing row is the fence.
+            return Err(DatabaseError::Constraint(
+                PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL.to_string(),
+            ));
+        };
+        let updated = pipeline_run_from_row(&row)?;
+        let moved = tx
+            .execute(
+                "UPDATE pipeline_attempt_artifacts
+                    SET state = 'committed', committed_at = NOW()
+                  WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+                    AND artifact = 'privacy-pass' AND state = 'staged'
+                    AND object_key = $4
+                    AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &lease_token,
+                    &pass.object_ref.object_key,
+                    &ciphertext_sha256,
+                ],
+            )
+            .await?;
+        if moved != 1 {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL.to_string(),
+            ));
+        }
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    /// The receipt-time privacy values of `submission_id`, raw as the
+    /// receipt stored them (`trace_submissions.privacy_risk` and
+    /// `residual_risk_basis`), read in a tenant transaction. The privacy pass
+    /// reads them before it overwrites them (`record_privacy_pass`) and maps
+    /// them through `pipeline_privacy_risk` itself (decision P3).
+    pub async fn load_submission_receipt_privacy(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Result<SubmissionReceiptPrivacy, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT privacy_risk, residual_risk_basis FROM trace_submissions
+                 WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant_id, &submission_id],
+            )
+            .await?
+            .ok_or_else(|| DatabaseError::NotFound {
+                entity: "trace_submission".to_string(),
+                id: submission_id.to_string(),
+            })?;
+        tx.commit().await?;
+        let privacy_risk: String = row.get("privacy_risk");
+        let residual_pii_risk: ResidualPiiRisk =
+            serde_json::from_value(serde_json::Value::String(privacy_risk)).map_err(|_| {
+                DatabaseError::Serialization("submission privacy risk is unknown".to_string())
+            })?;
+        let residual_risk_basis = row
+            .get::<_, Option<serde_json::Value>>("residual_risk_basis")
+            .map(serde_json::from_value::<Vec<String>>)
+            .transpose()
+            .map_err(|_| {
+                DatabaseError::Serialization(
+                    "submission residual risk basis is not an array of labels".to_string(),
+                )
+            })?
+            .unwrap_or_default();
+        Ok(SubmissionReceiptPrivacy {
+            residual_pii_risk,
+            residual_risk_basis,
+        })
     }
 
     /// A reviewer's exclusive claim on a run quarantined at Review (port
@@ -10144,7 +10413,7 @@ impl PipelineService {
                     lease_token,
                     artifact: artifact.clone(),
                 });
-                // The column is CHECK-constrained to the three known artifacts,
+                // The column is CHECK-constrained to the four known artifacts,
                 // so this should never fire; if it ever does (a future migration
                 // loosens the constraint, or direct DB tampering), fail this
                 // sweep pass closed -- an error the caller logs and retries next
@@ -14570,13 +14839,15 @@ fn decode_pipeline_artifact_bytes(wrapper: &serde_json::Value) -> anyhow::Result
 /// `pipeline_attempt_artifacts` stores and `pipeline_attempt_object_id`
 /// embeds in the object id; `from_db_str` is its inverse for a reader that
 /// only has the column's value, and `store_kind` is the `TraceArtifactKind`
-/// its write site stores it under (`ContributionEnvelope` for `approved`,
-/// `VectorPayload` for the two Score artifacts).
+/// its write site stores it under (`ContributionEnvelope` for `approved`
+/// and `privacy-pass`, `VectorPayload` for the two Score artifacts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineAttemptArtifact {
     Approved,
     IndexCommand,
     ScoreNeighbors,
+    /// The Review-start privacy pass's output (`record_privacy_pass`).
+    PrivacyPass,
 }
 
 impl PipelineAttemptArtifact {
@@ -14585,6 +14856,7 @@ impl PipelineAttemptArtifact {
             Self::Approved => "approved",
             Self::IndexCommand => "index-command",
             Self::ScoreNeighbors => "score-neighbors",
+            Self::PrivacyPass => "privacy-pass",
         }
     }
 
@@ -14593,13 +14865,14 @@ impl PipelineAttemptArtifact {
             "approved" => Some(Self::Approved),
             "index-command" => Some(Self::IndexCommand),
             "score-neighbors" => Some(Self::ScoreNeighbors),
+            "privacy-pass" => Some(Self::PrivacyPass),
             _ => None,
         }
     }
 
     fn store_kind(&self) -> TraceArtifactKind {
         match self {
-            Self::Approved => TraceArtifactKind::ContributionEnvelope,
+            Self::Approved | Self::PrivacyPass => TraceArtifactKind::ContributionEnvelope,
             Self::IndexCommand | Self::ScoreNeighbors => TraceArtifactKind::VectorPayload,
         }
     }
@@ -14681,7 +14954,8 @@ impl PrestagedScoreArtifacts {
 }
 
 /// The object id a claim stores one of its run's phase artifacts under
-/// (`artifact` is `approved`, `index-command`, or `score-neighbors`).
+/// (`artifact` is `approved`, `index-command`, `score-neighbors`, or
+/// `privacy-pass`).
 ///
 /// Ruling FR1: the id carries the claim's lease token, not the run id
 /// alone. Every write encrypts with a fresh salt and nonce, so two writes of
@@ -14933,6 +15207,41 @@ fn approved_object_ref(
         size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
         compression: None,
         created_by_job_id: None,
+    }
+}
+
+/// Builds the `trace_object_refs` write for the Review-start privacy
+/// pass's output object. Like `approved_object_ref`, the object ref id is
+/// derived from the run id alone, so every attempt of the run records the
+/// identical id and only the object key moves per claim (Ruling FR1; spec
+/// correction 1). The kind is `review_snapshot`, which no legacy by-name
+/// selector picks up and which the withdrawal's deletion maps to a
+/// contribution envelope (decision P2); `created_by_job_id` is the run,
+/// which tells it apart from the approved ref (`None`).
+pub fn privacy_pass_object_ref(
+    run: &PipelineRunRecord,
+    receipt: &EncryptedTraceArtifactReceipt,
+    size_bytes: usize,
+    object_store: &str,
+) -> TraceObjectRefWrite {
+    TraceObjectRefWrite {
+        object_ref_id: Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("tracecommons:pipeline-privacy-pass-object:{}", run.run_id).as_bytes(),
+        ),
+        tenant_id: run.tenant_id.clone(),
+        submission_id: run.submission_id,
+        artifact_kind: TraceObjectArtifactKind::ReviewSnapshot,
+        object_store: object_store.to_string(),
+        object_key: receipt.object_key.clone(),
+        content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+        encryption_key_ref: format!(
+            "tenant:{}",
+            pipeline_tenant_storage_ref(&run.tenant_id).as_str()
+        ),
+        size_bytes: i64::try_from(size_bytes).unwrap_or(i64::MAX),
+        compression: None,
+        created_by_job_id: Some(run.run_id),
     }
 }
 
@@ -15679,5 +15988,140 @@ mod tests {
             pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
             PrivacyRisk::High
         );
+    }
+
+    /// A run record for the object-ref unit tests below: only the ids
+    /// matter to them.
+    fn privacy_pass_test_run(run_id: Uuid) -> PipelineRunRecord {
+        let now = Utc::now();
+        PipelineRunRecord {
+            tenant_id: "tenant-privacy-pass-unit".to_string(),
+            run_id,
+            submission_id: Uuid::new_v4(),
+            trace_id: Uuid::new_v4(),
+            bundle_id: "bundle".to_string(),
+            request_idempotency_key: "key".to_string(),
+            request_content_hash: "sha256:00".to_string(),
+            source_object_ref_id: Uuid::new_v4(),
+            approved_revision_id: None,
+            next_phase: Some(Phase::Review),
+            state: PipelineRunState::Leased,
+            lease_token: Some(Uuid::new_v4()),
+            lease_expires_at: Some(now),
+            attempt_count: 1,
+            max_attempts: 5,
+            next_attempt_at: now,
+            phase_started_at: now,
+            last_error_label: None,
+            index_membership: "none".to_string(),
+            index_command_ref: None,
+            index_command_hash: None,
+            index_write_state: "none".to_string(),
+            admission_decision: "admit".to_string(),
+            admission_reason: None,
+            approved_object_ref_id: None,
+            approved_content_hash: None,
+            score_neighbor_ref: None,
+            score_neighbor_hash: None,
+            settle_selection_hash: None,
+            privacy_pass_object_ref_id: None,
+            privacy_pass_content_hash: None,
+            privacy_pass_source_hash: None,
+            privacy_pass_residual_risk_basis: None,
+            privacy_pass_outcome: None,
+            privacy_pass_recorded_at: None,
+            privacy_pass_approval_assessment_hash: None,
+            privacy_pass_approval_resolved_reasons: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn privacy_pass_test_receipt(object_key: &str) -> EncryptedTraceArtifactReceipt {
+        EncryptedTraceArtifactReceipt {
+            tenant_storage_ref: "tenant-ref".to_string(),
+            artifact_kind: TraceArtifactKind::ContributionEnvelope,
+            object_key: object_key.to_string(),
+            ciphertext_sha256: "ab".repeat(32),
+            encrypted_at: Utc::now(),
+        }
+    }
+
+    /// Task 4: the pass object's staging name round-trips through the
+    /// column value, and it is stored as a contribution envelope, as the
+    /// approved content is.
+    #[test]
+    fn privacy_pass_artifact_round_trips() {
+        let artifact = PipelineAttemptArtifact::PrivacyPass;
+        assert_eq!(artifact.as_str(), "privacy-pass");
+        assert_eq!(
+            PipelineAttemptArtifact::from_db_str(artifact.as_str()),
+            Some(PipelineAttemptArtifact::PrivacyPass)
+        );
+        assert_eq!(
+            artifact.store_kind(),
+            TraceArtifactKind::ContributionEnvelope
+        );
+    }
+
+    /// Task 4 (spec correction 1): the pass object ref id is derived from
+    /// the run id alone, so every attempt of one run records the same id,
+    /// and it is not the approved ref's id. It is a `review_snapshot` ref
+    /// whose `created_by_job_id` is the run, which tells it apart from the
+    /// approved ref (`None`).
+    #[test]
+    fn privacy_pass_object_ref_is_derived_from_the_run() {
+        let run_id = Uuid::new_v4();
+        let run = privacy_pass_test_run(run_id);
+        let first = privacy_pass_object_ref(
+            &run,
+            &privacy_pass_test_receipt("pipeline-privacy-pass-a"),
+            10,
+            "store",
+        );
+        let second = privacy_pass_object_ref(
+            &run,
+            &privacy_pass_test_receipt("pipeline-privacy-pass-b"),
+            20,
+            "store",
+        );
+        assert_eq!(first.object_ref_id, second.object_ref_id);
+        assert_ne!(first.object_key, second.object_key);
+        let approved = approved_object_ref(
+            &run,
+            &privacy_pass_test_receipt("pipeline-approved-a"),
+            10,
+            "store",
+        );
+        assert_ne!(first.object_ref_id, approved.object_ref_id);
+        assert_eq!(first.artifact_kind, TraceObjectArtifactKind::ReviewSnapshot);
+        assert_eq!(first.created_by_job_id, Some(run_id));
+        assert_eq!(first.submission_id, run.submission_id);
+        assert_eq!(first.content_sha256, format!("sha256:{}", "ab".repeat(32)));
+        let other = privacy_pass_object_ref(
+            &privacy_pass_test_run(Uuid::new_v4()),
+            &privacy_pass_test_receipt("pipeline-privacy-pass-a"),
+            10,
+            "store",
+        );
+        assert_ne!(first.object_ref_id, other.object_ref_id);
+    }
+
+    /// Task 4: the revocation-propagation worker must take the
+    /// `ContributionEnvelope` arm for the pass ref, not treat it as a
+    /// pipeline Score object.
+    #[test]
+    fn privacy_pass_ref_is_not_a_score_object() {
+        let run_id = Uuid::new_v4();
+        let pass = privacy_pass_object_ref(
+            &privacy_pass_test_run(run_id),
+            &privacy_pass_test_receipt("pipeline-privacy-pass-a"),
+            10,
+            "store",
+        );
+        assert!(!is_pipeline_score_object_ref(
+            pass.object_ref_id,
+            Some(run_id)
+        ));
     }
 }
