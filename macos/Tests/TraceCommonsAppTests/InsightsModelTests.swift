@@ -653,6 +653,8 @@ final class InsightsSessionsTests: XCTestCase {
         "claude_code": "CLAUDE",
         "codex": "CODEX",
         "analytics_session_header": "{date} | {harness} | {n} turns | {t} tokens | {span} between",
+        "analytics_session_label": "{date} {time} | {harness} | {t} tokens",
+        "analytics_session_label_undated": "Undated | {harness} | {t} tokens",
         "analytics_turn": "Turn {n}",
         "analytics_codex_not_recorded": "NOT RECORDED",
         "analytics_reason_no_usage_counters": "NO COUNTERS",
@@ -712,6 +714,139 @@ final class InsightsSessionsTests: XCTestCase {
         XCTAssertFalse(header.contains("2026-10-03"), "the date is formatted, not the wire value")
         let codex = InsightsSessionsWords.header(try drill(Self.codexJSON), copy: copy)
         XCTAssertEqual(codex, "\u{2014} | CODEX | \u{2014} turns | \u{2014} tokens | \u{2014} between")
+    }
+
+    /// A saved snapshot as the core lists it. `earliest` is its first
+    /// recorded event; `.some(nil)` is time evidence with no valid timestamp.
+    static func snapshot(_ id: String, source: String = "claude_code",
+                         earliest: String?? = .some("2026-10-03T14:05:09.123Z")) throws -> LocalInsight {
+        var json: [String: Any] = ["id": id, "source_format": source, "boundary": "local",
+            "analyzed_at": "2026-10-08T09:00:00Z", "cost_unavailable_reason": "unknown",
+            "report": ["schema_version": 1,
+                       "provider": ["id": "local", "version": "1", "rubric_version": "1", "execution_mode": "local"],
+                       "metrics": [], "evidence": []]]
+        switch earliest {
+        case nil: json["time_evidence"] = NSNull()
+        case .some(nil):
+            json["time_evidence"] = ["schema_version": 1, "valid_timestamps": 0, "earliest": NSNull(), "latest": NSNull()]
+        case .some(let at?):
+            json["time_evidence"] = ["schema_version": 1, "valid_timestamps": 2,
+                                     "earliest": ["recorded_at": at, "event_refs": [["record_index": 1]],
+                                                  "omitted_event_refs": 0],
+                                     "latest": ["recorded_at": "2026-10-03T16:15:00Z",
+                                                "event_refs": [["record_index": 9]], "omitted_event_refs": 0]]
+        }
+        return try JSONDecoder().decode(LocalInsight.self, from: JSONSerialization.data(withJSONObject: json))
+    }
+
+    static let snapshotID = String(repeating: "ab", count: 32)
+
+    func testASavedSessionIsLabelledByItsFirstEventHarnessAndTokens() throws {
+        let copy = Self.words
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let insight = try Self.snapshot(Self.snapshotID)
+        let label = InsightsSessionsWords.label(insight, tokens: 1_100_000, copy: copy, timeZone: utc)
+        let first = try Date("2026-10-03T14:05:09.123Z", strategy: .iso8601.year().month().day()
+            .time(includingFractionalSeconds: true))
+        let date = first.formatted(Date.FormatStyle(timeZone: utc).month(.abbreviated).day())
+        let time = first.formatted(Date.FormatStyle(timeZone: utc).hour().minute())
+        XCTAssertEqual(label, date + " " + time + " | CLAUDE | "
+                       + InsightsOverviewWords.figure(1_100_000, copy: copy) + " tokens")
+        XCTAssertFalse(label.contains(Self.snapshotID), label)
+        XCTAssertFalse(label.contains("2026-10-03"), "the date is formatted, not the wire value")
+        // Read in the offset the app sends the core, so a late event lands
+        // on the local day the drill header names.
+        let east = try XCTUnwrap(TimeZone(secondsFromGMT: 10 * 3600))
+        XCTAssertTrue(InsightsSessionsWords.label(insight, copy: copy, timeZone: east)
+            .hasPrefix(first.formatted(Date.FormatStyle(timeZone: east).month(.abbreviated).day()) + " "))
+        XCTAssertNotEqual(InsightsSessionsWords.label(insight, copy: copy, timeZone: east),
+                          InsightsSessionsWords.label(insight, copy: copy, timeZone: utc))
+        // A whole-second timestamp reads too.
+        let whole = try Self.snapshot(Self.snapshotID, earliest: "2026-10-03T14:05:09Z")
+        XCTAssertEqual(InsightsSessionsWords.label(whole, tokens: 1_100_000, copy: copy, timeZone: utc), label)
+        // An unknown figure is the dash, never zero.
+        XCTAssertTrue(InsightsSessionsWords.label(insight, copy: copy, timeZone: utc)
+            .hasSuffix(" | CLAUDE | \u{2014} tokens"))
+    }
+
+    func testASessionWithNoRecordedTimeUsesTheUndatedLabel() throws {
+        let copy = Self.words
+        for insight in [try Self.snapshot("s-1", source: "codex", earliest: nil),
+                        try Self.snapshot("s-1", source: "codex", earliest: .some(nil))] {
+            XCTAssertEqual(InsightsSessionsWords.label(insight, copy: copy), "Undated | CODEX | \u{2014} tokens")
+            XCTAssertEqual(InsightsSessionsWords.label(insight, tokens: 0, copy: copy),
+                           "Undated | CODEX | 0 tokens", "a measured zero stays zero")
+        }
+    }
+
+    func testThePickerShowsLabelsAndNeverTheSnapshotID() throws {
+        let snapshots = [try Self.snapshot(Self.snapshotID),
+                         try Self.snapshot(String(repeating: "cd", count: 32), source: "codex", earliest: nil)]
+        let options = InsightsSessionsWords.pickerChoices(snapshots, copy: Self.words)
+        XCTAssertEqual(options.map(\.value), snapshots.map(\.id), "the value is still the snapshot ID, in order")
+        for (option, snapshot) in zip(options, snapshots) {
+            XCTAssertNotEqual(option.title, option.value)
+            XCTAssertFalse(option.title.contains(snapshot.id), option.title)
+            XCTAssertEqual(option.title, InsightsSessionsWords.label(snapshot, copy: Self.words))
+        }
+    }
+
+    func testADrillRowIsLabelledFromItsSnapshotOrShowsTheDash() throws {
+        let copy = Self.words
+        let snapshots = [try Self.snapshot(Self.snapshotID)]
+        XCTAssertEqual(InsightsSessionsWords.rowLabel(Self.snapshotID, tokens: 42, snapshots: snapshots, copy: copy),
+                       InsightsSessionsWords.label(snapshots[0], tokens: 42, copy: copy))
+        let missing = String(repeating: "ef", count: 32)
+        XCTAssertEqual(InsightsSessionsWords.rowLabel(missing, tokens: 42, snapshots: snapshots, copy: copy),
+                       "\u{2014}", "an unmatched row shows the dash, never its ID")
+        XCTAssertEqual(InsightsSessionsWords.rowLabel("", tokens: nil, snapshots: snapshots, copy: copy), "\u{2014}")
+    }
+
+    /// The label reads the core's own time evidence: a saved Codex rollout
+    /// listed by the real core is dated by its first record, and one whose
+    /// records carry no time is undated.
+    func testTheRealCoresSavedListLabelsBothShapes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = root.appendingPathComponent("insights")
+        let dated = root.appendingPathComponent("dated.jsonl")
+        let undated = root.appendingPathComponent("undated.jsonl")
+        try Data("""
+        {"timestamp":"2026-10-03T14:05:09.123Z","type":"session_meta","payload":{}}
+        {"timestamp":"2026-10-03T14:05:09.123Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"dated"}]}}
+        {"timestamp":"2026-10-03T16:15:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"later"}]}}
+        """.utf8).write(to: dated)
+        try Data("""
+        {"type":"session_meta","payload":{}}
+        {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"undated"}]}}
+        """.utf8).write(to: undated)
+        func local(_ operation: InsightsRequest.Operation) throws -> InsightsResponse {
+            try TCInsights.call(.init(storeDirectory: store.path, operation: operation))
+        }
+        let one = try XCTUnwrap(local(.init("analyze", source: "codex", file: dated.path, save: true)).insight)
+        let two = try XCTUnwrap(local(.init("analyze", source: "codex", file: undated.path, save: true)).insight)
+        let listed = try XCTUnwrap(local(.init("list")).insights)
+        let utc = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let first = try Date("2026-10-03T14:05:09.123Z", strategy: .iso8601.year().month().day()
+            .time(includingFractionalSeconds: true))
+        let copy = Self.words
+        let labelled = try XCTUnwrap(listed.first { $0.id == one.id })
+        XCTAssertEqual(InsightsSessionsWords.label(labelled, copy: copy, timeZone: utc),
+                       first.formatted(Date.FormatStyle(timeZone: utc).month(.abbreviated).day()) + " "
+                       + first.formatted(Date.FormatStyle(timeZone: utc).hour().minute()) + " | CODEX | \u{2014} tokens")
+        let bare = try XCTUnwrap(listed.first { $0.id == two.id })
+        XCTAssertEqual(InsightsSessionsWords.label(bare, copy: copy), "Undated | CODEX | \u{2014} tokens")
+    }
+
+    @MainActor
+    func testNoInsightsViewDrawsASnapshotID() throws {
+        let overview = try MonitorNavigationTests.text("Views/InsightsOverviewTab.swift")
+        XCTAssertFalse(overview.contains("Text(session.session_ref)"))
+        XCTAssertTrue(overview.contains("InsightsSessionsWords.rowLabel("))
+        let sessions = try MonitorNavigationTests.text("Views/InsightsSessionsTab.swift")
+        XCTAssertFalse(sessions.contains("GlassPickerOption($0, value: $0)"))
+        XCTAssertTrue(sessions.contains("InsightsSessionsWords.pickerChoices("))
     }
 
     func testAnUnknownTurnIsAGapAndNeverAZeroBar() throws {

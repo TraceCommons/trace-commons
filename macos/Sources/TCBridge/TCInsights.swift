@@ -371,6 +371,14 @@ public struct LocalInsight: Decodable, Sendable, Identifiable {
     public let model_observations: InsightModelObservations?
     public let claude_task_attribution: ClaudeTaskAttributionEvidence?
     public let outcome_links: [InsightOutcomeLink]?
+    /// Timestamp coverage from the imported records. `nil` for a legacy
+    /// snapshot, and `earliest` is `nil` when no record carries a valid time.
+    public let time_evidence: TimeEvidence?
+    public struct TimeEvidence: Decodable, Sendable {
+        public let earliest: Extremum?
+    }
+    /// A recorded event time, RFC 3339 in UTC as the core writes it.
+    public struct Extremum: Decodable, Sendable { public let recorded_at: String }
     public struct Annotation: Decodable, Sendable {
         public let category, outcome, provenance, recorded_at, source_digest: String
     }

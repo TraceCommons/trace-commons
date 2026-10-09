@@ -1056,6 +1056,52 @@ enum InsightsSessionsWords {
         ])
     }
 
+    /// A saved session's label: its first recorded event's local date and
+    /// time, its harness and `tokens`, the core's figure when the caller
+    /// holds one and the dash otherwise. Never the snapshot ID. The time is
+    /// read in the fixed offset the app sends the core
+    /// (`InsightsOverviewModel.offset`), so the date is the one the drill
+    /// header names.
+    static func label(_ insight: LocalInsight, tokens: UInt64? = nil, copy: [String: String],
+                      timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT()) ?? .current)
+        -> String {
+        let harness = InsightsOverviewWords.harness(insight.source_format, copy: copy)
+        let figure = InsightsOverviewWords.figure(tokens, copy: copy)
+        guard let first = firstEvent(insight) else {
+            return InsightsOverviewWords.fill(text("analytics_session_label_undated", copy),
+                                              ["harness": harness, "t": figure])
+        }
+        return InsightsOverviewWords.fill(text("analytics_session_label", copy), [
+            "date": first.formatted(Date.FormatStyle(timeZone: timeZone).month(.abbreviated).day()),
+            "time": first.formatted(Date.FormatStyle(timeZone: timeZone).hour().minute()),
+            "harness": harness,
+            "t": figure,
+        ])
+    }
+
+    /// The first recorded event. The core writes it with or without
+    /// fractional seconds; the tests pin that both read.
+    private static func firstEvent(_ insight: LocalInsight) -> Date? {
+        guard let wire = insight.time_evidence?.earliest?.recorded_at else { return nil }
+        return try? Date(wire, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+    }
+
+    /// The session picker: each saved session by its label, valued by its ID.
+    /// The shell holds no core token figure per saved session, so `{t}` is
+    /// the dash here.
+    static func pickerChoices(_ snapshots: [LocalInsight],
+                              copy: [String: String]) -> [(value: String, title: String)] {
+        snapshots.map { (value: $0.id, title: label($0, copy: copy)) }
+    }
+
+    /// A drill-down row's session: its saved snapshot's label with the row's
+    /// own figure, or the dash when no saved snapshot has that ID.
+    static func rowLabel(_ sessionRef: String, tokens: UInt64?, snapshots: [LocalInsight],
+                         copy: [String: String]) -> String {
+        guard let insight = snapshots.first(where: { $0.id == sessionRef }) else { return dash(copy) }
+        return label(insight, tokens: tokens, copy: copy)
+    }
+
     /// Why there is no chart; `nil` when there is one.
     static func unavailableLine(_ drill: InsightsSessionDrill, copy: [String: String]) -> String? {
         switch drill.series_unavailable {

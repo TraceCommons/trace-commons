@@ -13,8 +13,9 @@ import TCDesign
 /// decision D7, open).
 struct InsightsSessionsTab: View {
     let model: InsightsSessionsModel
-    /// Saved snapshot IDs, newest first, for the session picker.
-    let snapshotIDs: [String]
+    /// Saved snapshots, newest first, for the session picker. Each is shown
+    /// by its label, never its ID.
+    let snapshots: [LocalInsight]
     let copy: [String: String]
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
@@ -22,11 +23,12 @@ struct InsightsSessionsTab: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
-                if !snapshotIDs.isEmpty {
+                if !snapshots.isEmpty {
                     GlassSelect(text("analytics_drill_session"), selection: Binding(
                         get: { model.selected ?? "" },
                         set: { model.select($0) }
-                    ), options: snapshotIDs.map { GlassPickerOption($0, value: $0) })
+                    ), options: InsightsSessionsWords.pickerChoices(snapshots, copy: copy)
+                        .map { GlassPickerOption($0.title, value: $0.value) })
                     .frame(maxWidth: 360)
                 }
                 if let drill = model.drill {
@@ -45,7 +47,7 @@ struct InsightsSessionsTab: View {
                             markerCards(drill)
                         }
                     }
-                } else if model.failed || snapshotIDs.isEmpty {
+                } else if model.failed || snapshots.isEmpty {
                     Text(text("analytics_unavailable")).insightsError()
                 }
                 if model.busy { GlassSpinner() }

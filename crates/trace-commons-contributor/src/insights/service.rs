@@ -1597,6 +1597,15 @@ mod tests {
                 "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
             ),
             ("analytics_glance_tokens_only", "{tokens} tokens"),
+            // A saved session's picker and drill-down label, never its id.
+            (
+                "analytics_session_label",
+                "{date} {time} \u{b7} {harness} \u{b7} {t} tokens",
+            ),
+            (
+                "analytics_session_label_undated",
+                "Undated \u{b7} {harness} \u{b7} {t} tokens",
+            ),
             (
                 "analytics_setting_ledger_feed",
                 "Count tokens in routed calls",
