@@ -1409,8 +1409,10 @@ be production (GCS store, Cloud KMS key wrapper, managed EdDSA tokens, no
 static tokens). Set `TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR`,
 `TRACE_COMMONS_PIPELINE_CHECK_RUN_ID` and
 `TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH` on the service for one boot.
-After every startup refusal has passed, ingest writes
-`pipeline_production_adapters.result.json` and `.evidence.json` there:
+After every startup refusal has passed (the scheduler validations, the
+`TRACE_COMMONS_BIND` address and the bind itself), just before it serves,
+ingest writes `pipeline_production_adapters.result.json` and `.evidence.json`
+there. A boot refused at any of those writes nothing:
 
 - the revision must be the build's (`pipeline_check_revision_mismatch` refuses
   the start otherwise);

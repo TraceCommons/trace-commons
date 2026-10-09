@@ -1278,8 +1278,10 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     .await
     .unwrap();
 
-    // Not requested: nothing written, the start continues.
-    let quiet = tempfile::tempdir().unwrap();
+    // Not requested (no variable set): the start continues. With no
+    // variable there is no directory to write to, so the outcome is the
+    // answer. A directory alone is not a request either: an incomplete set
+    // refuses the start, and nothing reaches that directory.
     assert_eq!(
         emit_production_adapters_check(
             PipelineCheckVars::default(),
@@ -1291,6 +1293,23 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
         )
         .unwrap(),
         ProductionAdaptersEmit::NotRequested
+    );
+    let quiet = tempfile::tempdir().unwrap();
+    assert_eq!(
+        emit_production_adapters_check(
+            PipelineCheckVars {
+                dir: Some(quiet.path().to_string_lossy().into_owned()),
+                ..PipelineCheckVars::default()
+            },
+            Some(&revision()),
+            &service,
+            &components,
+            production_infrastructure(),
+            "disabled",
+        )
+        .unwrap_err()
+        .to_string(),
+        "pipeline_check_environment_incomplete"
     );
     assert_eq!(std::fs::read_dir(quiet.path()).unwrap().count(), 0);
 
@@ -1449,6 +1468,60 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
         evidence["infrastructure_blockers"],
         serde_json::json!(["artifact_store_not_production"])
     );
+}
+
+/// PR #1295 review, Minor 3: `pipeline_production_adapters` is emitted only
+/// after every startup refusal that follows assembly -- the scheduler
+/// validations, the bind address and the bind itself -- so a refused boot
+/// leaves no result for the corrected one to keep as `already_emitted`.
+#[tokio::test]
+async fn a_boot_refused_after_assembly_writes_no_result() {
+    let components = test_components(classifying_privacy());
+    let service = Boot {
+        components: Some(components.clone()),
+        ..Boot::production()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+    state.pipeline_service = Some(service);
+    let state = Arc::new(state);
+    let dir = tempfile::tempdir().unwrap();
+    let start = |bind: String| {
+        let state = state.clone();
+        let components = components.clone();
+        let vars = emit_vars(dir.path(), &revision());
+        async move {
+            crate::finish_ingest_startup(
+                &state,
+                Some(components.as_ref()),
+                &bind,
+                vars,
+                Some(&revision()),
+            )
+            .await
+        }
+    };
+
+    assert!(start("not-an-address".to_string()).await.is_err());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    assert!(
+        start(taken.local_addr().unwrap().to_string())
+            .await
+            .is_err()
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // The corrected boot emits (a `fail`: the test state's infrastructure
+    // is not the production profile).
+    let listener = start("127.0.0.1:0".to_string()).await.unwrap();
+    drop(listener);
+    let result = read_json(dir.path().join("pipeline_production_adapters.result.json"));
+    assert_eq!(result["run_id"], "qproduction");
+    assert_eq!(result["status"], "fail");
 }
 
 /// The embedder's `model_id` is what every index entry and sealed index
