@@ -194,20 +194,14 @@ def load_pin(path):
     return pin
 
 
-def export_hf_corpus(run, pin_path, env, *, local_dir=None):
-    """Runs the Task 4 export binary with the settings from `pin_path`,
-    writing into `run.run_dir / "hf"`, then checks the manifest against the
-    pin's digests. Returns `[bootstrap-corpus.json, holdout-corpus.json]`.
 
-    `local_dir`, when given, is passed through as `--local-jsonl-dir`
-    (a local fixture run, as CI uses); the pin's own `source_digest` and
-    `order_digest` are used as `--expected-*-digest` either way, exactly as
-    the port script does for both its local and remote modes. `--cache-dir`
-    is always `HF_CACHE_DIR` (one code path for both modes; harmless when
-    `local_dir` is set, since no download happens then), so a real network
-    export never writes outside the worktree."""
-    pin = load_pin(pin_path)
-    output_dir = run.run_dir / "hf"
+def export_command(pin, output_dir, cache_dir, *, local_dir=None, expected_digests=True):
+    """The export binary's command line for the pin fields `pin`, writing
+    into `output_dir` and downloading into `cache_dir`. With
+    `expected_digests` (the default) the pin's `source_digest` and
+    `order_digest` are passed as `--expected-*-digest`, and the binary refuses
+    a source that moved; without it (`pipeline.py hf-pin record` and the
+    network canary, which compare every digest themselves) none is passed."""
     command = [
         "cargo",
         "run",
@@ -237,15 +231,35 @@ def export_hf_corpus(run, pin_path, env, *, local_dir=None):
         str(pin["max_words"]),
         "--expected-instrument-count",
         str(pin["expected_instrument_count"]),
-        "--expected-source-digest",
-        str(pin["source_digest"]),
-        "--expected-order-digest",
-        str(pin["order_digest"]),
     ]
-    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    command += ["--cache-dir", str(HF_CACHE_DIR)]
+    if expected_digests:
+        command += [
+            "--expected-source-digest",
+            str(pin["source_digest"]),
+            "--expected-order-digest",
+            str(pin["order_digest"]),
+        ]
+    command += ["--cache-dir", str(cache_dir)]
     if local_dir is not None:
         command += ["--local-jsonl-dir", str(local_dir)]
+    return command
+
+def export_hf_corpus(run, pin_path, env, *, local_dir=None):
+    """Runs the Task 4 export binary with the settings from `pin_path`,
+    writing into `run.run_dir / "hf"`, then checks the manifest against the
+    pin's digests. Returns `[bootstrap-corpus.json, holdout-corpus.json]`.
+
+    `local_dir`, when given, is passed through as `--local-jsonl-dir`
+    (a local fixture run, as CI uses); the pin's own `source_digest` and
+    `order_digest` are used as `--expected-*-digest` either way, exactly as
+    the port script does for both its local and remote modes. `--cache-dir`
+    is always `HF_CACHE_DIR` (one code path for both modes; harmless when
+    `local_dir` is set, since no download happens then), so a real network
+    export never writes outside the worktree."""
+    pin = load_pin(pin_path)
+    output_dir = run.run_dir / "hf"
+    HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    command = export_command(pin, output_dir, HF_CACHE_DIR, local_dir=local_dir)
 
     run_child(run, "hf_corpus_export", command, env)
 

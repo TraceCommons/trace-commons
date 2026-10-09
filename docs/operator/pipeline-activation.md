@@ -2383,6 +2383,59 @@ while a tenant can still run the old one. For each such tenant:
 A tenant left on the drain list for good keeps no active bundle and runs no
 new receipt, so step 3 may leave it on the drain list.
 
+## Gate decision rows from Settle
+
+A run under a compatibility bundle writes one `trace_gate_decisions` row for
+its submission when its Settle commits, in the same transaction, so the
+features that read that table see pipeline traffic: duplicate clustering, the
+contributor cap, the score listings and account trust. A run under any other
+bundle, a run rejected before Settle, and a Settle commit refused for a stale
+lease or a suspended policy write none. The row is marked `source =
+'pipeline_settle'` and names its run in `pipeline_run_id` (V116); `main`'s own
+rows read `legacy_gate`. V116 allows one pipeline row per submission.
+
+What the row holds:
+
+- the Score evidence: perplexity, tail fraction, novelty, their peaks, the
+  two pass flags, the nearest-neighbour hash, chunk counts, the index
+  cardinality, and the credit quality and its calibration version;
+- `gate_policy_version` = `pipeline:<bundle_id>` and `gate_version_hash` =
+  the bundle's Score configuration hash;
+- `embedding_evidence_hash` = the sealed index command's hash, or the hash of
+  `pipeline_no_index_command` when the Score sealed none;
+- `attestation_chain_hash` = the SHA-256 of the Score outcome's canonical
+  JSON;
+- `credit_withheld_reason` = the Trace Credit leg's label when one of
+  `main`'s NoveltyUtility checks withheld the award.
+
+The vector entry and snapshot ids, the per-author columns and every column a
+sweep fills (dedup, contributor cap, correction, composite score) start
+NULL. Dedup is not filled by a periodic pass: the recluster pass skips rows
+with no `dedup_simhash`, and only the operator-run re-derivation
+(`POST /v1/admin/rederive-dedup`) computes one for a row that has none. Until
+an operator runs it, pipeline rows are not clustered and their
+`dedup_cluster_size` stays NULL for the contributor cap. The credit-quality sweep
+(`POST /v1/admin/score-credit-quality`) skips pipeline rows, since the Score
+already computed their credit quality under the bundle. The perplexity
+re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
+submission with a pipeline row: rewriting its perplexity would leave the
+row's verdict disagreeing with the Score that awarded the credit and with
+its `attestation_chain_hash`, and its per-author columns stay NULL.
+
+Settle checks a compatibility run's Score evidence before the index write or
+any settlement leg. Evidence that lacks a field the row needs fails the run
+terminally with `pipeline_gate_decision_evidence_incomplete`, with nothing
+paid and no row written; it is deterministic, so the run is not retried. A
+value too large for its column (the chunk aggregate saturates a perplexity
+on purpose) is stored saturated, as `main`'s gate writer stores it. If the
+submission already has a pipeline row naming another run, the commit fails
+the run terminally with `pipeline_gate_decision_conflict` and leaves that
+row as it is; a completed leg stays complete.
+
+A withdrawal, a revocation follow-up and a retention follow-up clear the
+row's dedup columns, as `main`'s withdrawal does for its rows, and change
+nothing else on it; the row stays as the history account trust reads.
+
 ## Retention of pipeline submissions
 
 `main`'s retention maintenance covers the submissions with a pipeline run,
