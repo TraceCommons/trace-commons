@@ -189,8 +189,9 @@ pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Sessions you send are now judg
 /// DRAFT, NEEDS APPROVAL.
 pub const OFFER_NOTIFY_IDLE_EXISTING: &str = "Sessions that have been idle for a few days can now be a notification. \
      At most once a week.";
-/// Accepts an offer. DRAFT, NEEDS APPROVAL.
-pub const OFFER_TURN_ON: &str = "Turn on";
+/// Accepts an offer. "Enable", not "Turn on", per Ron's #1303 design
+/// review. DRAFT, NEEDS APPROVAL.
+pub const OFFER_ENABLE: &str = "Enable";
 /// Declines an offer. DRAFT, NEEDS APPROVAL.
 pub const OFFER_NO_THANKS: &str = "No thanks";
 
@@ -294,7 +295,7 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
         OFFER_NOTIFY_VERDICTS_EXISTING,
     ),
     ("OFFER_NOTIFY_IDLE_EXISTING", OFFER_NOTIFY_IDLE_EXISTING),
-    ("OFFER_TURN_ON", OFFER_TURN_ON),
+    ("OFFER_ENABLE", OFFER_ENABLE),
     ("OFFER_NO_THANKS", OFFER_NO_THANKS),
     ("SETTING_SUGGESTIONS", SETTING_SUGGESTIONS),
     ("SETTING_SUGGESTIONS_HELP", SETTING_SUGGESTIONS_HELP),
@@ -322,7 +323,7 @@ mod tests {
 
     /// Every key spec section 6 names, the combined rows split into one key
     /// each. The offer buttons the spec gives as words only are
-    /// `OFFER_TURN_ON` and `OFFER_NO_THANKS`.
+    /// `OFFER_ENABLE` and `OFFER_NO_THANKS`.
     const SPEC_KEYS: &[&str] = &[
         "NUDGE_BACKLOG_TITLE",
         "NUDGE_BACKLOG_BODY",
@@ -358,7 +359,7 @@ mod tests {
         "OFFER_NOTIFY_VERDICTS",
         "OFFER_NOTIFY_VERDICTS_EXISTING",
         "OFFER_NOTIFY_IDLE_EXISTING",
-        "OFFER_TURN_ON",
+        "OFFER_ENABLE",
         "OFFER_NO_THANKS",
         "DIGEST_PENDING_REASSURANCE",
         "DIGEST_VERDICT_SENTENCE",
@@ -627,6 +628,20 @@ mod tests {
         for (key, text) in NUDGE_COPY {
             assert!(!text.to_lowercase().contains("unpurposed"), "{key}: {text}");
         }
+    }
+
+    /// Ron's #1303 design review, item 11: the offer buttons.
+    #[test]
+    fn the_offer_buttons_are_enable_and_no_thanks() {
+        let key = |want: &str| {
+            NUDGE_COPY
+                .iter()
+                .find(|(k, _)| *k == want)
+                .map(|(_, text)| *text)
+        };
+        assert_eq!(key("OFFER_ENABLE"), Some("Enable"));
+        assert_eq!(key("OFFER_NO_THANKS"), Some("No thanks"));
+        assert_eq!(key("OFFER_TURN_ON"), None);
     }
 
     /// No path, folder label or title placeholder can reach a nudge.
