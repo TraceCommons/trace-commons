@@ -505,6 +505,44 @@ async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
+/// The fold is gated on the counter pass as well as the ledger feed: with
+/// the pass off and the feed on, the store and key still there, nothing is
+/// folded.
+#[test]
+fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
+    let s = shared();
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let call_at = |id: i64| crate::routing::RoutedExchange {
+        id: Some(id),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some(format!("SESSION-SECRET-{id}")),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    };
+    let first = crate::routing::FixedLedger::new(vec![call_at(1)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &first);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    let before = std::fs::read(rows_file(&s)).unwrap();
+
+    s.settings.lock().unwrap().insights_counter_pass = false;
+    let second = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+    assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
+
+    // And on again, the call made meanwhile is folded once.
+    s.settings.lock().unwrap().insights_counter_pass = true;
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &second);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
+}
+
 /// Owner decision on #1287: unenroll also turns the counter pass off, in
 /// memory and on disk, so the next watcher tick does not rebuild the store
 /// it just cleared under a new key.

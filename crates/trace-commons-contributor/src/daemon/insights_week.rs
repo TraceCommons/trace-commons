@@ -718,7 +718,14 @@ impl CounterPass {
     /// config files, the private-inference state and settings locks) are
     /// asked with no lock of this pass held. The cache lock is then held
     /// across load, fold and write, as `clear` holds it across removal, so
-    /// the two cannot interleave.
+    /// the two cannot interleave. The key is read before that lock, so a
+    /// keychain's latency never holds an `insights_week` answer.
+    ///
+    /// The counter pass writes from the store it loaded when it began, so a
+    /// fold landing inside a pass would be written over, tallies and cursor
+    /// together, and the next fold would take the rows still in the window
+    /// again. In the daemon they do not overlap: the tick loop refreshes the
+    /// ledger, and so folds, before it runs the watcher's pass, in sequence.
     pub(crate) fn fold_ledger(
         &self,
         enabled: &dyn Fn() -> bool,
@@ -767,13 +774,15 @@ impl CounterPass {
             Vec::new()
         };
 
-        let mut cached = self.cached.lock().map_err(|_| UNREADABLE_STORE)?;
-        if self.cleared.load(Ordering::SeqCst) != cleared {
-            return Ok(FoldSummary::default());
-        }
         let Some(key) = self.keys.load().map_err(|_| UNREADABLE_KEY)? else {
             return Ok(FoldSummary::default());
         };
+        let mut cached = self.cached.lock().map_err(|_| UNREADABLE_STORE)?;
+        // A clear since the settings were read: the key just read may be
+        // the one it forgot, and the store is gone. Nothing is written.
+        if self.cleared.load(Ordering::SeqCst) != cleared {
+            return Ok(FoldSummary::default());
+        }
         let fingerprint = key_fingerprint(&key);
         let mut store = match self.load_into(&mut cached)? {
             Some(store) if store.key_fingerprint == fingerprint => (*store).clone(),
