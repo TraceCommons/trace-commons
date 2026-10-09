@@ -130,7 +130,7 @@ pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
 /// action opens Review. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
 /// [`NOTIFY_IDLE_BODY`] for one.
-pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE;
+pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_ALTERNATIVE_ONE;
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
 /// Folded into a due digest after its first sentence, never a separate
