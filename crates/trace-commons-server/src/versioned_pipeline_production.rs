@@ -1089,6 +1089,64 @@ mod tests {
         );
     }
 
+    /// `from_lookup` reads through its lookup and refuses before it loads or
+    /// calls anything: a missing scorer pin, an index root that nests with
+    /// the legacy root, and a missing endpoint, each with its own refusal.
+    #[cfg(feature = "near-ai-scorer")]
+    #[tokio::test]
+    async fn from_lookup_refuses_before_building_anything() {
+        let inputs = || gate_env::PipelineComponentInputs {
+            tenant_policies: Arc::new(BTreeMap::new()),
+            require_tenant_submission_policy: false,
+            db_policy_reads: Arc::new(|_: &str| false),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("vector-index");
+        let legacy_text = legacy.to_string_lossy().to_string();
+        let refusal = |pairs: Vec<(&'static str, String)>, root: Option<std::path::PathBuf>| {
+            let inputs = inputs();
+            async move {
+                let lookup = move |var: &str| {
+                    pairs
+                        .iter()
+                        .find(|(key, _)| *key == var)
+                        .map(|(_, value)| value.clone())
+                };
+                PipelineGateComponents::from_lookup(inputs, &lookup, root.as_deref())
+                    .await
+                    .err()
+                    .expect("refused")
+                    .to_string()
+            }
+        };
+        assert_eq!(
+            refusal(vec![], Some(dir.path().join("pipeline"))).await,
+            "pipeline_scorer_model_missing"
+        );
+        let pinned = vec![
+            (
+                gate_env::TRACE_COMMONS_NEAR_AI_MODEL,
+                "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+            ),
+            (
+                gate_env::TRACE_COMMONS_VECTOR_INDEX_ROOT,
+                legacy_text.clone(),
+            ),
+        ];
+        assert_eq!(
+            refusal(pinned.clone(), Some(legacy.join("pipeline"))).await,
+            PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL
+        );
+        assert_eq!(
+            refusal(pinned.clone(), None).await,
+            gate_env::PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL
+        );
+        assert_eq!(
+            refusal(pinned, Some(dir.path().join("pipeline"))).await,
+            "TRACE_COMMONS_NEAR_AI_BASE_URL must be set when TRACE_COMMONS_GATE_SERVICE=\"enclave_near_ai\""
+        );
+    }
+
     /// The qualification the assembly binds is the components' own: the
     /// private production path, and only it, yields qualified adapters.
     #[cfg(feature = "near-ai-scorer")]
