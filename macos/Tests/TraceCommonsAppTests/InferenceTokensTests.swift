@@ -79,6 +79,51 @@ final class InferenceTokensTests: XCTestCase {
         }
     }
 
+    // MARK: Reload on appear
+
+    /// The recorded `inference_calls` page with every call's `tokens` taken
+    /// out, as a daemon sends it once the ledger feed is turned off.
+    static func callsWithoutTokens(_ client: SampleDaemonClient) throws -> String {
+        let recorded = try XCTUnwrap(client.json(for: "inference_calls"))
+        var page = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(recorded.utf8)) as? [String: Any])
+        let calls = try XCTUnwrap(page["calls"] as? [[String: Any]])
+        page["calls"] = calls.map { call in call.filter { $0.key != "tokens" } }
+        return String(decoding: try JSONSerialization.data(withJSONObject: page), as: UTF8.self)
+    }
+
+    /// Turning the ledger feed off in Settings leaves the calls already
+    /// loaded holding their tokens; coming back to the tab re-reads the
+    /// page, so the lines go as soon as the daemon stops sending them, not
+    /// when the next call arrives.
+    func test_aReloadOnAppearDropsTokensTheDaemonNoLongerSends() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let store = InferenceStore(client: client)
+        await store.load()
+        let loaded = try XCTUnwrap(store.calls?.calls)
+        XCTAssertTrue(loaded.contains { $0.tokens != nil }, "the recorded page carries tokens")
+
+        client.replaceReply("inference_calls", with: try Self.callsWithoutTokens(client))
+        XCTAssertTrue(store.calls?.calls.contains { $0.tokens != nil } ?? false, "nothing re-reads before the tab appears")
+
+        await store.appeared()
+        let reloaded = try XCTUnwrap(store.calls?.calls)
+        XCTAssertEqual(reloaded.count, loaded.count)
+        XCTAssertTrue(reloaded.allSatisfy { $0.tokens == nil }, "a token line outlived the feed")
+        XCTAssertNil(store.failures["inference_calls"])
+    }
+
+    /// The tab calls the reload each time it appears, beside the settings
+    /// refresh that re-reads the ledger feed's switch; it writes nothing.
+    func test_theTabReloadsTheStoreWhenItAppears() throws {
+        let views = try MonitorNavigationTests.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertTrue(views.contains(".task { await store.appeared() }"))
+        XCTAssertTrue(views.contains(".onAppear { model.refreshAll() }"))
+        let store = try MonitorNavigationTests.text("Views/Monitor/InferenceStore.swift")
+        let start = try XCTUnwrap(store.range(of: "func appeared() async {"))
+        let body = store[start.upperBound...].prefix { $0 != "}" }
+        XCTAssertFalse(body.contains("set"), "the reload on appear writes: \(body)")
+    }
+
     // MARK: Source rules
 
     func test_aCallRowDrawsTokensOnlyWhenTheCallCarriesThem() throws {

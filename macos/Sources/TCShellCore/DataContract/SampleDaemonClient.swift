@@ -58,11 +58,23 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     public var overrideCalls: [String] { lock.withLock { recordedOverrideCalls } }
     private var recordedOverrideCalls: [String] = []
 
+    /// Replies a test put in place of the recorded ones, by method.
+    private var replacedReplies: [String: String] = [:]
+
+    /// Answers `method` with `json` from now on, in place of the recorded
+    /// reply, so a test can show the daemon changing what it sends (a
+    /// ledger feed turned off). A test seam: no screen calls it.
+    public func replaceReply(_ method: String, with json: String) {
+        lock.withLock { replacedReplies[method] = json }
+    }
+
     /// The raw JSON this set answers `method` with: the IPC `result`
     /// object, or `nil` for a set where the core is down. `status` carries
     /// the override in force, as the daemon's `status_value` does.
     public func json(for method: String) -> String? {
-        guard set != .coreDown, let reply = SampleDaemonData.reply(method, in: set) else { return nil }
+        guard set != .coreDown else { return nil }
+        let replaced = lock.withLock { replacedReplies[method] }
+        guard let reply = replaced ?? SampleDaemonData.reply(method, in: set) else { return nil }
         guard method == "status" else { return reply }
         lock.lock()
         let active = contributionOverride

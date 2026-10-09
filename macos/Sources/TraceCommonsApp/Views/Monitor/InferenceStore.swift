@@ -105,6 +105,13 @@ final class InferenceStore {
         }
     }
 
+    /// The tab came into view: everything is read again, so a call loaded
+    /// before the ledger feed was turned off in Settings stops drawing its
+    /// tokens now rather than when the next call arrives. Reads only.
+    func appeared() async {
+        await load()
+    }
+
     func load() async {
         async let harnesses: Void = loadHarnesses()
         async let calls: Void = loadCalls()

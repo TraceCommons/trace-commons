@@ -49,6 +49,9 @@ struct InferenceTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { model.refreshAll() }
+        // The settings refresh re-reads the ledger feed's switch; this
+        // re-reads the calls, so tokens the daemon stopped sending go too.
+        .task { await store.appeared() }
     }
 
     private var ledger: some View {
