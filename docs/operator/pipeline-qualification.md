@@ -488,6 +488,18 @@ results of a local `qualify` run is therefore never ready: it lacks these three
 results, and its restore drill carries the blocker
 `filesystem_restore_local_only`.
 
+The production run's four package-bearing results must come from the
+production assembly. `assemble_production_pipeline`
+(`trace_commons_server::versioned_pipeline_production`) is library code, so
+the integration targets that emit them can build it
+(`production_assembly_is_constructible_from_the_library`), but today
+`pipeline_bundle_qualification` still qualifies the reference candidate: it
+asserts that the candidate's scorer and embedder are the reference ones, that
+neither is production-qualified, and that its configuration is not
+qualifiable. All five assertions flip in production mode. Switching the check
+onto the production assembly is Slice B-2; until then `promote package-checks`
+refuses with `harness_production_assembly_unavailable`.
+
 ## The production run: `pipeline.py promote`
 
 Spec: `docs/superpowers/specs/2026-10-08-pipeline-production-assembly-design.md`
