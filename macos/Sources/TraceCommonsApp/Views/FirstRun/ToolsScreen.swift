@@ -175,7 +175,7 @@ enum ToolsScreenLayout {
         URL(fileURLWithPath: path).lastPathComponent
     }
 
-    /// The trajectory row's picker. "I don't use it" withdraws the folder;
+    /// The trajectory row's picker. "Not used" withdraws the folder;
     /// the placeholder and "Watch this folder" leave it as it is.
     static func selectTrajectory(_ answer: ToolAnswer?, in state: inout FirstRunState) {
         if answer == .dontUse { state.withdrawTrajectory() }

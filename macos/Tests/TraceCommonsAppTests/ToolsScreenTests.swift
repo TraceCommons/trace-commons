@@ -236,7 +236,7 @@ final class ToolsScreenTests: XCTestCase {
         XCTAssertTrue(screen.contains("ToolsScreenLayout.answer("))
     }
 
-    /// The trajectory row is withdrawn with "I don't use it" on its picker.
+    /// The trajectory row is withdrawn with "Not used" on its picker.
     func test_theTrajectoryRowCanBeWithdrawn() throws {
         var state = FirstRunState(tier: .custom, step: .tools)
         ToolsScreenLayout.choose(.trajectory, path: "/t", in: &state)

@@ -41,7 +41,7 @@ enum ToolAnswerRowLayout {
         asks(candidate, in: state)
     }
 
-    /// "Get {tool}" sits on a row that does not ask, and only when the core
+    /// "Download" sits on a row that does not ask, and only when the core
     /// gave the tool an install page (Ron's `tool.installUrl ? ... : null`).
     static func offersGetTool(_ candidate: SourceCandidate, installURL: URL?, in state: FirstRunState) -> Bool {
         !asks(candidate, in: state) && installURL != nil
@@ -66,7 +66,7 @@ enum ToolAnswerRowLayout {
     }
 
     /// `chosenFolder` is the row's last "Choose a different folder", kept
-    /// so "I don't use it" and back to Watch returns to it, not discovery's.
+    /// so "Not used" and back to Watch returns to it, not discovery's.
     static func select(
         _ answer: ToolAnswer?, for candidate: SourceCandidate, in state: inout FirstRunState,
         chosenFolder: String? = nil
@@ -97,7 +97,7 @@ enum ToolAnswerRowLayout {
 /// is the core's.
 ///
 /// `meta` is an optional caption under the path (`ToolsScreenLayout.meta`).
-/// `installURL` names where "Get {tool}" leads; with none there is no
+/// `installURL` names where "Download" leads; with none there is no
 /// button.
 struct ToolAnswerRow: View {
     let copy: FirstRunCopy.Folders
@@ -161,7 +161,7 @@ struct ToolAnswerRow: View {
                     let installURL
                 {
                     // Not on this Mac: not asked, and no line of its own
-                    // (owner, 2026-10-08); "Get {tool}" only with an install
+                    // (owner, 2026-10-08); "Download" only with an install
                     // page.
                     Button {
                         NSWorkspace.shared.open(installURL)
@@ -175,6 +175,8 @@ struct ToolAnswerRow: View {
                     .buttonStyle(GlassButtonStyle(.glass))
                     .fixedSize()
                     .help(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
+                    // The label is "Download"; VoiceOver names the tool.
+                    .accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))
                 }
             }
         }

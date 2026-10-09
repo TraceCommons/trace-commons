@@ -64,7 +64,7 @@ final class FoldersScreenTests: XCTestCase {
         ToolAnswerRowLayout.select(.dontUse, for: found, in: &answered)
         XCTAssertTrue(FirstRunNavigation.canContinue(answered, candidates: [found, missing], requiredScope: nil))
 
-        // The row's words are the core's: "Get {tool}", and no install line
+        // The row's words are the core's: "Download", and no install line
         // (owner, 2026-10-08). The button is the folder picker's neutral
         // glass pill, not a coloured one.
         let folders = try copy().folders
@@ -72,10 +72,12 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertFalse(row.contains("copy.notInstalled"))
         XCTAssertTrue(row.contains("copy.getTool"))
         let getTool = try XCTUnwrap(row.range(of: "ToolAnswerRowLayout.fill(copy.getTool, tool: candidate.source)"))
-        let getStyle = String(row[getTool.upperBound...].prefix(400))
+        let getStyle = String(row[getTool.upperBound...].prefix(800))
         XCTAssertTrue(getStyle.contains(".buttonStyle(GlassButtonStyle(.glass))"), getStyle)
         XCTAssertFalse(row.contains("GlassButtonStyle(.secondary"))
-        XCTAssertTrue(folders.getTool.contains("{tool}"))
+        // "Download", with the tool named for VoiceOver (owner, 2026-10-08).
+        XCTAssertEqual(folders.getTool, "Download")
+        XCTAssertTrue(getStyle.contains(".accessibilityLabel(ToolAnswerRowLayout.fill(copy.downloadTool, tool: candidate.source))"), getStyle)
         XCTAssertTrue(row.contains("GlassToolTile("))
         XCTAssertTrue(row.contains("large: true"))
         XCTAssertTrue(row.contains("GlassPicker("))
@@ -235,7 +237,7 @@ final class FoldersScreenTests: XCTestCase {
 
     /// While a commit runs, nothing on the screen can change the plan being
     /// committed: the rows are disabled and the frame offers no tier switch.
-    /// A row flipped mid-commit would otherwise show "I don't use it" while
+    /// A row flipped mid-commit would otherwise show "Not used" while
     /// the daemon keeps watching the folder (`.start` sends no roots).
     func test_rowsAndTierSwitchAreHeldWhileCommitting() throws {
         XCTAssertFalse(FoldersScreenLayout.rowsEnabled(isCommitting: true))
@@ -322,7 +324,7 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertTrue(row.contains("ToolAnswerRowLayout.options(for: candidate, in: state)"))
     }
 
-    /// A chosen folder survives "I don't use it" and back to Watch.
+    /// A chosen folder survives "Not used" and back to Watch.
     func test_aChosenFolderSurvivesDontUseAndBack() {
         let claude = Self.candidate(.claudeCode, exists: true)
         var state = FirstRunState(step: .folders)
@@ -354,7 +356,7 @@ final class FoldersScreenTests: XCTestCase {
         XCTAssertEqual(fresh.toolAnswers[.claudeCode], .watch(path: claude.path))
     }
 
-    /// "Get {tool}" opens the tool's install page: every tool the Mac is
+    /// "Download" opens the tool's install page: every tool the Mac is
     /// asked about has one, from the core, over https.
     func test_everyToolHasAnInstallLink() throws {
         let folders = try copy().folders

@@ -485,11 +485,14 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "app watch?",
             body: "We've found the following tools on your device. Traces work by reading coding-session transcripts from locations you specify. Select an option from each of the tools below to continue.",
             loading: "Looking for coding tools on this Mac…",
-            watch: "Watch this folder",
-            dont_use: "I don’t use it",
+            // Approved 2026-10-08 (button rule): the picker's answers.
+            watch: "Watch",
+            dont_use: "Not used",
             watch_question: "{tool}: watch this folder?",
             choose_folder: "Choose a different folder for {tool}",
-            get_tool: "Get {tool}",
+            // Approved 2026-10-08 (button rule); the row names the tool, and
+            // `download_tool` is the button's accessible name.
+            get_tool: "Download",
             download_tool: "Download {tool}",
             install_urls: InstallUrls {
                 claude_code: "https://claude.com/product/claude-code",
@@ -515,7 +518,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
             neither: "Neither",
-            one_folder_per_tool: "{tool} can watch only one folder. Answer “I don’t use it” on one of its rows.",
+            one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -863,7 +866,7 @@ mod tests {
     fn a_tool_watched_twice_has_its_own_line() {
         let tools = first_run_copy().tools;
         assert!(tools.one_folder_per_tool.contains("{tool}"));
-        assert!(tools.one_folder_per_tool.contains("I don’t use it"));
+        assert!(tools.one_folder_per_tool.contains("“Not used”"));
     }
 
     /// Start's failures each have a sentence that is true when it is shown.

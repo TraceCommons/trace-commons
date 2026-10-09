@@ -354,7 +354,7 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(tools.contains("dash: [4, 3]"))
         XCTAssertTrue(tools.contains("GlassTokens.Color.purpleText"))
         XCTAssertFalse(tools.contains(".opacity(dragging"))
-        // "Get {tool}": the neutral glass pill with the download icon.
+        // "Download": the neutral glass pill with the download icon.
         let row = try Self.appSource("Views/FirstRun/ToolAnswerRow.swift")
         XCTAssertTrue(row.contains("GlassButtonStyle(.glass)"))
         XCTAssertTrue(row.contains("systemImage: \"arrow.down.to.line\""))

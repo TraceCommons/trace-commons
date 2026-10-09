@@ -111,7 +111,7 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
         XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
 
-        // "I don't use it" on the added row declares nothing for the tool:
+        // "Not used" on the added row declares nothing for the tool:
         // its own row's answer stands.
         state.answerAdded(path: "/Volumes/moved/codex", watched: false)
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
