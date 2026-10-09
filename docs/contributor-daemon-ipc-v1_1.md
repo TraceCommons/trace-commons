@@ -1131,6 +1131,15 @@ folder label, an id or a title.
   final with nothing to say is not news at all: finals whose credit rounds
   to zero add nothing to `count` and arm nothing on their own. It is never
   logged.
+- `text` is present exactly when there is a lead: `{title, body, actions:
+  [{id, label}], panel_row}`, the leading card's words and its menu-bar panel
+  row, composed by the daemon from the same counts as the fields above (with
+  the mission clause when some subjects fit a mission, and the estimate
+  clause only when the estimate is `drawn`). A shell draws these and
+  composes nothing. `body` is empty when the title says everything.
+- `mark_text` is present exactly while `mark` is `news` or `ready`:
+  `{accessibility, tooltip}`, the mark's accessibility sentence and its
+  tooltip clause.
 - `cooldown_until` is present only while an in-app "Not now" silences a kind
   that would otherwise lead and nothing else leads, and says when that
   lapses.
@@ -7020,13 +7029,13 @@ relaxation of origin/CORS/CSP controls.
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
 | `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, or a history poll found verdict news or made a stale `status.nudge` readable again (a routine poll publishes nothing) | `{}` |
-| `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
+| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, credit_pending, text, fold?}` -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
 | `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
-| `reengage_due` | **opt-in**: a standalone re-engagement notification is due; sent only to a subscriber that named it in `subscribe`'s `accepts` | not published yet: the name and its opt-in rule are reserved here; the payload, `{kind, title, text, primary: {label, target}, secondary: {label}}`, is documented with the change that first publishes it |
+| `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's
 `/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
@@ -7089,19 +7098,53 @@ there is one: `reengage_due`. A subscriber names the ones it can render in
   declaration**; it does not add to it. Subscribing again without `accepts`
   withdraws it.
 
-The daemon counts live connections per declared event. The attention
-arbiter that will publish `reengage_due` (not yet in this version) is to
-publish a standalone notification, and stamp it against its caps, only while
-at least one live connection has declared `reengage_due`.
+The daemon counts live subscribers per declared event. The attention
+arbiter publishes a standalone `reengage_due`, and stamps it against its
+caps, only while at least one live subscriber has declared `reengage_due`.
 Otherwise the item stays deferred with the reason `no_renderer` and spends
 no budget, so an older shell never uses up a slot on a notification it cannot
 draw. A declaration ends with its connection, however the connection ends.
 
-The FFI's in-process `tc_subscribe` path (an embedded daemon, no socket) has
-no `subscribe` request to carry `accepts`. It behaves as a subscriber that
-accepted nothing: it never receives an opt-in event and never counts as a
-renderer. The FFI's attached path goes over the socket and follows the rules
-above.
+The FFI's in-process path (an embedded daemon, no socket) declares through
+`tc_subscribe_with_accepts(handle, accepts_json, cb, ctx)`, whose
+`accepts_json` is the same array: that subscription receives the events it
+declared and counts as a renderer until `tc_unsubscribe` returns. Plain
+`tc_subscribe` declares nothing: it never receives an opt-in event and never
+counts. On the attached path both send the declaration in the `subscribe`
+request and follow the rules above.
+
+### Re-engagement notifications
+
+On every digest tick the daemon runs the attention arbiter (nudge A2). It
+considers two kinds today:
+
+- `idle_sessions` (N1): waiting sessions in Ask-me folders, idle for the
+  threshold, that no earlier announcement named, while the shared in-app
+  "Not now" is not in force.
+- `verdicts_landed` (N2): verdict news from a fresh history poll that no
+  earlier announcement covered. News that grew since its announcement is a
+  candidate again, under its own interval.
+
+Nothing is a candidate while the daemon is paused, under a consent hold, or
+signed out. The arbiter then either folds the strongest candidate into a
+digest that posts this tick (`digest_due.fold`), or posts one on its own as
+`reengage_due`, or holds every candidate for a labelled reason (quiet hours,
+caps, the gap, no renderer, muted). It posts at most one per tick. Every
+announcement, folded or standalone, is recorded in the attention log the
+caps count against, and the sessions an idle announcement named are not
+named again.
+
+```json
+{"event": "reengage_due", "data": {"kind": "idle_sessions", "title": "Trace Commons",
+  "body": "2 sessions from Codex have been idle for 3 days or more. Review them to send or keep.",
+  "actions": [{"id": "review", "label": "Review"}, {"id": "not_now", "label": "Not now"}]}}
+```
+
+Every word is composed by the daemon; a shell posts `title` and `body` as
+they are and draws `actions` in order. `id` is `review` (open Traces at the
+idle sessions), `see_history` (open History), or `not_now` (send
+`nudge_decline` for the kind). The words are DRAFT, NEEDS APPROVAL; the
+whole fixed table is `tc_nudge_copy_json`.
 
 ## Queue states
 
