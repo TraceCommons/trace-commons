@@ -145,6 +145,32 @@ final class NudgeTracesTests: XCTestCase {
         XCTAssertEqual(store.rowTags, [:])
     }
 
+    /// A notification's Review, or the panel row, can open a fresh Monitor
+    /// window whose list asks for the idle filter before the window has
+    /// attached its client. The request survives that first attach and
+    /// narrows the list it loads, in either order.
+    func test_anIdleRequestBeforeTheFirstAttachNarrowsTheList() async throws {
+        let client = SampleDaemonClient(.normalDay)
+        let fresh = TracesStore(client: nil)
+        await fresh.requestIdleOnly()
+        // The daemon still starting: no client yet, the request waits.
+        fresh.attach(nil, awaiting: true)
+        fresh.attach(client)
+        await fresh.load()
+        XCTAssertTrue(fresh.idleOnly, "the first attach cleared the requested filter")
+        XCTAssertEqual(fresh.tree.allSessions.count, 2)
+
+        let attachedFirst = TracesStore(client: nil)
+        attachedFirst.attach(client)
+        await attachedFirst.requestIdleOnly()
+        XCTAssertTrue(attachedFirst.idleOnly)
+        XCTAssertEqual(attachedFirst.tree.allSessions.count, 2)
+
+        // Applied once: a later new client still starts unfiltered.
+        fresh.attach(SampleDaemonClient(.normalDay))
+        XCTAssertFalse(fresh.idleOnly)
+    }
+
     /// From the panel row or a notification, Review opens Traces; the
     /// window then narrows the list (`consumePending`).
     func test_theIdleDestinationOpensTraces() {

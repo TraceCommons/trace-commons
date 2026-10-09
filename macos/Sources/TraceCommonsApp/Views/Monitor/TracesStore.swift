@@ -38,6 +38,9 @@ final class TracesStore {
     /// Narrowed to the idle sessions the idle card named
     /// (`list_pending {filter: "idle_sessions"}`), by its Review.
     private(set) var idleOnly = false
+    /// An idle filter requested before any client was attached
+    /// (`requestIdleOnly`), applied by the first attach to one.
+    private var idleRequested = false
     /// A row's tags in the core's words (`tc_nudge_entry_tags_json`), by
     /// entry id; rows with nothing to draw are absent.
     private(set) var rowTags: [String: NudgeEntryTags] = [:]
@@ -74,6 +77,19 @@ final class TracesStore {
     func showIdleOnly(_ on: Bool) async {
         idleOnly = on
         await load()
+    }
+
+    /// The idle filter asked for from outside the list -- a notification's
+    /// Review, or the menu-bar panel row -- which can arrive before a
+    /// freshly opened window has attached its client. With no client yet it
+    /// is held, and the first attach to a client applies it instead of
+    /// clearing it.
+    func requestIdleOnly() async {
+        guard client != nil else {
+            idleRequested = true
+            return
+        }
+        await showIdleOnly(true)
     }
 
     /// A card button: its request, then its place. Review narrows (or, on
@@ -254,7 +270,10 @@ final class TracesStore {
         actionError = nil
         writeErrors = [:]
         folderNotice = nil
-        idleOnly = false
+        // A new daemon starts unfiltered, unless the filter was asked for
+        // before any client was here to load it.
+        idleOnly = client != nil && idleRequested
+        if client != nil { idleRequested = false }
         rowTags = [:]
         nudgeBusy = false
         nudgeError = nil

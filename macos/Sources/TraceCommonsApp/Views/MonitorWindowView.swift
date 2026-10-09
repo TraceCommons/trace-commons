@@ -381,7 +381,9 @@ struct MonitorWindowView: View {
                   selection: &selection, showsInspector: &showsInspector)
         navigation.pending = nil
         if destination == .idleSessions {
-            Task { await traces.showIdleOnly(true) }
+            // Held by the store until the window's first attach when the
+            // window has only just opened.
+            Task { await traces.requestIdleOnly() }
         }
     }
 
