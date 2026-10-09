@@ -668,9 +668,10 @@ pub struct DaemonSettings {
     /// [`DaemonSettings::load`] gives it the upgrade values for the new kinds
     /// and sets their one-time offers, per kind (see
     /// [`DaemonSettings::apply_notify_upgrade`]). With no file at all the
-    /// install is new and gets `NotifyKinds::default()`, unless an
-    /// old-format project policy holding a folder says otherwise; then it
-    /// gets the upgrade too.
+    /// install is new and gets `NotifyKinds::default()`, unless a project
+    /// policy an older build wrote says otherwise
+    /// (`ProjectPolicy::notify_kinds_known` unset); then it gets the
+    /// upgrade too.
     #[serde(
         default = "NotifyKinds::upgraded",
         deserialize_with = "notify_or_upgraded"
@@ -1298,17 +1299,21 @@ impl DaemonSettings {
                     }),
                 ..Self::default()
             };
-            // The same evidence says the install predates the notification
-            // kinds, so they get the upgrade a file without them gets. Any
-            // folder answered in an old-format policy counts, not only an
-            // armed one: an Ask me folder is an existing install too, and
-            // constraint 12 protects it as much.
-            if !policy.scrub_check_upgrade_recorded
+            // A policy an older build wrote says the install predates the
+            // notification kinds, so they get the upgrade a file without
+            // them gets. Whatever its folders' modes, and whether or not
+            // that build already marked the Scrub check migration: an Ask
+            // me install that ran a build after #1162 has
+            // `scrub_check_upgrade_recorded` set and no settings file, and
+            // constraint 12 protects it as much as an armed one. An
+            // old-format policy holding a folder counts as well, as it did
+            // before the marker existed.
+            let old_format_with_a_folder = !policy.scrub_check_upgrade_recorded
                 && policy
                     .projects
                     .keys()
-                    .any(|key| key != super::policy::UNKNOWN_PROJECT_KEY)
-            {
+                    .any(|key| key != super::policy::UNKNOWN_PROJECT_KEY);
+            if !policy.notify_kinds_known || old_format_with_a_folder {
                 settings.apply_notify_upgrade(&serde_json::Value::Null);
             }
             return Ok(settings);
@@ -1398,12 +1403,14 @@ impl DaemonSettings {
     /// a restart in between changes nothing.
     ///
     /// A missing file reaches here, with a `Null` stored value, only when
-    /// the project policy says the install is old: an old-format policy
+    /// the project policy says the install is old: a policy file an older
+    /// build wrote (`ProjectPolicy::notify_kinds_known` unset), whatever
+    /// its folders and its Scrub check marker, or an old-format policy
     /// (`scrub_check_upgrade_recorded` unset) holding a folder. A missing
-    /// file with no such evidence is a new install and keeps
-    /// `NotifyKinds::default()`. Daemon startup saves the file whenever an
-    /// offer is pending and no file exists, before the policy is marked
-    /// migrated, so the next load does not lose the evidence.
+    /// file with no such
+    /// evidence is a new install and keeps `NotifyKinds::default()`. Daemon
+    /// startup saves the file whenever an offer is pending and no file
+    /// exists, so the decision is on disk from the first start.
     fn apply_notify_upgrade(&mut self, stored: &serde_json::Value) {
         let held = |kind: &str| {
             stored
@@ -3159,6 +3166,60 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    /// A policy file as a build from before the notification kinds wrote
+    /// it: the same JSON, without the key that says this build created it.
+    fn save_as_an_older_build(
+        policy: &crate::daemon::policy::ProjectPolicy,
+        store: &crate::config::ConfigStore,
+    ) {
+        let mut value = serde_json::to_value(policy).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_PROJECTS_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+    }
+
+    /// Kristi's #1300 review, finding 2: an install that ran a build after
+    /// #1162 without ever writing settings has its policy marked migrated
+    /// (`scrub_check_upgrade_recorded` set) by that build's startup. It is
+    /// still an existing install, whatever its folders' modes, and gets the
+    /// upgrade and both offers rather than the new kinds switched on.
+    #[test]
+    fn a_migrated_policy_from_an_older_build_without_settings_gets_the_notify_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        for mode in [ProjectMode::NotifyOnly, ProjectMode::Ignore] {
+            let (_d, store) = temp_store();
+            let mut policy = ProjectPolicy::new();
+            policy
+                .set_mode("/tmp/legacy-ask", mode, chrono::Utc::now())
+                .unwrap();
+            assert!(policy.scrub_check_upgrade_recorded);
+            save_as_an_older_build(&policy, &store);
+            let loaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(loaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                loaded.verdicts_offer_pending && loaded.idle_offer_pending,
+                "{mode:?}"
+            );
+            assert!(!loaded.scrub_check_defaulted_on_upgrade, "{mode:?}");
+        }
+    }
+
+    /// An older build's policy file with no folder in it still says the
+    /// install predates the kinds.
+    #[test]
+    fn an_older_builds_policy_without_folders_gets_the_notify_upgrade() {
+        use crate::daemon::policy::ProjectPolicy;
+        let (_d, store) = temp_store();
+        save_as_an_older_build(&ProjectPolicy::new(), &store);
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
     }
 
     /// A new install -- no settings file, and no policy or only one this
