@@ -185,7 +185,7 @@ fn launch_dialog(app: &Rc<App>, snapshot: &Value) {
         return;
     };
     let accounts = accounts.clone();
-    let (window, content) = dialog(app, "launch");
+    let (window, content) = dialog(app, "launch_title");
     let labels: Vec<_> = accounts
         .iter()
         .map(|a| {

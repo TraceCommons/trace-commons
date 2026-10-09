@@ -4,7 +4,7 @@ import {
   canWithdrawStatus,
   historyStatusLabel,
   type SharedHistoryStatusCopy,
-} from "../withdrawal-eligibility";
+} from "../withdrawal-eligibility.ts";
 import {
   contributorFacingExplanations,
   historyCreditLine,

@@ -363,6 +363,8 @@ public struct MonitorLookInsideCopy: MonitorWordTable {
     public let turnIndex: String
     public let transcriptCaption: String
     public let loadMore: String
+    /// The caption beside Load more; `{size}`: what is left to load.
+    public let loadMoreRemaining: String
     public let addTurnSeparators: String
     public let searchCaption: String
     public let searchLabel: String
@@ -396,6 +398,7 @@ public struct MonitorLookInsideCopy: MonitorWordTable {
         case turnIndex = "turn_index"
         case transcriptCaption = "transcript_caption"
         case loadMore = "load_more"
+        case loadMoreRemaining = "load_more_remaining"
         case addTurnSeparators = "add_turn_separators"
         case searchCaption = "search_caption"
         case searchLabel = "search_label"

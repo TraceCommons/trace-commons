@@ -132,8 +132,9 @@ struct FundingRow: View {
             Button {
                 load(opening: status?.destination)
             } label: {
+                // The glass style's own 28pt, as every inline card button
+                // (owner, 2026-10-08); a 44pt label made it the odd one out.
                 Text(status?.destination == nil ? copy.fundingRefresh : copy.fundingManage)
-                    .frame(minHeight: 44)
             }
             .buttonStyle(GlassButtonStyle(.glass))
             .disabled(model.credentialBusy || request != nil)

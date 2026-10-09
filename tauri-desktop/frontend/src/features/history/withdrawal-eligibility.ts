@@ -15,8 +15,20 @@ const withdrawableStatuses = new Set([
   "rejected",
 ]);
 
+// `processing` is the versioned pipeline's receipt status: uploaded, no
+// verdict reported. It is not "no verdict": a trace that Admission rejected
+// or quarantined gets the same receipt, and the verdict arrives only when a
+// history refresh reads the server's status for the row. Until then every
+// history surface reads the status through this one mapping -- the label,
+// the withdraw option, the count and the filter -- so the row is `submitted`
+// to all of them, the bucket the daemon uses
+// (`daemon::history::status_bucket`).
+export function historyStatusBucket(status: string) {
+  return status === "processing" ? "submitted" : status;
+}
+
 export function canWithdrawStatus(status: string) {
-  return withdrawableStatuses.has(status);
+  return withdrawableStatuses.has(historyStatusBucket(status));
 }
 
 export type SharedHistoryStatusCopy = {
@@ -38,8 +50,9 @@ export function historyStatusLabel(
   if (!shared) {
     return null;
   }
+  const bucket = historyStatusBucket(status);
   // Own keys only: "constructor" is not a status.
-  return Object.prototype.hasOwnProperty.call(shared.status_labels, status)
-    ? shared.status_labels[status]
+  return Object.prototype.hasOwnProperty.call(shared.status_labels, bucket)
+    ? shared.status_labels[bucket]
     : shared.status_unavailable;
 }

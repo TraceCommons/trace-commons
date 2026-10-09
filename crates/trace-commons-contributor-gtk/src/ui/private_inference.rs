@@ -1164,7 +1164,7 @@ mod tests {
     fn a_refusal_on_this_screen_says_what_to_do() {
         for failure in ["port_in_use", "start_failed", "crashed"] {
             let line = copy::private_inference_state_line(failure);
-            assert!(line.contains("off and on again"), "{failure}: {line}");
+            assert!(line.contains("off and on"), "{failure}: {line}");
         }
     }
 

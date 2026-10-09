@@ -12,7 +12,8 @@ pub const CORRECTION_CAPTION: &str = "Stored exactly as you write it. Unlike the
 pub const CORRECTION_CREDENTIAL_HEADLINE: &str =
     "Nothing was sent. Your correction looks like it contains a credential.";
 pub const CORRECTION_CREDENTIAL_BODY: &str = "A correction is stored as you write it, so this one was refused rather than masked. Take the credential out and submit again -- and rotate it, because it has already been typed here.";
-pub const SUBMIT_ALL_AS: &str = "Submit all as...";
+/// Approved 2026-10-08 (button rule).
+pub const SUBMIT_ALL_AS: &str = "Submit as...";
 pub const SUBMIT_ALL_AS_TOOLTIP: &str = "Record the same outcome for every session in this group.";
 
 #[derive(serde::Serialize)]

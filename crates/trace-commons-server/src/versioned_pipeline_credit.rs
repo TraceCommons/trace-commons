@@ -103,6 +103,14 @@ impl SettlementAdapterRegistry {
     }
 }
 
+/// A test settlement adapter with no effect: it records each request and
+/// answers the expected result. It is in the library, not behind
+/// `#[cfg(test)]`, because the integration tests and the ingest binary's
+/// tests link the library built without `cfg(test)`. It is never
+/// production-qualified (`production_qualified` keeps the trait's `false`),
+/// so the qualification gate refuses a runtime that routes or drains a
+/// tenant through it (`each_pipeline_test_double_fails_the_qualification_gate`
+/// in the ingest binary's tests).
 #[derive(Debug)]
 pub struct RecordingSettlementAdapter {
     instrument_id: InstrumentId,
@@ -196,6 +204,13 @@ pub struct NearLogicalRequest {
 /// repeated key with a different method. A confirmation exists only once a
 /// test records one (`record_confirmation`). `fail_next` makes the next
 /// submit fail. It presents no credential unless built `authenticated`.
+///
+/// It is in the library, not behind `#[cfg(test)]`, because the integration
+/// tests and the ingest binary's tests link the library built without
+/// `cfg(test)`. It is never production-qualified, so the qualification gate
+/// refuses an enabled payout through it
+/// (`pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`
+/// in the ingest binary's tests).
 #[derive(Debug, Default)]
 pub struct RecordingNearAdapter {
     requests: Mutex<Vec<NearLogicalRequest>>,

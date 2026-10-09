@@ -118,7 +118,7 @@ pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        "Can't reach Trace Commons' background service.",
+        "Can't reach the Trace Commons service.",
         "Nothing is being watched or sent while it's down. Your queue and the sessions \
          already sent are safe, and sessions from while it was down will be picked up when \
          it's running again.",
@@ -178,9 +178,11 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             "The extra privacy scan isn't reachable.",
             "Your traces are waiting rather than going out unscanned. Retrying automatically.",
         ),
+        // The upload servers, not the app's own background service, are out
+        // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
             HealthLineCopy::waiting(
-                "Can't reach Trace Commons right now.",
+                "Can't upload right now.",
                 "Your queue is safe; it'll retry on its own.",
             )
         }
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach Trace Commons' background service.");
+        assert_eq!(copy.title, "Can't reach the Trace Commons service.");
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),

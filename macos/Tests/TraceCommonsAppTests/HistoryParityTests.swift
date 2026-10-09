@@ -222,7 +222,7 @@ final class HistoryParityTests: XCTestCase {
     /// One implementation of the core's dismiss word: the notices that can
     /// be put away read it from `ActionNoticeWords`, beside its fallback.
     func test_theDismissWordIsDecodedOnce() throws {
-        let decode = "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"
+        let decode = "MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction"
         let words = try Self.text("Views/SettingsView.swift")
         XCTAssertTrue(words.contains("static let coreDismissWord = \(decode)"))
         for rel in ["Views/SessionDetailView.swift", "Views/SkillLearningView.swift", "Views/Settings/ProjectsSection.swift"] {
@@ -718,7 +718,7 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertFalse(home.contains("HistoryDetailInspector("), "the opened row is not drawn on History's page")
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
         XCTAssertTrue(Self.flat(inspector).contains(
-            "struct HistoryInspectorPane: View { let row: DaemonData.HistoryRow var body: some View { ScrollView { HistoryDetailInspector(row: row) }"))
+            "struct HistoryInspectorPane: View { let row: DaemonData.HistoryRow var body: some View { HistoryDetailInspector(row: row) }"))
         // Ron's headings and project groups, in the core's words.
         let flat = Self.flat(home)
         for needle in [
@@ -763,9 +763,9 @@ final class HistoryParityTests: XCTestCase {
             .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
             .joined(separator: "\n")
         XCTAssertTrue(Self.flat(code).contains(
-            "case .home, .traces: VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { "
-                + "if Self.promptsInInspector(tab) { InspectorPromptsHeader(traces: traces) } "
-                + "if tab == .home, let row = HistorySelection.opened(selectedHistory, "
+            "VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) { "
+                + "if Self.promptsInInspector(shownTab) { InspectorPromptsHeader(traces: traces) } "
+                + "if shownTab == .home, let row = HistorySelection.opened(selectedHistory, "
                 + "onHistory: homePage == .history, in: home.history) { HistoryInspectorPane(row: row) } "
                 + "else { TracesInspectorHost(traces: traces, home: home, selection: selection) }"))
         XCTAssertTrue(Self.flat(window).contains(

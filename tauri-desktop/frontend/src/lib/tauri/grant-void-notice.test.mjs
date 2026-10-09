@@ -104,7 +104,7 @@ const grantNotice = {
   ...noButton,
   title: "Automatic contributing stopped for new projects",
   regrant: "You can turn automatic contributing back on for new projects.",
-  regrant_action: "Review and turn back on",
+  regrant_action: "Review settings",
 };
 
 test("the grant's notice is taken whole with its re-grant", () => {
