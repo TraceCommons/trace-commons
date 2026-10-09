@@ -43800,8 +43800,8 @@ async fn pipeline_review_assessment_handler(
     }
     // The audit row's labels, formed before the commit, so nothing that can
     // fail without an append stands between the commit and the answer.
-    let review_status = storage_corpus_status(resulting_status);
-    let decision_label = serde_storage_string(&review_status).map_err(internal_error)?;
+    let audit_row =
+        review_decision_audit_row(resulting_status, &reason_label, None).map_err(internal_error)?;
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -43828,24 +43828,9 @@ async fn pipeline_review_assessment_handler(
             Some(&trace_free_text_audit_reason(&reason_label)),
         );
         event.event_id = assessment.assessment_id;
-        append_audit_event_mirrored(
-            state.as_ref(),
-            &tenant,
-            event,
-            AuditRowMirror {
-                action: StorageTraceAuditAction::Review,
-                metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
-                    decision: decision_label,
-                    resulting_status: review_status,
-                    reason_code: Some(reason_label.clone()),
-                },
-                object_ref_id: None,
-                actor_role_label: None,
-            },
-            "audit event",
-        )
-        .await
-        .map(|_| ())
+        append_audit_event_mirrored(state.as_ref(), &tenant, event, audit_row, "audit event")
+            .await
+            .map(|_| ())
     }
     .await;
     if let Err(error) = appended {
@@ -66724,6 +66709,27 @@ fn system_audit_tenant(tenant_id: &str, actor_ref: &'static str) -> TenantAuth {
         allowed_consent_scopes: BTreeSet::new(),
         allowed_uses: BTreeSet::new(),
     }
+}
+
+/// The database row of a `review_decision` audit event for a pipeline
+/// review assessment: the route's append and the worker's repair of a missed
+/// one build it here, so the two cannot differ. Labels only.
+fn review_decision_audit_row(
+    resulting_status: TraceCorpusStatus,
+    reason_code: &str,
+    actor_role_label: Option<&'static str>,
+) -> anyhow::Result<AuditRowMirror> {
+    let review_status = storage_corpus_status(resulting_status);
+    Ok(AuditRowMirror {
+        action: StorageTraceAuditAction::Review,
+        metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: serde_storage_string(&review_status)?,
+            resulting_status: review_status,
+            reason_code: Some(reason_code.to_string()),
+        },
+        object_ref_id: None,
+        actor_role_label,
+    })
 }
 
 /// The audit action the store records for a change to `status`.

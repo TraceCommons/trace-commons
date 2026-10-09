@@ -13392,6 +13392,20 @@ async fn the_worker_appends_one_audit_event_for_an_automatic_review() {
         events[0].actor_principal_ref.as_deref(),
         Some("pipeline_worker")
     );
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row_role: String = tx
+        .query_one(
+            "SELECT actor_role FROM trace_audit_events
+              WHERE tenant_id = $1 AND audit_event_id = $2",
+            &[&tenant, &outcome_id],
+        )
+        .await
+        .expect("the event has its database row")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(row_role, "system");
     assert!(!review_audit_marker_is_set(&fixture, approved.run_id).await);
 
     // 2. A rejected Review: a reviewer's rejection, then the run's Review.
@@ -13581,4 +13595,32 @@ async fn a_review_audit_item_that_fails_keeps_its_marker() {
     assert_eq!((pass.audited, pass.failed), (1, 1));
     assert!(!review_audit_marker_is_set(&fixture, first.run_id).await);
     assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
+}
+
+/// With a database mirror that is not required, the file line is written
+/// before the row, so a failed mirror write would leave an event that the
+/// read by id cannot see. The pass appends nothing there, answers an error
+/// with a label, and keeps the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_review_audit_pass_appends_nothing_when_the_mirror_is_not_required() {
+    let Some((mut fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    Arc::make_mut(&mut fixture.state).require_db_mirror_writes = false;
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+
+    let error = run_review_audit_pass(&fixture)
+        .await
+        .expect_err("the pass refuses");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_review_audit_mirror_not_required"
+    );
+    assert!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "lifecycle_status_change")
+            .is_empty()
+    );
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
 }

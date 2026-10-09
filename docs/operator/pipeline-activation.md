@@ -1716,8 +1716,8 @@ the assessment commits. When that append fails, the route still answers the
 committed result (the lease token, the assessment id), and logs
 `pipeline_review_audit_append_failed` with the tenant's storage reference, a
 hash of the run id and the route (`claim` or `assessment`). The audit trail
-then has no row for that claim or decision; the decision itself is in
-`pipeline_review_assessments`.
+then has no row for that claim. The assessment is in
+`pipeline_review_assessments`, and the worker's pass below repairs its event.
 
 The worker's review audit pass repairs a missed assessment event. The
 marker is `review_audit_pending_at` on `pipeline_runs` (V117). A Review
@@ -1733,6 +1733,15 @@ before V117 gets no event. A failed event keeps its marker and logs
 failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit
 append fails stays logged under `pipeline_review_audit_append_failed` and is
 not repaired. The owner accepted this gap in #1185.
+
+A stale audit chain is the usual cause of a repeated
+`pipeline_worker_review_audit_item_failed` line. Run the audit-chain repair
+(see [audit-trail-forensics.md](audit-trail-forensics.md)). The worker can
+append the assessment event before the route does. The route then logs
+`pipeline_review_audit_append_failed` although the event exists. The pass
+appends nothing for a tenant whose process does not require the database
+mirror. It logs `pipeline_worker_review_audit_failed` with the label
+`pipeline_review_audit_mirror_not_required` for such a tenant.
 
 Two other events release a parked run to `pending`:
 

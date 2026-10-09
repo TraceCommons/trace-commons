@@ -1352,7 +1352,14 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 /// repair of a missed one are the same event; the automatic Review's event
 /// takes the id of the Review `phase_outcomes` row. Each event is read by id
 /// and appended only when absent, so a pass that stopped before it cleared a
-/// marker finds the events again and only clears it.
+/// marker finds the events again and only clears it. That holds only in the
+/// required order, the database row first and the file line second
+/// (`require_db_mirror_writes`): with a mirror that is not required the file
+/// line comes first, and a failed mirror write would leave an event the read
+/// cannot see. The pass therefore appends nothing in that configuration and
+/// returns `pipeline_review_audit_mirror_not_required`. After a failed file
+/// append the row exists: the next pass finds it by id and clears the marker,
+/// and the audit-chain repair writes the file line.
 ///
 /// As the credit pass does: an item that fails keeps its marker and does not
 /// stop the items after it, the failure is logged by label with a hash of
@@ -1368,11 +1375,22 @@ pub(crate) async fn append_pipeline_review_audit_events(
         .store()
         .list_pending_review_audits(tenant_id, i64::try_from(limit).unwrap_or(i64::MAX))
         .await?;
+    if items.is_empty() {
+        return Ok(PipelineCreditAuditPass {
+            audited: 0,
+            failed: 0,
+        });
+    }
+    let db = match state.db_mirror.as_ref() {
+        Some(db) if state.require_db_mirror_writes => db,
+        _ => anyhow::bail!("pipeline_review_audit_mirror_not_required"),
+    };
     let mut audited = 0;
     let mut failed = 0;
     let mut first_error = None;
     for item in &items {
-        match append_pipeline_review_audit_item(state, service, tenant_id, item).await {
+        match append_pipeline_review_audit_item(state, db.as_ref(), service, tenant_id, item).await
+        {
             Ok(()) => audited += 1,
             Err(error) => {
                 tracing::warn!(
@@ -1509,25 +1527,19 @@ async fn append_pipeline_payout_audit_event(
 /// `item` that is absent, then clears its marker.
 async fn append_pipeline_review_audit_item(
     state: &AppState,
+    db: &dyn Database,
     service: &PipelineService,
     tenant_id: &str,
     item: &trace_commons_server::versioned_pipeline::PipelineReviewAuditItem,
 ) -> anyhow::Result<()> {
-    // Without the database the worker cannot tell an appended event from a
-    // missing one, so it appends none and leaves the marker.
-    let db = state
-        .db_mirror
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("pipeline_review_audit_mirror_missing"))?;
     if let Some(assessment) = &item.assessment {
         if db
             .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
             .await?
             .is_none()
         {
-            let (status, status_label) = review_audit_status(assessment.approved)?;
+            let (status, _) = review_audit_status(assessment.approved)?;
             let reviewer = TenantAuth {
-                role: TokenRole::Reviewer,
                 principal_ref: assessment.reviewer_principal_ref.clone(),
                 ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
             };
@@ -1543,16 +1555,7 @@ async fn append_pipeline_review_audit_item(
                 state,
                 &reviewer,
                 event,
-                AuditRowMirror {
-                    action: StorageTraceAuditAction::Review,
-                    metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
-                        decision: status_label,
-                        resulting_status: storage_corpus_status(status),
-                        reason_code: Some(assessment.reason_code.clone()),
-                    },
-                    object_ref_id: None,
-                    actor_role_label: Some("reviewer"),
-                },
+                review_decision_audit_row(status, &assessment.reason_code, Some("reviewer"))?,
                 "pipeline review assessment audit event",
             )
             .await?;
@@ -1615,9 +1618,10 @@ fn review_audit_status(approved: bool) -> anyhow::Result<(TraceCorpusStatus, Str
 /// What one pass of `append_pipeline_credit_audit_events` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PipelineCreditAuditPass {
-    /// Legs whose event is in the audit log and that are now marked.
+    /// Legs (or, for the review audit pass, runs) whose event is in the audit
+    /// log and that are now marked.
     pub(crate) audited: usize,
-    /// Legs whose event failed; they stay unmarked for the next pass.
+    /// Legs (or runs) whose event failed; they stay unmarked for the next pass.
     pub(crate) failed: usize,
 }
 

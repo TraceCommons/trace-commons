@@ -806,7 +806,10 @@ No grant allows `DELETE` on assessments, snapshots, or items. A trigger
 refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
 their submission or tenant, through foreign-key cascades.
 
-V117 adds `pipeline_runs.review_audit_pending_at`, the marker of a review audit event that the worker must still append. V117 locks `pipeline_runs` until it commits. Apply it before a tenant is routed, or with the worker stopped.
+V117 adds `pipeline_runs.review_audit_pending_at`, the marker of a review
+audit event that the worker must still append. V117 locks `pipeline_runs`
+until it commits. Apply it before a tenant is routed, or with the worker
+stopped.
 
 These routes also write tables older than V62, which no pipeline migration
 grants anything on. The pilot's V62-era table-wide grants cover them:
