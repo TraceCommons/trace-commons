@@ -151,6 +151,19 @@ restored database and artifacts, and require it to reach the same
 settlement legs and Trace Credit ledger event the seed produced, with no
 duplicate effect.
 
+A production package whose `NoveltyUtility` delta is `0` (the pilot's
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0`) awards nothing, so no
+run settles a leg or writes a ledger event. The drill then requires exactly
+that, zero legs and zero events for every run, the resume included, and its
+evidence carries `credit_delta_zero: true`. Everything else is checked as
+before, and the seed still requires the pending run's Settle selection to
+include it in the index (`restore_seed_pending_selection_excludes` when a
+fixture misses its floors). With no `CreditMutate` event to keep, the seed
+appends one hash-only read event per tenant through `main`'s mirrored audit
+log, so the audit chain checks still have a chain to compare. The credit
+and credit-audit path stays covered by the reference candidate's drill,
+which awards 2.5 points.
+
 The checks before the resume, each with its own failure label in the
 resume's protected log:
 
