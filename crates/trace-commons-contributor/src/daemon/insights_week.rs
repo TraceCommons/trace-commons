@@ -369,7 +369,12 @@ impl CounterPass {
                 }
                 continue;
             }
-            let cost = candidate.size_bytes.min(COUNTER_PASS_MAX_SESSION_BYTES);
+            // Charged by the one file read, not the group: delegated
+            // transcripts are counted in `size_bytes` but never read.
+            let read_len = std::fs::metadata(&candidate.path)
+                .map(|meta| meta.len())
+                .unwrap_or(candidate.size_bytes);
+            let cost = read_len.min(COUNTER_PASS_MAX_SESSION_BYTES);
             if reads.len() >= COUNTER_PASS_MAX_READS_PER_TICK
                 || (!reads.is_empty()
                     && bytes_budgeted.saturating_add(cost) > COUNTER_PASS_MAX_BYTES_PER_TICK)
@@ -639,9 +644,7 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
         source,
         reason: UnknownReason::NoUsageCounters,
     };
-    if candidate.size_bytes > COUNTER_PASS_MAX_SESSION_BYTES {
-        return unknown;
-    }
+    // The bound is on the file read; `size_bytes` is the whole group's.
     let Some(bytes) = bounded_read(&candidate.path, COUNTER_PASS_MAX_SESSION_BYTES) else {
         return unknown;
     };
@@ -1199,8 +1202,13 @@ mod tests {
     fn an_unreadable_or_oversized_session_is_unknown_never_zero() {
         let f = Fixture::new();
         let missing = candidate(SOURCE_CLAUDE_CODE, &f.dir.path().join("gone.jsonl"));
-        let mut huge = candidate(SOURCE_CODEX, &f.write("big.jsonl", &codex_bytes()));
-        huge.size_bytes = COUNTER_PASS_MAX_SESSION_BYTES + 1;
+        // Sparse: one byte over the bound without writing it.
+        let big = f.dir.path().join("big.jsonl");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(COUNTER_PASS_MAX_SESSION_BYTES + 1)
+            .unwrap();
+        let huge = candidate(SOURCE_CODEX, &big);
         assert_eq!(f.run(&[missing, huge]).read, 2);
         let value = f.week(&[]);
         assert_eq!(value["rollup"]["coverage"]["unknown"], 2);
@@ -1227,6 +1235,46 @@ mod tests {
         let value = f.week(&[]);
         assert_eq!(value["rollup"]["coverage"]["reasons"]["truncated"], 1);
         assert_eq!(value["rollup"]["coverage"]["known"], 0);
+    }
+
+    #[test]
+    fn a_small_session_with_large_delegated_transcripts_is_partial_not_unknown() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let mut group = candidate(SOURCE_CLAUDE_CODE, &path);
+        group.group_member_count = 2;
+        // The group is over the per-session bound; the file read is not.
+        group.size_bytes = COUNTER_PASS_MAX_SESSION_BYTES + 1;
+        f.run(&[group]);
+        let value = f.week(&[]);
+        assert_eq!(value["rollup"]["coverage"]["unknown"], 0);
+        assert_eq!(value["rollup"]["coverage"]["reasons"]["truncated"], 1);
+    }
+
+    #[test]
+    fn the_byte_budget_is_charged_by_the_file_read_not_the_group() {
+        const SESSIONS: usize = 5;
+        const { assert!(COUNTER_PASS_MAX_READS_PER_TICK >= SESSIONS) };
+        const {
+            assert!(
+                COUNTER_PASS_MAX_SESSION_BYTES * (SESSIONS as u64 - 1)
+                    >= COUNTER_PASS_MAX_BYTES_PER_TICK
+            )
+        };
+        let f = Fixture::new();
+        let candidates: Vec<CounterCandidate> = (0..SESSIONS)
+            .map(|i| {
+                let path = f.write(&format!("s{i}.jsonl"), &claude_bytes());
+                let mut c = candidate(SOURCE_CLAUDE_CODE, &path);
+                c.group_member_count = 2;
+                c.size_bytes = COUNTER_PASS_MAX_BYTES_PER_TICK;
+                c.modified_at = written() - Duration::minutes(i as i64);
+                c
+            })
+            .collect();
+        let summary = f.run(&candidates);
+        assert_eq!(summary.read, SESSIONS);
+        assert_eq!(summary.deferred, 0);
     }
 
     #[test]
