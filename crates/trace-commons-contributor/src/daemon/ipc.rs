@@ -17549,6 +17549,7 @@ mod tests {
                 credit_final_delta: 0.0,
                 since: at,
                 newest_at: at,
+                submissions: Default::default(),
             });
         }
 

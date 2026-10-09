@@ -181,6 +181,7 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
             credit_final_delta: 0.0,
             since: at,
             newest_at: at,
+            submissions: Default::default(),
         });
         // Nudge U4: the idle batching set names this account's queue.
         state.idle_announced.insert(uuid::Uuid::from_bytes([9; 16]));

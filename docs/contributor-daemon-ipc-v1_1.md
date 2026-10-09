@@ -1098,9 +1098,13 @@ only the daemon writes, per submission: newly `accepted`, newly
 command or an upload already wrote into the shared cache is still news, once.
 Withdrawn and revoked submissions are never counted, nor are submissions from
 a folder that now resolves to Never (or any folder while a Never override is
-in force); `rejected` is not news. The first poll after an upgrade, or after
-`unenroll`, records the mark silently, so history that already existed never
-reads as news. Unacknowledged news accumulates across polls. It has no
+in force); `rejected` is not news. That holds for news already waiting too:
+every poll re-checks each waiting submission against the cache it read, and
+one since withdrawn or revoked, in a folder now set to Never, or gone from
+the cache leaves the news, with `status_changed`; when nothing is left the
+news is gone and the news mark goes dark. The first poll after an upgrade, or
+after `unenroll`, records the mark silently, so history that already existed
+never reads as news. Unacknowledged news accumulates across polls. It has no
 "Not now": it is information, not an ask.
 
 **Stale history is `unknown`.** Once neither `idle_sessions` nor
