@@ -37,6 +37,7 @@ import os
 import re
 import shutil
 import struct
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -776,9 +777,11 @@ def assemble(args, run):
     require(len(revisions) == 1, "promote_assemble_mixed_revision")
     require(len(sources) == len(mechanics_check_ids()) + len(production_check_ids()), "promote_assemble_count_mismatch")
 
-    staging = output.with_name(f".{output.name}.staging")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, mode=0o700)
+    # A fresh staging directory beside the output (so the final rename stays
+    # on one file system), never a fixed name: a directory that already has
+    # a name like it is someone else's and is left alone.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
     try:
         for check_id, path in sorted(sources.items()):
             shutil.copyfile(path, staging / path.name)

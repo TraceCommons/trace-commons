@@ -5232,6 +5232,28 @@ class PromoteAssembleTests(_PromoteCase):
         self.assertEqual(self._failure(), f"PipelineFailure: promote_assemble_check_doubled:{mechanics_id}")
         self.assertFalse((self.root / "second").exists())
 
+    def test_promote_assemble_leaves_an_existing_staging_name_alone(self):
+        """A directory that happens to have the staging name `.<output>.staging`
+        is never removed: the staging directory is a fresh one beside it."""
+        mechanics = self._mechanics_run()
+        run_id = self._signed_production_run()
+        output = self.root / "submission"
+        bystander = self.root / ".submission.staging"
+        bystander.mkdir()
+        (bystander / "keep.txt").write_text("not the tool's")
+        self.assertEqual(self._assemble(run_id, mechanics, output), 0, self.stderr.getvalue())
+        self.assertEqual((bystander / "keep.txt").read_text(), "not the tool's")
+        self.assertEqual(len(list(output.glob("*.attestation.json"))), 22)
+        # Nothing of the tool's own staging is left behind.
+        self.assertEqual(sorted(path.name for path in self.root.iterdir() if path.name.startswith(".submission")),
+                         [".submission.staging"])
+
+        # An output whose parent does not exist yet is still written.
+        nested = self.root / "out" / "nested" / "submission"
+        self.assertEqual(self._assemble(run_id, mechanics, nested), 0, self.stderr.getvalue())
+        self.assertEqual(len(list(nested.glob("*.attestation.json"))), 22)
+        self.assertEqual(sorted(path.name for path in nested.parent.iterdir()), ["submission"])
+
     def test_promote_assemble_refuses_a_missing_or_mismatched_set(self):
         mechanics = self._mechanics_run()
         run_id = self._signed_production_run()
