@@ -4,6 +4,16 @@
 //! discarded rather than forwarded to clients. Policy and rule schemas remain
 //! strict: every field affects interpretation or the canonical policy digest,
 //! so their evolution requires an explicitly supported schema version.
+//!
+//! The one versioned extension point inside that strictness is a mission's
+//! optional [`MissionPredicate`]: what local work a mission asks for, for a
+//! client to match on its own machine. A version-1 block is read strictly; a
+//! block of a later version is carried verbatim, still digest-covered, and
+//! treated as absent, never half-read. Every predicate block serializes as
+//! key-sorted JSON (see [`crate::canonical_json`]), so a reader that does not
+//! know a version re-serializes it to the same bytes and the policy digest
+//! still agrees. The server never evaluates a predicate and accepts no
+//! matching result.
 use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -37,6 +47,133 @@ pub struct ActivityMission {
     pub id: String,
     pub title: String,
     pub required_contributions: u32,
+    /// What local work the mission asks for. Absent on a count-only
+    /// mission, and then not serialized, so a policy without predicates
+    /// keeps the digest it had before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicate: Option<MissionPredicate>,
+}
+
+impl ActivityMission {
+    /// The predicate a client may match on: a version-1 block. `None` for
+    /// a mission without one and for a version this build does not read,
+    /// which counts as having no predicate.
+    pub fn supported_predicate(&self) -> Option<&MissionPredicateV1> {
+        match self.predicate.as_ref()? {
+            MissionPredicate::V1(predicate) => Some(predicate),
+            MissionPredicate::Unsupported(_) => None,
+        }
+    }
+}
+
+/// The predicate version this build reads.
+pub const MISSION_PREDICATE_VERSION: u32 = 1;
+/// The most values one predicate list may carry. Equal to the client
+/// catalogue's per-criterion bound.
+pub const MAX_PREDICATE_VALUES: usize = 32;
+/// The most bytes one predicate value may have.
+pub const MAX_PREDICATE_LABEL_BYTES: usize = 64;
+/// The most readable sessions a predicate may ask for.
+pub const MAX_PREDICATE_MIN_SESSIONS: u32 = 1000;
+/// The most characters the title of a mission carrying a predicate may have:
+/// the client catalogue's title bound, tighter than the policy's own.
+pub const MAX_PREDICATE_TITLE_CHARS: usize = 200;
+
+/// A mission's versioned predicate block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissionPredicate {
+    /// Read and validated.
+    V1(MissionPredicateV1),
+    /// A later version, kept key-sorted so the digest still verifies, and
+    /// never interpreted. An operator policy refuses it.
+    Unsupported(serde_json::Value),
+}
+
+/// Version 1: every list is "any of" and an empty list does not restrict;
+/// the lists combine with AND per session. A mission fits when at least
+/// `min_sessions` readable sessions satisfy every non-empty list. At least
+/// one list is non-empty, so a predicate never fits everything.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MissionPredicateV1 {
+    pub version: u32,
+    /// Session sources, e.g. `claude-code`, `codex`, `gemini-cli`.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// Tool families, e.g. `anthropic`, `openai`, `google`.
+    #[serde(default)]
+    pub tool_families: Vec<String>,
+    /// Languages a folder is worked in, e.g. `rust`, `python`.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    pub min_sessions: u32,
+}
+
+impl MissionPredicateV1 {
+    fn validate(&self) -> Result<(), InvalidActivityPolicy> {
+        let lists = [&self.tools, &self.tool_families, &self.languages];
+        if self.version != MISSION_PREDICATE_VERSION
+            || !(1..=MAX_PREDICATE_MIN_SESSIONS).contains(&self.min_sessions)
+            || lists.iter().all(|list| list.is_empty())
+        {
+            return Err(InvalidActivityPolicy);
+        }
+        for list in lists {
+            if list.len() > MAX_PREDICATE_VALUES
+                || list.iter().collect::<BTreeSet<_>>().len() != list.len()
+                || !list.iter().all(|value| predicate_label(value))
+            {
+                return Err(InvalidActivityPolicy);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn predicate_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PREDICATE_LABEL_BYTES
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+impl Serialize for MissionPredicate {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Both variants through the same canonical form, so the digest is
+        // taken over key-sorted bytes whatever map backs serde_json here.
+        let value = match self {
+            MissionPredicate::V1(predicate) => {
+                serde_json::to_value(predicate).map_err(serde::ser::Error::custom)?
+            }
+            MissionPredicate::Unsupported(value) => value.clone(),
+        };
+        crate::canonical_json::canonical_value(&value).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MissionPredicate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let value = serde_json::Value::deserialize(deserializer)?;
+        // The version decides how the rest is read; without a positive
+        // integer version the block is malformed, never unsupported.
+        let version = value
+            .as_object()
+            .and_then(|object| object.get("version"))
+            .and_then(serde_json::Value::as_u64)
+            .filter(|version| *version >= 1)
+            .ok_or_else(|| D::Error::custom("activity_missions_predicate_invalid"))?;
+        if version == u64::from(MISSION_PREDICATE_VERSION) {
+            serde_json::from_value(value)
+                .map(MissionPredicate::V1)
+                .map_err(|_| D::Error::custom("activity_missions_predicate_invalid"))
+        } else {
+            Ok(MissionPredicate::Unsupported(
+                crate::canonical_json::canonical_value(&value),
+            ))
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -148,12 +285,22 @@ fn identifier(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 impl ActivityPolicy {
+    /// Parse an operator policy. Stricter than [`Self::validate`]: a
+    /// predicate of a version this build does not read is refused, so a
+    /// server never publishes a block it cannot validate.
     pub fn parse(bytes: &[u8]) -> Result<Self, InvalidActivityPolicy> {
         if bytes.len() > MAX_POLICY_BYTES {
             return Err(InvalidActivityPolicy);
         }
         let policy: Self = serde_json::from_slice(bytes).map_err(|_| InvalidActivityPolicy)?;
         policy.validate()?;
+        if policy
+            .missions
+            .iter()
+            .any(|m| matches!(m.predicate, Some(MissionPredicate::Unsupported(_))))
+        {
+            return Err(InvalidActivityPolicy);
+        }
         Ok(policy)
     }
     pub fn validate(&self) -> Result<(), InvalidActivityPolicy> {
@@ -180,6 +327,15 @@ impl ActivityPolicy {
                 || mission.title.chars().any(char::is_control)
             {
                 return Err(InvalidActivityPolicy);
+            }
+            // A published version-1 block must fit what the client catalogue
+            // accepts. A later version is the reader's to ignore; its size is
+            // bounded by the policy's.
+            if let Some(MissionPredicate::V1(predicate)) = &mission.predicate {
+                predicate.validate()?;
+                if mission.title.chars().count() > MAX_PREDICATE_TITLE_CHARS {
+                    return Err(InvalidActivityPolicy);
+                }
             }
         }
         match &self.daily {
@@ -399,6 +555,17 @@ mod tests {
                 "{path}"
             );
         }
+        // The predicate is the one versioned extension point inside that
+        // strictness: an unknown field in a version-1 block still fails,
+        // while a block of a later version is carried and ignored.
+        let mut value = original.clone();
+        value["policy"]["missions"][0]["predicate"] =
+            serde_json::json!({"version":1,"tools":["codex"],"min_sessions":1,"future_rule":true});
+        assert!(serde_json::from_value::<ActivityCatalogue>(value).is_err());
+        let mut value = original.clone();
+        value["policy"]["missions"][0]["predicate"] =
+            serde_json::json!({"version":2,"future_rule":true});
+        assert!(serde_json::from_value::<ActivityCatalogue>(value).is_ok());
     }
 
     #[test]
@@ -556,5 +723,200 @@ mod tests {
                 "mission_credit_ledger_unavailable"
             );
         }
+    }
+
+    /// The policy every other test uses, with a predicate on its first
+    /// mission, as operator JSON.
+    fn predicate_policy_json(predicate: serde_json::Value) -> serde_json::Value {
+        let mut value = serde_json::to_value(policy()).unwrap();
+        value["missions"][0]["predicate"] = predicate;
+        value
+    }
+    fn parse_value(value: &serde_json::Value) -> Result<ActivityPolicy, InvalidActivityPolicy> {
+        ActivityPolicy::parse(&serde_json::to_vec(value).unwrap())
+    }
+    fn v1() -> serde_json::Value {
+        serde_json::json!({"version":1,"tools":["claude-code"],"tool_families":[],"languages":["rust"],"min_sessions":2})
+    }
+
+    /// Adding the optional predicate moved no deployed digest: a policy
+    /// without one serializes byte for byte as it did before it existed.
+    #[test]
+    fn activity_missions_predicate_free_digest_is_unchanged() {
+        assert_eq!(
+            policy().digest().unwrap(),
+            "58a46687243041bd87fff7de28953b25c618e96809d725f73759cc29e75b1886"
+        );
+        let text = serde_json::to_string(&policy()).unwrap();
+        assert!(!text.contains("predicate"), "{text}");
+    }
+
+    /// A version-1 predicate is read whole, is covered by the digest, and
+    /// the digest does not depend on the order its keys arrived in.
+    #[test]
+    fn activity_missions_v1_predicate_is_read_and_digest_covered() {
+        let parsed = parse_value(&predicate_policy_json(v1())).unwrap();
+        let read = parsed.missions[0].supported_predicate().unwrap();
+        assert_eq!(read.tools, vec!["claude-code"]);
+        assert!(read.tool_families.is_empty());
+        assert_eq!(read.languages, vec!["rust"]);
+        assert_eq!(read.min_sessions, 2);
+        assert_eq!(parsed.missions[1].supported_predicate(), None);
+        assert_ne!(parsed.digest().unwrap(), policy().digest().unwrap());
+
+        let mut wider = v1();
+        wider["min_sessions"] = 3.into();
+        assert_ne!(
+            parse_value(&predicate_policy_json(wider))
+                .unwrap()
+                .digest()
+                .unwrap(),
+            parsed.digest().unwrap(),
+            "every predicate field is digest-covered"
+        );
+
+        // The same predicate written with its keys in reverse order.
+        // Key-sorted text first, so the replacement below finds the block
+        // whatever map backs serde_json in this build.
+        let text =
+            crate::canonical_json::to_canonical_string(&predicate_policy_json(v1())).unwrap();
+        let reversed = text.replace(
+            r#"{"languages":["rust"],"min_sessions":2,"tool_families":[],"tools":["claude-code"],"version":1}"#,
+            r#"{"version":1,"tools":["claude-code"],"tool_families":[],"min_sessions":2,"languages":["rust"]}"#,
+        );
+        assert_ne!(text, reversed, "the replacement must have happened");
+        assert_eq!(
+            ActivityPolicy::parse(reversed.as_bytes())
+                .unwrap()
+                .digest()
+                .unwrap(),
+            parsed.digest().unwrap()
+        );
+        // Emitted key-sorted, whatever map backs serde_json in this build.
+        let emitted = serde_json::to_string(&parsed).unwrap();
+        assert!(emitted.contains(
+            r#""predicate":{"languages":["rust"],"min_sessions":2,"tool_families":[],"tools":["claude-code"],"version":1}"#
+        ), "{emitted}");
+    }
+
+    /// Version 1 is strict and bounded to what the client catalogue
+    /// accepts, so a policy the server publishes can never make the client
+    /// refuse its whole mission catalogue.
+    #[test]
+    fn activity_missions_v1_predicate_bounds_are_enforced() {
+        let refused = |mutate: &dyn Fn(&mut serde_json::Value)| {
+            let mut predicate = v1();
+            mutate(&mut predicate);
+            parse_value(&predicate_policy_json(predicate)).is_err()
+        };
+        assert!(!refused(&|_| {}));
+        assert!(refused(&|p| p["future_rule"] = true.into()), "v1 is strict");
+        assert!(refused(&|p| p["min_sessions"] = 0.into()));
+        assert!(refused(&|p| {
+            p["min_sessions"] = (MAX_PREDICATE_MIN_SESSIONS + 1).into()
+        }));
+        assert!(refused(&|p| p
+            .as_object_mut()
+            .unwrap()
+            .remove("min_sessions")
+            .map(drop)
+            .unwrap_or(())));
+        assert!(
+            refused(&|p| {
+                p["tools"] = serde_json::json!([]);
+                p["languages"] = serde_json::json!([]);
+            }),
+            "a predicate that restricts nothing would fit every session"
+        );
+        let many: Vec<String> = (0..=MAX_PREDICATE_VALUES)
+            .map(|i| format!("t{i}"))
+            .collect();
+        assert!(refused(&|p| p["tools"] = serde_json::json!(many)));
+        assert!(refused(
+            &|p| p["languages"] = serde_json::json!(["rust", "rust"])
+        ));
+        for bad in [
+            "",
+            "Rust Lang",
+            "rust\n",
+            "ünicode",
+            &"x".repeat(MAX_PREDICATE_LABEL_BYTES + 1),
+        ] {
+            assert!(
+                refused(&|p| p["tool_families"] = serde_json::json!([bad])),
+                "{bad:?}"
+            );
+        }
+        for version in [
+            serde_json::json!(0),
+            serde_json::json!("1"),
+            serde_json::json!(-1),
+            serde_json::Value::Null,
+        ] {
+            assert!(refused(&|p| p["version"] = version.clone()), "{version}");
+        }
+        assert!(refused(&|p| p
+            .as_object_mut()
+            .unwrap()
+            .remove("version")
+            .map(drop)
+            .unwrap_or(())));
+        assert!(parse_value(&predicate_policy_json(serde_json::json!([1]))).is_err());
+        assert!(parse_value(&predicate_policy_json(serde_json::json!("v1"))).is_err());
+
+        // A predicate-bearing mission's title must fit the client's bound.
+        let mut value = predicate_policy_json(v1());
+        value["missions"][0]["title"] = "t".repeat(MAX_PREDICATE_TITLE_CHARS + 1).into();
+        assert!(parse_value(&value).is_err());
+        value["missions"][0]["title"] = "t".repeat(MAX_PREDICATE_TITLE_CHARS).into();
+        assert!(parse_value(&value).is_ok());
+        // ...and a mission without one keeps the wider title bound.
+        let mut value = serde_json::to_value(policy()).unwrap();
+        value["missions"][0]["title"] = "t".repeat(MAX_PREDICATE_TITLE_CHARS + 1).into();
+        assert!(parse_value(&value).is_ok());
+    }
+
+    /// A predicate version this build does not know is never half-read: a
+    /// reader keeps it verbatim for the digest and treats the mission as
+    /// having no predicate. Only an operator policy refuses it, so a server
+    /// never publishes a version it cannot validate.
+    #[test]
+    fn activity_missions_unknown_predicate_version_is_ignored_not_half_read() {
+        let v2 = serde_json::json!({"version":2,"tools":["claude-code"],"min_sessions":1,"repo_size":"large"});
+        let operator = predicate_policy_json(v2.clone());
+        assert!(parse_value(&operator).is_err(), "the server refuses it");
+
+        // What a later server would publish: a v1 and a v2 mission.
+        let mut published = predicate_policy_json(v2);
+        published["missions"][1]["predicate"] = v1();
+        let reader: ActivityPolicy = serde_json::from_value(published.clone()).unwrap();
+        assert!(reader.validate().is_ok());
+        assert_eq!(reader.missions[0].supported_predicate(), None);
+        assert_eq!(
+            reader.missions[1]
+                .supported_predicate()
+                .map(|p| p.min_sessions),
+            Some(2)
+        );
+        // Its digest is taken over the same canonical bytes either way the
+        // unknown block's keys arrive.
+        let text = crate::canonical_json::to_canonical_string(&published).unwrap();
+        let reordered = text.replace(
+            r#"{"min_sessions":1,"repo_size":"large","tools":["claude-code"],"version":2}"#,
+            r#"{"version":2,"repo_size":"large","tools":["claude-code"],"min_sessions":1}"#,
+        );
+        assert_ne!(text, reordered, "the replacement must have happened");
+        let again: ActivityPolicy = serde_json::from_str(&reordered).unwrap();
+        assert_eq!(again.digest().unwrap(), reader.digest().unwrap());
+        assert_ne!(reader.digest().unwrap(), policy().digest().unwrap());
+
+        let catalogue = ActivityCatalogue {
+            policy_sha256: Some(reader.digest().unwrap()),
+            policy: Some(reader.clone()),
+            ..ActivityCatalogue::new(None).unwrap()
+        };
+        let round: ActivityCatalogue =
+            serde_json::from_slice(&serde_json::to_vec(&catalogue).unwrap()).unwrap();
+        assert_eq!(round, catalogue);
     }
 }
