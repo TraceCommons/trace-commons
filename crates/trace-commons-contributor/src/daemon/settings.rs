@@ -669,9 +669,8 @@ pub struct DaemonSettings {
     /// and sets their one-time offers, per kind (see
     /// [`DaemonSettings::apply_notify_upgrade`]). With no file at all the
     /// install is new and gets `NotifyKinds::default()`, unless a project
-    /// policy an older build wrote says otherwise
-    /// (`ProjectPolicy::notify_kinds_known` unset); then it gets the
-    /// upgrade too.
+    /// policy or daemon state file an older build wrote says otherwise
+    /// (its `notify_kinds_known` unset); then it gets the upgrade too.
     #[serde(
         default = "NotifyKinds::upgraded",
         deserialize_with = "notify_or_upgraded"
@@ -1313,7 +1312,22 @@ impl DaemonSettings {
                     .projects
                     .keys()
                     .any(|key| key != super::policy::UNKNOWN_PROJECT_KEY);
-            if !policy.notify_kinds_known || old_format_with_a_folder {
+            // An install whose daemon only ever watched -- no folder
+            // answered, nothing contributed -- has no policy file, but its
+            // daemon wrote a state file while watching. One an older build
+            // wrote, or one this build cannot read, is the same evidence.
+            let state_from_an_older_build = store
+                .read_daemon_file(crate::config::DAEMON_STATE_FILE)?
+                .is_some_and(|body| {
+                    #[derive(serde::Deserialize)]
+                    struct Marker {
+                        #[serde(default)]
+                        notify_kinds_known: bool,
+                    }
+                    serde_json::from_slice::<Marker>(&body)
+                        .map_or(true, |marker| !marker.notify_kinds_known)
+                });
+            if !policy.notify_kinds_known || old_format_with_a_folder || state_from_an_older_build {
                 settings.apply_notify_upgrade(&serde_json::Value::Null);
             }
             return Ok(settings);
@@ -1403,11 +1417,13 @@ impl DaemonSettings {
     /// a restart in between changes nothing.
     ///
     /// A missing file reaches here, with a `Null` stored value, only when
-    /// the project policy says the install is old: a policy file an older
-    /// build wrote (`ProjectPolicy::notify_kinds_known` unset), whatever
-    /// its folders and its Scrub check marker, or an old-format policy
-    /// (`scrub_check_upgrade_recorded` unset) holding a folder. A missing
-    /// file with no such
+    /// the daemon's own files say the install is old: a policy file an
+    /// older build wrote (`ProjectPolicy::notify_kinds_known` unset),
+    /// whatever its folders and its Scrub check marker; an old-format
+    /// policy (`scrub_check_upgrade_recorded` unset) holding a folder; or,
+    /// for an install that only ever watched and so has no policy file, a
+    /// state file an older build wrote (`DaemonState::notify_kinds_known`
+    /// unset) or one this build cannot read. A missing file with no such
     /// evidence is a new install and keeps `NotifyKinds::default()`. Daemon
     /// startup saves the file whenever an offer is pending and no file
     /// exists, so the decision is on disk from the first start.
@@ -3220,6 +3236,69 @@ mod tests {
         let loaded = DaemonSettings::load(&store).unwrap();
         assert_eq!(loaded.notify, NotifyKinds::upgraded());
         assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+    }
+
+    /// A daemon state file as a build from before the notification kinds
+    /// wrote it: the same JSON, without the key that says this build
+    /// created it.
+    fn save_state_as_an_older_build(store: &crate::config::ConfigStore) {
+        let mut value = serde_json::to_value(crate::daemon::state::DaemonState::new()).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        store
+            .write_daemon_file(
+                crate::config::DAEMON_STATE_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+    }
+
+    /// Kristi's #1300 review, finding 2 ("policy/queue evidence"): an older
+    /// install that only ever watched -- no folder answered, nothing
+    /// contributed -- has no policy file, so the policy marker cannot speak
+    /// for it. Unlisted folders resolve to Ask me, so its queue still holds
+    /// idle candidates. The state file its daemon wrote while watching is
+    /// the evidence: it gets the upgrade and both offers.
+    #[test]
+    fn a_watch_only_install_from_an_older_build_gets_the_notify_upgrade() {
+        let (_d, store) = temp_store();
+        save_state_as_an_older_build(&store);
+        assert!(
+            store
+                .read_daemon_file(crate::config::DAEMON_PROJECTS_FILE)
+                .unwrap()
+                .is_none()
+        );
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+        assert!(!loaded.scrub_check_defaulted_on_upgrade);
+    }
+
+    /// A state file this build cannot read says nothing about its writer,
+    /// so it is read as an older build's: offers, never kinds switched on
+    /// unasked.
+    #[test]
+    fn an_unreadable_state_file_without_settings_gets_the_notify_upgrade() {
+        let (_d, store) = temp_store();
+        store
+            .write_daemon_file(crate::config::DAEMON_STATE_FILE, b"{not json")
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::upgraded());
+        assert!(loaded.verdicts_offer_pending && loaded.idle_offer_pending);
+    }
+
+    /// The state file a new install's own daemon writes is not evidence of
+    /// an older install.
+    #[test]
+    fn a_new_installs_own_state_file_keeps_the_notify_defaults() {
+        let (_d, store) = temp_store();
+        crate::daemon::state::DaemonState::new()
+            .save(&store)
+            .unwrap();
+        let loaded = DaemonSettings::load(&store).unwrap();
+        assert_eq!(loaded.notify, NotifyKinds::default());
+        assert!(!loaded.verdicts_offer_pending && !loaded.idle_offer_pending);
     }
 
     /// A new install -- no settings file, and no policy or only one this
