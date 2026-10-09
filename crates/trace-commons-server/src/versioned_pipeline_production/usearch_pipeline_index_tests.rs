@@ -441,14 +441,25 @@ impl VectorIndex for FaultyIndex {
             entered.send(()).unwrap();
             release.recv().unwrap();
         }
-        let failing = self
-            .fail_flush_tenant
-            .fetch_update(
-                std::sync::atomic::Ordering::SeqCst,
-                std::sync::atomic::Ordering::SeqCst,
-                |left| left.checked_sub(1),
-            )
-            .is_ok();
+        // A compare-exchange loop, not `fetch_update`: newer toolchains
+        // deprecate that name and CI denies warnings, while its replacement
+        // `try_update` is newer than the MSRV floor.
+        let failing = {
+            use std::sync::atomic::Ordering::SeqCst;
+            let mut left = self.fail_flush_tenant.load(SeqCst);
+            loop {
+                if left == 0 {
+                    break false;
+                }
+                match self
+                    .fail_flush_tenant
+                    .compare_exchange(left, left - 1, SeqCst, SeqCst)
+                {
+                    Ok(_) => break true,
+                    Err(current) => left = current,
+                }
+            }
+        };
         anyhow::ensure!(!failing, "injected save failure");
         self.flushed
             .lock()
