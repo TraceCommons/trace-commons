@@ -1863,12 +1863,13 @@ Both need an account session, never a device key, and both answer the same
 - `POST /v1/account/traces/{submission_id}/withdraw`, `main`'s route, uses
   the pipeline withdrawal when a pipeline runtime is injected and the
   requested submission, or another submission of its source session, has a
-  pipeline run. Otherwise it takes `main`'s path. On a build with no
-  runtime injected, that path still queues the pipeline's follow-up for
-  each withdrawn submission with a pipeline run, through the database,
-  after the tombstones and before the bytes: the revision's invalidation
-  (reason `withdrawn`), a payload deletion per live object, and the end of
-  its runs' work. A runtime processes them when it runs.
+  pipeline run. Otherwise it takes `main`'s path. That path runs the
+  pipeline's follow-up for each withdrawn submission, with or without a
+  runtime. The follow-up goes through the runtime when one is injected,
+  and through the database when none is. It runs after the tombstones and
+  before the bytes. It queues the revision's invalidation (reason
+  `withdrawn`), a payload deletion per live object, and the end of its
+  runs' work. A runtime processes them when it runs.
 
 An upload whose source session is withdrawn while the pipeline receipt is
 still in progress is not recorded. The receipt's final transaction locks the

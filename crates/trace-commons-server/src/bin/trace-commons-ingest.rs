@@ -19807,6 +19807,34 @@ async fn account_source_session_status_handler(
     ))
 }
 
+/// The pipeline's follow-up of an account withdrawal, for each withdrawn
+/// version: its revision queued for removal from the pipeline index, a
+/// payload deletion per live object, and its runs' work ended. Zaki review 1,
+/// round 2, N-9: a build with no runtime injected takes the database path
+/// (`pipeline_store`), for a later runtime to process. A route that read "no
+/// pipeline run" before a run appeared reaches here with a runtime, so that
+/// build takes the runtime's path, which also wakes its worker. Idempotent,
+/// and nothing for a version with no run.
+async fn follow_up_account_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    affected_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    let actor = account_audit_tenant(ctx);
+    for affected_id in affected_ids {
+        if let Some(pipeline) = state.pipeline_service.as_ref() {
+            pipeline
+                .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                .await?;
+        } else if let Some(store) = state.pipeline_store.as_ref() {
+            store
+                .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn account_trace_withdraw_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -19908,25 +19936,12 @@ async fn account_trace_withdraw_handler(
         (tombstone, vec![submission_id])
     };
 
-    // Zaki review 1, round 2, N-9: a build with no runtime injected takes
-    // this path for a submission with a pipeline run too, so each withdrawn
-    // version with one gets the pipeline's follow-up through the database
-    // (its revision queued for removal from the pipeline index, a payload
-    // deletion per live object, its runs' work ended), for a later runtime
-    // to process. After the tombstones and before the bytes, as the
-    // completion reconciler runs it; idempotent, and nothing for a version
-    // with no run.
-    if state.pipeline_service.is_none() {
-        if let Some(store) = state.pipeline_store.as_ref() {
-            let actor = account_audit_tenant(&ctx);
-            for affected_id in &affected_ids {
-                store
-                    .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
-                    .await
-                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
-            }
-        }
-    }
+    // Each withdrawn version gets the pipeline's follow-up, with or without
+    // a runtime injected. See `follow_up_account_withdrawal`. After the
+    // tombstones and before the bytes, as the completion reconciler runs it.
+    follow_up_account_withdrawal(state.as_ref(), &ctx, &affected_ids)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
 
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {

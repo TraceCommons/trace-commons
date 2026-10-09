@@ -2341,6 +2341,92 @@ async fn queued_index_invalidation(
     (row.get(0), row.get(1))
 }
 
+/// `/v1/account/traces/{id}/withdraw` runs the pipeline's follow-up for each
+/// withdrawn submission whether or not a runtime is injected. The route
+/// reaches it with a runtime only in a race (a run that appears after the
+/// unlocked read), so the test calls `follow_up_account_withdrawal` directly:
+/// a run still before Review, with no index work and no export item, gets
+/// its submission's tombstone, and a second call adds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_withdrawal_follow_up_tombstones_a_run_with_no_index_work() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let ext = account_ctx_ext(&fixture.state, &session).await;
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    fixture
+        .service
+        .register_default_bundle(tenant)
+        .await
+        .expect("register the bundle");
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    let run = fixture
+        .service
+        .store()
+        .get_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_ne!(
+        run.state,
+        PipelineRunState::Complete,
+        "the run is not processed"
+    );
+
+    let tombstones = || async {
+        let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_tombstones
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant, &envelope.submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert_eq!(tombstones().await, 0, "nothing is withdrawn yet");
+
+    follow_up_account_withdrawal(&fixture.state, &ext.0, &[envelope.submission_id])
+        .await
+        .expect("the follow-up succeeds");
+    assert_eq!(tombstones().await, 1, "the submission is tombstoned");
+    follow_up_account_withdrawal(&fixture.state, &ext.0, &[envelope.submission_id])
+        .await
+        .expect("the follow-up repeats");
+    assert_eq!(tombstones().await, 1, "a second call adds no row");
+}
+
 /// Owner ruling T7-8: `main`'s legacy route `POST /v1/account/traces/{id}/withdraw`
 /// uses the pipeline withdrawal when the pipeline runtime is present and the
 /// withdrawal reaches a pipeline run: the requested submission's own, or one
