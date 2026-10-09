@@ -50,8 +50,9 @@ use crate::trace_corpus_storage::{
 };
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
-    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
-    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
+    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+    PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL, PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
+    PipelineAuthorityProvider, PipelinePrivacyBoundary,
 };
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
@@ -10798,6 +10799,20 @@ impl PipelineService {
                 self.mark_transient_retry_or_record_lease_expired(
                     &run,
                     PIPELINE_DATABASE_UNAVAILABLE_LABEL,
+                )
+                .await
+            }
+            // The tenant authority could not be read (a tenant whose policy
+            // `main` reads from the database, and the read failed). It is
+            // not the trace's fault either: the same uncharged suspension,
+            // so an outage cannot spend the run's attempts and fail it, and
+            // the retry reads the policy again. No leg settles without it:
+            // the Settle reads run before the dispatch and before the
+            // ledger transaction.
+            Err(error) if error.to_string() == PIPELINE_AUTHORITY_READ_FAILED_LABEL => {
+                self.mark_transient_retry_or_record_lease_expired(
+                    &run,
+                    PIPELINE_AUTHORITY_READ_FAILED_LABEL,
                 )
                 .await
             }

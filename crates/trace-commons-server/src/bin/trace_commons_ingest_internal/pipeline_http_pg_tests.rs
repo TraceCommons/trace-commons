@@ -11993,14 +11993,82 @@ async fn production_assembly_refuses_a_receipt_whose_policy_read_fails() {
     serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFails).await;
 }
 
+/// A tenant on database policy reads whose row cannot be read when Settle
+/// reads it before dispatching the `NoveltyUtility` leg: no leg is
+/// dispatched or settled and no ledger row is written; the run waits in
+/// retry, uncharged; once the read succeeds again it settles exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_policy_read_before_dispatch_retries_and_settles_once() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure: 0,
+    })
+    .await;
+}
+
+/// The same, when the read fails after the dispatch, at the ledger
+/// transaction's own check: the leg stays open with no ledger row, and the
+/// retry repeats the idempotent adapter call and settles exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_policy_read_at_the_ledger_retries_and_settles_once() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure: 1,
+    })
+    .await;
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TenantPolicyMode {
     Environment,
     Database,
     DatabaseReadFails,
+    /// Reads succeed until Settle; there, after `reads_before_failure`
+    /// successful reads, one read fails.
+    DatabaseReadFailsAtSettle {
+        reads_before_failure: usize,
+    },
+}
+
+/// `main`'s DB mirror as the tenant policy store, with one read failure
+/// that can be armed: after `skip` more successful reads, the next fails.
+struct ArmedTenantPolicies {
+    inner: super::super::production_assembly::DatabaseTenantPolicies,
+    armed: std::sync::Mutex<Option<usize>>,
+}
+
+#[async_trait::async_trait]
+impl super::super::production_assembly::TenantPolicyStore for ArmedTenantPolicies {
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<
+        Option<trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord>,
+        DatabaseError,
+    > {
+        let fail = {
+            let mut armed = self.armed.lock().unwrap();
+            match *armed {
+                Some(0) => {
+                    *armed = None;
+                    true
+                }
+                Some(skip) => {
+                    *armed = Some(skip - 1);
+                    false
+                }
+                None => false,
+            }
+        };
+        if fail {
+            return Err(DatabaseError::Query(
+                "injected tenant policy read failure".into(),
+            ));
+        }
+        self.inner.get_trace_tenant_policy(tenant_id).await
+    }
 }
 
 async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
+    let mut armed_store: Option<Arc<ArmedTenantPolicies>> = None;
     use super::super::production_assembly::tests as production;
     use super::super::production_assembly::{
         DatabaseTenantPolicies, TenantPolicyPipelineAuthorityProvider, TenantPolicyStore,
@@ -12044,7 +12112,7 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
             Arc::new(|_: &str| true),
             Some(Arc::new(production::FailingTenantPolicies) as Arc<dyn TenantPolicyStore>),
         )
-    } else if mode == TenantPolicyMode::Database {
+    } else if mode != TenantPolicyMode::Environment {
         runtime
             .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
                 tenant_id: tenant.clone(),
@@ -12061,10 +12129,14 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
             Arc::new(BTreeMap::new()),
             false,
             Arc::new(|_: &str| true),
-            Some(
-                Arc::new(DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>))
-                    as Arc<dyn TenantPolicyStore>,
-            ),
+            Some({
+                let store = Arc::new(ArmedTenantPolicies {
+                    inner: DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>),
+                    armed: std::sync::Mutex::new(None),
+                });
+                armed_store = Some(store.clone());
+                store as Arc<dyn TenantPolicyStore>
+            }),
         )
     } else {
         TenantPolicyPipelineAuthorityProvider::new(
@@ -12159,11 +12231,85 @@ async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
         PipelineReceiptResult::Created(created) => created,
         other => panic!("the receipt creates a run: {other:?}"),
     };
-    for _ in 0..3 {
+    if let TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure,
+    } = mode
+    {
+        // Score, then Review: neither reads the tenant authority.
+        for _ in 0..2 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .expect("the phase runs");
+        }
+        let before = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the run exists");
+        assert_eq!(before.next_phase, Some(Phase::Settle), "{before:?}");
+        *armed_store.as_ref().unwrap().armed.lock().unwrap() = Some(reads_before_failure);
         service
             .process_run(&tenant, created.run_id)
             .await
-            .expect("the phase runs");
+            .expect("a failed policy read is recorded, not raised");
+        let waiting = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the run exists");
+        assert_eq!(
+            (waiting.state, waiting.last_error_label.as_deref()),
+            (
+                PipelineRunState::Retry,
+                Some(trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL)
+            ),
+            "{waiting:?}"
+        );
+        assert_eq!(
+            waiting.attempt_count, before.attempt_count,
+            "a failed policy read is an uncharged suspension"
+        );
+        let ledger = ledger_rows(&owner, &tenant, waiting.submission_id).await;
+        assert_eq!(ledger, serde_json::json!([]), "no ledger row");
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let settled: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM pipeline_run_settlements
+                  WHERE tenant_id = $1 AND run_id = $2 AND operation_state = 'complete'",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(settled, 0, "no leg settled");
+        tx.execute(
+            "UPDATE pipeline_runs SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        // The read succeeds again: the retry settles, once.
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the retry runs");
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("a complete run is not claimed again");
+    } else {
+        for _ in 0..3 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .expect("the phase runs");
+        }
     }
     let run = service
         .store()
