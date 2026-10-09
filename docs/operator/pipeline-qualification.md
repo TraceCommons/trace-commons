@@ -555,7 +555,10 @@ seed took (`remote_restore_source_changed` otherwise).
 
 Only `TRACE_COMMONS_KEK_PROVIDER` and `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME` are
 passed from the operator's environment to the children; set them as the
-deployment does. Credentials come from Application Default Credentials. The
+deployment does. On GCS the drill refuses a key wrapper that is not a
+production trust boundary (`remote_restore_kek_not_production`): under the
+local master key every object would unwrap and the count would say nothing
+about KMS. Credentials come from Application Default Credentials. The
 drill's objects stay in both stores: nothing in the drill deletes from a
 bucket. Remove the `pipeline-remote-restore-*` namespaces by hand (or with a
 lifecycle rule on that prefix) when the run is done.

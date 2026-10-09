@@ -731,13 +731,35 @@ fn remote_provider(client: &RemoteClient, location: &RemoteStoreLocation) -> Rem
 }
 
 /// The key wrapper the deployment selects (`TRACE_COMMONS_KEK_PROVIDER`:
-/// GCP KMS on the pilot, the local master key otherwise).
+/// GCP KMS on the pilot, the local master key otherwise). On GCS it must be
+/// a production one (`require_production_kek`).
 async fn remote_kek(
+    kind: &RemoteStoreKind,
     master_key_hex: &str,
 ) -> Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync> {
-    build_selected_kek_wrapper_async(secrecy::SecretString::from(master_key_hex.to_string()))
-        .await
-        .unwrap_or_else(|_| panic!("remote_restore_kek_unavailable"))
+    let kek =
+        build_selected_kek_wrapper_async(secrecy::SecretString::from(master_key_hex.to_string()))
+            .await
+            .unwrap_or_else(|_| panic!("remote_restore_kek_unavailable"));
+    require_production_kek(kind, kek.is_production_trust_boundary())
+        .unwrap_or_else(|label| panic!("{label}"));
+    kek
+}
+
+/// On GCS the unwrap count is evidence about the deployment's key wrapper,
+/// so the wrapper must be a production trust boundary: under the local
+/// master key the drill would pass and prove nothing about KMS. The
+/// directory double runs on the local key and can never pass anyway.
+fn require_production_kek(
+    kind: &RemoteStoreKind,
+    production_trust_boundary: bool,
+) -> Result<(), &'static str> {
+    match kind {
+        RemoteStoreKind::Gcs if !production_trust_boundary => {
+            Err("remote_restore_kek_not_production")
+        }
+        _ => Ok(()),
+    }
 }
 
 fn remote_crypto(master_key_hex: &str) -> SecretsCrypto {
@@ -759,7 +781,7 @@ impl RemoteRestoreStore {
         master_key_hex: &str,
     ) -> Self {
         let client = remote_client(kind, location).await;
-        let kek = remote_kek(master_key_hex).await;
+        let kek = remote_kek(kind, master_key_hex).await;
         let kek_status = kek.safe_status();
         let store = ServiceOwnedTraceArtifactStore::new(
             TraceArtifactProviderConfig::service_owned_remote(
@@ -882,8 +904,13 @@ impl RemoteCopyConfig {
         else {
             return Err("remote_restore_environment_incomplete");
         };
-        let kind = RemoteStoreKind::from_vars(&kind, var(REMOTE_DOUBLE_ROOT_VAR))
-            .map_err(|_| "remote_restore_environment_incomplete")?;
+        let kind =
+            RemoteStoreKind::from_vars(&kind, var(REMOTE_DOUBLE_ROOT_VAR)).map_err(|label| {
+                match label {
+                    "restore_environment_incomplete" => "remote_restore_environment_incomplete",
+                    other => other,
+                }
+            })?;
         if remote_store_names_overlap(&source, &scratch) {
             return Err("remote_restore_scratch_overlaps_live_store");
         }
@@ -903,7 +930,7 @@ impl RemoteCopyConfig {
 async fn run_remote_copy(config: &RemoteCopyConfig) -> serde_json::Value {
     let source = remote_client(&config.kind, &config.source).await;
     let scratch = remote_client(&config.kind, &config.scratch).await;
-    let kek = remote_kek(&config.master_key_hex).await;
+    let kek = remote_kek(&config.kind, &config.master_key_hex).await;
     let copy = trace_commons_server::versioned_pipeline_remote_restore::restore_remote_artifacts(
         &remote_provider(&source, &config.source),
         remote_provider(&scratch, &config.scratch),
@@ -2677,4 +2704,19 @@ async fn the_remote_copy_step_restores_a_seeded_store_over_the_directory_double(
         root.path().join("tracecommons-scratch/drill/ns").is_dir(),
         "the restore lands under the scratch prefix and namespace"
     );
+}
+
+/// A drill on GCS proves the restored objects unwrap under the deployment's
+/// key wrapper only when that wrapper is a production one: under the local
+/// master key every count would pass and say nothing about KMS. The double
+/// runs on the local key.
+#[test]
+fn a_gcs_drill_refuses_a_key_wrapper_that_is_not_production() {
+    assert_eq!(
+        require_production_kek(&RemoteStoreKind::Gcs, false),
+        Err("remote_restore_kek_not_production")
+    );
+    assert_eq!(require_production_kek(&RemoteStoreKind::Gcs, true), Ok(()));
+    let double = RemoteStoreKind::DirectoryDouble(PathBuf::from("/tmp/buckets"));
+    assert_eq!(require_production_kek(&double, false), Ok(()));
 }
