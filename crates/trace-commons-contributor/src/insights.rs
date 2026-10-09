@@ -1454,7 +1454,7 @@ fn reject_leaf_symlink(path: &Path) -> Result<()> {
     }
 }
 
-fn reject_symlinks(path: &Path) -> Result<()> {
+pub(crate) fn reject_symlinks(path: &Path) -> Result<()> {
     for ancestor in path.ancestors() {
         match fs::symlink_metadata(ancestor) {
             Ok(metadata) if metadata.file_type().is_symlink() => {

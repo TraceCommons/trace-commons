@@ -482,7 +482,9 @@ impl DigestKeyStore for CreationLocked {
             return Ok(key);
         }
         let unavailable = || DigestKeyError::Unavailable("insights_digest_key_lock");
-        std::fs::create_dir_all(&self.dir).map_err(|_| unavailable())?;
+        // The store made and checked this directory when it opened; checked
+        // again here, as every store lock is, and never created.
+        super::reject_symlinks(&self.dir).map_err(|_| unavailable())?;
         let lock_path = self.dir.join(KEY_LOCK_FILE_NAME);
         match std::fs::symlink_metadata(&lock_path) {
             Ok(metadata) if !metadata.is_file() => return Err(unavailable()),
@@ -950,12 +952,15 @@ mod tests {
             }
         }
         let dir = tempfile::tempdir().unwrap();
+        // Canonical, as the store hands it over: macOS temp paths run through
+        // the /var alias, which the symlink check refuses.
+        let dir_path = dir.path().canonicalize().unwrap();
         let racy = Arc::new(Racy::default());
         let barrier = Arc::new(Barrier::new(2));
         let handles: Vec<_> = (0..2)
             .map(|_| {
                 let store =
-                    CreationLocked::new(Box::new(Shared(Arc::clone(&racy))), dir.path().into());
+                    CreationLocked::new(Box::new(Shared(Arc::clone(&racy))), dir_path.clone());
                 let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
@@ -967,5 +972,24 @@ mod tests {
         let stored = key_fingerprint(&DigestKey::from_bytes(racy.stored.lock().unwrap().unwrap()));
         assert_eq!(made, vec![stored, stored]);
         assert_eq!(racy.next.load(Ordering::SeqCst), 1, "one key made");
+    }
+
+    /// The store directory is checked again before a lock file is made in
+    /// it, as every store lock does: a directory swapped for a symlink after
+    /// the store opened gets no file written through it, and no key.
+    #[cfg(unix)]
+    #[test]
+    fn key_creation_refuses_a_symlinked_store_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let target = root.join("elsewhere");
+        std::fs::create_dir(&target).unwrap();
+        let link = root.join("store");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let inner = InMemoryDigestKeyStore::with_seed([3; 32]);
+        let store = CreationLocked::new(Box::new(inner), link);
+        assert!(store.load_or_create().is_err());
+        assert!(store.load().unwrap().is_none());
+        assert!(!target.join(KEY_LOCK_FILE_NAME).exists());
     }
 }
