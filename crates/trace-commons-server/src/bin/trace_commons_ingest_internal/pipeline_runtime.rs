@@ -1221,10 +1221,18 @@ pub(crate) async fn drain_pipeline_tenant(
         }
     }
     if due.payouts {
-        match service
-            .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
-            .await
-        {
+        let mut tally = trace_commons_server::versioned_pipeline::PipelinePayoutTally::default();
+        let result = service
+            .process_payouts_tallied(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT,
+                &mut tally,
+            )
+            .await;
+        // Appended on an error too: the lines that changed before it are
+        // changed for good.
+        append_pipeline_payout_audit_events(state.as_ref(), &tenant_id, &tally).await;
+        match result {
             Ok(processed) => {
                 if processed >= PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT {
                     lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Payouts);
@@ -1383,6 +1391,118 @@ pub(crate) async fn append_pipeline_review_audit_events(
         Some(error) if audited == 0 => Err(error),
         _ => Ok(PipelineCreditAuditPass { audited, failed }),
     }
+}
+
+/// The label of the purpose in the payout audit events of a pass, hashed
+/// into `purpose_hash` as `main` hashes the purpose of its own workers.
+const PIPELINE_PAYOUT_AUDIT_PURPOSE: &str = "pipeline_near_payout";
+
+/// Appends `main`'s two payout audit kinds for a payout pass that changed an
+/// outbox line: `near_credit_outbox_confirm` when the pass confirmed or
+/// failed a line on chain, `near_credit_outbox_submit` when it submitted a
+/// line or its submit failed. Each event holds counts only. A pass that
+/// changed no line appends nothing: a leg that waits for a NEAR account is
+/// listed again each interval and changes none. A failed append is logged by
+/// label with a hash of the error, and the step goes on; the lost event is
+/// not appended again.
+async fn append_pipeline_payout_audit_events(
+    state: &AppState,
+    tenant_id: &str,
+    tally: &trace_commons_server::versioned_pipeline::PipelinePayoutTally,
+) {
+    let events = [
+        (
+            "near_credit_outbox_confirm",
+            [
+                ("confirmed", tally.confirmed),
+                ("failed", tally.chain_failed),
+            ],
+        ),
+        (
+            "near_credit_outbox_submit",
+            [
+                ("submitted", tally.submitted),
+                ("failed", tally.submit_failed),
+            ],
+        ),
+    ];
+    for (kind, counts) in events {
+        if counts.iter().all(|(_, count)| *count == 0) {
+            continue;
+        }
+        if let Err(error) = append_pipeline_payout_audit_event(state, tenant_id, kind, counts).await
+        {
+            tracing::warn!(
+                error_class = "pipeline_worker_payout_audit_failed",
+                tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                audit_kind = kind,
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker payout audit event failed"
+            );
+        }
+    }
+}
+
+/// One event of `append_pipeline_payout_audit_events`, in the shape of
+/// `append_near_credit_outbox_submit_audit` and
+/// `append_near_credit_outbox_confirm_audit`.
+async fn append_pipeline_payout_audit_event(
+    state: &AppState,
+    tenant_id: &str,
+    kind: &'static str,
+    counts: [(&'static str, u64); 2],
+) -> anyhow::Result<()> {
+    let action_counts = counts
+        .iter()
+        .map(|(name, count)| {
+            (
+                (*name).to_string(),
+                (*count).min(u64::from(u32::MAX)) as u32,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let changed = counts.iter().map(|(_, count)| *count).sum::<u64>();
+    let purpose_hash = sha256_prefixed(PIPELINE_PAYOUT_AUDIT_PURPOSE);
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant_id.to_string(),
+        submission_id: Uuid::nil(),
+        kind: kind.to_string(),
+        created_at: Utc::now(),
+        status: None,
+        actor_role: None,
+        actor_principal_ref: Some(actor.principal_ref.clone()),
+        reason: Some(trace_maintenance_audit_reason(
+            Some(&purpose_hash),
+            false,
+            &action_counts,
+        )),
+        export_count: Some(usize::try_from(changed).unwrap_or(usize::MAX)),
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Retain,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(kind.to_string()),
+                purpose_hash: Some(purpose_hash),
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+        },
+        "pipeline payout audit event",
+    )
+    .await?;
+    Ok(())
 }
 
 /// One item of `append_pipeline_review_audit_events`: appends each event of

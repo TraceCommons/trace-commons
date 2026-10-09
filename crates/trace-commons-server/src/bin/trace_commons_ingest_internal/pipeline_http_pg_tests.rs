@@ -8880,6 +8880,149 @@ async fn mains_operational_summary_leaves_a_failed_pipeline_payout_line_out() {
     );
 }
 
+/// The worker's payout step appends `main`'s two payout audit kinds for a
+/// pass that changed a line, under the actor `pipeline_worker` and the
+/// purpose `pipeline_near_payout`, with the counts of the lines it changed.
+/// A pass over a leg that waits for a NEAR account changes no line and
+/// appends nothing. `main`'s audit verification finds no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_payout_pass_appends_mains_payout_audit_rows() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    Arc::make_mut(&mut fixture.state).require_db_mirror_writes = true;
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let payout_events = |kind: &str| -> Vec<TraceCommonsAuditEvent> {
+        read_all_audit_events(&root, &tenant)
+            .expect("the file audit log reads")
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .collect()
+    };
+    let drain = || {
+        pipeline_runtime::drain_pipeline_tenant(
+            fixture.state.clone(),
+            fixture.service.clone(),
+            tenant.clone(),
+            cadence.clone(),
+        )
+    };
+    let audit_row = |event_id: Uuid| {
+        let db = fixture
+            .state
+            .db_mirror
+            .clone()
+            .expect("the state has a database");
+        let tenant = tenant.clone();
+        async move {
+            db.list_trace_audit_events(&tenant)
+                .await
+                .expect("the audit rows read")
+                .into_iter()
+                .find(|row| row.audit_event_id == event_id)
+                .expect("the event has its database row")
+        }
+    };
+
+    // 1. The pass that submits the line.
+    drain().await;
+    let requests = near.requests();
+    assert_eq!(requests.len(), 1, "the settled credit is submitted");
+    let submits = payout_events("near_credit_outbox_submit");
+    assert_eq!(submits.len(), 1, "{submits:?}");
+    assert!(payout_events("near_credit_outbox_confirm").is_empty());
+    assert_eq!(
+        submits[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let row = audit_row(submits[0].event_id).await;
+    let StorageTraceAuditSafeMetadata::Maintenance {
+        surface,
+        dry_run,
+        action_counts,
+        ..
+    } = &row.metadata
+    else {
+        panic!("a maintenance row: {:?}", row.metadata);
+    };
+    assert_eq!(surface.as_deref(), Some("near_credit_outbox_submit"));
+    assert!(!dry_run);
+    assert_eq!(
+        action_counts.get("submitted"),
+        Some(&1),
+        "{action_counts:?}"
+    );
+    assert_eq!(action_counts.get("failed"), Some(&0), "{action_counts:?}");
+
+    // 2. The pass that confirms it.
+    near.record_confirmation(
+        &requests[0].idempotency_key,
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .expect("confirm the submitted request");
+    drain().await;
+    let confirms = payout_events("near_credit_outbox_confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(
+        confirms[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let row = audit_row(confirms[0].event_id).await;
+    let StorageTraceAuditSafeMetadata::Maintenance { action_counts, .. } = &row.metadata else {
+        panic!("a maintenance row: {:?}", row.metadata);
+    };
+    assert_eq!(
+        action_counts.get("confirmed"),
+        Some(&1),
+        "{action_counts:?}"
+    );
+    assert_eq!(action_counts.get("failed"), Some(&0), "{action_counts:?}");
+    assert_eq!(payout_events("near_credit_outbox_submit").len(), 1);
+
+    // 3. A leg whose account has no NEAR payout target is held: no line
+    // changes, so the pass appends nothing.
+    let held_principal = format!("principal_sha256:held-{}", Uuid::new_v4().simple());
+    let account_id = Uuid::new_v4();
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&tenant, &account_id],
+    )
+    .await
+    .expect("insert the account");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant, &account_id, &held_principal],
+    )
+    .await
+    .expect("link the principal");
+    tx.commit().await.unwrap();
+    drop(client);
+    completed_pipeline_run(&fixture.service, &tenant, &held_principal).await;
+    drain().await;
+    assert_eq!(near.requests().len(), 1, "the held leg is not submitted");
+    assert_eq!(payout_events("near_credit_outbox_submit").len(), 1);
+    assert_eq!(payout_events("near_credit_outbox_confirm").len(), 1);
+
+    // 4. `main`'s audit verification finds no mismatch.
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
 /// `main`'s operational summary leaves the derived records of pipeline
 /// submissions out of its vector counts and its `missing_active_vectors`
 /// gate: the pipeline indexes its own submissions, so only the legacy

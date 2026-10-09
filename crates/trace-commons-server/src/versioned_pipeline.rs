@@ -13684,6 +13684,19 @@ impl PipelineService {
     /// Only a database error ends the pass, as does an injected crash (a
     /// test's stand-in for the process dying).
     pub async fn process_payouts(&self, tenant_id: &str, limit: usize) -> anyhow::Result<usize> {
+        self.process_payouts_tallied(tenant_id, limit, &mut PipelinePayoutTally::default())
+            .await
+    }
+
+    /// `process_payouts`, adding to `tally` each outbox line the pass
+    /// changed. The counts stay in `tally` when the pass ends with an error,
+    /// so the caller can audit the lines that changed before it.
+    pub async fn process_payouts_tallied(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        tally: &mut PipelinePayoutTally,
+    ) -> anyhow::Result<usize> {
         let Some((_, config)) = self.payout.as_ref() else {
             return Ok(0);
         };
@@ -13712,7 +13725,7 @@ impl PipelineService {
             .map(|(run_id, _)| run_id)
             .collect::<Vec<_>>();
         let mut processed = self
-            .pay_out_runs_on(&mut client, tenant_id, &to_confirm, false)
+            .pay_out_runs_on(&mut client, tenant_id, &to_confirm, false, tally)
             .await?;
         drop(client);
         if to_submit.is_empty() {
@@ -13723,7 +13736,7 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.pay_out_runs_on(client, tenant_id, &to_submit, true)
+                self.pay_out_runs_on(client, tenant_id, &to_submit, true, tally)
                     .await
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
@@ -13767,14 +13780,21 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.process_payout_on(client, tenant_id, run_id, true, true)
-                    .await
-                    .map(|attempt| match attempt {
-                        PayoutAttempt::NoRun => None,
-                        // A held run is returned as a run with nothing to pay
-                        // now is: untouched.
-                        PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
-                    })
+                self.process_payout_on(
+                    client,
+                    tenant_id,
+                    run_id,
+                    true,
+                    true,
+                    &mut PipelinePayoutTally::default(),
+                )
+                .await
+                .map(|attempt| match attempt {
+                    PayoutAttempt::NoRun => None,
+                    // A held run is returned as a run with nothing to pay
+                    // now is: untouched.
+                    PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
+                })
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
@@ -13808,11 +13828,12 @@ impl PipelineService {
         tenant_id: &str,
         run_ids: &[Uuid],
         may_submit: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<usize> {
         let mut processed = 0;
         for &run_id in run_ids {
             match self
-                .process_payout_on(client, tenant_id, run_id, may_submit, false)
+                .process_payout_on(client, tenant_id, run_id, may_submit, false, tally)
                 .await
             {
                 Ok(PayoutAttempt::Done(_)) => processed += 1,
@@ -13850,6 +13871,7 @@ impl PipelineService {
         run_id: Uuid,
         may_submit: bool,
         retry_failed: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<PayoutAttempt> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
@@ -13869,7 +13891,7 @@ impl PipelineService {
         // withdrawal does not stop one. `dispatch_near_settlements` pays only
         // complete, payout-eligible legs.
         let held = self
-            .dispatch_near_settlements(client, &run, may_submit, retry_failed)
+            .dispatch_near_settlements(client, &run, may_submit, retry_failed, tally)
             .await?;
         Ok(if held {
             PayoutAttempt::Held(run)
@@ -13945,6 +13967,7 @@ impl PipelineService {
         run: &PipelineRunRecord,
         may_submit: bool,
         retry_failed: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<bool> {
         let mut any_held = false;
         let Some((injected, config)) = self.payout.as_ref() else {
@@ -14106,6 +14129,7 @@ impl PipelineService {
                                     mode,
                                 )
                                 .await?;
+                                tally.submitted += 1;
                                 submission_mode = Some(mode.to_string());
                                 self.inject_crash(PipelineCrashPoint::AfterNearSubmit)?;
                             }
@@ -14117,6 +14141,7 @@ impl PipelineService {
                                     &sha256_prefixed(PIPELINE_NEAR_SUBMIT_FAILED_LABEL.as_bytes()),
                                 )
                                 .await?;
+                                tally.submit_failed += 1;
                                 continue;
                             }
                         }
@@ -14140,7 +14165,7 @@ impl PipelineService {
                         // again.
                         let tx =
                             PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
-                        let _failed_rows = tx
+                        let failed_rows = tx
                             .execute(
                                 "UPDATE trace_near_credit_outbox
                                     SET status = 'failed', confirmed_at = NULL,
@@ -14163,6 +14188,7 @@ impl PipelineService {
                             )
                             .await?;
                         tx.commit().await?;
+                        tally.chain_failed += failed_rows;
                         continue;
                     }
                 };
@@ -14172,8 +14198,9 @@ impl PipelineService {
                     anyhow::bail!(PIPELINE_NEAR_CONFIRMATION_INVALID_LABEL);
                 }
                 let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
-                tx.execute(
-                    "UPDATE trace_near_credit_outbox
+                let confirmed_rows = tx
+                    .execute(
+                        "UPDATE trace_near_credit_outbox
                         SET near_call_json = jsonb_set(
                                 near_call_json,
                                 '{confirmation_evidence}',
@@ -14192,17 +14219,18 @@ impl PipelineService {
                         AND COALESCE(
                                 near_call_json ->> 'pipeline_submission_mode', $6::TEXT
                             ) = $5",
-                    &[
-                        &run.tenant_id,
-                        &outbox_id,
-                        &evidence.transaction_hash_hash,
-                        &evidence.receipt_hash,
-                        &mode,
-                        &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
-                    ],
-                )
-                .await?;
+                        &[
+                            &run.tenant_id,
+                            &outbox_id,
+                            &evidence.transaction_hash_hash,
+                            &evidence.receipt_hash,
+                            &mode,
+                            &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
+                        ],
+                    )
+                    .await?;
                 tx.commit().await?;
+                tally.confirmed += confirmed_rows;
                 self.inject_crash(PipelineCrashPoint::AfterNearConfirm)?;
             }
             if dispatch_held {
@@ -14239,6 +14267,20 @@ impl PipelineService {
         }
         Ok(any_held)
     }
+}
+
+/// The outbox lines a payout pass changed, by what changed them. A statement
+/// that changed no row counts nothing: two replicas can poll one line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelinePayoutTally {
+    /// Lines a submit moved to `submitted`.
+    pub submitted: u64,
+    /// Lines a refused submit moved to `failed`.
+    pub submit_failed: u64,
+    /// Lines the confirmation moved to `confirmed`.
+    pub confirmed: u64,
+    /// Lines the chain reported as failed, moved to `failed`.
+    pub chain_failed: u64,
 }
 
 /// What one run's payout attempt came to (`process_payout_on`).
