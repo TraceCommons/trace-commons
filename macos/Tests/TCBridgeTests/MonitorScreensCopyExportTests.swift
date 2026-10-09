@@ -18,6 +18,21 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         }
     }
 
+    /// The edge rail's words: a singular apart, and each link's accessible
+    /// name says where it goes.
+    func testTheEdgeRailWordsDecode() throws {
+        let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
+        let rail = copy.edgeRail
+        XCTAssertEqual(rail.onThisMac(count: 1), rail.onThisMacLineOne)
+        XCTAssertTrue(rail.onThisMac(count: 3).hasPrefix("3 "))
+        XCTAssertEqual(rail.inTheLibrary(count: 1), rail.inTheLibraryLineOne)
+        XCTAssertTrue(rail.inTheLibrary(count: 12).hasPrefix("12 "))
+        let link = rail.open(section: copy.settingsNav.tools)
+        XCTAssertEqual(link.text, "Open " + copy.settingsNav.tools)
+        XCTAssertTrue(link.label.hasPrefix(link.text))
+        XCTAssertTrue(link.label.hasSuffix("Trace Commons"))
+    }
+
     /// Ron's #1146 Settings modal over the Monitor (#1241 Task 10): its
     /// title, subtitle, section list name and close button, from the core.
     func testTheSettingsModalWordsDecode() throws {
@@ -33,8 +48,8 @@ final class MonitorScreensCopyExportTests: XCTestCase {
     /// words (owner ruling, 2026-10-06).
     func testTheHistoryActionsDecode() throws {
         let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
-        XCTAssertEqual(copy.historyActions.requestRefresh, "Request server refresh")
-        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in to withdraw")
+        XCTAssertEqual(copy.historyActions.requestRefresh, "Refresh")
+        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in")
         XCTAssertTrue(copy.historyActions.refreshFailed.hasPrefix("Could not ask for updates"))
     }
 

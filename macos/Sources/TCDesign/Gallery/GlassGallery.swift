@@ -154,6 +154,30 @@ public struct GlassGallery: View {
                 Button("Link") {}.buttonStyle(GlassButtonStyle(.link))
                 Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive))
             }
+            // The two sizes side by side (owner ruling, 2026-10-08): a
+            // window's action bar, where every button is the CTA's size,
+            // then the same kinds inline.
+            Text("bar")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            GlassActionBar(notes: ["note"]) {
+                HStack(spacing: 10) {
+                    Button("Back") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Spacer(minLength: 0)
+                    Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive, size: .bar))
+                    Button("Cancel") {}.buttonStyle(GlassButtonStyle(.secondary, size: .bar))
+                    Button("Customize") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Button("Continue") {}.buttonStyle(GlassButtonStyle(.primary))
+                }
+            }
+            Text("inline")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: 10) {
+                Button("Check") {}.buttonStyle(GlassButtonStyle(.glass))
+                Button("Remove") {}.buttonStyle(GlassButtonStyle(.destructive))
+                Button("Details") {}.buttonStyle(GlassButtonStyle(.link))
+            }
             // A set of glass buttons, one chosen (selected), as #1146's
             // aria-pressed.
             HStack(spacing: 6) {

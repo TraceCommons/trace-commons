@@ -95,10 +95,16 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("episode_members_saved", "Episode members saved."),
         ("episode_assessment", "Independent user-reported episode assessment"),
         ("episode_assessment_notice_short", "Assess this episode independently from its member snapshots and linked evidence."),
-        ("episode_save_assessment", "Save episode assessment"),
+        // Approved 2026-10-08 (button rule).
+        ("episode_save_assessment", "Save"),
+        // The button's accessible name beside the other Saves.
+        ("episode_save_assessment_accessibility", "Save episode assessment"),
         ("episode_assessment_saved", "Episode assessment saved."),
         ("episode_unassessed", "Unassessed"),
-        ("episode_clear_assessment", "Clear episode assessment"),
+        // Approved 2026-10-08 (button rule).
+        ("episode_clear_assessment", "Clear"),
+        // Its confirmation's title, which keeps the full name.
+        ("episode_clear_assessment_title", "Clear episode assessment"),
         ("episode_clear_assessment_confirm", "Clear this episode assessment? The episode and its members will remain."),
         ("episode_assessment_cleared", "Episode assessment cleared."),
         ("episode_delete", "Delete episode"),
@@ -111,7 +117,9 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_task_title", "Comparison task"),
         ("comparison_specification_title", "Comparison specification"),
         ("comparison_specifications_empty", "No comparison specifications have been saved."),
-        ("comparison_specification_refresh", "Refresh saved specifications"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_specification_refresh", "Refresh"),
+        ("comparison_specification_refresh_accessibility", "Refresh saved specifications"),
         ("comparison_specification_draft", "Draft a retrospective comparison"),
         ("comparison_specification_need_context", "Add complete context to saved comparison tasks before drafting a specification."),
         ("comparison_specification_stratum", "Exact project, language, and configuration"),
@@ -125,11 +133,17 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_specification_cutoff", "Evidence cutoff"),
         ("comparison_specification_cutoff_notice", "The cutoff freezes the task material and outcomes available at that time. Later evidence is excluded."),
         ("comparison_specification_preview", "Preview comparison"),
-        ("comparison_specification_save", "Save immutable specification"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_specification_save", "Save"),
+        ("comparison_specification_save_accessibility", "Save immutable specification"),
+        // Beside Save: what the short label no longer says.
+        ("comparison_specification_immutable_notice", "A saved specification cannot be changed."),
         ("comparison_specification_saved", "Saved comparison specifications"),
         ("comparison_specification_saved_notice", "Comparison specification saved."),
-        ("comparison_specification_evaluate", "Evaluate saved specification"),
-        ("comparison_specification_explain_result", "Verify this result"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_specification_evaluate", "Evaluate"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_specification_explain_result", "Verify"),
         ("comparison_specification_explain_confirm", "Verify this exact audit digest against current local evidence?"),
         ("comparison_specification_result", "Categorical outcome counts"),
         ("comparison_specification_included", "Included tasks"),
@@ -187,18 +201,32 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_task_confirmation_current", "Independence review is current."),
         ("comparison_task_confirmation_missing", "Independence review is missing or stale."),
         ("comparison_task_attribution_pending", "Source attribution is pending qualification; this task is not comparison-eligible."),
-        ("comparison_task_create", "Create comparison task"),
-        ("comparison_task_list", "Saved comparison tasks"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_create", "Create task"),
+        // The create section's heading, which keeps the full name.
+        ("comparison_task_create_heading", "Create comparison task"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_list", "Refresh"),
+        ("comparison_task_list_accessibility", "Refresh saved comparison tasks"),
         ("comparison_task_open", "Review comparison task"),
-        ("comparison_task_back", "Back to comparison tasks"),
-        ("comparison_task_delete", "Delete comparison task"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_back", "Back"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_delete", "Delete task"),
         ("comparison_task_delete_confirm", "Delete this comparison task? Its episodes and snapshots will remain."),
         ("comparison_task_deleted", "Comparison task deleted."),
-        ("comparison_task_replace_episodes", "Replace episode evidence"),
-        ("comparison_task_set_context", "Save task context"),
-        ("comparison_task_set_outcome", "Save user-reported outcome"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_replace_episodes", "Replace episodes"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_set_context", "Save context"),
+        // The context section's heading, which keeps its words.
+        ("comparison_task_context_heading", "Save task context"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_set_outcome", "Save outcome"),
         ("comparison_task_clear_outcome", "Clear outcome"),
-        ("comparison_task_reconfirm", "Confirm one work item and all known attempts"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_reconfirm", "Confirm"),
+        ("comparison_task_reconfirm_accessibility", "Confirm one work item and all known attempts"),
         ("comparison_task_reconfirm_notice", "Confirm only after reviewing the displayed material evidence digest and all frozen attempts."),
         ("comparison_task_revision_conflict", "This task changed in another window. Refresh and review it before editing."),
         ("comparison_task_digest_conflict", "The task evidence changed after it was displayed. Refresh and review the new digest."),
@@ -232,12 +260,15 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("comparison_task_frozen_evidence", "Frozen episode evidence"),
         ("comparison_task_advanced_evidence", "Identifiers and digests"),
         ("comparison_task_project", "Project"),
-        ("comparison_task_new_project", "New local project"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_new_project", "New project"),
         ("comparison_task_current_missing", "Current episode is unavailable; frozen evidence remains inspectable."),
         ("comparison_task_current_matches_frozen", "Current episode matches the frozen revision and membership."),
         ("comparison_task_current_changed", "Current episode differs from the frozen revision or membership."),
-        ("comparison_task_open_current_episode", "Inspect current episode"),
-        ("comparison_task_open_frozen_snapshot", "Inspect frozen snapshot evidence"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_open_current_episode", "Open episode"),
+        // Approved 2026-10-08 (button rule).
+        ("comparison_task_open_frozen_snapshot", "Open snapshot"),
         ("comparison_task_reasoning_unknown", "Unknown"),
         ("comparison_task_reasoning_none", "None"),
         ("comparison_task_reasoning_minimal", "Minimal"),
@@ -265,11 +296,20 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("refreshed", "Saved insights refreshed. Source files were not read again."),
         ("deleted", "Saved insight deleted. The original file was not modified."),
         ("already_absent", "That saved insight is already absent."),
-        ("cancelled", "Screen updates cancelled. Refresh saved insights after pending work finishes."),
+        ("cancelled", "Screen updates cancelled. Choose Refresh after pending work finishes."),
         ("partial_notice", "Partial recognition: some source records are not classified."),
         ("choose_file", "Choose file"), ("analyze", "Analyze"),
-        ("save", "Re-read and save"), ("refresh", "Refresh saved insights"),
-        ("delete", "Delete saved insight"),
+        // Approved 2026-10-08 (button rule).
+        ("save", "Save"), ("refresh", "Refresh"),
+        // Approved 2026-10-08 (button rule).
+        ("delete", "Delete"),
+        // The accessible names beside the other Saves, Refreshes and Deletes,
+        // and the delete confirmation's title: the full names.
+        ("save_accessibility", "Re-read and save"),
+        ("refresh_accessibility", "Refresh saved insights"),
+        ("episode_refresh_accessibility", "Refresh saved episodes"),
+        ("delete_accessibility", "Delete saved insight"),
+        ("delete_title", "Delete saved insight"),
         ("delete_confirm", "Delete this saved insight? The original source file will remain."),
         ("cancel", "Cancel"),
         ("explain", "Show evidence"), ("save_assessment", "Save assessment"),
@@ -331,9 +371,11 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("choose_repository", "Choose repository"),
         ("link_commit", "Full commit object ID"),
         ("link_git", "Inspect and link commit"),
-        ("choose_test_report", "Choose test report"),
+        // Approved 2026-10-08 (button rule).
+        ("choose_test_report", "Choose report"),
         ("link_test_report", "Import and link report"),
-        ("unlink_evidence", "Remove evidence link"),
+        // Approved 2026-10-08 (button rule).
+        ("unlink_evidence", "Unlink"),
         ("link_git_notice", "Inspects an exact local commit. This does not establish merge, acceptance, or revert status."),
         ("link_test_notice", "Imports a structured report as an assertion from its producer. This does not run tests or verify their result."),
         ("test_report_format", "Accepted report: JSON with schema_version 1, runner, passed, failed, skipped, observed_at, and optional commit_id."),
@@ -1539,7 +1581,8 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["type"], "copy");
         assert_eq!(value["copy"]["title"], "Insights");
-        assert_eq!(value["copy"]["save"], "Re-read and save");
+        assert_eq!(value["copy"]["save"], "Save");
+        assert_eq!(value["copy"]["save_accessibility"], "Re-read and save");
         assert_eq!(value["copy"]["insights_store_title"], "Insights store");
         assert_eq!(
             value["copy"]["insights_store_not_directory"],

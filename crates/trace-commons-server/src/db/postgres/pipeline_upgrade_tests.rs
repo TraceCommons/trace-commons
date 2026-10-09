@@ -75,6 +75,24 @@ async fn apply_real_migrations_through_v91(client: &mut Client) {
     }
 }
 
+async fn apply_real_migrations_through(client: &mut Client, last: i32) {
+    client
+        .batch_execute(
+            "CREATE TABLE _trace_commons_migrations (\
+                version INTEGER PRIMARY KEY,\
+                name TEXT NOT NULL,\
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()\
+            );",
+        )
+        .await
+        .expect("create migration history table");
+    for (version, name, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version <= last) {
+        apply_and_record_migration(client, *version, name, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply real V{version} ({name}): {error}"));
+    }
+}
+
 async fn set_tenant(client: &Client, tenant: &str) {
     client
         .execute(
@@ -346,9 +364,19 @@ async fn pipeline_table_grants(client: &Client) -> Vec<(String, String, String, 
     grants
 }
 
+/// Multi-lens review C13: the tests of this module each apply every
+/// migration, in a database of their own on one server. The migrations hold
+/// `ALTER ROLE` statements, roles are shared by the whole server, and two
+/// such statements on one role at the same time fail (`tuple concurrently
+/// updated`); the migration lock is per database and does not order them.
+/// Each test holds this lock from its first line, so they run one after the
+/// other however the test binary is started.
+static UPGRADE_CLUSTER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
 async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
     let url = isolated_upgrade_database_url();
     let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
         .await
@@ -375,7 +403,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 110, 111, 112, 113] {
+    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -1148,4 +1176,565 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
             "maximum_version": version,
         }),
     );
+}
+
+/// Zaki review 3, Z3-M3: a leg the V94-era code seeded with payout `pending`
+/// has no batch line under the account's settlement key, so the payout never
+/// pays it. V109 marks it `disabled` (a payout nothing will make) instead of
+/// leaving it `pending` for good, for each instrument (multi-lens review C8:
+/// that code seeded `pending` for each instrument on a payout rail, and the
+/// payout reads only payout-eligible Trace Credit legs). A payout-eligible
+/// leg keeps its state. V109 is applied here as a migrator that owns the
+/// tables and is not a superuser, so the test fails when V109 does not lift
+/// forced row security for its update.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v109_disables_the_payout_of_pending_legs_the_v94_code_seeded() {
+    v109_disables_v94_era_pending_legs(V109Order::Ascending).await;
+}
+
+/// `main` took V110 to V114 while 109 was free, so a database that runs
+/// `main` records every other version before V109, and the runner applies
+/// V109 last there (it applies each version that is not recorded, in the
+/// order of the list). Here the runner itself (`run_migrations`) applies
+/// V109, on a history that lacks only that version, in a session whose role
+/// is the non-superuser owner. The same seeded legs and the same results as
+/// the ascending test above; it fails when a later migration changes
+/// something a V109 statement names, and when the runner leaves out a
+/// version below the newest one it finds recorded.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v109_applies_after_every_later_migration_on_a_database_that_runs_main() {
+    v109_disables_v94_era_pending_legs(V109Order::AfterEveryLaterMigration).await;
+}
+
+/// When V109 reaches the database of `v109_disables_v94_era_pending_legs`.
+#[derive(Clone, Copy, PartialEq)]
+enum V109Order {
+    /// After V108 and before V110: a database that goes from #1143 to a
+    /// build with V109.
+    Ascending,
+    /// After every other migration of the list, by the migration runner.
+    AfterEveryLaterMigration,
+}
+
+async fn v109_disables_v94_era_pending_legs(order: V109Order) {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
+    // A database of its own beside the isolated one, so this upgrade starts
+    // from nothing whatever else ran on that one. It is dropped at the end.
+    let base = isolated_upgrade_database_url();
+    let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
+    let (base_name, query) = base_name
+        .split_once('?')
+        .map_or((base_name, String::new()), |(name, query)| {
+            (name, format!("?{query}"))
+        });
+    let name = match order {
+        V109Order::Ascending => format!("{base_name}_v94_legs"),
+        V109Order::AfterEveryLaterMigration => format!("{base_name}_v109_last"),
+    };
+    let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+        .await
+        .expect("connect to the isolated database");
+    tokio::spawn(async move { connection.await.expect("setup connection") });
+    setup
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    setup
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = format!("{prefix}/{name}{query}");
+    let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect upgrade admin");
+    let admin_connection =
+        tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    apply_real_migrations_through(&mut admin, 104).await;
+
+    let tenant = "upgrade-v94-legs";
+    set_tenant(&admin, tenant).await;
+    let submission_id = uuid::Uuid::new_v4();
+    let run_id = uuid::Uuid::new_v4();
+    let object_ref_id = uuid::Uuid::new_v4();
+    let hash = |byte: &str| format!("sha256:{}", byte.repeat(64));
+    let bundle_id = hash("c");
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[&tenant, &submission_id, &uuid::Uuid::new_v4(), &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes
+             ) VALUES ($1, $2, $3, 'submitted_envelope', 'store', 'key', $4, 'key-ref', 0)",
+            &[&tenant, &submission_id, &object_ref_id, &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_bundle_packages (tenant_id, bundle_id, manifest_format_version, package)
+             VALUES ($1, $2, 1, '{}'::jsonb)",
+            &[&tenant, &bundle_id],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs (
+                tenant_id, run_id, submission_id, trace_id, bundle_id,
+                request_idempotency_key, request_content_hash, source_object_ref_id,
+                next_phase, state, admission_decision
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'settle', 'pending', 'admit')",
+            &[
+                &tenant,
+                &run_id,
+                &submission_id,
+                &uuid::Uuid::new_v4(),
+                &bundle_id,
+                &hash("e"),
+                &hash("f"),
+                &object_ref_id,
+            ],
+        )
+        .await
+        .unwrap();
+    for (instrument, payout_rail, payout_state, operation_ref) in [
+        ("trace_credit", "near", "pending", hash("1")),
+        ("storage_rebate", "near", "pending", hash("2")),
+        ("eligible_credit", "near", "pending", hash("3")),
+    ] {
+        admin
+            .execute(
+                "INSERT INTO pipeline_run_settlements (
+                    tenant_id, run_id, instrument_id, atomic_units, operation_ref_hash,
+                    payout_rail, payout_state
+                 ) VALUES ($1, $2, $3, 1000, $4, $5, $6)",
+                &[
+                    &tenant,
+                    &run_id,
+                    &instrument,
+                    &operation_ref,
+                    &payout_rail,
+                    &payout_state,
+                ],
+            )
+            .await
+            .unwrap();
+    }
+
+    // Multi-lens review C16: V109 is applied as a migrator that owns the
+    // tables and is not a superuser, with no tenant set. Row security does
+    // not apply to a superuser, so as the URL's role the update would reach
+    // the legs with or without V109's lift of forced row security. V105 to
+    // V108 are applied first, as the admin (and each later migration too,
+    // when V109 goes last); the five tables V109 changes are then given to
+    // the owner role.
+    for (version, migration, sql) in MIGRATIONS.iter().filter(|(version, _, _)| match order {
+        V109Order::Ascending => (105..=108).contains(version),
+        V109Order::AfterEveryLaterMigration => *version >= 105 && *version != 109,
+    }) {
+        apply_and_record_migration(&mut admin, *version, migration, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply real V{version} ({migration}): {error}"));
+    }
+    if order == V109Order::AfterEveryLaterMigration {
+        // The history a database of `main` has: the newest version of the
+        // list is recorded, and V109 is the one version that is not.
+        let missing: Vec<i32> = admin
+            .query(
+                "SELECT version FROM unnest($1::INTEGER[]) AS listed(version)
+                  WHERE NOT EXISTS (
+                        SELECT 1 FROM _trace_commons_migrations m
+                         WHERE m.version = listed.version
+                  )",
+                &[&MIGRATIONS.iter().map(|(v, _, _)| *v).collect::<Vec<_>>()],
+            )
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(missing, vec![109]);
+        assert!(MIGRATIONS.iter().any(|(version, _, _)| *version > 109));
+    }
+    admin
+        .batch_execute(
+            "DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pipeline_upgrade_owner')
+                THEN CREATE ROLE pipeline_upgrade_owner NOLOGIN NOSUPERUSER NOBYPASSRLS; END IF;
+             END $$;
+             GRANT USAGE, CREATE ON SCHEMA public TO pipeline_upgrade_owner;
+             GRANT SELECT, INSERT ON _trace_commons_migrations TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_run_settlements OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_export_snapshots OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_export_snapshot_items OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_review_assessments OWNER TO pipeline_upgrade_owner;
+             ALTER TABLE pipeline_index_invalidations OWNER TO pipeline_upgrade_owner;",
+        )
+        .await
+        .expect("give V109's tables to a non-superuser owner");
+    // A leg today's code seeds: `pending` and payout-eligible (V105).
+    assert_eq!(
+        admin
+            .execute(
+                "UPDATE pipeline_run_settlements SET payout_eligible = TRUE
+                  WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'eligible_credit'",
+                &[&tenant, &run_id],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    set_tenant(&admin, "").await;
+    let migrator = match order {
+        V109Order::Ascending => {
+            admin
+                .batch_execute("SET ROLE pipeline_upgrade_owner")
+                .await
+                .unwrap();
+            let (version, migration, sql) = MIGRATIONS
+                .iter()
+                .find(|(version, _, _)| *version == 109)
+                .expect("V109 is in the list");
+            apply_and_record_migration(&mut admin, *version, migration, sql)
+                .await
+                .expect("apply V109 as the non-superuser owner");
+            admin.batch_execute("RESET ROLE").await.unwrap();
+            // The runner applies the later migrations now.
+            let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
+            migrator.run_migrations().await.expect("upgrade to current");
+            migrator
+        }
+        V109Order::AfterEveryLaterMigration => {
+            // Merge review M6: the runner applies V109, not the test. Each
+            // new session of the URL's role in this database starts in the
+            // owner role, so the runner's own connection is that of a
+            // migrator that owns the tables and is not a superuser. The
+            // setting goes with the database.
+            admin
+                .batch_execute(&format!(
+                    "ALTER ROLE CURRENT_USER IN DATABASE {name} SET role = 'pipeline_upgrade_owner'"
+                ))
+                .await
+                .expect("start the runner's sessions in the owner role");
+            let migrator = PgBackend::new(&database_config(url.clone())).await.unwrap();
+            let role = migrator
+                .trace_pool()
+                .get()
+                .await
+                .unwrap()
+                .query_one(
+                    "SELECT current_user::TEXT, rolsuper OR rolbypassrls
+                       FROM pg_roles WHERE rolname = current_user",
+                    &[],
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (role.get::<_, String>(0).as_str(), role.get::<_, bool>(1)),
+                ("pipeline_upgrade_owner", false),
+                "the runner's session is the non-superuser owner"
+            );
+            migrator
+                .run_migrations()
+                .await
+                .expect("the runner applies V109 after every later migration");
+            admin
+                .batch_execute(&format!(
+                    "ALTER ROLE CURRENT_USER IN DATABASE {name} RESET role"
+                ))
+                .await
+                .unwrap();
+            migrator
+        }
+    };
+    let recorded: i64 = admin
+        .query_one("SELECT COUNT(*) FROM _trace_commons_migrations", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(recorded, MIGRATIONS.len() as i64);
+    set_tenant(&admin, tenant).await;
+    let legs: Vec<(String, String, bool)> = admin
+        .query(
+            "SELECT instrument_id, payout_state, payout_eligible FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 ORDER BY instrument_id",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.get(0), row.get(1), row.get(2)))
+        .collect();
+    assert_eq!(
+        legs,
+        vec![
+            ("eligible_credit".to_string(), "pending".to_string(), true),
+            ("storage_rebate".to_string(), "disabled".to_string(), false),
+            ("trace_credit".to_string(), "disabled".to_string(), false),
+        ]
+    );
+    let forced: bool = admin
+        .query_one(
+            "SELECT relforcerowsecurity FROM pg_class WHERE relname = 'pipeline_run_settlements'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(forced, "V109 forces row security again after its update");
+    // The rest of V109 is there in either order: its four checks and its
+    // two indexes.
+    let objects: i64 = admin
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pg_constraint
+                      WHERE contype = 'c' AND conname::TEXT = ANY($1::TEXT[]))
+                  + (SELECT COUNT(*) FROM pg_indexes
+                      WHERE schemaname = 'public' AND indexname::TEXT = ANY($2::TEXT[]))",
+            &[
+                &[
+                    "pipeline_export_snapshots_requester_principal_ref_check",
+                    "pipeline_review_assessments_resolved_reasons_array",
+                    "pipeline_export_snapshot_items_outcome_schema_id_shape",
+                    "pipeline_export_snapshot_items_view_schema_id_shape",
+                ]
+                .as_slice(),
+                &[
+                    "idx_pipeline_index_invalidations_submission",
+                    "idx_pipeline_export_snapshot_items_run",
+                ]
+                .as_slice(),
+            ],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(objects, 6);
+
+    // Multi-lens review C13: no run leaves this test's database on the
+    // server. Its own connections are closed first.
+    drop(migrator);
+    drop(admin);
+    admin_connection.await.expect("the admin connection closes");
+    setup
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .expect("drop the test's own database");
+    // PR #1283 review, finding 8: the owner role is cluster-wide, so it is
+    // dropped too. Its objects and its per-database setting went with the
+    // database. A role a crashed earlier run left with objects in another
+    // database cannot be dropped; that is reported, not failed, since the
+    // test's own work is done and the next run reuses the role.
+    if let Err(error) = setup
+        .batch_execute("DROP ROLE IF EXISTS pipeline_upgrade_owner")
+        .await
+    {
+        eprintln!("pipeline_upgrade_owner was kept: {error}");
+    }
+}
+
+/// V116 (spec 2026-10-08, Slice C, C-D4): `trace_gate_decisions` gains
+/// `source` and `pipeline_run_id`, both defaulted so `main`'s writers are
+/// unchanged; the two must agree (a pipeline row names its run, a legacy row
+/// names none); one pipeline row at most per submission; and the gate
+/// driver may read `source`, which the credit-quality sweep filters on.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v116_adds_source_and_pipeline_run_id_with_defaults() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
+    let base = isolated_upgrade_database_url();
+    let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
+    let (base_name, query) = base_name
+        .split_once('?')
+        .map_or((base_name, String::new()), |(name, query)| {
+            (name, format!("?{query}"))
+        });
+    let name = format!("{base_name}_v116");
+    let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+        .await
+        .expect("connect to the isolated database");
+    tokio::spawn(async move { connection.await.expect("setup connection") });
+    setup
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    setup
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = format!("{prefix}/{name}{query}");
+    let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect upgrade admin");
+    let admin_connection =
+        tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    let last = MIGRATIONS
+        .iter()
+        .map(|(version, _, _)| *version)
+        .max()
+        .expect("a migration list");
+    assert!(last >= 116, "V116 is registered in the migration list");
+    apply_real_migrations_through(&mut admin, last).await;
+
+    let tenant = "upgrade-v116";
+    set_tenant(&admin, tenant).await;
+    let hash = |byte: &str| format!("sha256:{}", byte.repeat(64));
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    let submission_id = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[&tenant, &submission_id, &uuid::Uuid::new_v4(), &hash("d")],
+        )
+        .await
+        .unwrap();
+    // `main`'s column list, without the two new columns.
+    let insert = |source: Option<&'static str>, run: Option<uuid::Uuid>| {
+        let admin = &admin;
+        async move {
+            let decision_id = uuid::Uuid::new_v4();
+            let base_columns = "tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash";
+            let result = match source {
+                None => {
+                    admin
+                        .execute(
+                            &format!(
+                                "INSERT INTO trace_gate_decisions ({base_columns})
+                                 VALUES ($1,$2,$3,'v1','gv',1,0,true,1,'nn',true,'ee','aa')"
+                            ),
+                            &[&tenant, &decision_id, &submission_id],
+                        )
+                        .await
+                }
+                Some(source) => {
+                    admin
+                        .execute(
+                            &format!(
+                                "INSERT INTO trace_gate_decisions ({base_columns},
+                                     source, pipeline_run_id)
+                                 VALUES ($1,$2,$3,'v1','gv',1,0,true,1,'nn',true,'ee','aa',$4,$5)"
+                            ),
+                            &[&tenant, &decision_id, &submission_id, &source, &run],
+                        )
+                        .await
+                }
+            };
+            result.map(|_| decision_id)
+        }
+    };
+
+    // A legacy insert is unchanged and reads back as `legacy_gate` with no run.
+    let legacy = insert(None, None)
+        .await
+        .expect("main's insert is unchanged");
+    let row = admin
+        .query_one(
+            "SELECT source, pipeline_run_id FROM trace_gate_decisions
+              WHERE tenant_id = $1 AND decision_id = $2",
+            &[&tenant, &legacy],
+        )
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, String>(0), "legacy_gate");
+    assert_eq!(row.get::<_, Option<uuid::Uuid>>(1), None);
+    // A second legacy row for the same submission is still legal (`Cached`).
+    insert(None, None)
+        .await
+        .expect("main may write more than one row per submission");
+
+    let check_violation = |error: tokio_postgres::Error| {
+        assert_eq!(error.code(), Some(&SqlState::CHECK_VIOLATION), "{error}");
+    };
+    check_violation(
+        insert(Some("pipeline_settle"), None)
+            .await
+            .expect_err("a pipeline row names its run"),
+    );
+    check_violation(
+        insert(Some("legacy_gate"), Some(uuid::Uuid::new_v4()))
+            .await
+            .expect_err("a legacy row names no run"),
+    );
+    check_violation(
+        insert(Some("other"), Some(uuid::Uuid::new_v4()))
+            .await
+            .expect_err("only the two sources exist"),
+    );
+
+    insert(Some("pipeline_settle"), Some(uuid::Uuid::new_v4()))
+        .await
+        .expect("one pipeline row for the submission");
+    let error = insert(Some("pipeline_settle"), Some(uuid::Uuid::new_v4()))
+        .await
+        .expect_err("a second pipeline row for the submission is refused");
+    assert_eq!(error.code(), Some(&SqlState::UNIQUE_VIOLATION), "{error}");
+
+    let index: String = admin
+        .query_one(
+            "SELECT indexdef FROM pg_indexes
+              WHERE tablename = 'trace_gate_decisions'
+                AND indexname = 'trace_gate_decisions_one_pipeline_row'",
+            &[],
+        )
+        .await
+        .expect("the partial unique index exists")
+        .get(0);
+    assert!(index.starts_with("CREATE UNIQUE INDEX"), "{index}");
+    assert!(index.contains("(tenant_id, submission_id)"), "{index}");
+    assert!(index.contains("'pipeline_settle'"), "{index}");
+
+    let readable: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_gate_driver', 'trace_gate_decisions',
+                                         'source', 'SELECT')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(readable, "the gate driver reads `source`");
+
+    drop(admin);
+    admin_connection.await.expect("the admin connection closes");
+    setup
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .expect("drop the test's own database");
 }

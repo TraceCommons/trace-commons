@@ -388,6 +388,10 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             consent::AUTO_SCOPE_REQUIRED,
             consent::AUTO_PATH_AUTOMATIC,
             consent::AUTO_PATH_ASK_FIRST,
+            consent::AUTO_PATH_AUTOMATIC_TITLE,
+            consent::AUTO_PATH_AUTOMATIC_DETAIL,
+            consent::AUTO_PATH_ASK_FIRST_TITLE,
+            consent::AUTO_PATH_ASK_FIRST_DETAIL,
         ]
         .map(str::to_owned)
         .to_vec(),

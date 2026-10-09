@@ -33,7 +33,7 @@ final class VerdictCopyTests: XCTestCase {
     }
 
     func testTheBulkControlIsTheSharedWording() {
-        XCTAssertEqual(VerdictCopy.submitAllAs, "Submit all as...")
+        XCTAssertEqual(VerdictCopy.submitAllAs, "Submit as...")
         XCTAssertEqual(
             VerdictCopy.submitAllAsTooltip,
             "Record the same outcome for every session in this group."

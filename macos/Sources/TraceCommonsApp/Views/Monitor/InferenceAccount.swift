@@ -20,18 +20,8 @@ struct InferenceAccountSection: View {
     var body: some View {
         if let copy = model.privateInferenceCopy {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                Text(copy.subtitle)
-                    .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: GlassTokens.Space.s3) {
-                    PrivateAIStatCard(
-                        label: copy.statInferenceAccess,
-                        value: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
-                    PrivateAIStatCard(
-                        label: copy.statRuntime,
-                        value: Self.runtimeWord(store.privateAI?.state, copy: copy))
-                }
+                // No subtitle and no Inference access / Runtime pair (owner,
+                // 2026-10-09): the Private AI summary above says both.
                 // Saved model accounts and managed sessions, which #1146
                 // has no panel for (owner ruling O3: in the main pane), come
                 // before the global heading, as on main: that heading says

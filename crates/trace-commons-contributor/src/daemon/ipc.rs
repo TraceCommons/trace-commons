@@ -3746,10 +3746,11 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
         return;
     }
     value["capture_enabled"] = serde_json::json!(enabled == Some(true));
+    // The capture switch's button. Approved 2026-10-08 (button rule).
     value["capture_label"] = serde_json::json!(if enabled == Some(true) {
-        "Disable local token capture"
+        "Disable capture"
     } else {
-        "Enable local token capture"
+        "Enable capture"
     });
     value["capture_confirmation"] = serde_json::json!(
         "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."

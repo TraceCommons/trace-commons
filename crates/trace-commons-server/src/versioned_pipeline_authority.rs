@@ -15,11 +15,27 @@ use trace_commons_protocol::trace_contribution::{
 use crate::trace_authority::SubmissionAuthority;
 
 pub const PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL: &str = "authority_control_missing";
+/// The tenant's authority could not be read (its policy row, for a tenant
+/// whose policy `main` reads from the database). Fails closed: never a
+/// fallback to another source or to "no policy".
+pub const PIPELINE_AUTHORITY_READ_FAILED_LABEL: &str = "pipeline_authority_read_failed";
 pub const PIPELINE_PRIVACY_CONTROL_MISSING_LABEL: &str = "privacy_control_missing";
 pub const PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL: &str = "privacy_classification_failed";
 
+#[async_trait]
 pub trait PipelineAuthorityProvider: Send + Sync {
     fn authority_for_tenant(&self, tenant_id: &str) -> Option<SubmissionAuthority>;
+    /// The tenant's authority as of now, which is what the pipeline asks:
+    /// at the receipt and before each `NoveltyUtility` credit check. A
+    /// provider whose answer needs a read (a policy in the database)
+    /// overrides this; an `Err` refuses with its label. The default is
+    /// [`Self::authority_for_tenant`].
+    async fn resolve_authority(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Option<SubmissionAuthority>> {
+        Ok(self.authority_for_tenant(tenant_id))
+    }
     /// The one answer to whether this provider may serve a routed or
     /// drained tenant: `false` by default, and readiness fails closed on it.
     fn production_qualified(&self) -> bool {
@@ -41,6 +57,14 @@ impl StaticPipelineAuthorityProvider {
         }
     }
 
+    /// A test double: every tenant gets `fallback`. It is in the library,
+    /// not behind `#[cfg(test)]`, because the integration tests and the
+    /// ingest binary's tests link the library built without `cfg(test)`.
+    /// A `StaticPipelineAuthorityProvider` is never production-qualified
+    /// (`production_qualified` keeps the trait's `false`), so the
+    /// qualification gate refuses a runtime that routes or drains a tenant
+    /// through it (`each_pipeline_test_double_fails_the_qualification_gate`
+    /// in the ingest binary's tests).
     #[doc(hidden)]
     pub fn test_only(fallback: SubmissionAuthority) -> Self {
         Self {
