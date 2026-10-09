@@ -30022,8 +30022,8 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
 /// Multi-lens review C5, residual: a failed store call of Settle's read of
 /// the stored index command is charged as `index_command_unreadable`, one
 /// hour between attempts, so a store fault spans hours in which an operator
-/// can correct it. The run fails only after its last attempt, and it has no
-/// settlement leg, since Settle reads the command first. (A command that is read but wrong keeps
+/// can correct it. The run fails only after its last attempt, and its open
+/// legs are forfeited. (A command that is read but wrong keeps
 /// `index_command_invalid` and the short backoff:
 /// `stored_command_binding_failures_fail_closed`.)
 #[tokio::test]
@@ -30035,12 +30035,18 @@ async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
     let (service, _, _) = test_service(
         backend.clone(),
         artifact_store(&dir),
-        minimal_config(true),
+        scored_config(true),
         None,
     )
     .await;
     let tenant = format!("unreadable-command-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(!legs.is_empty(), "Score created the legs before Settle");
     let (object_key, _) = run
         .index_command_ref
         .as_deref()
@@ -30068,7 +30074,7 @@ async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
         (
             PipelineRunState::Retry,
             Some("index_command_unreadable"),
-            first.attempt_count
+            run.attempt_count + 1
         ),
         "an unreadable command is charged"
     );
@@ -30105,12 +30111,13 @@ async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
         .list_settlements(&tenant, run.run_id)
         .await
         .unwrap();
-    // Settle reads the command before it creates any leg, so a run that
-    // failed here has none.
     assert!(
-        settlements.is_empty(),
-        "the failed run has no settlement leg: {settlements:?}"
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "every open leg is forfeited: {settlements:?}"
     );
+    assert_eq!(settlements.len(), legs.len(), "no leg is added or lost");
 }
 
 /// ZA-2 follow-up: an in-memory Google Cloud Storage client that records

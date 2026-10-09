@@ -1757,8 +1757,8 @@ not the trace's fault:
   outage.
   A failed store call of Settle's read of the stored index command is
   charged under `index_command_unreadable`, with one hour between attempts.
-  The run fails about four hours after the first failure. It has no
-  settlement leg then, since Settle reads the command before it creates one. A stored command with wrong content keeps
+  The run fails about four hours after the first failure. Its open
+  settlement legs are forfeited when the run fails. A stored command with wrong content keeps
   `index_command_invalid` and the short backoff.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same

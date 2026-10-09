@@ -10324,9 +10324,10 @@ impl PipelineService {
     /// plan's ruling A7. `evidence` is the same Score outcome's own
     /// evidence; `None` when Score proposed no command
     /// (`embedding_artifact_hash` absent). Any failure -- a failed store
-    /// read, a missing or malformed reference, a decode failure, or a
-    /// mismatch against the evidence or the run's own recorded hash/revision
-    /// -- is the safe label `index_command_invalid`.
+    /// read (`index_command_unreadable`), a missing or malformed reference,
+    /// a decode failure, or a mismatch against the evidence or the run's
+    /// own recorded hash/revision (`index_command_invalid`) -- is a safe
+    /// label.
     pub async fn load_index_command(
         &self,
         run: &PipelineRunRecord,
