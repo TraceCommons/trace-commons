@@ -23,9 +23,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use trace_commons_protocol::local_credit_estimate::{
     BUILT_IN_ESTIMATE_BYTES_PER_TOKEN, BUILT_IN_ESTIMATE_CHUNK_CAP,
-    BUILT_IN_ESTIMATE_CHUNK_TARGET_TOKENS, ESTIMATE_MAX_ABS_WEIGHT, ESTIMATE_MAX_TIERS,
-    ESTIMATE_TABLE_SCHEMA_VERSION, EstimateBand, EstimateTerm, EstimateWeight,
-    LOCAL_ESTIMATE_FEATURES_VERSION, LocalEstimateFeatures, LocalEstimateTable, estimate_score,
+    BUILT_IN_ESTIMATE_CHUNK_TARGET_TOKENS, ESTIMATE_DISPLAY_STEP, ESTIMATE_MAX_ABS_WEIGHT,
+    ESTIMATE_MAX_DISPLAYED_CREDIT, ESTIMATE_MAX_TIERS, ESTIMATE_TABLE_SCHEMA_VERSION, EstimateBand,
+    EstimateTerm, EstimateWeight, LOCAL_ESTIMATE_FEATURES_VERSION, LocalEstimateFeatures,
+    LocalEstimateTable, estimate_score,
 };
 
 use crate::rescore_distribution::MIN_ROWS_FOR_PERCENTILES;
@@ -269,6 +270,12 @@ pub fn fit_estimate_table(inputs: &[EstimateFitInput]) -> EstimateFitReport {
         evaluate(&table, &fit, &held, &mut report);
         if report.passed {
             report.table = finish(table, report.withheld_share, &mut report);
+            // A pass always carries its table: one validation refused is
+            // not a pass, whatever the checks said.
+            if report.table.is_none() {
+                report.passed = false;
+                report.failed_checks.push("table_validation");
+            }
             return report;
         }
     } else if report.failed_checks.is_empty() {
@@ -285,10 +292,7 @@ pub fn fit_estimate_table(inputs: &[EstimateFitInput]) -> EstimateFitReport {
     let mut ys: Vec<f64> = held.iter().map(|s| s.displayed).collect();
     ys.sort_by(f64::total_cmp);
     let mut table = base_table(version);
-    table.bands = vec![EstimateBand {
-        low: quantile(&ys, ESTIMATE_BAND_LOW_QUANTILE),
-        high: quantile(&ys, ESTIMATE_BAND_HIGH_QUANTILE),
-    }];
+    table.bands = vec![display_band(&ys)];
     report.table = finish(table, report.withheld_share, &mut report);
     report
 }
@@ -312,6 +316,19 @@ fn usable<'a>(input: &'a EstimateFitInput, reference: &LocalEstimateTable) -> Op
             displayed: displayed_credit(q),
             tenant: &input.row.tenant_hash,
         })
+}
+
+/// The p10-p90 band of an ascending, non-empty slice of displayed credit,
+/// clamped to what the device can show: no lower than one display step
+/// (the device never shows "about 0") and no higher than the most credit a
+/// trace displays. Without the clamp a low-credit tier's p10 falls under
+/// the step and validation refuses the whole table.
+fn display_band(sorted: &[f64]) -> EstimateBand {
+    let low = quantile(sorted, ESTIMATE_BAND_LOW_QUANTILE)
+        .clamp(ESTIMATE_DISPLAY_STEP, ESTIMATE_MAX_DISPLAYED_CREDIT);
+    let high =
+        quantile(sorted, ESTIMATE_BAND_HIGH_QUANTILE).clamp(low, ESTIMATE_MAX_DISPLAYED_CREDIT);
+    EstimateBand { low, high }
 }
 
 fn finish(
@@ -400,10 +417,7 @@ fn fitted_candidate(
             .map(|(_, y)| *y)
             .collect();
         in_tier.sort_by(f64::total_cmp);
-        bands.push(EstimateBand {
-            low: quantile(&in_tier, ESTIMATE_BAND_LOW_QUANTILE),
-            high: quantile(&in_tier, ESTIMATE_BAND_HIGH_QUANTILE),
-        });
+        bands.push(display_band(&in_tier));
     }
     table.cut_offs = cut_offs;
     table.bands = bands;
@@ -917,5 +931,42 @@ mod tests {
         assert!((rho - 1.0).abs() < 1e-12);
         let rho = spearman(&[1.0, 2.0, 3.0], &[3.0, 2.0, 1.0]).unwrap();
         assert!((rho + 1.0).abs() < 1e-12);
+    }
+
+    /// Lower every row's displayed credit by `by`, floored at 0.05 so each
+    /// row stays scored rather than becoming a zero-quality withhold.
+    fn lowered(mut inputs: Vec<EstimateFitInput>, by: f64) -> Vec<EstimateFitInput> {
+        for input in &mut inputs {
+            let shown = displayed_credit(input.row.credit_quality_micros.unwrap());
+            let lower = (shown - by).max(0.05);
+            input.row.credit_quality_micros = Some((lower * 100_000.0).round() as i64);
+        }
+        inputs
+    }
+
+    /// Kristi's #1285 review, finding 2: a corpus whose lowest tier
+    /// displays under the 0.5 step still emits a table. Its p10 band end is
+    /// clamped up to the step the device shows rather than refused by
+    /// validation, and a fit that passes always carries a table.
+    #[test]
+    fn a_low_credit_tier_is_clamped_to_the_display_step() {
+        let report = fit_estimate_table(&lowered(rows(600, 12, true, 1), 1.0));
+        assert!(!report.passed || report.table.is_some(), "{report:#?}");
+        let table = report.table.expect("a table");
+        table.validate().expect("emitted tables validate");
+        assert_eq!(table.bands[0].low, ESTIMATE_DISPLAY_STEP, "{table:#?}");
+        assert!(table.bands.iter().all(|b| b.low <= b.high));
+    }
+
+    /// The same for the one-tier fallback: a held-out p10 under the step
+    /// is clamped, not refused.
+    #[test]
+    fn a_low_credit_fallback_band_is_clamped_to_the_display_step() {
+        let report = fit_estimate_table(&lowered(rows(600, 12, false, 2), 1.2));
+        assert!(!report.passed);
+        let table = report.table.expect("a one-tier table");
+        table.validate().expect("emitted tables validate");
+        assert_eq!(table.tier_count(), 1);
+        assert_eq!(table.bands[0].low, ESTIMATE_DISPLAY_STEP);
     }
 }
