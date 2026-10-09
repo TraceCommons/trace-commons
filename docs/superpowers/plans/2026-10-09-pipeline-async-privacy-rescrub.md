@@ -318,7 +318,7 @@ ALTER TABLE pipeline_runs
         (privacy_pass_approval_assessment_hash IS NULL)
             = (privacy_pass_approval_resolved_reasons IS NULL)
         AND (privacy_pass_approval_assessment_hash IS NULL
-             OR privacy_pass_outcome = 'escalated')),
+             OR privacy_pass_outcome IS NOT DISTINCT FROM 'escalated')),
     -- NO ACTION + DEFERRABLE for the reason V95 gives for approved_object_ref_fk.
     ADD CONSTRAINT pipeline_runs_privacy_pass_object_ref_fk
         FOREIGN KEY (tenant_id, submission_id, privacy_pass_object_ref_id)
@@ -349,6 +349,10 @@ GRANT UPDATE (privacy_pass_object_ref_id, privacy_pass_content_hash,
               privacy_pass_approval_resolved_reasons)
     ON pipeline_runs TO trace_ingest_runtime;
 ```
+
+  The approval-shape CHECK uses `IS NOT DISTINCT FROM`, not `=` (corrected while implementing Task 3): with no pass the outcome is NULL, `NULL = 'escalated'` is NULL, and a CHECK lets NULL through, so the first draft accepted both approval columns on a run with no pass at all. `v117_adds_the_privacy_pass_record` pins it ("no approval link without a pass").
+
+  The new `pipeline_attempt_artifacts_approved_hash` renders as `artifact <> ALL (ARRAY['approved'::text, 'privacy-pass'::text])`, so the definition pin in `pipeline_upgrade_from_v91_installs_forced_rls_storage` (which looked for `artifact <> 'approved'::text`) is updated to the new form in the same commit, and that test's recorded-version list gains 117 (UPG:406 lists the migrations that touch pipeline tables; V114-V116 touch none, V117 does).
 
   No RLS change: a column on an already-forced table inherits the tenant predicate (V52:40-44), and `TRACE_COMMONS_RLS_TABLES` (postgres.rs:188) lists tables only. No gate-driver grant. No new table, so `PIPELINE_TABLES` (RESTORE:~222-243) is unchanged. No grant on `trace_submissions` (P5).
 - [ ] **Step 5: Wire the run record.** Add the eight fields (Interfaces; `privacy_pass_required` comes in Task 5) and map them in `pipeline_run_from_row` (JSONB labels decode the way the V52 reader does). Every store read is `SELECT *`/`RETURNING *` (VP:1990, 2182, 2515, 3016, ...), so nothing else changes; the one test literal (RT:22291) uses `..run.clone()`. `PipelineRunRecord` derives `Serialize`: the new fields are ids, hashes, labels and timestamps only.

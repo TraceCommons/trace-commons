@@ -1063,8 +1063,69 @@ pub struct PipelineRunRecord {
     pub score_neighbor_ref: Option<String>,
     pub score_neighbor_hash: Option<String>,
     pub settle_selection_hash: Option<String>,
+    /// The Review-start privacy pass's record (V117). The six `privacy_pass_*`
+    /// columns are set together when the pass commits and are `None` until
+    /// then (and on every run that passed Review before V117). Ids, hashes,
+    /// labels and a timestamp only: never envelope text or classifier spans.
+    pub privacy_pass_object_ref_id: Option<Uuid>,
+    /// `sha256:` of the pass output (plaintext).
+    pub privacy_pass_content_hash: Option<String>,
+    /// `sha256:` of the source bytes the pass read.
+    pub privacy_pass_source_hash: Option<String>,
+    /// The merged residual-risk labels, as `safe_residual_risk_basis_labels`
+    /// writes them.
+    pub privacy_pass_residual_risk_basis: Option<Vec<String>>,
+    pub privacy_pass_outcome: Option<PrivacyPassOutcome>,
+    pub privacy_pass_recorded_at: Option<DateTime<Utc>>,
+    /// A human approval of an escalated run: the approving assessment's
+    /// `evidence_hash` and the hold reasons it resolved. Set together, and
+    /// only when `privacy_pass_outcome` is `Escalated`.
+    pub privacy_pass_approval_assessment_hash: Option<String>,
+    pub privacy_pass_approval_resolved_reasons: Option<Vec<String>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// What the Review-start privacy pass decided (V117
+/// `pipeline_runs.privacy_pass_outcome`): the run goes on to the Review
+/// policy, or it is held for a human.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyPassOutcome {
+    Cleared,
+    Escalated,
+}
+
+impl PrivacyPassOutcome {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Cleared => "cleared",
+            Self::Escalated => "escalated",
+        }
+    }
+
+    pub fn from_db(value: &str) -> Result<Self, DatabaseError> {
+        match value {
+            "cleared" => Ok(Self::Cleared),
+            "escalated" => Ok(Self::Escalated),
+            _ => Err(DatabaseError::Serialization(
+                "unknown privacy pass outcome".to_string(),
+            )),
+        }
+    }
+}
+
+/// A JSONB array of labels, as V117's pass columns hold them; NULL is `None`.
+fn json_label_array(row: &Row, column: &str) -> Result<Option<Vec<String>>, DatabaseError> {
+    row.get::<_, Option<serde_json::Value>>(column)
+        .map(|value| {
+            serde_json::from_value::<Vec<String>>(value).map_err(|_| {
+                DatabaseError::Serialization(format!(
+                    "pipeline run {column} is not an array of labels"
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// A human reviewer's exclusive, time-boxed claim on a quarantined run at
@@ -7271,6 +7332,23 @@ fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> 
         score_neighbor_ref: row.get("score_neighbor_ref"),
         score_neighbor_hash: row.get("score_neighbor_hash"),
         settle_selection_hash: row.get("settle_selection_hash"),
+        privacy_pass_object_ref_id: row.get("privacy_pass_object_ref_id"),
+        privacy_pass_content_hash: row.get("privacy_pass_content_hash"),
+        privacy_pass_source_hash: row.get("privacy_pass_source_hash"),
+        privacy_pass_residual_risk_basis: json_label_array(
+            row,
+            "privacy_pass_residual_risk_basis",
+        )?,
+        privacy_pass_outcome: row
+            .get::<_, Option<&str>>("privacy_pass_outcome")
+            .map(PrivacyPassOutcome::from_db)
+            .transpose()?,
+        privacy_pass_recorded_at: row.get("privacy_pass_recorded_at"),
+        privacy_pass_approval_assessment_hash: row.get("privacy_pass_approval_assessment_hash"),
+        privacy_pass_approval_resolved_reasons: json_label_array(
+            row,
+            "privacy_pass_approval_resolved_reasons",
+        )?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })

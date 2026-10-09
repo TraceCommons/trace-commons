@@ -1764,6 +1764,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_gate_decision_rows",
         include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
     ),
+    // V117 (spec 2026-10-09, async privacy rescrub) records the Review-start
+    // privacy pass on pipeline_runs: the pass object, the hashes of its input
+    // and output, its residual-risk labels and outcome, and the link from a
+    // human approval of an escalated run; and admits the `privacy-pass`
+    // attempt artifact.
+    (
+        117,
+        "pipeline_privacy_pass",
+        include_str!("../../../../migrations/V117__pipeline_privacy_pass.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
