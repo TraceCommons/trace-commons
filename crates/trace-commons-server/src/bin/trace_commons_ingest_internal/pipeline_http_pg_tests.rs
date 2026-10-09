@@ -209,7 +209,14 @@ pub(super) struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
@@ -7035,7 +7042,14 @@ struct MarkerRedactingBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
@@ -7045,14 +7059,21 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
     }
 }
 
-/// A privacy boundary whose rescrub always fails: the classifier outage a
+/// A privacy boundary whose classifier half always fails: the classifier outage a
 /// receipt must fail closed on. The same test double as
 /// `versioned_pipeline_runtime_pg.rs`'s `FailingPrivacyBoundary`.
 struct FailingPrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {

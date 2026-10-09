@@ -9093,11 +9093,15 @@ impl PipelineService {
         }
         let grant_valid = authority.permits(&consent_scopes, &envelope.trace_card.allowed_uses);
         let mut residual_risk_basis = request.residual_risk_basis.to_vec();
-        for condition in privacy
-            .rescrub(&mut envelope)
+        let deterministic_basis = privacy
+            .rescrub_deterministic(&mut envelope)
             .await
-            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?
-        {
+            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?;
+        let classifier_basis = privacy
+            .rescrub_classifier(&mut envelope)
+            .await
+            .map_err(|_| anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))?;
+        for condition in deterministic_basis.into_iter().chain(classifier_basis) {
             if !residual_risk_basis.contains(&condition) {
                 residual_risk_basis.push(condition);
             }

@@ -10990,7 +10990,14 @@ struct QualifiedTestPrivacy;
 impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
     for QualifiedTestPrivacy
 {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {

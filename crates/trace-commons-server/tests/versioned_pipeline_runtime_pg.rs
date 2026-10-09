@@ -2361,7 +2361,14 @@ struct PassThroughPipelinePrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for PassThroughPipelinePrivacyBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
@@ -5705,13 +5712,20 @@ async fn authority_allowlist_rejects_a_disallowed_use() {
     assert!(service.process_one(&tenant).await.unwrap().is_none());
 }
 
-/// A privacy boundary whose rescrub always fails -- the classifier-outage
+/// A privacy boundary whose classifier half always fails -- the classifier-outage
 /// case `submit` must fail closed on, storing nothing.
 struct FailingPrivacyBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
@@ -5759,7 +5773,14 @@ struct MarkerRedactingBoundary;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
@@ -30385,7 +30406,14 @@ struct QualifiedProductionPrivacy;
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for QualifiedProductionPrivacy {
-    async fn rescrub(
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
         &self,
         _envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
