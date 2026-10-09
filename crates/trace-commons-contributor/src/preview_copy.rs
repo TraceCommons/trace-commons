@@ -218,7 +218,8 @@ pub struct MonitorTracesCopy {
 
 /// Every placeholder the monitor tables use, each written `{name}`:
 /// Ron's, and History's and Inference's (`shown`, `hours`) before them.
-/// `uploads` and `megabytes` are the daily limit's two remainders.
+/// `uploads` and `megabytes` are the daily limit's two remainders, and
+/// `section` is the part of the app an edge rail peek links into.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "count",
     "total",
@@ -237,6 +238,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "megabytes",
     "amount",
     "days",
+    "section",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -890,6 +892,51 @@ pub struct MonitorScreensCopy {
     /// The Settings modal's section list and section rules (#1146
     /// `features/settings/sections.ts`).
     pub settings_nav: MonitorSettingsNavCopy,
+    /// The edge rail (Claude Design "Run 1 OS-level Explorations", 1b):
+    /// its switch in Settings, its icons' names and its peeks.
+    pub edge_rail: MonitorEdgeRailCopy,
+}
+
+/// The edge rail's words: the optional rail on the right edge of the
+/// screen, from the "Run 1 OS-level Explorations" design (1b, "The edge
+/// rail, and the menu bar"). Its Tools, Private AI and Compute icons take
+/// their names from [`MonitorSettingsNavCopy`], so a section is called the
+/// same thing on the rail as in Settings. A singular is its own line;
+/// numbers are `{count}` holes and a section's name is `{section}`.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorEdgeRailCopy {
+    /// The switch in Settings' system integrations card, and what it does.
+    pub setting_toggle: &'static str,
+    pub setting_caption: &'static str,
+    /// The rail's accessible name, and the closed rail's handle's.
+    pub rail_label: &'static str,
+    pub handle_label: &'static str,
+    /// The icons this table names; the other three are Settings' names.
+    pub waiting: &'static str,
+    pub balance: &'static str,
+    pub privacy: &'static str,
+    /// The mark at the foot of the rail.
+    pub open_app: &'static str,
+    /// Each peek's link into the app, and its accessible name.
+    pub open_section: &'static str,
+    pub open_section_label: &'static str,
+    /// The Waiting peek's button.
+    pub review: &'static str,
+    /// The Tools peek with no tool found.
+    pub tools_empty: &'static str,
+    /// The Compute peek before the core has reported.
+    pub compute_unreported: &'static str,
+    /// The Privacy peek: its title, then what is on this Mac and what was
+    /// contributed.
+    pub privacy_title: &'static str,
+    pub on_this_mac: &'static str,
+    pub on_this_mac_line_one: &'static str,
+    pub on_this_mac_line: &'static str,
+    pub in_the_library: &'static str,
+    pub in_the_library_line_one: &'static str,
+    pub in_the_library_line: &'static str,
+    /// Under every peek: the rail reads, and sends nothing.
+    pub nothing_sent: &'static str,
 }
 
 /// Ron's #1146 words for the Traces graph footer (`traces-graph.tsx`,
@@ -1411,6 +1458,29 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             projects: "Projects",
             log: "Change log",
             compute: "Compute",
+        },
+        edge_rail: MonitorEdgeRailCopy {
+            setting_toggle: "Show the edge rail",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at sessions waiting, tools, balance, Private AI, compute and privacy.",
+            rail_label: "Edge rail",
+            handle_label: "Open the edge rail",
+            waiting: "Waiting",
+            balance: "Balance",
+            privacy: "Privacy",
+            open_app: concat!("Open ", crate::app_name!()),
+            open_section: "Open {section}",
+            open_section_label: concat!("Open {section} in ", crate::app_name!()),
+            review: "Review",
+            tools_empty: "No tools found on this Mac yet.",
+            compute_unreported: "Compute has not reported yet.",
+            privacy_title: "What is where, right now",
+            on_this_mac: "On this Mac",
+            on_this_mac_line_one: "1 session waiting here. Nothing leaves until you send it.",
+            on_this_mac_line: "{count} sessions waiting here. Nothing leaves until you send it.",
+            in_the_library: "In the library",
+            in_the_library_line_one: "1 contribution sent from this Mac.",
+            in_the_library_line: "{count} contributions sent from this Mac.",
+            nothing_sent: "Nothing is sent from the rail.",
         },
     }
 }

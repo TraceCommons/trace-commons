@@ -1163,9 +1163,12 @@ fn apply_hand_written_overrides(all: &mut BTreeMap<String, Value>) {
     // `shared.routing_ledger()`, refreshed by the daemon's main loop
     // (`refresh_routing`, `pub(crate)`) polling a real proxy over HTTP --
     // nothing an IPC-only temp store can be. Shaped exactly like the real
-    // reply `calls_page` builds (`daemon/inference_map.rs` and its own
+    // reply `calls_page_with` builds (`daemon/inference_map.rs` and its own
     // tests): `id`, `at`, `tool`, `family`, `model`, `route`,
-    // `cost.{known,priced_micros}`, `proof`.
+    // `cost.{known,priced_micros}`, `proof`, and -- because the Insights
+    // ledger feed is on by default (owner decision D3, settled 2026-10-09)
+    // and these sets' `get_settings` says so -- `tokens.{input,cache_read,
+    // cache_write,output}`, each a count or `null` when not known.
     for key in ["normalDay/inference_calls", "busyQueue/inference_calls"] {
         all.insert(key.to_string(), hand_written_inference_calls());
     }
@@ -1255,19 +1258,24 @@ fn hand_written_inference_calls() -> Value {
         "calls": [
             {"id": 414, "at": "2026-09-30T09:04:11+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 8400},
-             "proof": "verified"},
+             "proof": "verified",
+             "tokens": {"input": 1200, "cache_read": 18000, "cache_write": 0, "output": 350}},
             {"id": 413, "at": "2026-09-30T08:58:40+00:00", "tool": "codex", "family": "openai",
              "model": "Qwen/Qwen3.6-27B-FP8", "route": "routed", "cost": {"known": true, "priced_micros": 12300},
-             "proof": "gateway_only"},
+             "proof": "gateway_only",
+             "tokens": {"input": 900, "cache_read": 0, "cache_write": 2048, "output": 410}},
             {"id": 412, "at": "2026-09-30T08:51:02+00:00", "tool": "unknown", "family": "unknown",
              "model": "unknown", "route": "outside", "cost": {"known": false, "priced_micros": null},
-             "proof": "outside"},
+             "proof": "outside",
+             "tokens": {"input": null, "cache_read": null, "cache_write": null, "output": null}},
             {"id": 411, "at": "2026-09-30T08:40:19+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 5100},
-             "proof": "pending"},
+             "proof": "pending",
+             "tokens": {"input": 640, "cache_read": 12000, "cache_write": null, "output": 95}},
             {"id": 410, "at": "2026-09-30T08:31:55+00:00", "tool": "claude-code", "family": "anthropic",
              "model": "zai-org/GLM-4.6", "route": "routed", "cost": {"known": true, "priced_micros": 4900},
-             "proof": "failed"}
+             "proof": "failed",
+             "tokens": {"input": 300, "cache_read": null, "cache_write": null, "output": null}}
         ],
         "next_cursor": null
     })

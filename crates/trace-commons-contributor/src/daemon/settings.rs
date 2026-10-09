@@ -598,8 +598,9 @@ pub struct DaemonSettings {
     /// Whether Insights may read the proxy ledger's token counters (feed L):
     /// `insights_glance`, the `tokens` on `inference_calls`, and the
     /// `usage_changed` event. Off, nothing reads the ledger for Insights.
-    /// Starts as `insights::analytics_constants::LEDGER_FEED_DEFAULT_ON`,
-    /// owner decision D3, open.
+    /// Starts as `insights::analytics_constants::LEDGER_FEED_DEFAULT_ON`:
+    /// on (owner decision D3, settled 2026-10-09). A settings file without
+    /// the key loads it on; a saved `false` stays off.
     #[serde(default = "default_insights_ledger_feed")]
     pub insights_ledger_feed: bool,
 
@@ -1641,7 +1642,8 @@ pub fn apply_settings_object(
                     .and_then(ScrubCheck::parse)
                     .ok_or(ERR_SETTINGS_INVALID_VALUE)?;
             }
-            // Insights feed L (owner decision D3, open). Off by default.
+            // Insights feed L (owner decision D3, settled 2026-10-09). On by
+            // default; this is how a contributor turns it off.
             "insights_ledger_feed" => {
                 settings.insights_ledger_feed =
                     value.as_bool().ok_or(ERR_SETTINGS_INVALID_VALUE)?;
@@ -2468,25 +2470,37 @@ mod tests {
         );
     }
 
-    /// The Insights ledger feed (owner decision D3, open) starts off, an
-    /// older settings file loads it off, and it takes a boolean only.
+    /// The Insights ledger feed (owner decision D3, settled 2026-10-09)
+    /// starts on, a settings file without the key (one written by any build
+    /// before this one) loads it on, an explicit `false` stays off, and it
+    /// takes a boolean only.
     #[test]
-    fn the_insights_ledger_feed_starts_off_and_takes_a_boolean() {
-        assert!(!DaemonSettings::default().insights_ledger_feed);
+    fn the_insights_ledger_feed_starts_on_and_takes_a_boolean() {
+        assert!(DaemonSettings::default().insights_ledger_feed);
         let mut v = serde_json::to_value(DaemonSettings::default()).unwrap();
         v.as_object_mut().unwrap().remove("insights_ledger_feed");
+        let settings: DaemonSettings = serde_json::from_value(v.clone()).expect("settings load");
+        assert!(settings.insights_ledger_feed, "absent reads as the default");
+        v.as_object_mut()
+            .unwrap()
+            .insert("insights_ledger_feed".into(), serde_json::json!(false));
         let settings: DaemonSettings = serde_json::from_value(v).expect("settings load");
-        assert!(!settings.insights_ledger_feed);
+        assert!(!settings.insights_ledger_feed, "a saved off stays off");
 
         let mut s = DaemonSettings::default();
         assert_eq!(
-            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": true})),
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": false})),
             Ok(true)
         );
-        assert!(s.insights_ledger_feed);
+        assert!(!s.insights_ledger_feed);
         assert_eq!(
             apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": "on"})),
             Err(ERR_SETTINGS_INVALID_VALUE)
+        );
+        assert!(!s.insights_ledger_feed);
+        assert_eq!(
+            apply_settings_object(&mut s, &serde_json::json!({"insights_ledger_feed": true})),
+            Ok(true)
         );
         assert!(s.insights_ledger_feed);
     }

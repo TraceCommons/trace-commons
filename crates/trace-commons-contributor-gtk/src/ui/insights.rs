@@ -2524,6 +2524,7 @@ mod tests {
             task_attribution: None,
             claude_task_attribution: None,
             turn_series: None,
+            session_identity: None,
             id: "fixture".into(),
             source_format: SourceFormat::Codex,
             boundary: trace_commons_contributor::insights::EpisodeBoundary::SessionProxy,

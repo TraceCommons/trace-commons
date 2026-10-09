@@ -2,8 +2,8 @@
 //! glance reads from them (today per tool, and the context tip). Pure: no
 //! clock, no I/O and no copy; the daemon passes rows and `now` in.
 //!
-//! Gated on owner decision D3 (open): the daemon calls this only while
-//! `insights_ledger_feed` is on.
+//! The daemon calls this only while `insights_ledger_feed` is on (the
+//! default; owner decision D3, settled 2026-10-09).
 //!
 //! # Normalization per facade
 //!

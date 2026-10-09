@@ -127,13 +127,18 @@ final class SettingsParityTests: XCTestCase {
                            "model.routingProbeLine", "model.status.routing.state", "model.status.routing.derived",
                            "model.status.routing.lastRefreshAt", "model.routingEvidence", "model.routingCalls",
                            "model.applyIronWire(", "model.discoverRouting()", "model.refreshRoutedTools()",
-                           "RoutingPortInput.accept("],
+                           "RoutingPortInput.accept(",
+                           // The Insights ledger feed's off switch (on by
+                           // default, owner ruling 2026-10-09).
+                           "settings.insightsLedgerFeed", "model.setInsightsLedgerFeed(",
+                           "model.insightsLedgerFeedBusy", "model.insightsLedgerFeedRefusal"],
                 copySources: ["RoutingSurface.toolRows(", "RoutingSurface.discoveryLine(", "RoutingSurface.connecting(",
                               "RoutingSurface.overrideIsCollapsed(", "RoutingSurface.stateLine(", "RoutingSurface.tone(forState:",
                               "RoutingSurface.showsLastChecked(", "TCRoutingCopy.lastChecked(",
                               "copy.toolsHeading", "copy.intro", "copy.toggle", "copy.connect", "copy.lookAgain",
                               "copy.overrideTitle", "copy.portTitle", "copy.portNote", "copy.folderTitle", "copy.chooseFolder",
-                              "copy.folderNote", "copy.checking", "copy.apply", "copy.appliesAtOnce", "copy.derivedOrigin"],
+                              "copy.folderNote", "copy.checking", "copy.apply", "copy.appliesAtOnce", "copy.derivedOrigin",
+                              "TCInsights.copy()", "\"analytics_setting_ledger_feed\"", "\"analytics_feed_ledger\""],
                 confirmations: ["FolderPanel.choose()"],
                 accessibility: ["GlassToggleStyle(.settings)", ".accessibilityLabel(copy.portTitle)",
                                 ".accessibilityLabel(copy.folderTitle)", ".accessibilityElement(children: .combine)"]),
@@ -367,9 +372,10 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// Sections that read nothing from the daemon: the login item, the
-    /// system's notification permission and the update feed are all local.
-    static let localOnlySections: Set<SettingsSection> = [.startup, .notifications, .updates]
+    /// Sections that read nothing from the daemon: the appearance, the
+    /// login item, the system's notification permission and the update feed
+    /// are all local.
+    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .notifications, .updates]
 
     /// Each daemon-reading section's branch for "the daemon has not answered",
     /// and what that branch draws. Every branch is the absent case written

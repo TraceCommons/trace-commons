@@ -13,6 +13,9 @@ struct InsightsOverviewTab: View {
     let model: InsightsOverviewModel
     let comparisons: InsightsComparisonsModel
     let copy: [String: String]
+    /// Saved snapshots, so a drill-down row reads as its session's label.
+    /// No default: a caller that forgets them would show every row as the dash.
+    let snapshots: [LocalInsight]
     /// "Watched-folder counting is unavailable right now", shown with feed S
     /// when feed T is switched on but could not be read.
     var notice: String?
@@ -45,7 +48,7 @@ struct InsightsOverviewTab: View {
                         leverCard(lever)
                     }
                     if let inputs = model.inputs {
-                        InsightsCardInputsView(inputs: inputs, copy: copy)
+                        InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
                     }
                     HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
                         byDay(overview).frame(maxWidth: .infinity)
@@ -363,9 +366,11 @@ struct InsightsShareBar: View {
 }
 
 /// "What makes up this number": each session's own figure, coverage state
-/// and reasons, in the core's order.
+/// and reasons, in the core's order. A row names its session by the saved
+/// snapshot's label, or the dash when none matches; never the snapshot ID.
 struct InsightsCardInputsView: View {
     let inputs: InsightsCardInputs
+    let snapshots: [LocalInsight]
     let copy: [String: String]
 
     private func text(_ key: String) -> String { copy[key] ?? "" }
@@ -395,7 +400,9 @@ struct InsightsCardInputsView: View {
                     HStack(alignment: .top) {
                         VStack(alignment: .leading) {
                             Text(InsightsOverviewWords.harness(session.source, copy: copy))
-                            Text(session.session_ref).insightsMono().lineLimit(1).truncationMode(.middle)
+                            Text(InsightsSessionsWords.rowLabel(session.session_ref, tokens: session.tokens,
+                                                                snapshots: snapshots, copy: copy))
+                                .insightsCaption().lineLimit(1).truncationMode(.tail)
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         Text(inputs.card == "cache_share"

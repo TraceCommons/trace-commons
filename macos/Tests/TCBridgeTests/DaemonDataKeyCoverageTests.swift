@@ -227,22 +227,24 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             DaemonData.InferenceCallPage.self, try result(daemon, "inference_calls", ["limit": 25]),
             method: "inference_calls")
 
-        // The Insights glance: off by default, then the ledger feed switched
-        // on, which a temp store with no IronWire proxy answers as
-        // unreadable. The readable shape and per-call `tokens` need a live
-        // ledger; `DaemonDataContractWireTests` pins those from the
-        // daemon's own recorded replies.
+        // The Insights glance: on by default (owner decision D3, settled
+        // 2026-10-09), which a temp store with no IronWire proxy answers as
+        // unreadable; then the ledger feed switched off. The readable shape
+        // and per-call `tokens` need a live ledger;
+        // `DaemonDataContractWireTests` pins those from the daemon's own
+        // recorded replies.
+        let unreadable = try result(daemon, "insights_glance", ["tz": 0])
+        XCTAssertEqual((unreadable as? [String: Any])?["enabled"] as? Bool, true)
+        XCTAssertEqual((unreadable as? [String: Any])?["readable"] as? Bool, false)
+        assertDeclared(DaemonData.InsightsGlance.self, unreadable, method: "insights_glance")
+        // The ledger feed's off switch in Settings moves only when the reply
+        // echoes what was asked, so the real daemon's reply must carry it.
+        let written = try result(daemon, "set_settings", ["insights_ledger_feed": false])
+        XCTAssertEqual((written as? [String: Any])?["insights_ledger_feed"] as? Bool, false)
+        assertDeclared(DaemonData.Settings.self, written, method: "set_settings")
         let off = try result(daemon, "insights_glance", ["tz": 0])
         XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
-        // The Inference tab's switch moves only when the reply echoes what
-        // was asked, so the real daemon's reply must carry it.
-        let written = try result(daemon, "set_settings", ["insights_ledger_feed": true])
-        XCTAssertEqual((written as? [String: Any])?["insights_ledger_feed"] as? Bool, true)
-        assertDeclared(DaemonData.Settings.self, written, method: "set_settings")
-        let unreadable = try result(daemon, "insights_glance", ["tz": 0])
-        XCTAssertEqual((unreadable as? [String: Any])?["readable"] as? Bool, false)
-        assertDeclared(DaemonData.InsightsGlance.self, unreadable, method: "insights_glance")
 
         // Approve last: it moves the entry out of the queue when it acts.
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["entry_id": entryId]), method: "approve")

@@ -565,7 +565,8 @@ pub const EVENT_PREVIEW_READY: &str = "preview_ready";
 /// per tick, newest kept.
 pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 /// The poll tick's ledger read added at least one call while the Insights
-/// ledger feed is on (owner decision D3, open). At most one per tick, and
+/// ledger feed is on (the default; owner decision D3, settled 2026-10-09).
+/// At most one per tick, and
 /// `{}`: a pulse to re-read `insights_glance`, carrying no figure. See
 /// `insights_glance::publish_usage_changed`.
 pub const EVENT_USAGE_CHANGED: &str = "usage_changed";

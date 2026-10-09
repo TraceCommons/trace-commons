@@ -49,6 +49,11 @@ struct InferenceTabView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onAppear { model.refreshAll() }
+        // The settings refresh re-reads the ledger feed's switch; this
+        // re-reads the calls, so tokens the daemon stopped sending go too.
+        // Keyed on the switch: Settings is its own window, so this tab can
+        // stay in view while the feed is turned off there.
+        .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
     }
 
     private var ledger: some View {
@@ -62,7 +67,6 @@ struct InferenceTabView: View {
                 PrivateAIInspectorView(
                     store: store, destinationLabel: model.privateInferenceCopy?.destination)
                 ledgerSections
-                InsightsLedgerFeedSwitch(store: store)
                 InferenceAccountSection(store: store)
             }
         }
@@ -466,36 +470,6 @@ private struct InspectorFactRow: View {
         }
         .glassType(GlassTokens.TypeScale.body)
         .accessibilityElement(children: .combine)
-    }
-}
-
-/// The Insights ledger feed's switch (`insights_ledger_feed`, owner
-/// decision D3, open; off by default): whether the calls above carry their
-/// tokens, and whether the menu-bar glance has figures. It moves only on a
-/// write the daemon confirmed, and is not drawn for a daemon that does not
-/// report it.
-struct InsightsLedgerFeedSwitch: View {
-    let store: InferenceStore
-
-    private static let copy = TCInsights.copy() ?? [:]
-
-    var body: some View {
-        if let on = store.ledgerFeed {
-            GlassCard {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                    Toggle(InsightsOverviewWords.text("analytics_setting_ledger_feed", Self.copy), isOn: Binding(
-                        get: { on }, set: { value in Task { await store.setLedgerFeed(value) } }))
-                        .toggleStyle(GlassToggleStyle(.settings))
-                        .disabled(store.ledgerFeedBusy)
-                    Text(InsightsOverviewWords.text("analytics_feed_ledger", Self.copy))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                    if let refusal = store.ledgerFeedRefusal {
-                        GlassNotice(tone: .outside) { Text(refusal) }
-                    }
-                }
-            }
-        }
     }
 }
 

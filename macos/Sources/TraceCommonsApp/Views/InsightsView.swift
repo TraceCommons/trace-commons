@@ -110,6 +110,7 @@ struct InsightsView: View {
             case .overview:
                 InsightsOverviewTab(
                     model: overviewModel, comparisons: comparisonsModel, copy: model.copy,
+                    snapshots: model.snapshots,
                     notice: model.counterPassNoticeKey.map(model.text),
                     selectWeek: selectWeek,
                     openRecap: { if let week = comparisonsModel.openRecap() { selectWeek(week) } },
@@ -121,7 +122,7 @@ struct InsightsView: View {
                 InsightsPatternsTab(model: patternsModel, comparisons: comparisonsModel, copy: model.copy,
                                     selectWeek: selectWeek)
             case .sessions:
-                InsightsSessionsTab(model: sessionsModel, snapshotIDs: model.snapshots.map(\.id), copy: model.copy)
+                InsightsSessionsTab(model: sessionsModel, snapshots: model.snapshots, copy: model.copy)
             case .analyze: content
             }
         }

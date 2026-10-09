@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCDesign
+import TCShellCore
 import TCUpdates
 import UserNotifications
 

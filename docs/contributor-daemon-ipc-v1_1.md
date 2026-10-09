@@ -527,7 +527,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
-| `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (owner decision D3, open); see "`insights_glance`" below |
+| `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
 | `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
@@ -3735,8 +3735,9 @@ own 24 hours.
   **priced, not billed** -- work a plan already paid for is priced at the
   meter -- and must not be drawn as money spent. `known: false` is not zero.
 - `tokens` (additive, Insights feed L) is present **only while the
-  `insights_ledger_feed` setting is on** (owner decision D3, open); with it
-  off, and from an older daemon, the key is absent. When present it is
+  `insights_ledger_feed` setting is on** (the default; owner decision D3,
+  settled 2026-10-09); with it turned off, and from an older daemon, the key
+  is absent. When present it is
   `{input, cache_read, cache_write, output}`, the ledger's four counts for the
   call as recorded, each a non-negative integer or `null` when the proxy
   recorded none (or a value out of range). `null` is not zero. `input` is the
@@ -3800,8 +3801,9 @@ example `-14400` for UTC-4), an integer within 18 hours either way. Anything
 else, including an IANA zone name, is `bad_params` / `tz-invalid`, whatever
 the setting. "Today" is the local date at that offset.
 
-With the `insights_ledger_feed` setting off (the default; owner decision D3,
-open) the answer is exactly the following, and the ledger is not read:
+With the `insights_ledger_feed` setting turned off (it is on by default;
+owner decision D3, settled 2026-10-09) the answer is exactly the following,
+and the ledger is not read:
 
 ```json
 { "enabled": false, "feed": "ledger" }
@@ -3949,8 +3951,8 @@ folded, the two tools the counter pass counts. `cost_usd`, backend and model nam
 are never read into it (owner decision D5, open), and no session ID is
 stored. Calls whose tokens are unknown are kept per bucket, so the answer
 can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
-it, unless both `insights_ledger_feed` (owner decision D3, open, default off)
-and `insights_counter_pass` are on. A tally goes when its session is dropped
+it, unless both `insights_ledger_feed` (on by default, owner decision D3,
+settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
 for a Never folder, or, once no stored row matches it, when its last call is
 more than 13 weeks old; at most 2048 are kept, oldest last call first.
 `unenroll` removes them with the store. The answer joins each row to its
@@ -4088,8 +4090,9 @@ sessions on disk. Otherwise:
   count each call, subagent calls under the parent's session, and are never
   summed with or reconciled to the row's transcript `tokens`.
 - `routing_available` is whether rows carry `routing`. When it is false,
-  `routing_unavailable` says why: `ledger_feed_off` (the
-  `insights_ledger_feed` setting is off, owner decision D3, open; checked
+  `routing_unavailable` says why: `ledger_feed_off` (the contributor
+  turned the `insights_ledger_feed` setting off; it is on by default,
+  owner decision D3, settled 2026-10-09; checked
   first, and a tally folded while it was on is not shown) or `no_ledger`
   (no proxy ledger is declared, so a stored tally may lack every call
   since). When it is true, `routing_unavailable` is `null`. The answer reads
@@ -5031,15 +5034,17 @@ it as unanswered and asks once.
 Both are additive; a daemon that predates them refuses them as
 `settings-unknown-field`, and `get_settings` from it omits them.
 
-`insights_ledger_feed` takes a boolean and defaults to `false` (owner
-decision D3, open). It is the one gate on Insights reading the proxy
-ledger's token counters (feed L). While it is `false`, nothing reads the
-ledger for Insights: `insights_glance` answers `enabled: false` without
+`insights_ledger_feed` takes a boolean and defaults to `true` (owner
+decision D3, settled 2026-10-09: on by default, and the setting remains so
+a contributor can turn it off). It is the one gate on Insights reading the
+proxy ledger's token counters (feed L). While it is `false`, nothing reads
+the ledger for Insights: `insights_glance` answers `enabled: false` without
 touching the ledger, `inference_calls` rows carry no `tokens` key,
 `usage_changed` is never published, nothing is folded into the counter
 store's route tallies, and `insights_week` answers `routing_available:
 false` with `routing_unavailable: "ledger_feed_off"` and no row's `routing`.
-A settings file written before the key existed loads it as `false`.
+A settings file without the key (written by any build before the key
+existed) loads it as `true`; a saved `false` stays off.
 
 `insights_context_threshold` takes an integer from 1000 to 10000000 (tokens),
 or `null` to unset it; anything else is `settings-invalid-value`. **It has no
@@ -6900,8 +6905,8 @@ no poll of its own, so a call is announced on the first tick after it lands
 per poll tick, published on the same tick and from the same ledger read as
 `inference_call_added` (only a call whose id is above the highest id the
 daemon has already seen counts; a row without an id never does), and
-only while the `insights_ledger_feed` setting is on (owner decision D3,
-open). Its data is `{}`; a shell re-reads `insights_glance` for the figures.
+only while the `insights_ledger_feed` setting is on (the default; owner
+decision D3, settled 2026-10-09). Its data is `{}`; a shell re-reads `insights_glance` for the figures.
 An older daemon never sends it, and `hello.events` lists it on one that can.
 
 `subscribe` sends a full `snapshot` before any delta, so a client never has to

@@ -141,6 +141,21 @@ enum DebugScreenshot {
                     size: CGSize(width: 760, height: 620)
                 )
             }
+            // The edge rail open at each peek. Its switch is in the Startup
+            // section's capture.
+            let compute = ComputeModel()
+            for peek in EdgeRailPeek.allCases {
+                let state = EdgeRailState()
+                state.open = true
+                state.peek = peek
+                render(
+                    EdgeRailView(state: state, onOpenChange: { _ in })
+                        .environmentObject(model)
+                        .environment(compute),
+                    to: directory + "/macos-shell-edge-rail-\(peek).png",
+                    size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)
+                )
+            }
             if ProcessInfo.processInfo.environment["TRACE_COMMONS_QUIT_AFTER_SHOT"] == "1" {
                 // Late enough that the self-test, which starts on the same
                 // clock, has finished writing.

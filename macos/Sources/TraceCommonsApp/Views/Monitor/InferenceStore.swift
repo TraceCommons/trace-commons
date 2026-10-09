@@ -41,21 +41,6 @@ final class InferenceStore {
     /// that started under an older value answers about the switch before
     /// that write, and is dropped rather than drawn over its result.
     private var privateAIWrites = 0
-    /// Whether Insights may read the proxy ledger (`insights_ledger_feed`,
-    /// owner decision D3, open; off by default), as the daemon's settings
-    /// echo it. Nil from a daemon that does not report it: the switch is
-    /// then not drawn, never drawn as off. Only a read or a write the
-    /// daemon's reply confirmed is kept here.
-    private(set) var ledgerFeed: Bool?
-    /// A ledger-feed write is in flight; the switch takes no other.
-    private(set) var ledgerFeedBusy = false
-    /// The core's words for a ledger-feed write that was refused or not
-    /// confirmed (`MonitorScreensCopy.requestFailed`); cleared by the next
-    /// confirmed write.
-    private(set) var ledgerFeedRefusal: String?
-    /// Bumped when a ledger-feed write starts and when it answers, so a
-    /// settings read that started before it never undoes its result.
-    private var ledgerFeedWrites = 0
     /// The last read that failed, by method; cleared when it next succeeds.
     private(set) var failures: [String: DaemonDataError] = [:]
 
@@ -93,9 +78,6 @@ final class InferenceStore {
         // A write to the old client is dropped when it answers, so it must
         // not hold the new client's switch.
         privateAIBusy = false
-        ledgerFeed = nil
-        ledgerFeedRefusal = nil
-        ledgerFeedBusy = false
         failures = [:]
     }
 
@@ -123,66 +105,23 @@ final class InferenceStore {
         }
     }
 
+    /// The tab came into view, or the ledger feed's switch moved: everything
+    /// is read again, so a call loaded before the feed was turned off in
+    /// Settings stops drawing its tokens now rather than when the next call
+    /// arrives. Reads only; while the daemon is still starting it reads
+    /// nothing, as `run()` does.
+    func appeared() async {
+        guard !awaiting else { return }
+        await load()
+    }
+
     func load() async {
         async let harnesses: Void = loadHarnesses()
         async let calls: Void = loadCalls()
         async let summary: Void = loadSummary()
         async let destinations: Void = loadDestinations()
         async let privateAI: Void = loadPrivateAI()
-        async let settings: Void = loadSettings()
-        _ = await (harnesses, calls, summary, destinations, privateAI, settings)
-    }
-
-    /// The ledger feed's switch, from `get_settings`. A failed read, or a
-    /// read that started before a ledger-feed write, keeps the last value.
-    private func loadSettings() async {
-        let startedAt = ledgerFeedWrites
-        await read("get_settings", { try await $0.settings() }) {
-            guard let value = $0, startedAt == self.ledgerFeedWrites else { return }
-            self.ledgerFeed = value.insightsLedgerFeed
-        }
-    }
-
-    /// Turns the ledger feed on or off. Only a reply that echoes what was
-    /// asked moves the switch; it then rereads the calls, so their tokens
-    /// appear or go at once (a settings write publishes no event). A write
-    /// that failed or was not confirmed shows the core's request-failed
-    /// words, and the switch stands where the daemon has it.
-    func setLedgerFeed(_ on: Bool) async {
-        guard !ledgerFeedBusy else { return }
-        guard let client else {
-            failures["set_settings"] = .unreachable
-            ledgerFeedRefusal = MonitorWords.table?.requestFailed
-            return
-        }
-        let mine = generation
-        ledgerFeedBusy = true
-        ledgerFeedWrites += 1
-        let result: Result<DaemonData.Settings, DaemonDataError>
-        do {
-            result = .success(try await client.setInsightsLedgerFeed(on))
-        } catch {
-            result = .failure(error as? DaemonDataError ?? .undecodable(method: "set_settings"))
-        }
-        guard mine == generation else { return }
-        ledgerFeedBusy = false
-        ledgerFeedWrites += 1
-        switch result {
-        case .success(let reply) where reply.insightsLedgerFeed == on:
-            failures["set_settings"] = nil
-            ledgerFeedRefusal = nil
-            ledgerFeed = on
-            await loadCalls()
-        case .success(let reply):
-            // The daemon answered with its own value: that is where it
-            // stands, but it is not what was asked.
-            failures["set_settings"] = nil
-            ledgerFeedRefusal = MonitorWords.table?.requestFailed
-            if let echoed = reply.insightsLedgerFeed { ledgerFeed = echoed }
-        case .failure(let error):
-            failures["set_settings"] = error
-            ledgerFeedRefusal = MonitorWords.table?.requestFailed
-        }
+        _ = await (harnesses, calls, summary, destinations, privateAI)
     }
 
     private func loadPrivateAI() async {

@@ -2,9 +2,10 @@
 //! the proxy ledger this daemon already holds (Insights feed L), and the
 //! coalesced `usage_changed` pulse.
 //!
-//! Gated on owner decision D3 (open), through the `insights_ledger_feed`
-//! setting: while it is off, the method answers `enabled: false` without
-//! touching the ledger, and no pulse is published.
+//! Gated through the `insights_ledger_feed` setting, on by default (owner
+//! decision D3, settled 2026-10-09): while a contributor has it off, the
+//! method answers `enabled: false` without touching the ledger, and no pulse
+//! is published.
 //!
 //! Synchronous and read-only. It reads the committed ledger snapshot, never
 //! refreshes it, never forwards to the Insights service, and makes no network
@@ -128,7 +129,7 @@ pub fn handle_glance(shared: &DaemonShared, req: &Request) -> Response {
         )
     });
     if !enabled {
-        // Owner decision D3, open: nothing reads the ledger for Insights.
+        // Turned off by the contributor: nothing reads the ledger for Insights.
         return Response::ok(
             req.id,
             serde_json::json!({"enabled": false, "feed": FEED_LEDGER}),
@@ -166,7 +167,7 @@ pub fn handle_glance(shared: &DaemonShared, req: &Request) -> Response {
 }
 
 /// Publish one `usage_changed` when this tick's ledger read added any call
-/// and the feed is on. A pulse: the data is `{}`, and a shell re-reads
+/// and the feed is on (the default; owner decision D3, settled 2026-10-09). A pulse: the data is `{}`, and a shell re-reads
 /// `insights_glance` for the figures.
 pub(crate) fn publish_usage_changed(shared: &DaemonShared, added: &[RoutedExchange]) {
     if added.is_empty()
@@ -487,6 +488,7 @@ mod tests {
     #[test]
     fn with_the_feed_off_the_ledger_is_not_read() {
         let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_ledger_feed = false;
         s.install_routing_ledger_for_test(
             crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![row(1, Utc::now())]),
         );
@@ -500,7 +502,10 @@ mod tests {
     #[test]
     fn with_the_feed_on_it_reads_the_held_ledger() {
         let (_dir, s) = shared();
-        s.settings.lock().unwrap().insights_ledger_feed = true;
+        assert!(
+            s.settings.lock().unwrap().insights_ledger_feed,
+            "on by default (owner decision D3, settled 2026-10-09)"
+        );
         let r = handle_glance(&s, &call(serde_json::json!({"tz": 0})));
         assert_eq!(
             r.result.unwrap(),
@@ -537,7 +542,11 @@ mod tests {
         let (_dir, mut s) = shared();
         s.dev_dry_run = true;
         let r = super::super::ipc::handle_request(&s, &call(serde_json::json!({"tz": 0})));
-        assert_eq!(r.result.unwrap()["enabled"], false);
+        assert_eq!(
+            r.result.unwrap(),
+            serde_json::json!({"enabled": true, "feed": "ledger", "readable": false}),
+            "on by default; no ledger answered"
+        );
         let hello = super::super::ipc::handle_request(
             &s,
             &Request {
@@ -560,6 +569,7 @@ mod tests {
         let (_dir, s) = shared();
         let mut rx = s.events.subscribe();
         let added: Vec<RoutedExchange> = (1..=5).map(|id| row(id, now())).collect();
+        s.settings.lock().unwrap().insights_ledger_feed = false;
         publish_usage_changed(&s, &added);
         assert!(rx.try_recv().is_err(), "off: nothing published");
 
@@ -571,5 +581,73 @@ mod tests {
         assert_eq!(event.event, super::super::ipc::EVENT_USAGE_CHANGED);
         assert_eq!(event.data, serde_json::json!({}));
         assert!(rx.try_recv().is_err(), "coalesced to one per tick");
+    }
+
+    /// The off switch through the path a shell takes: `set_settings` with
+    /// `insights_ledger_feed: false` stops all three readers of feed L --
+    /// the glance, the per-call `tokens` and the `usage_changed` pulse --
+    /// and a daemon loaded again from the same store keeps it off.
+    #[test]
+    fn turning_the_feed_off_through_set_settings_stops_every_reader() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let s = DaemonShared::load(store.clone()).unwrap();
+        let mut r = row(1, Utc::now());
+        r.input_tokens = Some(7);
+        let ledger =
+            || crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![r.clone()]);
+        s.install_routing_ledger_for_test(ledger());
+        let request = |method: &str, params: serde_json::Value| Request {
+            id: 1,
+            method: method.to_string(),
+            params,
+        };
+        let calls = |s: &DaemonShared| {
+            super::super::ipc::handle_request(s, &request("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap()
+        };
+        assert_eq!(calls(&s)["calls"][0]["tokens"]["input"], 7, "on by default");
+
+        let written = super::super::ipc::handle_request(
+            &s,
+            &request(
+                "set_settings",
+                serde_json::json!({"insights_ledger_feed": false}),
+            ),
+        );
+        assert_eq!(written.result.unwrap()["insights_ledger_feed"], false);
+
+        let check_off = |s: &DaemonShared| {
+            assert_eq!(
+                handle_glance(s, &call(serde_json::json!({"tz": 0})))
+                    .result
+                    .unwrap(),
+                serde_json::json!({"enabled": false, "feed": "ledger"})
+            );
+            let page = calls(s);
+            assert!(!page["calls"].as_array().unwrap().is_empty());
+            assert!(page["calls"][0].get("tokens").is_none(), "{page}");
+            let mut rx = s.events.subscribe();
+            publish_usage_changed(s, &[r.clone()]);
+            assert!(rx.try_recv().is_err(), "off: no usage_changed");
+        };
+        check_off(&s);
+
+        drop(s);
+        let again = DaemonShared::load(store).unwrap();
+        again.install_routing_ledger_for_test(ledger());
+        check_off(&again);
+        drop(dir);
+    }
+
+    /// Owner decision D3, settled 2026-10-09: with the setting never touched,
+    /// a tick that added a call publishes the pulse.
+    #[test]
+    fn usage_changed_is_published_by_default() {
+        let (_dir, s) = shared();
+        let mut rx = s.events.subscribe();
+        publish_usage_changed(&s, &[row(1, now())]);
+        let event = rx.try_recv().expect("on by default: one pulse");
+        assert_eq!(event.event, super::super::ipc::EVENT_USAGE_CHANGED);
     }
 }

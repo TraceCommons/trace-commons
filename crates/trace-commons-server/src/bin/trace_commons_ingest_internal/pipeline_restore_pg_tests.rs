@@ -66,7 +66,7 @@ use std::path::{Path, PathBuf};
 use super::pipeline_corpus_pg_tests::{
     ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, TEST_MASTER_KEY_VAR,
     assemble_production_harness_service, fixture_envelope, id_hash, load_corpus, main_corpus_path,
-    production_test_package, sha256_bytes, write_atomically,
+    production_test_package, production_test_package_awarding, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
@@ -391,6 +391,10 @@ struct RestoreFingerprint {
     adapter_request_count: usize,
     completed_settlement_count: usize,
     completed_credit_event_count: usize,
+    /// The package's `NoveltyUtility` delta is `0` (the pilot's): Score
+    /// awards nothing, so the three counts above are `0` and the drill
+    /// covers no settlement leg, ledger event, or credit audit.
+    credit_delta_zero: bool,
     /// `TRACE_COMMONS_RLS_TABLES`'s length, all isolated in the seed.
     rls_table_count: usize,
     rls_policy_set_hash: String,
@@ -423,8 +427,7 @@ impl RestoreFingerprint {
         ];
         if fingerprint.schema != RESTORE_FINGERPRINT_SCHEMA
             || !hashes.into_iter().all(|hash| is_sha256_label(hash))
-            || fingerprint.completed_settlement_count == 0
-            || fingerprint.completed_credit_event_count == 0
+            || !fingerprint.credit_counts_match_delta()
             || fingerprint.rls_table_count == 0
             || fingerprint.rls_policy_count == 0
             || fingerprint.rls_flag_table_count == 0
@@ -435,6 +438,21 @@ impl RestoreFingerprint {
             return Err("restore_fingerprint_invalid");
         }
         Ok(fingerprint)
+    }
+
+    /// A seed under a zero delta settled and credited nothing; any other
+    /// seed settled and credited at least one leg.
+    fn credit_counts_match_delta(&self) -> bool {
+        let counts = [
+            self.adapter_request_count,
+            self.completed_settlement_count,
+            self.completed_credit_event_count,
+        ];
+        if self.credit_delta_zero {
+            counts.iter().all(|count| *count == 0)
+        } else {
+            self.completed_settlement_count > 0 && self.completed_credit_event_count > 0
+        }
     }
 
     fn to_bytes(&self) -> Vec<u8> {
@@ -703,10 +721,20 @@ async fn remote_client(kind: &RemoteStoreKind, location: &RemoteStoreLocation) -
     )
 }
 
+/// `main()`'s rustls provider choice, made here because a test binary never
+/// runs `main()`: with `ring` and `aws-lc-rs` both compiled in (the pilot's
+/// feature set), rustls panics at the first TLS connection, the GCS client's
+/// or the KMS key wrapper's, unless a provider is installed. An error means
+/// one already is.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[cfg(feature = "gcs-client")]
 async fn gcs_bucket_client(
     bucket: &str,
 ) -> Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient> {
+    install_tls_provider();
     Arc::new(
         trace_commons_server::trace_artifact_gcs::prod_client::ProdGcsObjectClient::try_new(
             bucket.to_string(),
@@ -740,6 +768,7 @@ async fn remote_kek(
     kind: &RemoteStoreKind,
     master_key_hex: &str,
 ) -> Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync> {
+    install_tls_provider();
     let kek =
         build_selected_kek_wrapper_async(secrecy::SecretString::from(master_key_hex.to_string()))
             .await
@@ -1063,6 +1092,17 @@ impl RunRow {
             && self.credit_events == self.trace_credit_legs
             && self.linked_credit_legs == self.trace_credit_legs
     }
+
+    /// Settled as a package that `awards_credit` settles a run: every leg a
+    /// Trace Credit leg credited once, or, under a zero delta, no leg and no
+    /// ledger event at all.
+    fn settled_as_awarded(&self, awards_credit: bool) -> bool {
+        if awards_credit {
+            self.credited_once() && self.trace_credit_legs == self.settlement_count
+        } else {
+            self.settlement_count == 0 && self.trace_credit_legs == 0 && self.credit_events == 0
+        }
+    }
 }
 
 async fn tenant_runs(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<RunRow> {
@@ -1187,17 +1227,20 @@ async fn committed_selection_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> Str
 }
 
 /// Whether `RESTORE_TENANT`'s run for `submission_id` has a durable Settle
-/// selection with at least one settlement operation.
-async fn settle_selection_settles(backend: &Arc<PgBackend>, submission_id: Uuid) -> bool {
+/// selection that includes it in the index (both floors passed), and whether
+/// that selection has at least one settlement operation.
+async fn settle_selection(backend: &Arc<PgBackend>, submission_id: Uuid) -> (bool, bool) {
     let mut client = backend
         .trace_pool_for_test()
         .get()
         .await
         .expect("restore_selection_rows_connection_failed");
     let tx = tenant_tx(&mut client, RESTORE_TENANT).await;
-    let settles: bool = tx
+    let row = tx
         .query_one(
-            r"SELECT COALESCE(jsonb_array_length(
+            r"SELECT COALESCE(settle_selection::jsonb -> 'decision'
+                         -> 'index_membership' ->> 'kind' = 'include', false),
+                     COALESCE(jsonb_array_length(
                          settle_selection::jsonb -> 'decision' -> 'settlement_operations') > 0,
                      false)
                 FROM pipeline_runs
@@ -1205,12 +1248,11 @@ async fn settle_selection_settles(backend: &Arc<PgBackend>, submission_id: Uuid)
             &[&RESTORE_TENANT, &submission_id],
         )
         .await
-        .expect("restore_selection_rows_query_failed")
-        .get(0);
+        .expect("restore_selection_rows_query_failed");
     tx.commit()
         .await
         .expect("restore_selection_rows_query_failed");
-    settles
+    (row.get(0), row.get(1))
 }
 
 /// Rows that exist more than once where one logical effect allows one: a
@@ -1318,6 +1360,23 @@ impl RestoreDependencies {
         match self {
             Self::Reference { .. } => HarnessAssembly::Reference,
             Self::Production { .. } => HarnessAssembly::Production,
+        }
+    }
+
+    /// Whether Score awards Trace Credit to a run that passes its floors:
+    /// the reference candidate always does; a production package does unless
+    /// its `NoveltyUtility` delta, `main`'s, is `0`, as on the pilot.
+    fn awards_credit(&self) -> bool {
+        match self {
+            Self::Reference { .. } => true,
+            Self::Production { package, .. } => {
+                trace_commons_server::versioned_pipeline_bundle::package_compatibility_config(
+                    package,
+                )
+                .unwrap_or_else(|| panic!("harness_production_package_invalid"))
+                .novelty_utility_microcredits
+                    > 0
+            }
         }
     }
 
@@ -1991,7 +2050,8 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
 
     // Lifetime 1: no crash point, so the first fixture completes. A crash
     // point fires at the first run that reaches it, so it cannot be set here.
-    let (base, stop, server) = serve_pipeline_app(start(None)).await;
+    let first = start(None);
+    let (base, stop, server) = serve_pipeline_app(first.clone()).await;
     wait_for_pipeline_ready(&client, &base).await;
     let body = serde_json::to_vec(&completed_envelope).expect("the envelope serialises");
     let (status, receipt) = post_trace(&client, &base, RESTORE_TOKEN, &body).await;
@@ -2009,9 +2069,25 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
     );
     wait_for_run_complete(&runtime, SECOND_TENANT, completed_envelope.submission_id).await;
     // Both credit events are in `main`'s audit chain before the app stops,
-    // so the chain the restore must keep is not empty.
+    // so the chain the restore must keep is not empty. A zero delta credits
+    // nothing, so there is no credit event to wait for.
+    let awards_credit = dependencies.awards_credit();
     for tenant in [RESTORE_TENANT, SECOND_TENANT] {
-        wait_for_credit_audited(&runtime, tenant).await;
+        if awards_credit {
+            wait_for_credit_audited(&runtime, tenant).await;
+        } else {
+            // No run writes a `CreditMutate` event, so the seed appends one
+            // hash-only read event through `main`'s mirrored audit log
+            // instead: a chain the restore must keep.
+            append_control_plane_read_audit(
+                &first,
+                &system_audit_tenant(tenant, "pipeline_restore_seed"),
+                "pipeline_restore_seed",
+                1,
+            )
+            .await
+            .expect("restore_seed_audit_append_failed");
+        }
     }
     stop.send(())
         .expect("send shutdown to the seed's first app");
@@ -2029,13 +2105,20 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
         "restore_seed_receipt_refused"
     );
     wait_for_settle_selection(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
-    // The resume must have legs to settle. The reference candidate always
-    // selects some; a production package selects none when the second
-    // fixture misses its floors under the deployment's scorer and embedder,
-    // and the drill then fails here, naming that, rather than in the resume.
+    // The resume must have an index write and, unless the delta is zero,
+    // legs to settle. The reference candidate always selects both; a
+    // production package selects neither when the second fixture misses its
+    // floors under the deployment's scorer and embedder, and the drill then
+    // fails here, naming that, rather than in the resume.
+    let (includes, settles) = settle_selection(&runtime, pending_envelope.submission_id).await;
+    assert!(includes, "restore_seed_pending_selection_excludes");
     assert!(
-        settle_selection_settles(&runtime, pending_envelope.submission_id).await,
+        settles || !awards_credit,
         "restore_seed_pending_selection_settles_nothing"
+    );
+    assert!(
+        !settles || awards_credit,
+        "restore_seed_pending_selection_settles_under_zero_delta"
     );
     stop.send(())
         .expect("send shutdown to the seed's second app");
@@ -2087,7 +2170,7 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
         "restore_seed_outcomes_unexpected"
     );
     assert!(
-        completed.credited_once() && completed.trace_credit_legs == completed.settlement_count,
+        completed.settled_as_awarded(awards_credit),
         "restore_seed_run_not_credited"
     );
     assert_eq!(
@@ -2101,8 +2184,7 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
     assert!(
         second.state == "complete"
             && second.phases == ["admission", "review", "score", "settle"]
-            && second.credited_once()
-            && second.trace_credit_legs == second.settlement_count,
+            && second.settled_as_awarded(awards_credit),
         "restore_seed_second_tenant_run_not_credited"
     );
     // The adapter saw the completed run's legs and the second tenant's, and
@@ -2130,7 +2212,7 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
         None => completed.settlement_count,
     };
     assert!(
-        completed.settlement_count > 0,
+        (completed.settlement_count > 0) == awards_credit,
         "restore_seed_adapter_requests_unexpected"
     );
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
@@ -2176,6 +2258,7 @@ async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies
         adapter_request_count: completed_requests,
         completed_settlement_count: completed.settlement_count,
         completed_credit_event_count: completed.credit_events,
+        credit_delta_zero: !awards_credit,
         rls_table_count,
         rls_policy_set_hash,
         rls_policy_count,
@@ -2413,9 +2496,15 @@ async fn restore_resume(config: &RestoreConfig, url: &str, dependencies: &Restor
         "restore_settle_selection_changed"
     );
     // Ruling T10-5: the resumed run settled the same legs as the completed
-    // run (same bundle, same award), and at least one, as the seed recorded.
+    // run (same bundle, same award), and at least one, as the seed recorded;
+    // none under a zero delta, which the seed recorded too.
+    let awards_credit = dependencies.awards_credit();
     assert!(
-        resumed.settlement_count > 0
+        seed.credit_delta_zero != awards_credit,
+        "restore_credit_delta_changed"
+    );
+    assert!(
+        (resumed.settlement_count > 0) == awards_credit
             && !completed.is_empty()
             && completed
                 .iter()
@@ -2426,7 +2515,8 @@ async fn restore_resume(config: &RestoreConfig, url: &str, dependencies: &Restor
     // One ledger event for each credited leg, none of which existed before
     // the resume, as many as the completed run has.
     assert!(
-        resumed.credited_once() && resumed.credit_events == seed.completed_credit_event_count,
+        resumed.settled_as_awarded(awards_credit)
+            && resumed.credit_events == seed.completed_credit_event_count,
         "restore_pending_run_credit_events"
     );
     // The adapter was asked for the resumed run's legs and nothing else. In
@@ -2522,6 +2612,11 @@ async fn restore_resume(config: &RestoreConfig, url: &str, dependencies: &Restor
     // A reference result's evidence is exactly what it always was.
     if dependencies.assembly() == HarnessAssembly::Production {
         evidence["harness_assembly"] = serde_json::json!(dependencies.assembly().label());
+    }
+    // Named only when true: a drill that settled no leg says so, and one
+    // that did reads as it always has.
+    if seed.credit_delta_zero {
+        evidence["credit_delta_zero"] = serde_json::json!(true);
     }
     PipelineCheckEmitter::emit_from_env(
         RESTORE_CHECK_ID,
@@ -2625,11 +2720,38 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         tenant_fingerprint: hash("tenants"),
         tenant_count: 2,
         audit_event_count: 2,
+        credit_delta_zero: false,
     };
     assert_eq!(
         RestoreFingerprint::parse(&fingerprint.to_bytes()),
         Ok(fingerprint.clone())
     );
+    // A zero-delta seed settled and credited nothing, and says so; a seed
+    // that says so and counts a leg or an event is refused.
+    let uncredited = RestoreFingerprint {
+        adapter_request_count: 0,
+        completed_settlement_count: 0,
+        completed_credit_event_count: 0,
+        credit_delta_zero: true,
+        ..fingerprint.clone()
+    };
+    assert_eq!(
+        RestoreFingerprint::parse(&uncredited.to_bytes()),
+        Ok(uncredited.clone())
+    );
+    for count in [
+        "adapter_request_count",
+        "completed_settlement_count",
+        "completed_credit_event_count",
+    ] {
+        let mut value = serde_json::to_value(&uncredited).unwrap();
+        value[count] = 1.into();
+        assert_eq!(
+            RestoreFingerprint::parse(&serde_json::to_vec(&value).unwrap()),
+            Err("restore_fingerprint_invalid"),
+            "{count}"
+        );
+    }
     let edited = |edit: &dyn Fn(&mut serde_json::Value)| {
         let mut value = serde_json::to_value(&fingerprint).unwrap();
         edit(&mut value);
@@ -2813,6 +2935,29 @@ async fn production_restore_drill_resumes_once_over_doubles() {
     let dependencies = production_restore_doubles(production_test_package());
     restore_seed(&config, &dependencies).await;
     let resume = production_restore_doubles(production_test_package());
+    restore_resume(&config, &url, &resume).await;
+}
+
+/// The production restore drill over doubles under a package whose
+/// `NoveltyUtility` delta is `0`, the pilot's: Score awards nothing, so
+/// neither run settles a leg or writes a ledger event, and the drill
+/// checks the restore and the one resume without them. Ignored for the
+/// reason `production_restore_drill_resumes_once_over_doubles` is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "writes the drill's fixed tenants into the shared database: run alone"]
+async fn production_restore_drill_resumes_once_without_credit_over_doubles() {
+    let Some(url) = pipeline_http_database_url().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = RestoreConfig {
+        artifacts: RestoreArtifacts::Local(dir.path().join("artifacts")),
+        master_key_hex: trace_commons_server::secrets::keychain::generate_master_key_hex(),
+        fingerprint_path: dir.path().join("fingerprint.json"),
+    };
+    let dependencies = production_restore_doubles(production_test_package_awarding(0));
+    restore_seed(&config, &dependencies).await;
+    let resume = production_restore_doubles(production_test_package_awarding(0));
     restore_resume(&config, &url, &resume).await;
 }
 
@@ -3096,6 +3241,21 @@ async fn the_remote_copy_step_restores_a_seeded_store_over_the_directory_double(
 /// key wrapper only when that wrapper is a production one: under the local
 /// master key every count would pass and say nothing about KMS. The double
 /// runs on the local key.
+/// The remote drill's key wrapper and GCS client open TLS connections from a
+/// test binary, which never runs `main()`'s rustls provider install. With two
+/// providers compiled in (the pilot's feature set), rustls panics at the
+/// first TLS use unless one is installed, so building the key wrapper
+/// installs it. Run alone (`--exact`): another test may install it first.
+#[tokio::test]
+async fn the_remote_key_wrapper_installs_the_tls_provider() {
+    let _kek = remote_kek(
+        &RemoteStoreKind::DirectoryDouble(PathBuf::from("/nonexistent")),
+        &trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    )
+    .await;
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
 #[test]
 fn a_gcs_drill_refuses_a_key_wrapper_that_is_not_production() {
     assert_eq!(

@@ -42,6 +42,7 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "ctx",
     "source",
     "date",
+    "time",
     "harness",
     "span",
     "label",
@@ -313,6 +314,19 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_session_header",
         "{date} · {harness} · {n} turns · {t} tokens · {span} between first and last event",
     ),
+    // A saved session's label in the session picker and the drill-down rows,
+    // so neither shows the snapshot ID: the first recorded event's local date
+    // and time, the harness and the session's tokens. No project name (owner
+    // decision D7, open).
+    (
+        "analytics_session_label",
+        "{date} {time} · {harness} · {t} tokens",
+    ),
+    // The same label for a session with no recorded event time.
+    (
+        "analytics_session_label_undated",
+        "Undated · {harness} · {t} tokens",
+    ),
     ("analytics_turn", "Turn {n}"),
     (
         "analytics_codex_not_recorded",
@@ -378,8 +392,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Show the weekly summary card",
     ),
     ("analytics_setting_lever", "Lever suggestions"),
-    // The `insights_ledger_feed` switch (owner decision D3, open: off by
-    // default).
+    // The `insights_ledger_feed` switch (owner decision D3, settled
+    // 2026-10-09: on by default, the switch turns it off).
     (
         "analytics_setting_ledger_feed",
         "Count tokens in routed calls",

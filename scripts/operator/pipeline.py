@@ -149,6 +149,11 @@ _RESTORE_FINGERPRINT_COUNTS = (
     "tenant_count",
     "audit_event_count",
 )
+# The counts a seed under a zero `NoveltyUtility` delta has as zero: Score
+# awards nothing, so no run settles a leg or writes a ledger event.
+_RESTORE_CREDIT_COUNTS = frozenset(
+    {"adapter_request_count", "completed_settlement_count", "completed_credit_event_count"}
+)
 
 # `qualify`: the contract test manifest whose bytes it hashes (ruling T11-2),
 # and its three corpus runs, in `REQUIRED_CORPUS_CHECK_IDS` order, as
@@ -702,18 +707,26 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, seven hashes, and
-    eight positive counts, two tenants or more among them."""
+    """The seed's fingerprint file: exactly its schema, its hashes, its
+    counts, and `credit_delta_zero`, two tenants or more among them. Every
+    count is positive, except that a seed under a zero `NoveltyUtility`
+    delta (the pilot's) has exactly zero of the three credit counts."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
-        and set(value) == {"schema", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
+        and set(value)
+        == {"schema", "credit_delta_zero", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
         and value["schema"] == RESTORE_FINGERPRINT_SCHEMA
+        and type(value["credit_delta_zero"]) is bool
         and all(
             isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
             for key in _RESTORE_FINGERPRINT_HASHES
         )
-        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(type(value[key]) is int for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(
+            value[key] == 0 if value["credit_delta_zero"] and key in _RESTORE_CREDIT_COUNTS else value[key] > 0
+            for key in _RESTORE_FINGERPRINT_COUNTS
+        )
         and value["tenant_count"] >= 2,
         "restore_fingerprint_invalid",
     )
@@ -825,6 +838,7 @@ def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TES
                 "tenant_fingerprint": seed["tenant_fingerprint"],
                 "tenant_count": seed["tenant_count"],
                 "audit_events_verified": seed["audit_event_count"],
+                **({"credit_delta_zero": True} if seed["credit_delta_zero"] else {}),
             },
             assembly,
         ),

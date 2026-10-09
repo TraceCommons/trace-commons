@@ -100,7 +100,7 @@ struct InsightsPatternsTab: View {
                 Button(InsightsPatternsWords.seeSessions(card, copy: copy)) {
                     if model.sessions?.pattern == card.kind { model.hideSessions() } else { model.showSessions(card.kind) }
                 }
-                .buttonStyle(.link)
+                .buttonStyle(GlassButtonStyle(.link))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)

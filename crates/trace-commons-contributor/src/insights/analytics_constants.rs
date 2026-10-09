@@ -143,11 +143,13 @@ pub const DIGEST_KEY_CUSTODY: DigestKeyCustody = DigestKeyCustody::OsKeychain;
 /// Owner decision D5, open.
 pub const LEDGER_MONEY_IN_INSIGHTS: bool = false;
 
-/// Whether the daemon setting `insights_ledger_feed` starts on. While it is
-/// off nothing reads the proxy ledger for Insights: `insights_glance` answers
+/// Whether the daemon setting `insights_ledger_feed` starts on. Owner
+/// decision D3, settled by the owner on 2026-10-09: on by default, and the
+/// setting remains so a contributor can turn it off. While it is off nothing
+/// reads the proxy ledger for Insights: `insights_glance` answers
 /// `enabled: false`, `inference_calls` carries no `tokens`, and
-/// `usage_changed` is never published. Owner decision D3, open.
-pub const LEDGER_FEED_DEFAULT_ON: bool = false;
+/// `usage_changed` is never published.
+pub const LEDGER_FEED_DEFAULT_ON: bool = true;
 
 /// The context tip reads at most this many of the current session's newest
 /// calls, so a side call (a title, a compaction, a subagent) cannot make it
@@ -285,7 +287,7 @@ mod tests {
 
     #[test]
     fn ledger_glance_constants() {
-        const { assert!(!LEDGER_FEED_DEFAULT_ON) };
+        const { assert!(LEDGER_FEED_DEFAULT_ON) };
         assert_eq!(CONTEXT_TIP_RECENT_CALLS, 5);
         assert_eq!(CONTEXT_TIP_WINDOW_SECS, 600);
         assert_eq!(CONTEXT_TIP_RATIO, Ratio::new(9, 10));
