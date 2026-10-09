@@ -32,9 +32,6 @@ enum JoinLookUpOutcome: Equatable {
 enum JoinScreenLayout {
     /// The extra space above the invite card (under the body), on top of the
     /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
-    /// The extra space above the body's second paragraph: one line of
-    /// body text (owner ruling, 2026-10-08).
-    static let laterLineGap: CGFloat = GlassTokens.Space.s8
     static let extraGap = GlassTokens.Space.s4
 
     /// Contributing needs an account; without one, setup is watching only.
@@ -61,8 +58,27 @@ enum JoinScreenLayout {
         !state.signedOutOfEnrolment && (state.enrolledInvite != nil || state.nearAIEnrolled)
     }
 
+    /// "Skip" whenever no account was signed into on Join, including when
+    /// the daemon already holds an enrollment from before; "Continue" once
+    /// one was (owner ruling, 2026-10-08). The body tells the person to
+    /// click "Skip", so the button always matches it.
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        hasAccount(state) || !offersWatchOnly(state) ? copy.frame.continueButton : copy.join.skip
+        hasSignedInAccount(state) ? copy.frame.continueButton : copy.join.skip
+    }
+
+    /// Whether Join shows an account as signed into: near.ai or a passkey
+    /// answered on this run, a known invite joined, or a held near.ai
+    /// enrollment, and nothing signed out of. An enrollment the daemon holds
+    /// with no invite or account to show (an earlier run's, a preset
+    /// config's) draws no signed-in card, so the button reads "Skip" there
+    /// too; pressing it still goes on as that enrollment (`forward`).
+    static func hasSignedInAccount(_ state: FirstRunState) -> Bool {
+        if state.signedOutOfEnrolment { return false }
+        switch state.account {
+        case .nearAI, .passkeyChosen, .passkey: return true
+        case .none, .watchOnly, .enrolled:
+            return !(state.enrolledInvite ?? "").isEmpty || state.nearAIEnrolled
+        }
     }
 
     static func footerNote(_ state: FirstRunState, copy: FirstRunCopy) -> String? {
@@ -464,8 +480,7 @@ struct JoinScreen: View {
         }
     }
 
-    /// The title, then the body in two paragraphs, the second a line
-    /// further down (owner, 2026-10-08).
+    /// The title, then the body as one paragraph (owner, 2026-10-08).
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
@@ -473,13 +488,6 @@ struct JoinScreen: View {
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            // A line further down, in the body's regular weight and ink
-            // (owner ruling, 2026-10-08).
-            Text(copy.join.bodyEmphasis)
-                .glassType(GlassTokens.TypeScale.body)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, JoinScreenLayout.laterLineGap)
         }
     }
 

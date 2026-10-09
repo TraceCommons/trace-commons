@@ -34,7 +34,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
         public let body: String
-        public let bodyEmphasis: String
         public let inviteEyebrow: String
         public let invitePlaceholder: String
         public let lookUp: String

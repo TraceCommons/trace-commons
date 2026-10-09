@@ -649,8 +649,7 @@ pub const AUTO_PATH_AUTOMATIC_TITLE: &str =
 /// appear after the grant are armed, and a project with sessions on disk
 /// keeps asking.
 ///
-/// First sentence: DRAFT, NEEDS APPROVAL (2026-10-08) -- written here, from
-/// the owner's example, to keep "after you turn this on" now that the title
+/// First sentence: approved 2026-10-08 -- written from the owner's example, to keep "after you turn this on" now that the title
 /// line drops it. Second sentence: [`AUTO_PATH_AUTOMATIC`]'s own, approved
 /// 2026-10-06.
 pub const AUTO_PATH_AUTOMATIC_DETAIL: &str = "Only projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";

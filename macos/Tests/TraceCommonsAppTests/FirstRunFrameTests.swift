@@ -374,12 +374,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
         // The Private AI switch is the settings style.
         XCTAssertTrue(uses.contains("GlassToggleStyle(.settings, showsLabel: false)"))
-        // Join's second paragraph is regular weight now (owner, 2026-10-08),
-        // its own paragraph a line further down.
+        // Join's body is one regular paragraph (owner, 2026-10-08).
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
-        let emphasis = try XCTUnwrap(join.range(of: "Text(copy.join.bodyEmphasis)"))
-        let emphasisStyle = String(join[emphasis.upperBound...].prefix(200))
-        XCTAssertFalse(emphasisStyle.contains(".weight(.bold)"))
+        XCTAssertFalse(join.contains("bodyEmphasis"))
         // The page content has its own side margin; the step progress and
         // the button row do not.
         XCTAssertEqual(FirstRunFrameLayout.contentInset, 20)

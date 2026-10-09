@@ -652,7 +652,8 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(forwarded.holdsEnrolment)
 
         let signedOut = FirstRunState(account: .none, signedOutOfEnrolment: true)
-        XCTAssertEqual(JoinScreenLayout.footerTitle(signedOut, copy: copy), copy.frame.continueButton)
+        // Nothing signed into: "Skip", with no watch-only note, held back.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(signedOut, copy: copy), copy.join.skip)
         XCTAssertNil(JoinScreenLayout.footerNote(signedOut, copy: copy))
         XCTAssertFalse(JoinScreenLayout.canForward(signedOut))
         XCTAssertEqual(JoinScreenLayout.forward(signedOut), signedOut, "nothing to go on as")
@@ -750,7 +751,10 @@ final class JoinScreenTests: XCTestCase {
         // watch-only Start would act under it and could never finish (the
         // marker is refused while the daemon is logged in).
         XCTAssertTrue(out.daemonHoldsEnrolment)
-        XCTAssertNotEqual(JoinScreenLayout.footerTitle(out, copy: copy), copy.join.skip)
+        // No account is signed into, so the button reads "Skip" (owner
+        // ruling, 2026-10-08), but it cannot go on until one is chosen.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(out, copy: copy), copy.join.skip)
+        XCTAssertNil(JoinScreenLayout.footerNote(out, copy: copy))
         XCTAssertFalse(JoinScreenLayout.canForward(out))
         var watching = out
         watching.account = .watchOnly
@@ -917,18 +921,13 @@ final class JoinScreenTests: XCTestCase {
     /// slot, not in the cards (owner ruling, 2026-10-08).
     func test_joinLaysOutItsBodyAndCardsAsRuled() throws {
         let source = try Self.source()
-        // Two paragraphs, not one run of concatenated text.
-        XCTAssertFalse(source.contains("Text(copy.join.body) + Text("))
-        let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
-        let emphasis = try XCTUnwrap(source.range(of: "Text(copy.join.bodyEmphasis)\n"))
-        XCTAssertLessThan(body.lowerBound, emphasis.lowerBound)
-        let emphasisStyle = String(source[emphasis.upperBound...].prefix(400))
-        // Regular weight, the body's ink, a line further down (owner
+        // One paragraph, in the body's regular weight and ink (owner
         // ruling, 2026-10-08).
-        XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body)\n"))
-        XCTAssertFalse(emphasisStyle.contains(".weight(.bold)"))
-        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textSecondary)"))
-        XCTAssertTrue(emphasisStyle.contains(".padding(.top, JoinScreenLayout.laterLineGap)"))
+        XCTAssertEqual(source.components(separatedBy: "Text(copy.join.body").count - 1, 1)
+        let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
+        let bodyStyle = String(source[body.upperBound...].prefix(200))
+        XCTAssertTrue(bodyStyle.contains(".glassType(GlassTokens.TypeScale.body)\n"))
+        XCTAssertTrue(bodyStyle.contains(".foregroundStyle(GlassColor.textSecondary)"))
 
         // The no-sharing line is the frame's action note, in no card and
         // not in the scrolling content (owner ruling, 2026-10-08).
@@ -971,7 +970,7 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertLessThan(words.count, 2, "authored: \(text)")
         }
         for field in [
-            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
+            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
             "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
             "copy.passkeyChosen", "copy.frame.undo",

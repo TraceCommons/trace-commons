@@ -130,8 +130,10 @@ pub struct FrameCopy {
 pub struct JoinCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
+    /// One paragraph (owner ruling, 2026-10-08): the "later" sentence is
+    /// back in it. The button it names reads "Skip" whenever no account
+    /// was signed into on Join.
     pub body: &'static str,
-    pub body_emphasis: &'static str,
     pub invite_eyebrow: &'static str,
     pub invite_placeholder: &'static str,
     pub look_up: &'static str,
@@ -325,8 +327,8 @@ pub struct UsesCopy {
     pub sharing_loading: &'static str,
     pub sharing_unavailable: &'static str,
     /// `{title}`: a scope's or the Sharing card's title. The accessible
-    /// name of the info button holding its longer text. DRAFT, NEEDS
-    /// APPROVAL (2026-10-08): the owner's example wording.
+    /// name of the info button holding its longer text. Approved
+    /// 2026-10-08: the owner's example wording.
     pub more_about: &'static str,
     pub start: &'static str,
     /// Start finished on Ask me because the Automatic grant was refused.
@@ -450,10 +452,7 @@ pub fn first_run_copy() -> FirstRunCopy {
         join: JoinCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
-            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\".",
-            // Approved 2026-10-08 (owner ruling): the clause about credits
-            // and the near.ai ecosystem is dropped.
-            body_emphasis: "You'll be able to setup or connect your account later.",
+            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\". You'll be able to setup or connect your account later.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
