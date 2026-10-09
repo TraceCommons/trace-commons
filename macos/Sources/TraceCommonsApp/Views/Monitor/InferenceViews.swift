@@ -247,7 +247,9 @@ struct InferenceTabView: View {
                         .foregroundStyle(GlassColor.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
-                        .accessibilityValue(InferenceTokenWords.accessibilityLine(tokens, copy: Self.insightsCopy))
+                        // Read out in place of the line, so the combined row
+                        // says unknown where the line draws the dash.
+                        .accessibilityLabel(InferenceTokenWords.accessibilityLine(tokens, copy: Self.insightsCopy))
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
