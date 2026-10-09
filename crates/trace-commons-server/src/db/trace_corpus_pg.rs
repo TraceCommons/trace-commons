@@ -6957,7 +6957,7 @@ impl TraceCorpusStore for PgBackend {
         perplexity_micros: i64,
         peak_perplexity_micros: Option<i64>,
         perplexity_passed: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // Update ONLY the three perplexity columns, and ONLY on the latest
@@ -6976,9 +6976,12 @@ impl TraceCorpusStore for PgBackend {
         // entirely: that row's verdict is what its Score awarded credit on
         // and what its attestation_chain_hash covers (spec 2026-10-08,
         // Slice C, O-C3). The enumeration already leaves such submissions
-        // out; this guards a re-score enumerated before Settle committed.
-        tx.execute(
-            "UPDATE trace_gate_decisions
+        // out; this guards a re-score enumerated before Settle committed, and
+        // the 0 rows it then touches are returned so the re-score counts a
+        // skip, not a re-score.
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
                 SET perplexity_micros = $3,
                     peak_perplexity_micros = $4,
                     perplexity_passed = $5
@@ -6990,18 +6993,18 @@ impl TraceCorpusStore for PgBackend {
                  SELECT 1 FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
                     AND source = 'pipeline_settle')",
-            &[
-                &tenant_id,
-                &submission_id,
-                &perplexity_micros,
-                &peak_perplexity_micros,
-                &perplexity_passed,
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &perplexity_micros,
+                    &peak_perplexity_micros,
+                    &perplexity_passed,
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn update_trace_gate_decision_author_perplexity(
@@ -7009,7 +7012,7 @@ impl TraceCorpusStore for PgBackend {
         tenant_id: &str,
         submission_id: Uuid,
         columns: [Option<i64>; 5],
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         let mut client = self.trace_pool().get().await?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
         // The five V73 columns and nothing else, on the latest decision row
@@ -7020,9 +7023,11 @@ impl TraceCorpusStore for PgBackend {
         // `perplexity_passed` alone is the point: a backfill scored by a
         // different model must not rewrite what the row was gated on.
         // A pipeline submission is skipped, as there: its per-author columns
-        // stay NULL until the compatibility Score computes them (O-C2).
-        tx.execute(
-            "UPDATE trace_gate_decisions
+        // stay NULL until the compatibility Score computes them (O-C2), and
+        // the 0 rows touched are returned.
+        let updated = tx
+            .execute(
+                "UPDATE trace_gate_decisions
                 SET agent_prose_perplexity_micros = $3,
                     agent_prose_tokens = $4,
                     tool_result_perplexity_micros = $5,
@@ -7036,20 +7041,20 @@ impl TraceCorpusStore for PgBackend {
                  SELECT 1 FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
                     AND source = 'pipeline_settle')",
-            &[
-                &tenant_id,
-                &submission_id,
-                &columns[0],
-                &columns[1],
-                &columns[2],
-                &columns[3],
-                &columns[4],
-            ],
-        )
-        .await
-        .map_err(DatabaseError::Postgres)?;
+                &[
+                    &tenant_id,
+                    &submission_id,
+                    &columns[0],
+                    &columns[1],
+                    &columns[2],
+                    &columns[3],
+                    &columns[4],
+                ],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-        Ok(())
+        Ok(updated)
     }
 
     async fn update_trace_gate_decision_credit_quality(
