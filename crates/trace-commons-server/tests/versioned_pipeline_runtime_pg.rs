@@ -2913,6 +2913,93 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     );
 }
 
+/// PR #1295 review, Major 1: the production assembly is library code, so
+/// this target can construct it. `pipeline_bundle_qualification` above still
+/// qualifies the local reference candidate: its assertions that the
+/// candidate's scorer and embedder are the reference ones, that neither is
+/// production-qualified, and that the configuration is not qualifiable all
+/// flip for a production candidate, and switching the check onto this
+/// constructor in production mode is Slice B-2. This shows what that
+/// candidate qualifies as: the production identities, both qualified, and a
+/// qualifiable configuration. The scorer and embedder behind the adapters are
+/// reference doubles; the identities are the adapters' own.
+#[tokio::test]
+async fn production_assembly_is_constructible_from_the_library() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponents,
+        ProductionPipelineInputs, assemble_production_pipeline,
+    };
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let components = Arc::new(PipelineGateComponents {
+        scorer: Arc::new(ReferencePerplexityScorer::new()),
+        scorer_descriptor: NearAiScorerDescriptor {
+            model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+            tail_logprob_cutoff: -8.0,
+            logprobs_top_k: 1,
+        },
+        embedder: Arc::new(ReferenceEmbedder::new()),
+        embedder_descriptor: FastEmbedDescriptor {
+            model_id: "BAAI/bge-large-en-v1.5".to_string(),
+            output_dim: 1024,
+            max_tokens: 512,
+            matryoshka_dim: None,
+        },
+        index_reader: index.clone(),
+        index_writer: index,
+        index_root_shared_with_legacy: false,
+        authority: allow_all_authority(),
+        tenant_policy_count: 0,
+        privacy: None,
+        privacy_backend: None,
+    });
+    let service = assemble_production_pipeline(ProductionPipelineInputs {
+        backend,
+        artifact_store: artifact_store(&dir),
+        object_store_name: "local".to_string(),
+        lease_config: PipelineLeaseConfig::default(),
+        novelty_utility_checks: issuing_checks(),
+        unqualified_routing_allowed: false,
+        main_gate: MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(500_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: 2_500_000,
+        },
+        components,
+    })
+    .expect("the production assembly builds over qualified adapters");
+    let candidate = service.default_package().clone();
+    let qualification = service
+        .bundle_qualification(&candidate)
+        .expect("the candidate resolves against its own service");
+    assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
+    assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+    assert!(qualification.scorer.production_qualified);
+    assert!(qualification.embedder.production_qualified);
+    assert!(qualification.configuration_qualifiable);
+}
+
 /// Task 5: `bundle_qualification` fails closed on a package it cannot
 /// resolve against the held dependencies -- the same two failure labels
 /// `construct` uses -- and reports, rather than refuses, a bundle-pinned

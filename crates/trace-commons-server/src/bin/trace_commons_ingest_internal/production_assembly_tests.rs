@@ -51,7 +51,7 @@ fn with(
 }
 
 fn scorer_descriptor(pairs: &[(&str, &str)]) -> NearAiScorerDescriptor {
-    NearAiScorerDescriptor::from_lookup(&lookup_from(pairs)).expect("descriptor parses")
+    near_ai_scorer_descriptor_from_lookup(&lookup_from(pairs)).expect("descriptor parses")
 }
 
 /// Spec 4.2 item 2: the scorer descriptor is a pure function of the model
@@ -113,14 +113,14 @@ fn scorer_descriptor_refuses_a_missing_or_malformed_pin() {
         .filter(|(key, _)| *key != TRACE_COMMONS_NEAR_AI_MODEL)
         .collect::<Vec<_>>();
     assert_eq!(
-        NearAiScorerDescriptor::from_lookup(&lookup_from(&no_model))
+        near_ai_scorer_descriptor_from_lookup(&lookup_from(&no_model))
             .unwrap_err()
             .to_string(),
         "pipeline_scorer_model_missing"
     );
     for cutoff in ["not-a-number", "NaN", "inf"] {
         assert_eq!(
-            NearAiScorerDescriptor::from_lookup(&lookup_from(&with(
+            near_ai_scorer_descriptor_from_lookup(&lookup_from(&with(
                 &scorer_env(),
                 TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF,
                 cutoff
@@ -143,7 +143,7 @@ fn embedder_env() -> Vec<(&'static str, &'static str)> {
 }
 
 fn embedder_descriptor(pairs: &[(&str, &str)]) -> FastEmbedDescriptor {
-    FastEmbedDescriptor::from_lookup(&lookup_from(pairs)).expect("descriptor parses")
+    fastembed_descriptor_from_lookup(&lookup_from(pairs)).expect("descriptor parses")
 }
 
 /// Spec 4.2 item 3.
@@ -328,323 +328,6 @@ fn pipeline_index_root_must_not_be_the_legacy_root() {
     }
 }
 
-#[cfg(feature = "near-ai-scorer")]
-mod usearch_pipeline_index {
-    use super::*;
-    use trace_commons_gate_api::pipeline::TenantStorageRef;
-    use trace_commons_gate_api::{
-        IndexEntryKey, IndexUpsertResult, IndexWriteError, VectorIndexReader, VectorIndexWriter,
-    };
-
-    const DIM: usize = 4;
-
-    fn usearch_test_config(
-        dim: usize,
-    ) -> trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig {
-        trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig {
-            dim,
-            hnsw_m: 16,
-            ef_construction: 64,
-            ef_search: 64,
-            max_open: 8,
-            flush_every: 1_000,
-            flush_interval: None,
-        }
-    }
-
-    fn open(root: &std::path::Path) -> anyhow::Result<UsearchPipelineIndex> {
-        UsearchPipelineIndex::open(root, usearch_test_config(DIM))
-    }
-
-    fn tenant(n: u8) -> TenantStorageRef {
-        TenantStorageRef::new(format!("tenant_sha256:{}", format!("{n:02x}").repeat(16))).unwrap()
-    }
-
-    fn key(tenant_ref: &TenantStorageRef, revision: u128, chunk: u32) -> IndexEntryKey {
-        IndexEntryKey {
-            tenant_storage_ref: tenant_ref.clone(),
-            index_id: PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
-            revision_id: Uuid::from_u128(revision),
-            projection_id: PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
-            model_id: "BAAI/bge-large-en-v1.5".to_string(),
-            chunk,
-        }
-    }
-
-    fn unit(axis: usize) -> Vec<f32> {
-        let mut vector = vec![0.0; DIM];
-        vector[axis] = 1.0;
-        vector
-    }
-
-    /// The writer contract `IsolatedPipelineIndex`'s tests cover, against
-    /// the usearch-backed index.
-    #[test]
-    fn usearch_pipeline_index_meets_the_writer_contract() {
-        let dir = tempfile::tempdir().unwrap();
-        let index = open(dir.path()).unwrap();
-        let a = tenant(1);
-        let b = tenant(2);
-        let index_id = PRODUCTION_COMPATIBILITY_INDEX_ID;
-
-        let first = key(&a, 1, 0);
-        assert_eq!(
-            index.upsert(&first, &unit(0), "sha256:one").unwrap(),
-            IndexUpsertResult::Inserted
-        );
-        assert_eq!(
-            index.upsert(&first, &unit(0), "sha256:one").unwrap(),
-            IndexUpsertResult::Unchanged
-        );
-        assert_eq!(
-            index.upsert(&first, &unit(0), "sha256:other").unwrap_err(),
-            IndexWriteError::ContentConflict
-        );
-        assert_eq!(
-            index.upsert(&first, &unit(1), "sha256:one").unwrap_err(),
-            IndexWriteError::ContentConflict
-        );
-        index
-            .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
-            .unwrap();
-        index
-            .upsert(&key(&b, 3, 0), &unit(0), "sha256:three")
-            .unwrap();
-
-        // `nearest` answers the real entry ids, best first, within one
-        // tenant, and leaves out the excluded revision.
-        let nearest = index.nearest(&a, index_id, &unit(0), 2, None).unwrap();
-        assert_eq!(nearest.len(), 2);
-        assert_eq!(nearest[0].entry_id, first.entry_id());
-        assert!((nearest[0].similarity - 1.0).abs() < 1e-4);
-        assert_eq!(nearest[1].entry_id, key(&a, 2, 0).entry_id());
-        let excluded = index
-            .nearest(&a, index_id, &unit(0), 2, Some(Uuid::from_u128(1)))
-            .unwrap();
-        assert_eq!(
-            excluded
-                .iter()
-                .map(|neighbor| neighbor.entry_id)
-                .collect::<Vec<_>>(),
-            vec![key(&a, 2, 0).entry_id()]
-        );
-        assert!(
-            index
-                .nearest(&a, "another_index", &unit(0), 2, None)
-                .unwrap()
-                .is_empty()
-        );
-
-        assert_eq!(index.snapshot(&a, index_id).unwrap().cardinality, 2);
-        assert_eq!(index.snapshot(&b, index_id).unwrap().cardinality, 1);
-
-        // `invalidate_revision` removes that revision's entries only, and is
-        // idempotent.
-        assert!(
-            index
-                .invalidate_revision(&a, index_id, Uuid::from_u128(1))
-                .unwrap()
-        );
-        assert!(
-            !index
-                .invalidate_revision(&a, index_id, Uuid::from_u128(1))
-                .unwrap()
-        );
-        assert_eq!(index.snapshot(&a, index_id).unwrap().cardinality, 1);
-        assert_eq!(index.snapshot(&b, index_id).unwrap().cardinality, 1);
-        let after = index.nearest(&a, index_id, &unit(0), 5, None).unwrap();
-        assert_eq!(
-            after
-                .iter()
-                .map(|neighbor| neighbor.entry_id)
-                .collect::<Vec<_>>(),
-            vec![key(&a, 2, 0).entry_id()]
-        );
-        // A removed entry may be written again.
-        assert_eq!(
-            index.upsert(&first, &unit(0), "sha256:one").unwrap(),
-            IndexUpsertResult::Inserted
-        );
-    }
-
-    /// The snapshot hash depends on the entries, not the order they were
-    /// written in.
-    #[test]
-    fn usearch_pipeline_snapshot_hash_is_order_independent() {
-        let a = tenant(1);
-        let index_id = PRODUCTION_COMPATIBILITY_INDEX_ID;
-        let entries = [
-            (key(&a, 1, 0), unit(0), "sha256:one"),
-            (key(&a, 1, 1), unit(1), "sha256:two"),
-            (key(&a, 2, 0), unit(2), "sha256:three"),
-        ];
-        let forward_dir = tempfile::tempdir().unwrap();
-        let forward = open(forward_dir.path()).unwrap();
-        for (entry, embedding, hash) in &entries {
-            forward.upsert(entry, embedding, hash).unwrap();
-        }
-        let reverse_dir = tempfile::tempdir().unwrap();
-        let reverse = open(reverse_dir.path()).unwrap();
-        for (entry, embedding, hash) in entries.iter().rev() {
-            reverse.upsert(entry, embedding, hash).unwrap();
-        }
-        let left = forward.snapshot(&a, index_id).unwrap();
-        let right = reverse.snapshot(&a, index_id).unwrap();
-        assert_eq!(left, right);
-        assert_eq!(left.cardinality, 3);
-        let empty = open(tempfile::tempdir().unwrap().path())
-            .unwrap()
-            .snapshot(&a, index_id)
-            .unwrap();
-        assert_ne!(empty.snapshot_hash, left.snapshot_hash);
-        assert_eq!(empty.cardinality, 0);
-    }
-
-    /// The manifest is persisted beside the usearch files, so a reopened
-    /// index answers the same entries, snapshot and real entry ids.
-    #[test]
-    fn manifest_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = tenant(1);
-        let index_id = PRODUCTION_COMPATIBILITY_INDEX_ID;
-        let before = {
-            let index = open(dir.path()).unwrap();
-            index
-                .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
-                .unwrap();
-            index
-                .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
-                .unwrap();
-            index.snapshot(&a, index_id).unwrap()
-        };
-        let reopened = open(dir.path()).unwrap();
-        assert_eq!(reopened.snapshot(&a, index_id).unwrap(), before);
-        assert_eq!(
-            reopened
-                .nearest(&a, index_id, &unit(1), 1, None)
-                .unwrap()
-                .first()
-                .map(|neighbor| neighbor.entry_id),
-            Some(key(&a, 2, 0).entry_id())
-        );
-        assert_eq!(
-            reopened
-                .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
-                .unwrap(),
-            IndexUpsertResult::Unchanged
-        );
-    }
-
-    /// A manifest that does not match its usearch file refuses the start.
-    #[test]
-    fn truncated_manifest_refuses_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = tenant(1);
-        {
-            let index = open(dir.path()).unwrap();
-            index
-                .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
-                .unwrap();
-            index
-                .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
-                .unwrap();
-        }
-        let manifests = std::fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.to_string_lossy().ends_with(".manifest.json"))
-            .collect::<Vec<_>>();
-        assert_eq!(manifests.len(), 1);
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifests[0]).unwrap()).unwrap();
-        let mut truncated = manifest.clone();
-        let entries = truncated["entries"].as_object_mut().unwrap();
-        let first = entries.keys().next().unwrap().clone();
-        entries.remove(&first);
-        std::fs::write(&manifests[0], serde_json::to_vec(&truncated).unwrap()).unwrap();
-        assert_eq!(
-            open(dir.path()).err().unwrap().to_string(),
-            "pipeline_vector_index_manifest_mismatch"
-        );
-        std::fs::write(&manifests[0], b"{not json").unwrap();
-        assert_eq!(
-            open(dir.path()).err().unwrap().to_string(),
-            "pipeline_vector_index_manifest_mismatch"
-        );
-    }
-
-    /// A crash between the usearch flush and the first manifest write of a
-    /// namespace leaves a usearch file no manifest describes; the start
-    /// refuses it rather than serve a namespace whose entries it cannot name.
-    #[test]
-    fn an_orphaned_usearch_file_refuses_open() {
-        let dir = tempfile::tempdir().unwrap();
-        let a = tenant(1);
-        {
-            let index = open(dir.path()).unwrap();
-            index
-                .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
-                .unwrap();
-        }
-        let files = |suffix: &str| {
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| path.to_string_lossy().ends_with(suffix))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(files(".usearch").len(), 1);
-        for manifest in files(".manifest.json") {
-            std::fs::remove_file(manifest).unwrap();
-        }
-        assert_eq!(
-            open(dir.path()).err().unwrap().to_string(),
-            "pipeline_vector_index_manifest_mismatch"
-        );
-    }
-
-    /// Every write persists before it returns, and returns well within the
-    /// 60 s index write fence margin (measured with a generous bound).
-    #[test]
-    fn flush_returns_within_the_fence_margin() {
-        let dir = tempfile::tempdir().unwrap();
-        let index = open(dir.path()).unwrap();
-        let a = tenant(1);
-        let started = std::time::Instant::now();
-        for revision in 0..50 {
-            index
-                .upsert(
-                    &key(&a, revision, 0),
-                    &unit((revision % 4) as usize),
-                    "sha256:x",
-                )
-                .unwrap();
-        }
-        index
-            .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(3))
-            .unwrap();
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed
-                < std::time::Duration::from_secs(
-                    trace_commons_server::versioned_pipeline::PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS
-                        as u64
-                        / 4
-                ),
-            "{elapsed:?}"
-        );
-        drop(index);
-        assert_eq!(
-            open(dir.path())
-                .unwrap()
-                .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
-                .unwrap()
-                .cardinality,
-            49
-        );
-    }
-}
-
 fn trace_credit_request(atomic_units: u128) -> trace_commons_gate_api::SettlementRequest {
     trace_commons_gate_api::SettlementRequest::new(
         trace_commons_gate_api::pipeline::TenantStorageRef::new(format!(
@@ -794,7 +477,7 @@ async fn tenant_policy_authority_matches_legacy_admission() {
 
     for require_policy in [false, true] {
         let provider = TenantPolicyPipelineAuthorityProvider::new(
-            policies.clone(),
+            tenant_policy_allowlists(&policies),
             require_policy,
             Arc::new(|tenant_id: &str| tenant_id == "tenant-db"),
         );

@@ -4834,7 +4834,7 @@ impl AppState {
             pipeline_gate_components.as_deref(),
         ) {
             production_assembly::emit_production_adapters_check(
-                production_assembly::PipelineCheckVars::from_env(),
+                production_assembly::pipeline_check_vars_from_env(),
                 DEPLOYED_CODE_REVISION_HASH,
                 service,
                 components,
