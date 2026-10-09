@@ -250,6 +250,17 @@ pub struct DaemonState {
     /// `attention::MIN_GAP_ANY`. Cleared by `unenroll` (`clear_nudges`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_notified_at: Option<DateTime<Utc>>,
+    /// Whether this file was first written by a build that has the per-kind
+    /// notification switches, as `ProjectPolicy::notify_kinds_known` is for
+    /// the policy. Set by [`DaemonState::new`] and never changed, so a file
+    /// an older build wrote keeps reading `false` however often this build
+    /// saves it.
+    ///
+    /// `DaemonSettings::load` reads it when there is no settings file: an
+    /// install whose daemon only ever watched has no policy file, and this
+    /// is the evidence that it predates the kinds (constraint 12).
+    #[serde(default)]
+    pub notify_kinds_known: bool,
     /// Write-elision memo; see [`LastWritten`]. Never persisted, so a fresh
     /// process always writes once before it can skip anything.
     #[serde(skip)]
@@ -286,6 +297,7 @@ impl DaemonState {
             idle_announced: BTreeSet::new(),
             attention_log: Vec::new(),
             last_notified_at: None,
+            notify_kinds_known: true,
             last_written: LastWritten::default(),
         }
     }

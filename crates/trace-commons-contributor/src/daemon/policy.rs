@@ -341,6 +341,18 @@ pub struct ProjectPolicy {
     /// `#[serde(default)]` so an older policy file loads with none.
     #[serde(default)]
     pub contribution_override: Option<ContributionOverride>,
+    /// Whether this file was first written by a build that has the per-kind
+    /// notification switches (`DaemonSettings::notify`). Set by
+    /// [`ProjectPolicy::new`] and never changed, so a file an older build
+    /// wrote keeps reading `false` -- that build has no such key -- however
+    /// often this build saves it.
+    ///
+    /// `DaemonSettings::load` reads it when there is no settings file: a
+    /// policy an older build wrote is an existing install, and gets the
+    /// upgrade values and the one-time offers (constraint 12), even when
+    /// that build already marked `scrub_check_upgrade_recorded`.
+    #[serde(default)]
+    pub notify_kinds_known: bool,
 }
 
 /// The key the contribution override's arming record is listed under in
@@ -507,6 +519,7 @@ impl ProjectPolicy {
             sessions_on_disk_at_arming: BTreeMap::new(),
             next_arming_record: 0,
             contribution_override: None,
+            notify_kinds_known: true,
         }
     }
 

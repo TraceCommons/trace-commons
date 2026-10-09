@@ -1271,8 +1271,9 @@ impl DaemonShared {
         {
             // Save provenance before marking the policy migration done; a
             // restart must not mistake a legacy settings-less install for fresh.
-            // The notification offers rest on the same policy evidence, and a
-            // new install has neither, so it still writes nothing here.
+            // The notification offers rest on the same kind of evidence (a
+            // policy or state file an older build wrote), and a new install
+            // has neither, so it still writes nothing here.
             settings.save(&store)?;
         }
         if policy.record_scrub_check_upgrade(
@@ -10992,6 +10993,74 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    /// Kristi's #1300 review, finding 2: an Ask me install that ran a build
+    /// after #1162 has its policy marked migrated and no settings file.
+    /// Startup still treats it as existing and saves the offers, so the new
+    /// kinds never come on for it unasked.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_migrated_install_without_a_settings_file() {
+        let s = shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+            assert!(policy.scrub_check_upgrade_recorded);
+            let mut value = serde_json::to_value(&*policy).unwrap();
+            value.as_object_mut().unwrap().remove("notify_kinds_known");
+            s.store
+                .write_daemon_file(
+                    crate::config::DAEMON_PROJECTS_FILE,
+                    value.to_string().as_bytes(),
+                )
+                .unwrap();
+        }
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
+    }
+
+    /// Kristi's #1300 review, finding 2: an older install that only ever
+    /// watched has no policy file, only the state file its daemon wrote.
+    /// Startup saves its offers, and the next start still reads them.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_watch_only_install_without_a_settings_file() {
+        let s = shared();
+        let mut value = serde_json::to_value(super::super::state::DaemonState::new()).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_STATE_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
     }
 
     /// A new install's startup writes no settings file on its own account.
