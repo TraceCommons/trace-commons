@@ -1,3 +1,5 @@
+import TCShellCore
+
 /// Home's pages. Top-level rather than nested in `HomeTabView` (which names
 /// it `HomeTabView.Page`), so `MonitorDestination` can name one without
 /// reaching into a view.
@@ -23,6 +25,16 @@ enum MonitorDestination: Equatable, Sendable {
     var settingsSection: SettingsSection? {
         if case .settings(let section) = self { return section }
         return nil
+    }
+}
+
+extension MonitorDestination {
+    /// Where a nudge action opens the Monitor.
+    init(nudge destination: NudgeSurface.Destination) {
+        switch destination {
+        case .traces(let idleOnly): self = idleOnly ? .idleSessions : .traces(entryId: nil)
+        case .history: self = .home(.history)
+        }
     }
 }
 

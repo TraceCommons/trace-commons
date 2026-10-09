@@ -47,6 +47,7 @@ struct MenuBarGlassPanel: View {
                 pills
                     .transition(.opacity)
             }
+            nudgeRow
             legend
             graph
             recent
@@ -339,6 +340,32 @@ struct MenuBarGlassPanel: View {
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
     }
 
+    // MARK: The nudge row
+
+    /// The lead suggestion's panel row, in the daemon's words: tapping it
+    /// opens its place (Traces at the idle sessions, Traces, or History).
+    @ViewBuilder
+    private var nudgeRow: some View {
+        if let row = store.nudgeRow {
+            Button {
+                Task {
+                    let destination = await store.open(row)
+                    open(destination)
+                }
+            } label: {
+                HStack {
+                    Text(row.text)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                }
+            }
+            .buttonStyle(GlassMenuRowStyle())
+            .padding(.vertical, -GlassTokens.Space.s2)
+        }
+    }
+
     // MARK: Recent activity
 
     @ViewBuilder
@@ -471,16 +498,22 @@ struct MenuBarStripLabel: View {
     let store: MenuPanelStore
 
     var body: some View {
+        let available = model.startup == .running && !store.stale
         GlassMenuBarStrip(
             columns: store.columns,
             condition: MenuPanelStatus.condition(
                 decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
                 paused: model.status.paused, available: model.startup == .running, stale: store.stale),
-            badge: MenuPanelStatus.badge(model.decisionsOwed))
+            badge: MenuPanelStatus.badge(model.decisionsOwed),
+            mark: MenuPanelStatus.mark(store.status?.nudge, available: available))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(MenuBarStatus.accessibilityLabel(
-                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running))
+            .accessibilityLabel(MenuPanelStatus.markAccessibility(
+                base: MenuBarStatus.accessibilityLabel(
+                    decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+                    paused: model.status.paused, available: model.startup == .running),
+                nudge: store.status?.nudge, available: available))
+            // The lit mark's tooltip clause, in the core's words.
+            .help(NudgeSurface.markText(store.status?.nudge, available: available)?.tooltip ?? "")
             // The label is always alive, so it owns the subscription: the
             // app's live client, re-attached whenever the daemon restarts.
             .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -508,6 +541,24 @@ enum MenuPanelStatus {
         guard available, !stale else { return .unavailable }
         if unhealthy || decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
+    }
+
+    /// The nudge mark the strip draws; nothing while it cannot vouch for
+    /// what it shows.
+    static func mark(_ nudge: DaemonData.Nudge?, available: Bool) -> GlassMenuBarStrip.Mark {
+        switch NudgeSurface.mark(nudge, available: available) {
+        case .news: .news
+        case .ready: .ready
+        case .none: .none
+        }
+    }
+
+    /// The item's accessibility label: what it already says, then the lit
+    /// mark's sentence from the core, whole.
+    static func markAccessibility(base: String, nudge: DaemonData.Nudge?, available: Bool) -> String {
+        guard let sentence = NudgeSurface.markText(nudge, available: available)?.accessibility, !sentence.isEmpty
+        else { return base }
+        return base + " " + sentence
     }
 
     /// The Private AI pill's state.
