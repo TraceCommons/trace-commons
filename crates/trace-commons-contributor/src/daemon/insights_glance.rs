@@ -583,6 +583,63 @@ mod tests {
         assert!(rx.try_recv().is_err(), "coalesced to one per tick");
     }
 
+    /// The off switch through the path a shell takes: `set_settings` with
+    /// `insights_ledger_feed: false` stops all three readers of feed L --
+    /// the glance, the per-call `tokens` and the `usage_changed` pulse --
+    /// and a daemon loaded again from the same store keeps it off.
+    #[test]
+    fn turning_the_feed_off_through_set_settings_stops_every_reader() {
+        let (dir, store) = crate::config::tests_support::temp_store();
+        let s = DaemonShared::load(store.clone()).unwrap();
+        let mut r = row(1, Utc::now());
+        r.input_tokens = Some(7);
+        let ledger =
+            || crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![r.clone()]);
+        s.install_routing_ledger_for_test(ledger());
+        let request = |method: &str, params: serde_json::Value| Request {
+            id: 1,
+            method: method.to_string(),
+            params,
+        };
+        let calls = |s: &DaemonShared| {
+            super::super::ipc::handle_request(s, &request("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap()
+        };
+        assert_eq!(calls(&s)["calls"][0]["tokens"]["input"], 7, "on by default");
+
+        let written = super::super::ipc::handle_request(
+            &s,
+            &request(
+                "set_settings",
+                serde_json::json!({"insights_ledger_feed": false}),
+            ),
+        );
+        assert_eq!(written.result.unwrap()["insights_ledger_feed"], false);
+
+        let check_off = |s: &DaemonShared| {
+            assert_eq!(
+                handle_glance(s, &call(serde_json::json!({"tz": 0})))
+                    .result
+                    .unwrap(),
+                serde_json::json!({"enabled": false, "feed": "ledger"})
+            );
+            let page = calls(s);
+            assert!(!page["calls"].as_array().unwrap().is_empty());
+            assert!(page["calls"][0].get("tokens").is_none(), "{page}");
+            let mut rx = s.events.subscribe();
+            publish_usage_changed(s, &[r.clone()]);
+            assert!(rx.try_recv().is_err(), "off: no usage_changed");
+        };
+        check_off(&s);
+
+        drop(s);
+        let again = DaemonShared::load(store).unwrap();
+        again.install_routing_ledger_for_test(ledger());
+        check_off(&again);
+        drop(dir);
+    }
+
     /// Owner decision D3, settled 2026-10-09: with the setting never touched,
     /// a tick that added a call publishes the pulse.
     #[test]

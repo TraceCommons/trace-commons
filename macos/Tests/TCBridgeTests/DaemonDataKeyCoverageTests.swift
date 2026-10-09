@@ -237,8 +237,8 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         XCTAssertEqual((unreadable as? [String: Any])?["enabled"] as? Bool, true)
         XCTAssertEqual((unreadable as? [String: Any])?["readable"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, unreadable, method: "insights_glance")
-        // The Inference tab's switch moves only when the reply echoes what
-        // was asked, so the real daemon's reply must carry it.
+        // The ledger feed's off switch in Settings moves only when the reply
+        // echoes what was asked, so the real daemon's reply must carry it.
         let written = try result(daemon, "set_settings", ["insights_ledger_feed": false])
         XCTAssertEqual((written as? [String: Any])?["insights_ledger_feed"] as? Bool, false)
         assertDeclared(DaemonData.Settings.self, written, method: "set_settings")
