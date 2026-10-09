@@ -22,9 +22,10 @@ Subcommands, each re-runnable alone into the run `init` created:
   package and its evidence must say `harness_assembly: production`.
 - `hf-canary`: `pipeline_hf_network_canary`, a fresh download of the network
   pin, every digest compared.
-- `remote-restore`: `pipeline_remote_restore`, from a measurement the remote
-  restore harness writes. The harness is not built yet: the default refuses
-  with `remote_restore_harness_unavailable`.
+- `remote-restore`: `pipeline_remote_restore`, from the measurement the
+  remote restore harness (`run_remote_restore_harness`) writes: a seed into
+  the live store, the database dump and restore, the ciphertext copy into the
+  scratch store, and the resume against it.
 - `adapters`: collects `pipeline_production_adapters`, which only the deployed
   ingest's boot writes; it never starts ingest.
 - `sign`: signs the production run's results with the operator's check key.
@@ -41,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import tempfile
@@ -48,9 +50,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from . import checks, envfile, environment
+from . import cargo, checks, envfile, environment
 from .corpus import PIN_SCHEMA, export_command, validate_hf_manifest
-from .environment import Run, child_environment, run_child
+from .environment import Environment, Run, child_environment, run_child
 from .errors import ToolingError, require
 from .files import atomic_write, sha256_digest
 from .results import SCHEMA as RESULT_SCHEMA
@@ -102,6 +104,20 @@ REMOTE_RESTORE_REPORT_SCHEMA = "trace_commons.pipeline_remote_restore_report.v1"
 # (`gcs-client`); a file-system store is a local copy, which is what the
 # local restore drill already proves.
 REMOTE_STORE_KINDS = frozenset({"gcs"})
+# The harness's three ignored ingest tests: the local restore drill's seed
+# and resume, run with a remote store in place of the artifact root, and the
+# copy between them.
+RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+REMOTE_RESTORE_RUN = "tests::pipeline_restore_pg_tests::pipeline_remote_restore_run"
+RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
+REMOTE_RESTORE_COPY_SCHEMA = "trace_commons.pipeline_remote_restore_copy.v1"
+REMOTE_RESTORE_RESUME_SCHEMA = "trace_commons.pipeline_remote_restore_resume.v1"
+# The only ambient variables the harness passes on: which key wrapper the
+# deployment uses, and the KMS key it names (a resource name, never key
+# material). Credentials stay out (`child_environment`); on the operator
+# host they come from Application Default Credentials.
+KEK_SELECTION_VARIABLES = ("TRACE_COMMONS_KEK_PROVIDER", "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME")
 
 # The harness variables `package-checks` sets (`versioned_pipeline_harness.rs`).
 HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
@@ -694,13 +710,186 @@ def _overlaps(first, second):
     return a[:shorter] == b[:shorter]
 
 
-def run_remote_restore_harness(run, step, source_store, scratch_store, report_path):
+def _read_seed_fingerprint(path):
+    """The two hashes the remote restore needs from the seed's fingerprint
+    file (the local drill reads the rest)."""
+    value = _read_json_file(path, "restore_fingerprint_invalid")
+    require(
+        isinstance(value, dict)
+        and value.get("schema") == RESTORE_FINGERPRINT_SCHEMA
+        and all(
+            isinstance(value.get(key), str) and _HASH.fullmatch(value[key]) is not None
+            for key in ("database_fingerprint", "artifact_fingerprint")
+        ),
+        "restore_fingerprint_invalid",
+    )
+    return value
+
+
+def _read_copy_report(path):
+    """`pipeline_remote_restore_run`'s measurement, exactly its fields."""
+    value = _read_json_file(path, "remote_restore_copy_report_invalid")
+    hashes = ("artifact_fingerprint", "restored_artifact_fingerprint")
+    counts = ("object_count", "kek_unwrap_verified_count")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", "object_store_kind", "versioning_enabled", *hashes, *counts}
+        and value["schema"] == REMOTE_RESTORE_COPY_SCHEMA
+        and isinstance(value["object_store_kind"], str)
+        and _KIND.fullmatch(value["object_store_kind"]) is not None
+        and type(value["versioning_enabled"]) is bool
+        and all(isinstance(value[key], str) and _HASH.fullmatch(value[key]) for key in hashes)
+        and all(type(value[key]) is int and value[key] >= 0 for key in counts),
+        "remote_restore_copy_report_invalid",
+    )
+    return value
+
+
+def _read_resume_report(path, seed):
+    """The remote resume's measurement, exactly its fields. The resume
+    already refused a restored store whose fingerprint is not the seed's;
+    one that reports another is refused here too."""
+    value = _read_json_file(path, "remote_restore_resume_report_invalid")
+    hashes = ("database_fingerprint", "artifact_fingerprint")
+    counts = ("pending_runs_resumed", "duplicate_effects")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", *hashes, *counts}
+        and value["schema"] == REMOTE_RESTORE_RESUME_SCHEMA
+        and all(isinstance(value[key], str) and _HASH.fullmatch(value[key]) for key in hashes)
+        and all(type(value[key]) is int and value[key] >= 0 for key in counts)
+        and value["artifact_fingerprint"] == seed["artifact_fingerprint"],
+        "remote_restore_resume_report_invalid",
+    )
+    return value
+
+
+def run_remote_restore_harness(
+    run, step, source_store, scratch_store, report_path, *, postgres_admin_url=None, double_root=None
+):
     """Restores the live store's objects into the scratch store and writes
     the measurement (`REMOTE_RESTORE_REPORT_SCHEMA`) to `report_path`. The
-    Rust harness this would start (`pipeline_remote_restore_run`, an ignored
-    ingest test built with `PROMOTE_CARGO_ARGS`) does not exist yet, so this
-    refuses. The self-tests replace it."""
-    raise ToolingError("remote_restore_harness_unavailable")
+    local restore drill's order (`pipeline.py`'s `run_restore_drill`), in a
+    PostgreSQL of its own (a container, or the loopback server
+    `postgres_admin_url` names) and with a remote store in place of the
+    artifact root:
+
+    1. the seed, on the drill's `_pilot` database, writing its artifacts
+       through the deployment's store (the GCS client and the selected key
+       wrapper) into the live store, under a namespace fresh for this
+       invocation (`pipeline-remote-restore-<run>-<random>`), never beside
+       the live objects;
+    2. the dump of that database and its restore into `_restored`;
+    3. `pipeline_remote_restore_run`: the namespace's objects copied as
+       ciphertext into the same namespace of the scratch store, with the
+       fingerprint of each side, the unwrap count and both buckets'
+       versioning;
+    4. the resume against the restored database and the scratch store.
+
+    The seed and the resume serve the reference compatibility candidate
+    (no `HARNESS_ASSEMBLY_VAR` reaches them), not the production assembly
+    `package-checks` uses: this check's claim is the remote store and the
+    key wrapper across a restore, and the production assembly's own restore
+    is `package-checks`' `pipeline_restore_drill`. That keeps the NEAR AI
+    credentials and the vector index out of this drill.
+
+    Each child is built with `PROMOTE_CARGO_ARGS`. Only the master key, the
+    store names, the namespace and the key-wrapper selection cross into the
+    children; store names never reach a label or the report. The drill's
+    objects stay in both stores (nothing here deletes from a bucket).
+
+    `double_root` (no command line flag reaches it) runs the same three
+    processes against the test-only directory double instead of GCS, for a
+    local run of the whole harness; its report names the double's kind, which
+    `remote_restore` never passes."""
+    report_path = Path(report_path)
+    work_dir = report_path.parent
+    fingerprint_path = work_dir / "seed-fingerprint.json"
+    copy_path = work_dir / "copy-report.json"
+    resume_path = work_dir / "resume-report.json"
+    dump_path = work_dir / f"{run.run_id}.dump"
+    shared = {
+        # One random key for the three processes: the resume and the copy
+        # unwrap what the seed wrapped. Only the children see it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+        "TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND": "gcs" if double_root is None else "gcs_directory_double",
+        "TRACE_COMMONS_PIPELINE_REMOTE_NAMESPACE": f"pipeline-remote-restore-{run.run_id}-{secrets.token_hex(4)}",
+        **{key: os.environ[key] for key in KEK_SELECTION_VARIABLES if key in os.environ},
+    }
+    if double_root is not None:
+        shared["TRACE_COMMONS_PIPELINE_REMOTE_DOUBLE_ROOT"] = str(double_root)
+    try:
+        with Environment(run, postgres_admin_url=postgres_admin_url) as environment_:
+            scenario = environment_.scenario(step)
+            seed_env = {
+                **shared,
+                "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+                "TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE": source_store,
+                "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_seed", PROMOTE_CARGO_ARGS, RESTORE_SEED, child_environment(seed_env),
+                exact=True, ignored=True,
+            )
+            require(
+                scenario.committed_transactions(scenario.pilot_database) >= 5,
+                f"database_check_executed_nothing:{step}_seed",
+            )
+            seed = _read_seed_fingerprint(fingerprint_path)
+            try:
+                environment_.dump(scenario.pilot_database, dump_path)
+                environment_.create_database(scenario.restored_database)
+                environment_.restore(dump_path, scenario.restored_database)
+            finally:
+                dump_path.unlink(missing_ok=True)
+
+            copy_env = {
+                **shared,
+                "TRACE_COMMONS_PIPELINE_REMOTE_SOURCE_STORE": source_store,
+                "TRACE_COMMONS_PIPELINE_REMOTE_SCRATCH_STORE": scratch_store,
+                "TRACE_COMMONS_PIPELINE_REMOTE_COPY_REPORT_PATH": str(copy_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_copy", PROMOTE_CARGO_ARGS, REMOTE_RESTORE_RUN, child_environment(copy_env),
+                exact=True, ignored=True,
+            )
+            copy = _read_copy_report(copy_path)
+            # The source the copy read is the one the seed fingerprinted.
+            require(copy["artifact_fingerprint"] == seed["artifact_fingerprint"], "remote_restore_source_changed")
+
+            resume_env = {
+                **shared,
+                "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.restored_url,
+                "TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE": scratch_store,
+                "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+                "TRACE_COMMONS_PIPELINE_REMOTE_RESUME_REPORT_PATH": str(resume_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_resume", PROMOTE_CARGO_ARGS, RESTORE_RESUME, child_environment(resume_env),
+                exact=True, ignored=True,
+            )
+            require(
+                scenario.committed_transactions(scenario.restored_database) >= 5,
+                f"database_check_executed_nothing:{step}_resume",
+            )
+            resume = _read_resume_report(resume_path, seed)
+    finally:
+        for path in (fingerprint_path, copy_path, resume_path, dump_path):
+            path.unlink(missing_ok=True)
+    report = {
+        "schema": REMOTE_RESTORE_REPORT_SCHEMA,
+        "object_store_kind": copy["object_store_kind"],
+        "object_count": copy["object_count"],
+        "artifact_fingerprint": copy["artifact_fingerprint"],
+        "restored_artifact_fingerprint": copy["restored_artifact_fingerprint"],
+        "versioning_enabled": copy["versioning_enabled"],
+        "kek_unwrap_verified_count": copy["kek_unwrap_verified_count"],
+        "seed_database_fingerprint": seed["database_fingerprint"],
+        "resumed_database_fingerprint": resume["database_fingerprint"],
+        "pending_runs_resumed": resume["pending_runs_resumed"],
+        "duplicate_effects": resume["duplicate_effects"],
+    }
+    atomic_write(report_path, canonical(report) + b"\n")
 
 
 _REPORT_HASHES = (
@@ -747,7 +936,10 @@ def remote_restore(args, run):
     shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, mode=0o700)
     report_path = work_dir / "remote-restore-report.json"
-    run_remote_restore_harness(production.run, "remote_restore", source, scratch, report_path)
+    run_remote_restore_harness(
+        production.run, "remote_restore", source, scratch, report_path,
+        postgres_admin_url=args.postgres_admin_url,
+    )
     report = _read_remote_report(report_path)
     blockers = []
     if report["object_store_kind"] not in REMOTE_STORE_KINDS:
@@ -968,6 +1160,10 @@ def add_parsers(subparsers, hooks):
     restore.add_argument("--source-store", dest="source_store", required=True, help="The live bucket[/prefix] name.")
     restore.add_argument(
         "--scratch-store", dest="scratch_store", required=True, help="A scratch bucket[/prefix] name, never the live one."
+    )
+    restore.add_argument(
+        "--postgres-admin-url", dest="postgres_admin_url", default=None,
+        help="A throwaway loopback PostgreSQL for the drill's own databases (default: a container).",
     )
     run_parser("adapters", adapters, "Collect pipeline_production_adapters from the deployed boot")
     sign = run_parser("sign", make_sign(hooks), "Sign the production run's results")
