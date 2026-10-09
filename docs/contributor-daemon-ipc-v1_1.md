@@ -6926,8 +6926,11 @@ draw. A declaration ends with its connection, however the connection ends.
 The FFI's in-process `tc_subscribe` path (an embedded daemon, no socket) has
 no `subscribe` request to carry `accepts`. It behaves as a subscriber that
 accepted nothing: it never receives an opt-in event and never counts as a
-renderer. The FFI's attached path goes over the socket and follows the rules
-above.
+renderer. A `subscribe` request sent in-process anyway (`tc_call("subscribe",
+{"accepts": [...]})`, or any other caller of the daemon's local dispatcher)
+says so: it is validated as above, but answered with `accepts: []`, since
+nothing in-process registers a declaration. The FFI's attached path goes over
+the socket and follows the rules above.
 
 ## Queue states
 

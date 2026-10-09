@@ -3339,6 +3339,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         // this validates `accepts` for both dispatchers and echoes the opt-in
         // events this daemon recognized, only when the request named any, so
         // a request without `accepts` is answered exactly as before it existed.
+        // `handle_local` empties the echo: nothing registers in-process.
         "subscribe" => match subscribe_accepts(&req.params) {
             Err(()) => Response::err(req.id, ERR_BAD_PARAMS, ERR_SUBSCRIBE_ACCEPTS_INVALID),
             Ok(None) => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
@@ -7863,13 +7864,25 @@ where
 /// real dispatcher, rather than special-casing individual methods here, is
 /// what guarantees a CLI caller and a socket caller can never get different
 /// answers to the same request.
+///
+/// One exception to "the same answer": `subscribe`. Only the connection
+/// loop owns a stream and registers a renderer declaration, so an
+/// in-process caller (the C ABI's `tc_call` among them) that names
+/// `accepts` is told it accepted nothing -- `accepts: []` -- rather than
+/// echoed events it will never be sent.
 pub fn handle_local(shared: &DaemonShared, method: &str, params: serde_json::Value) -> Response {
     let req = Request {
         id: 0,
         method: method.to_string(),
         params,
     };
-    block_on_ipc(shared, &req)
+    let mut resp = block_on_ipc(shared, &req);
+    if req.method == "subscribe" {
+        if let Some(accepts) = resp.result.as_mut().and_then(|r| r.get_mut("accepts")) {
+            *accepts = serde_json::json!([]);
+        }
+    }
+    resp
 }
 
 /// Run `handle_request_async` to completion from a synchronous caller.
@@ -17368,6 +17381,30 @@ mod tests {
             let ev = frame(&mut c.0).await;
             assert_eq!(ev["event"], EVENT_REENGAGE_DUE);
             assert_eq!(ev["data"], reengage());
+        }
+
+        /// An in-process caller (`handle_local`, which the C ABI's `tc_call`
+        /// uses) has no stream and registers no renderer, so it is told it
+        /// accepted nothing, while the socket answer above still echoes the
+        /// declaration.
+        #[test]
+        fn a_local_subscribe_echoes_no_accepted_events() {
+            let shared = shared();
+            let resp = handle_local(
+                &shared,
+                "subscribe",
+                serde_json::json!({ "accepts": ["reengage_due"] }),
+            );
+            let result = resp.result.expect("subscribe answers");
+            assert_eq!(result["subscribed"], true);
+            assert_eq!(result["accepts"], serde_json::json!([]));
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            let bare = handle_local(&shared, "subscribe", serde_json::json!({}));
+            assert_eq!(
+                bare.result.expect("subscribe answers"),
+                serde_json::json!({ "subscribed": true }),
+                "a request without accepts is answered as before"
+            );
         }
 
         #[tokio::test]
