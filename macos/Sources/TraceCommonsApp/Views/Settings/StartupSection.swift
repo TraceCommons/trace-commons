@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCDesign
+import TCShellCore
 import TCUpdates
 import UserNotifications
 
@@ -13,6 +14,9 @@ struct StartupSection: View {
     /// this view is thrown away when the section changes (G8 of #1229).
     @EnvironmentObject private var model: AppModel
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
+    /// The edge rail's switch: a shell preference, read once and written
+    /// through `EdgeRailController`, which shows or removes the rail at once.
+    @State private var edgeRailOn = EdgeRailPreference.isEnabled()
 
     var body: some View {
         // #1146's `DESKTOP / System integrations`, with Refresh re-reading
@@ -39,6 +43,19 @@ struct StartupSection: View {
                 }
                 if let loginItemActionError = model.loginItemActionError {
                     GlassNotice(tone: .outside) { Text(loginItemActionError) }
+                }
+                if let rail = MonitorWords.table?.edgeRail {
+                    Toggle(rail.settingToggle, isOn: Binding(
+                        get: { edgeRailOn },
+                        set: { on in
+                            edgeRailOn = on
+                            EdgeRailController.shared.setEnabled(on)
+                        }))
+                        .toggleStyle(GlassToggleStyle(.settings))
+                    Text(rail.settingCaption)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

@@ -356,6 +356,8 @@ private struct Launcher: View {
         }
         appDelegate.compute = compute
         appDelegate.model = model
+        // The edge rail, if the contributor turned it on in Settings.
+        EdgeRailController.shared.attach(model: model, compute: compute)
         navigation.registerServiceStart { startServices() }
         activateServices()
         // The only thing a notification action may do is open the Monitor

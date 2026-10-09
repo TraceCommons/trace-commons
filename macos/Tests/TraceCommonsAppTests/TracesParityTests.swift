@@ -290,7 +290,7 @@ final class TracesParityTests: XCTestCase {
             "Text(words?.transcriptCaption ?? \"\")\n"
                 + "                    .glassType(GlassTokens.TypeScale.caption)\n",
             "chip.backgroundColor = GlassTokens.Color.controlSelected.color\n"
-                + "            chip.foregroundColor = GlassColor.textPrimary\n",
+                + "            chip.foregroundColor = GlassTokens.Color.textOnSelected.color\n",
             "Text(segment.text)\n                            .glassType(GlassTokens.TypeScale.mono)\n"
                 + "                            .textSelection(.enabled)\n",
             "TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font)",

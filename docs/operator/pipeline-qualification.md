@@ -151,6 +151,19 @@ restored database and artifacts, and require it to reach the same
 settlement legs and Trace Credit ledger event the seed produced, with no
 duplicate effect.
 
+A production package whose `NoveltyUtility` delta is `0` (the pilot's
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0`) awards nothing, so no
+run settles a leg or writes a ledger event. The drill then requires exactly
+that, zero legs and zero events for every run, the resume included, and its
+evidence carries `credit_delta_zero: true`. Everything else is checked as
+before, and the seed still requires the pending run's Settle selection to
+include it in the index (`restore_seed_pending_selection_excludes` when a
+fixture misses its floors). With no `CreditMutate` event to keep, the seed
+appends one hash-only read event per tenant through `main`'s mirrored audit
+log, so the audit chain checks still have a chain to compare. The credit
+and credit-audit path stays covered by the reference candidate's drill,
+which awards 2.5 points.
+
 The checks before the resume, each with its own failure label in the
 resume's protected log:
 
@@ -541,7 +554,7 @@ record` refuses to start when `CI` is set (`promote_refused_in_ci`).
 | `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix] [--postgres-admin-url URL]` | `pipeline_remote_restore`: runs the remote restore drill (below). Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. |
 | `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
 | `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
-| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. Until spec A-D12 lands, `evaluate_promotion` refuses the set it writes; see below. |
+| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. `evaluate_promotion` applies the run rule per group; see below. |
 | `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
 
 In order, on the operator host, from a checkout of the deployed revision:
