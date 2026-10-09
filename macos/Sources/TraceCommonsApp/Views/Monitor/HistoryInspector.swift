@@ -120,17 +120,13 @@ struct HistoryDetailInspector: View {
     }
 }
 
-/// The inspector while a History row is open: the row's details, in a
-/// scroll of the inspector's own (Ron's inspector shows the selection
-/// alone).
+/// The inspector while a History row is open: the row's details (Ron's
+/// inspector shows the selection alone). The window scrolls the inspector.
 struct HistoryInspectorPane: View {
     let row: DaemonData.HistoryRow
 
     var body: some View {
-        ScrollView {
-            HistoryDetailInspector(row: row)
-        }
-        .scrollIndicators(.never)
+        HistoryDetailInspector(row: row)
     }
 }
 

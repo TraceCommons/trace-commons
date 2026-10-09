@@ -157,7 +157,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
     {
         var target = ViewModel.CaptureEpisodeTarget();
         if (target == null) return;
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = ViewModel["episode_clear_assessment"],
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = ViewModel["episode_clear_assessment_title"],
             Content = ViewModel["episode_clear_assessment_confirm"], PrimaryButtonText = ViewModel["episode_clear_assessment"],
             CloseButtonText = ViewModel["cancel"], DefaultButton = ContentDialogButton.Close };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary && !_closed)
@@ -196,7 +196,7 @@ public sealed partial class InsightsView : UserControl, IDisposable
     private async void OnDelete(object sender, RoutedEventArgs args)
     {
         var dialog = new ContentDialog {
-            XamlRoot = XamlRoot, Title = ViewModel["delete"], Content = ViewModel["delete_notice"],
+            XamlRoot = XamlRoot, Title = ViewModel["delete_title"], Content = ViewModel["delete_notice"],
             PrimaryButtonText = ViewModel["delete"], CloseButtonText = ViewModel["cancel"],
             DefaultButton = ContentDialogButton.Close
         };

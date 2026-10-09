@@ -80,6 +80,7 @@ use trace_commons_server::versioned_pipeline_credit::{
     PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
+use trace_commons_server::versioned_pipeline_harness::HarnessAssembly;
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineCreditStatus,
@@ -384,6 +385,39 @@ async fn stale_lease_cannot_commit_after_reclaim() {
             "reclaim_lease_kept": true,
         }),
     );
+}
+
+/// PR #1283 review, finding 7: the index-write state is set on a
+/// transaction held across the index write, so its lease check reads the
+/// database clock (`clock_timestamp()`), as the Score commit's does. A
+/// lease that ended after the transaction began is stale; `NOW()`, the
+/// transaction's start, would still call it live.
+#[tokio::test]
+async fn the_index_write_state_lease_check_reads_the_database_clock() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let tenant = format!("index-write-clock-{}", uuid::Uuid::new_v4());
+    let run = seed_run(&backend, &tenant, uuid::Uuid::new_v4()).await;
+    let claimed = store
+        .claim_run(&tenant, run.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    // The transaction began inside the lease; the lease ends while it is
+    // open.
+    tokio::time::sleep(std::time::Duration::from_millis(1_200)).await;
+    let stale = PgPipelineStore::set_index_write_state_on_tx(&tx, &claimed, "pending")
+        .await
+        .expect_err("a lease that ended during the transaction is stale");
+    assert!(
+        stale.to_string().contains("pipeline lease is stale"),
+        "{stale}"
+    );
+    tx.rollback().await.unwrap();
 }
 
 /// The token-only fence. `record_lease_expired` is fenced by the lease
@@ -2828,55 +2862,527 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     // The qualification candidate (P5-D15). The Q and U doubles above prove
     // that qualification reads the objects the constructor received; the
     // check result names a package, so it must be a package this test
-    // served: a second service, constructed from the candidate package with
-    // the reference scorer and embedder it names, qualifies that package.
-    let candidate_service = compatibility_test_service(
-        backend,
-        artifact_store(&dir),
-        qualification_candidate_config(),
-    )
-    .await;
-    let candidate = candidate_service.default_package().clone();
-    let candidate_qualification = candidate_service.bundle_qualification(&candidate);
-    let candidate_resolved = candidate_qualification.is_ok();
-    assert!(
-        candidate_resolved,
-        "the candidate resolves against the dependencies its service was built with"
-    );
-    let candidate_qualification = candidate_qualification.expect("resolved above");
-    let candidate_scorer_is_reference =
-        candidate_qualification.scorer.identity == "reference_perplexity_test_only";
-    let candidate_embedder_is_reference =
-        candidate_qualification.embedder.identity == "reference_embedder_test_only";
-    assert!(candidate_scorer_is_reference);
-    assert!(candidate_embedder_is_reference);
-    assert!(!candidate_qualification.scorer.production_qualified);
-    assert!(!candidate_qualification.embedder.production_qualified);
-    // Computed from the package's own configuration: the candidate is the
-    // local reference configuration, which no production run can qualify.
-    assert!(!candidate_qualification.configuration_qualifiable);
+    // served. In reference mode (the default) a second service, constructed
+    // from the candidate package with the reference scorer and embedder it
+    // names, qualifies that package. In production mode
+    // (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`, operator-only,
+    // spec B-D1) the production assembler builds it over the signed
+    // production package `promote init` recorded.
+    let assembly = HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}"));
+    let candidate_service = match assembly {
+        HarnessAssembly::Reference => {
+            compatibility_test_service(
+                backend,
+                artifact_store(&dir),
+                qualification_candidate_config(),
+            )
+            .await
+        }
+        HarnessAssembly::Production => production_candidate_service_from_env(backend, &dir).await,
+    };
+    let candidate = bundle_candidate(assembly, &candidate_service);
     assert_ne!(
-        candidate.bundle_id, package.bundle_id,
+        candidate.package.bundle_id, package.bundle_id,
         "the candidate is not the Q package above: that one names the counting scorer"
     );
 
     // The evidence is about the package the result names. The facts about the
     // Q package (the constructor proof) are kept apart from the candidate's.
+    let evidence = bundle_qualification_evidence(
+        assembly,
+        &candidate,
+        serde_json::json!({
+            "scorer_identity_is_q": scorer_identity_is_q,
+            "scorer_identity_u_absent": scorer_identity_u_absent,
+            "score_calls_u": score_calls_u,
+        }),
+    );
     PipelineCheckEmitter::emit_pass_from_env(
         "pipeline_bundle_qualification",
-        Some(&candidate),
-        serde_json::json!({
-            "candidate_resolved": candidate_resolved,
-            "candidate_scorer_identity_is_reference": candidate_scorer_is_reference,
-            "candidate_embedder_identity_is_reference": candidate_embedder_is_reference,
-            "candidate_scorer_production_qualified": candidate_qualification.scorer.production_qualified,
-            "candidate_embedder_production_qualified": candidate_qualification.embedder.production_qualified,
-            "constructor_object_proof": {
-                "scorer_identity_is_q": scorer_identity_is_q,
-                "scorer_identity_u_absent": scorer_identity_u_absent,
-                "score_calls_u": score_calls_u,
-            },
+        Some(&candidate.package),
+        evidence,
+    );
+}
+
+/// What `pipeline_bundle_qualification` found about its candidate: the
+/// package the candidate service serves, and that package's qualification
+/// against the service.
+struct BundleCandidate {
+    package: BundlePackage,
+    scorer_identity: String,
+    embedder_identity: String,
+    scorer_production_qualified: bool,
+    embedder_production_qualified: bool,
+    configuration_qualifiable: bool,
+}
+
+/// Qualifies `candidate_service`'s own package and asserts what `assembly`
+/// requires of it (spec B-D1's table). In both modes the candidate resolves
+/// against the dependencies its service was built with. Reference: the
+/// reference scorer and embedder, neither production-qualified, and a
+/// configuration no production run can qualify (the local reference
+/// configuration). Production: the NEAR AI scorer and fastembed embedder
+/// adapters, both qualified, and a qualifiable configuration.
+fn bundle_candidate(
+    assembly: HarnessAssembly,
+    candidate_service: &PipelineService,
+) -> BundleCandidate {
+    let candidate = read_bundle_candidate(candidate_service);
+    match assembly {
+        HarnessAssembly::Reference => {
+            assert!(candidate.scorer_identity == "reference_perplexity_test_only");
+            assert!(candidate.embedder_identity == "reference_embedder_test_only");
+            assert!(!candidate.scorer_production_qualified);
+            assert!(!candidate.embedder_production_qualified);
+            // Computed from the package's own configuration: the candidate is
+            // the local reference configuration, which no production run can
+            // qualify.
+            assert!(!candidate.configuration_qualifiable);
+        }
+        HarnessAssembly::Production => {
+            assert!(candidate.scorer_identity == "near_ai_perplexity_scorer");
+            assert!(candidate.embedder_identity == "fastembed_text_embedder");
+            // Only `PipelineGateComponents::from_env` yields qualified
+            // adapters, so a production-mode check over doubles stops here.
+            assert!(candidate.scorer_production_qualified);
+            assert!(candidate.embedder_production_qualified);
+            assert!(candidate.configuration_qualifiable);
+        }
+    }
+    candidate
+}
+
+/// What `candidate_service`'s own package qualifies as against the service,
+/// asserting only that it resolves.
+fn read_bundle_candidate(candidate_service: &PipelineService) -> BundleCandidate {
+    let package = candidate_service.default_package().clone();
+    let qualification = candidate_service.bundle_qualification(&package);
+    assert!(
+        qualification.is_ok(),
+        "the candidate resolves against the dependencies its service was built with"
+    );
+    let qualification = qualification.expect("resolved above");
+    BundleCandidate {
+        package,
+        scorer_identity: qualification.scorer.identity.clone(),
+        embedder_identity: qualification.embedder.identity.clone(),
+        scorer_production_qualified: qualification.scorer.production_qualified,
+        embedder_production_qualified: qualification.embedder.production_qualified,
+        configuration_qualifiable: qualification.configuration_qualifiable,
+    }
+}
+
+/// The evidence `pipeline_bundle_qualification` emits. Reference mode
+/// emits exactly what it always has. Production mode records the two
+/// identities as labels instead of the two `_is_reference` booleans, the
+/// configuration's qualifiability, and `harness_assembly`, so a production
+/// result can never be read as a reference one or the reverse.
+fn bundle_qualification_evidence(
+    assembly: HarnessAssembly,
+    candidate: &BundleCandidate,
+    constructor_object_proof: serde_json::Value,
+) -> serde_json::Value {
+    match assembly {
+        HarnessAssembly::Reference => serde_json::json!({
+            "candidate_resolved": true,
+            "candidate_scorer_identity_is_reference":
+                candidate.scorer_identity == "reference_perplexity_test_only",
+            "candidate_embedder_identity_is_reference":
+                candidate.embedder_identity == "reference_embedder_test_only",
+            "candidate_scorer_production_qualified": candidate.scorer_production_qualified,
+            "candidate_embedder_production_qualified": candidate.embedder_production_qualified,
+            "constructor_object_proof": constructor_object_proof,
         }),
+        HarnessAssembly::Production => serde_json::json!({
+            "harness_assembly": assembly.label(),
+            "candidate_resolved": true,
+            "candidate_scorer_identity": candidate.scorer_identity,
+            "candidate_embedder_identity": candidate.embedder_identity,
+            "candidate_scorer_production_qualified": candidate.scorer_production_qualified,
+            "candidate_embedder_production_qualified": candidate.embedder_production_qualified,
+            "candidate_configuration_qualifiable": candidate.configuration_qualifiable,
+            "constructor_object_proof": constructor_object_proof,
+        }),
+    }
+}
+
+/// The production harness's candidate service: [`production_harness_service_for`]
+/// with the package it must serve as the source of its pins.
+fn production_harness_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    package: &BundlePackage,
+    dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
+) -> anyhow::Result<Arc<PipelineService>> {
+    production_harness_service_for(backend, artifact_store, package, package, dependencies)
+}
+
+/// The production assembler over `dependencies`, under the pins `pins_from`
+/// carries, refused unless it serves exactly `expected`. A real run passes
+/// the same package twice; the second argument exists so a test can show
+/// the refusal.
+fn production_harness_service_for(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    expected: &BundlePackage,
+    pins_from: &BundlePackage,
+    dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_server::versioned_pipeline_harness::{
+        assemble_harness_production, harness_production_components, production_package_pins,
+    };
+    use trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs;
+    let pins = production_package_pins(pins_from)?;
+    let components = harness_production_components(
+        &pins,
+        dependencies,
+        allow_all_authority(),
+        default_privacy_boundary(),
+    );
+    Ok(Arc::new(assemble_harness_production(
+        expected,
+        ProductionPipelineInputs {
+            backend,
+            artifact_store,
+            object_store_name: "local".to_string(),
+            lease_config: PipelineLeaseConfig::default(),
+            novelty_utility_checks: issuing_checks(),
+            unqualified_routing_allowed: false,
+            main_gate: pins.main_gate,
+            components,
+        },
+    )?))
+}
+
+/// Production mode on the operator host: the signed production package and
+/// its trusted key, and the components `PipelineGateComponents::from_env`
+/// builds from the environment `pipeline.py promote package-checks` passes
+/// (NEAR AI, fastembed, a usearch index at
+/// `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run).
+#[cfg(feature = "near-ai-scorer")]
+async fn production_candidate_service_from_env(
+    backend: Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    use trace_commons_server::versioned_pipeline_harness::{
+        harness_dependencies_from_env, verified_package_from_lookup,
+    };
+    let lookup = |var: &str| std::env::var(var).ok();
+    let package = verified_package_from_lookup(&lookup).unwrap_or_else(|error| panic!("{error}"));
+    let dependencies = harness_dependencies_from_env()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    production_harness_service(backend, artifact_store(dir), &package, dependencies)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Never reached: `HarnessAssembly::from_env` refuses production mode
+/// without `near-ai-scorer`.
+#[cfg(not(feature = "near-ai-scorer"))]
+async fn production_candidate_service_from_env(
+    _backend: Arc<PgBackend>,
+    _dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    panic!(
+        "{}",
+        trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
+    )
+}
+
+/// Two production packages that differ only in a floor: the pilot's
+/// descriptors and gate settings, and the same with another novelty floor.
+fn production_test_packages() -> (BundlePackage, BundlePackage) {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        FastEmbedDescriptor, NearAiScorerDescriptor, production_compatibility_package,
+    };
+    let scorer = NearAiScorerDescriptor {
+        model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+        tail_logprob_cutoff: -8.0,
+        logprobs_top_k: 1,
+    };
+    let embedder = FastEmbedDescriptor {
+        model_id: "BAAI/bge-large-en-v1.5".to_string(),
+        output_dim: 1024,
+        max_tokens: 512,
+        matryoshka_dim: None,
+    };
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 2_500_000,
+    };
+    let other_gate = MainGateConfig {
+        novelty_floor_micros: Some(600_000),
+        ..gate
+    };
+    (
+        production_compatibility_package(&scorer, &embedder, &gate).unwrap(),
+        production_compatibility_package(&scorer, &embedder, &other_gate).unwrap(),
+    )
+}
+
+/// PR #1295 review, Major 1: the production assembly is library code, so
+/// this target can construct it. `pipeline_bundle_qualification` above still
+/// qualifies the local reference candidate; switching the check onto the
+/// production assembly in production mode is Slice B-2, which builds its
+/// components with `PipelineGateComponents::from_env` (`near-ai-scorer`).
+///
+/// Round 2, Major 1: components built from parts -- here, reference doubles
+/// behind the production adapters -- are never production-qualified. The
+/// adapters carry the production identities and the configuration is the
+/// production one, but the scorer and embedder are blockers: only the env
+/// constructor, over the real NEAR AI scorer and fastembed embedder, makes
+/// them qualified, so a double wrapped under production descriptors cannot
+/// pass as a production candidate.
+#[tokio::test]
+async fn production_assembly_is_constructible_from_the_library() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponentParts,
+        PipelineGateComponents, ProductionPipelineInputs, assemble_production_pipeline,
+    };
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let index = IsolatedPipelineIndex::new();
+    let components = Arc::new(PipelineGateComponents::with_unqualified_adapters(
+        PipelineGateComponentParts {
+            scorer: Arc::new(ReferencePerplexityScorer::new()),
+            scorer_descriptor: NearAiScorerDescriptor {
+                model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+                tail_logprob_cutoff: -8.0,
+                logprobs_top_k: 1,
+            },
+            embedder: Arc::new(ReferenceEmbedder::new()),
+            embedder_descriptor: FastEmbedDescriptor {
+                model_id: "BAAI/bge-large-en-v1.5".to_string(),
+                output_dim: 1024,
+                max_tokens: 512,
+                matryoshka_dim: None,
+            },
+            index_reader: index.clone(),
+            index_writer: index,
+            index_root_shared_with_legacy: false,
+            authority: allow_all_authority(),
+            tenant_policy_count: 0,
+            privacy: None,
+            privacy_backend: None,
+        },
+    ));
+    assert!(!components.adapters_production_qualified());
+    let service = assemble_production_pipeline(ProductionPipelineInputs {
+        backend,
+        artifact_store: artifact_store(&dir),
+        object_store_name: "local".to_string(),
+        lease_config: PipelineLeaseConfig::default(),
+        novelty_utility_checks: issuing_checks(),
+        unqualified_routing_allowed: false,
+        main_gate: MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(500_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: 2_500_000,
+        },
+        components,
+    })
+    .expect("the production assembly builds over doubles");
+    let candidate = service.default_package().clone();
+    let qualification = service
+        .bundle_qualification(&candidate)
+        .expect("the candidate resolves against its own service");
+    assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
+    assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+    assert!(!qualification.scorer.production_qualified);
+    assert!(!qualification.embedder.production_qualified);
+    assert!(qualification.configuration_qualifiable);
+    let blockers = qualification.blockers();
+    assert!(
+        blockers.contains(&"runtime_scorer_not_production"),
+        "{blockers:?}"
+    );
+    assert!(
+        blockers.contains(&"runtime_embedder_not_production"),
+        "{blockers:?}"
+    );
+    assert!(!qualification.is_production_qualified());
+}
+
+/// Spec 5.2 item 3 (B-2): `pipeline_bundle_qualification` in production
+/// mode. The candidate service comes from the production assembler over
+/// the package a signed production package names, through
+/// `production_harness_service`, the function the operator's run calls
+/// over `PipelineGateComponents::from_env`; here the dependencies are
+/// doubles, so no network and no model. Three of the five reference
+/// assertions take their production form over doubles (the two identities
+/// and a qualifiable configuration); the other two (both adapters
+/// production-qualified) hold only over `from_env`'s components, so doubles
+/// stay unqualified and the production-mode assertions refuse them: a
+/// production-mode check cannot pass over doubles. The evidence says
+/// `harness_assembly: production`, and the result names the production
+/// package. A service that would serve any other package is refused. Needs
+/// no database: assembly opens no connection.
+#[tokio::test]
+async fn bundle_qualification_production_mode_inverts_the_reference_assertions() {
+    use trace_commons_server::versioned_pipeline_harness::{
+        HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL, HarnessDependencies, HarnessDoubles,
+        verified_package,
+    };
+
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The package `pipeline.py package --bundle production` signs, and the
+    // load path a production harness reads it through.
+    let (package, other_package) = production_test_packages();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let signed = sign_bundle_package(package.clone(), "production_test_key", pkcs8.as_ref())
+        .expect("sign the production package");
+    let trusted = trusted_key_for_pkcs8("production_test_key", pkcs8.as_ref()).unwrap();
+    let package_path = dir.path().join("signed-package.json");
+    let key_path = dir.path().join("trusted-package-key.json");
+    std::fs::write(&package_path, serde_json::to_vec(&signed).unwrap()).unwrap();
+    std::fs::write(&key_path, serde_json::to_vec(&trusted).unwrap()).unwrap();
+    let served = verified_package(&package_path, &key_path).expect("the signed package verifies");
+    assert_eq!(served, package);
+
+    let doubles = || {
+        let index = IsolatedPipelineIndex::new();
+        HarnessDependencies::Doubles(HarnessDoubles {
+            scorer: Arc::new(ReferencePerplexityScorer::new()),
+            embedder: Arc::new(ReferenceEmbedder::new()),
+            index_reader: index.clone(),
+            index_writer: index,
+        })
+    };
+    let candidate_service =
+        production_harness_service(backend.clone(), artifact_store(&dir), &served, doubles())
+            .expect("the production assembler serves the signed package");
+    let candidate = read_bundle_candidate(&candidate_service);
+    assert_eq!(candidate.package, package);
+    assert_eq!(candidate.scorer_identity, "near_ai_perplexity_scorer");
+    assert_eq!(candidate.embedder_identity, "fastembed_text_embedder");
+    assert!(candidate.configuration_qualifiable);
+    assert!(!candidate.scorer_production_qualified);
+    assert!(!candidate.embedder_production_qualified);
+    // Production mode's assertions refuse a candidate over doubles.
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        bundle_candidate(HarnessAssembly::Production, &candidate_service)
+    }));
+    assert!(
+        refused.is_err(),
+        "a production-mode check must not pass over doubles"
+    );
+
+    let proof = serde_json::json!({
+        "scorer_identity_is_q": true,
+        "scorer_identity_u_absent": true,
+        "score_calls_u": 0,
+    });
+    let evidence = bundle_qualification_evidence(HarnessAssembly::Production, &candidate, proof);
+    assert_eq!(evidence["harness_assembly"], "production");
+    assert_eq!(
+        evidence["candidate_scorer_identity"],
+        "near_ai_perplexity_scorer"
+    );
+    assert_eq!(
+        evidence["candidate_embedder_identity"],
+        "fastembed_text_embedder"
+    );
+    assert_eq!(evidence["candidate_scorer_production_qualified"], false);
+    assert_eq!(evidence["candidate_embedder_production_qualified"], false);
+    assert_eq!(evidence["candidate_configuration_qualifiable"], true);
+    assert!(
+        evidence
+            .get("candidate_scorer_identity_is_reference")
+            .is_none()
+    );
+    assert!(
+        evidence
+            .get("candidate_embedder_identity_is_reference")
+            .is_none()
+    );
+
+    let results = tempfile::tempdir().unwrap();
+    let emitter = PipelineCheckEmitter::new(
+        results.path().to_path_buf(),
+        "q0123abcd",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .unwrap();
+    emitter
+        .emit(
+            "pipeline_bundle_qualification",
+            PipelineCheckStatus::Pass,
+            Some(&candidate.package),
+            &[],
+            evidence,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            results
+                .path()
+                .join("pipeline_bundle_qualification.result.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let digests = package_digests(&package).unwrap();
+    assert_eq!(result["package_hash"], digests.package_hash);
+    assert_eq!(result["configuration_digest"], digests.configuration_digest);
+    assert_eq!(result["dependency_digest"], digests.dependency_digest);
+
+    // The same doubles asked to serve another production package (another
+    // floor): the assembler builds its own package from the descriptors and
+    // gate settings it was handed, and the harness refuses the difference.
+    let refused = production_harness_service_for(
+        backend,
+        artifact_store(&dir),
+        &package,
+        &other_package,
+        doubles(),
+    )
+    .err()
+    .expect("a service serving another package is refused");
+    assert_eq!(
+        refused.to_string(),
+        HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL
     );
 }
 
@@ -24882,6 +25388,23 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
             "CREATE POLICY pipeline_control_test_open ON pipeline_runs
                  USING (true) WITH CHECK (true);",
         ),
+        // PR #1283 review, finding 6: a column list or a `WHEN` condition
+        // keeps the trigger's `tgtype` and lets most changes through.
+        (
+            "column-scoped trigger",
+            "DROP TRIGGER phase_outcomes_reject_update ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_update
+                 BEFORE UPDATE OF trace_id ON phase_outcomes
+                 FOR EACH ROW EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
+        (
+            "WHEN-conditioned trigger",
+            "DROP TRIGGER phase_outcomes_reject_delete ON phase_outcomes;
+             CREATE TRIGGER phase_outcomes_reject_delete
+                 BEFORE DELETE ON phase_outcomes
+                 FOR EACH ROW WHEN (false)
+                 EXECUTE FUNCTION reject_phase_outcome_mutation();",
+        ),
     ] {
         let tx = owner.transaction().await.unwrap();
         tx.batch_execute(change)
@@ -24949,21 +25472,28 @@ async fn the_pipeline_controls_fail_when_what_makes_them_work_is_changed() {
 /// table through that role's grants and policies, as it does in production.
 async fn gate_driver_backend() -> PgBackend {
     const GATE_DRIVER_LOGIN: &str = "trace_gate_driver_pipeline_test";
+    // Provisioned once per process: concurrent role DDL on one role fails
+    // with `tuple concurrently updated` when several tests start together.
+    static GATE_DRIVER_PROVISIONED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .expect("runtime_backend read the same variable");
-    let owner = owner_client().await;
-    owner
-        .batch_execute(&format!(
-            "DO $$ BEGIN
+    GATE_DRIVER_PROVISIONED
+        .get_or_init(|| async {
+            let owner = owner_client().await;
+            owner
+                .batch_execute(&format!(
+                    "DO $$ BEGIN
                  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{GATE_DRIVER_LOGIN}') THEN
                      CREATE ROLE {GATE_DRIVER_LOGIN} LOGIN;
                  END IF;
              END $$;
              ALTER ROLE {GATE_DRIVER_LOGIN} LOGIN INHERIT NOSUPERUSER NOBYPASSRLS;
              GRANT trace_gate_driver TO {GATE_DRIVER_LOGIN};"
-        ))
-        .await
-        .expect("provision the gate driver login");
+                ))
+                .await
+                .expect("provision the gate driver login");
+        })
+        .await;
     let mut gate_url = reqwest::Url::parse(&url).expect("parse test URL");
     gate_url
         .set_username(GATE_DRIVER_LOGIN)
@@ -26866,6 +27396,100 @@ async fn the_sweep_goes_on_after_one_failed_follow_up() {
         index_invalidation_of(&backend, &tenant, failing.run_id).await,
         Some(("revoked".to_string(), "pending".to_string()))
     );
+}
+
+/// PR #1283 review, finding 4: follow-ups that fail on every pass do not
+/// hold the sweep's window. Each pass resumes after the last submission the
+/// previous pass read, wrapping to the start, so a lost follow-up behind a
+/// full window of failing ones is reached on the next pass, and the failing
+/// ones are still tried again.
+#[tokio::test]
+async fn failing_follow_ups_do_not_starve_the_sweep() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("lost-follow-up-starve-{}", uuid::Uuid::new_v4());
+    let principal = "principal_sha256:lost-follow-up-starve";
+    let mut runs = Vec::new();
+    for _ in 0..3 {
+        let env = envelope(uuid::Uuid::new_v4()).await;
+        let run = submit_envelope_and_complete(&service, &tenant, principal, &env).await;
+        assert_eq!(run.index_write_state, "complete");
+        runs.push(run);
+    }
+    // The sweep reads in id order: the two lowest fail on every pass and
+    // fill a window of two.
+    runs.sort_by_key(|run| run.submission_id);
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    for run in &runs {
+        tx.execute(
+            "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &run.submission_id],
+        )
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(owner);
+
+    let faults = [
+        InvalidationFault::install(&tenant, runs[0].submission_id).await,
+        InvalidationFault::install(&tenant, runs[1].submission_id).await,
+    ];
+    let first = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    let second = service
+        .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+        .await;
+    for fault in faults {
+        fault.remove().await;
+    }
+    assert!(
+        first.is_err(),
+        "the first window holds only failing follow-ups"
+    );
+    assert_eq!(
+        index_invalidation_of(&backend, &tenant, runs[2].run_id).await,
+        Some(("revoked".to_string(), "pending".to_string())),
+        "the second pass resumes after the first one's window"
+    );
+    assert_eq!(
+        second.expect("the follow-up behind the failing ones succeeded"),
+        1
+    );
+    for run in &runs[..2] {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            None
+        );
+    }
+    // The cursor wraps: the failing follow-ups are tried again, and once
+    // they can succeed they are recovered.
+    let mut recovered = 0;
+    for _ in 0..2 {
+        recovered += service
+            .recover_lost_inoperable_follow_ups(&tenant, "pipeline_worker", 2)
+            .await
+            .unwrap();
+    }
+    assert_eq!(recovered, 2);
+    for run in &runs {
+        assert_eq!(
+            index_invalidation_of(&backend, &tenant, run.run_id).await,
+            Some(("revoked".to_string(), "pending".to_string()))
+        );
+    }
 }
 
 /// Merge review M4: a listed tenant with no pipeline run has nothing to
@@ -29420,6 +30044,14 @@ impl GcsObjectClient for ProbeGcsClient {
 
     fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
         self.inner.restore_deleted_object(key)
+    }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.list_object_keys(prefix)
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        self.inner.bucket_versioning_enabled()
     }
 }
 
@@ -42880,5 +43512,1246 @@ async fn a_rollback_needs_no_readiness_and_an_activation_does() {
             .unwrap()
             .as_deref(),
         Some(fixture.a.bundle_id.as_str())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Spec 2026-10-08 (pipeline production assembly), Slice C: Settle writes one
+// `trace_gate_decisions` row per compatibility submission, so `main`'s
+// consumers see pipeline traffic.
+// ---------------------------------------------------------------------------
+
+/// One gate decision row, as the Slice C tests read it.
+#[derive(Debug, Clone, PartialEq)]
+struct GateDecisionRow {
+    decision_id: uuid::Uuid,
+    submission_id: uuid::Uuid,
+    source: String,
+    pipeline_run_id: Option<uuid::Uuid>,
+    gate_policy_version: String,
+    gate_version_hash: String,
+    perplexity_micros: i64,
+    tail_fraction_micros: i64,
+    peak_perplexity_micros: Option<i64>,
+    perplexity_passed: bool,
+    novelty_score_micros: i64,
+    peak_novelty_micros: Option<i64>,
+    novelty_passed: bool,
+    nearest_neighbor_hash: String,
+    embedding_evidence_hash: String,
+    attestation_chain_hash: String,
+    chunk_count: Option<i32>,
+    total_chunk_count: Option<i32>,
+    chunks_capped: Option<bool>,
+    credit_quality_micros: Option<i64>,
+    credit_quality_calibration_version: Option<i32>,
+    index_cardinality_at_scoring: Option<i64>,
+    credit_withheld_reason: Option<String>,
+    vector_entry_id: Option<uuid::Uuid>,
+    vector_index_snapshot_id: Option<uuid::Uuid>,
+    agent_prose_perplexity_micros: Option<i64>,
+    attributed_token_fraction_micros: Option<i64>,
+    dedup_simhash: Option<i64>,
+    dedup_cluster_id: Option<uuid::Uuid>,
+    dedup_cluster_size: Option<i32>,
+    dedup_signal_version: Option<String>,
+    composite_score_micros: Option<i64>,
+}
+
+/// Every gate decision row of `submission_id`, read as the owner under the
+/// tenant's context.
+async fn gate_decision_rows(tenant_id: &str, submission_id: uuid::Uuid) -> Vec<GateDecisionRow> {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let rows = tx
+        .query(
+            "SELECT * FROM trace_gate_decisions
+              WHERE tenant_id = $1 AND submission_id = $2
+              ORDER BY decided_at, decision_id",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .expect("read the gate decision rows");
+    tx.commit().await.unwrap();
+    rows.iter()
+        .map(|row| GateDecisionRow {
+            decision_id: row.get("decision_id"),
+            submission_id: row.get("submission_id"),
+            source: row.get("source"),
+            pipeline_run_id: row.get("pipeline_run_id"),
+            gate_policy_version: row.get("gate_policy_version"),
+            gate_version_hash: row.get("gate_version_hash"),
+            perplexity_micros: row.get("perplexity_micros"),
+            tail_fraction_micros: row.get("tail_fraction_micros"),
+            peak_perplexity_micros: row.get("peak_perplexity_micros"),
+            perplexity_passed: row.get("perplexity_passed"),
+            novelty_score_micros: row.get("novelty_score_micros"),
+            peak_novelty_micros: row.get("peak_novelty_micros"),
+            novelty_passed: row.get("novelty_passed"),
+            nearest_neighbor_hash: row.get("nearest_neighbor_hash"),
+            embedding_evidence_hash: row.get("embedding_evidence_hash"),
+            attestation_chain_hash: row.get("attestation_chain_hash"),
+            chunk_count: row.get("chunk_count"),
+            total_chunk_count: row.get("total_chunk_count"),
+            chunks_capped: row.get("chunks_capped"),
+            credit_quality_micros: row.get("credit_quality_micros"),
+            credit_quality_calibration_version: row.get("credit_quality_calibration_version"),
+            index_cardinality_at_scoring: row.get("index_cardinality_at_scoring"),
+            credit_withheld_reason: row.get("credit_withheld_reason"),
+            vector_entry_id: row.get("vector_entry_id"),
+            vector_index_snapshot_id: row.get("vector_index_snapshot_id"),
+            agent_prose_perplexity_micros: row.get("agent_prose_perplexity_micros"),
+            attributed_token_fraction_micros: row.get("attributed_token_fraction_micros"),
+            dedup_simhash: row.get("dedup_simhash"),
+            dedup_cluster_id: row.get("dedup_cluster_id"),
+            dedup_cluster_size: row.get("dedup_cluster_size"),
+            dedup_signal_version: row.get("dedup_signal_version"),
+            composite_score_micros: row.get("composite_score_micros"),
+        })
+        .collect()
+}
+
+/// The decision id spec C-D2 fixes for a run's row.
+fn expected_pipeline_decision_id(tenant_id: &str, run_id: uuid::Uuid) -> uuid::Uuid {
+    uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        format!("trace_commons.pipeline_gate_decision.v1\n{tenant_id}\n{run_id}").as_bytes(),
+    )
+}
+
+/// The run's committed Score outcome.
+async fn score_outcome_of(
+    service: &PipelineService,
+    tenant_id: &str,
+    run_id: uuid::Uuid,
+) -> PhaseOutcomeRecord {
+    service
+        .store()
+        .outcome_for_phase(tenant_id, run_id, Phase::Score)
+        .await
+        .unwrap()
+        .expect("the run committed a Score outcome")
+}
+
+/// A compatibility service over the reference dependencies, `main`'s
+/// default (zero-delta) configuration.
+async fn compatibility_row_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    compatibility_test_service(
+        backend.clone(),
+        artifact_store(dir),
+        CompatibilityBundleConfig::local_reference(),
+    )
+    .await
+}
+
+/// A Settle outcome `commit_settle` accepts the shape of; the refusal tests
+/// never get past its lease or policy check, so its content is not read.
+fn placeholder_settle_outcome() -> StoredPhaseResult {
+    StoredPhaseResult {
+        phase: Phase::Settle,
+        decision: serde_json::json!({}),
+        evidence: serde_json::json!({}),
+        evaluation: serde_json::json!({}),
+    }
+}
+
+/// Spec C-D1 to C-D3: a compatibility run that reaches Settle writes exactly
+/// one `trace_gate_decisions` row, from its Score evidence, marked as the
+/// pipeline's and naming its run; the legacy-only columns stay NULL for the
+/// sweeps to fill.
+#[tokio::test]
+async fn settle_writes_one_gate_decision_row_per_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "one row for the submission: {rows:?}");
+    let row = &rows[0];
+
+    let score = score_outcome_of(&service, &tenant, run.run_id).await;
+    let evidence: ScoreEvidence = serde_json::from_value(score.evidence.clone()).unwrap();
+    let package = service
+        .store()
+        .load_bundle(&tenant, &run.bundle_id)
+        .await
+        .unwrap()
+        .expect("the run's bound package is on file");
+    let micros = |value: Option<u64>| value.map(|value| i64::try_from(value).unwrap());
+
+    assert_eq!(
+        row.decision_id,
+        expected_pipeline_decision_id(&tenant, run.run_id)
+    );
+    assert_eq!(row.submission_id, run.submission_id);
+    assert_eq!(row.source, "pipeline_settle");
+    assert_eq!(row.pipeline_run_id, Some(run.run_id));
+    assert_eq!(
+        row.gate_policy_version,
+        format!("pipeline:{}", run.bundle_id)
+    );
+    assert_eq!(
+        row.gate_version_hash,
+        package.manifest.score.configuration_hash
+    );
+    assert_eq!(
+        Some(row.perplexity_micros),
+        micros(evidence.perplexity_micros)
+    );
+    assert_eq!(
+        Some(row.tail_fraction_micros),
+        micros(evidence.tail_fraction_micros)
+    );
+    assert_eq!(
+        row.peak_perplexity_micros,
+        micros(evidence.peak_perplexity_micros)
+    );
+    assert_eq!(Some(row.perplexity_passed), evidence.quality_passed);
+    assert_eq!(
+        Some(row.novelty_score_micros),
+        micros(evidence.novelty_score_micros)
+    );
+    assert_eq!(
+        row.peak_novelty_micros,
+        micros(evidence.peak_novelty_micros)
+    );
+    assert_eq!(Some(row.novelty_passed), evidence.novelty_passed);
+    assert_eq!(
+        Some(row.nearest_neighbor_hash.clone()),
+        evidence.nearest_neighbor_hash
+    );
+    let no_command = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(b"pipeline_no_index_command"))
+    );
+    assert_eq!(
+        row.embedding_evidence_hash,
+        evidence
+            .embedding_artifact_hash
+            .clone()
+            .unwrap_or(no_command)
+    );
+    // The Score outcome's content hash: SHA-256 over the canonical JSON of
+    // its decision, evidence and evaluation under a fixed schema string.
+    let outcome_bytes =
+        trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!({
+            "schema": "trace_commons.pipeline_score_outcome_hash.v1",
+            "decision": score.decision,
+            "evidence": score.evidence,
+            "evaluation": score.evaluation,
+        }))
+        .unwrap();
+    assert_eq!(
+        row.attestation_chain_hash,
+        format!("sha256:{}", hex::encode(Sha256::digest(&outcome_bytes)))
+    );
+    assert_eq!(
+        row.chunk_count,
+        evidence.chunk_count.map(|n| i32::try_from(n).unwrap())
+    );
+    assert_eq!(
+        row.total_chunk_count,
+        evidence
+            .total_chunk_count
+            .map(|n| i32::try_from(n).unwrap())
+    );
+    assert_eq!(row.chunks_capped, evidence.chunks_capped);
+    assert_eq!(
+        row.credit_quality_micros,
+        micros(evidence.credit_quality_micros)
+    );
+    assert_eq!(
+        row.credit_quality_calibration_version,
+        evidence.credit_quality_version
+    );
+    assert_eq!(
+        row.index_cardinality_at_scoring,
+        micros(evidence.index_cardinality)
+    );
+    // A zero-delta run makes no award, so no leg was withheld.
+    assert_eq!(row.credit_withheld_reason, None);
+    // Columns the pipeline does not own: NULL, for the sweeps or for later.
+    assert_eq!(row.vector_entry_id, None);
+    assert_eq!(row.vector_index_snapshot_id, None);
+    assert_eq!(row.agent_prose_perplexity_micros, None);
+    assert_eq!(row.attributed_token_fraction_micros, None);
+    assert_eq!(row.dedup_simhash, None);
+    assert_eq!(row.dedup_cluster_id, None);
+    assert_eq!(row.dedup_cluster_size, None);
+    assert_eq!(row.dedup_signal_version, None);
+    assert_eq!(row.composite_score_micros, None);
+}
+
+/// Spec C-D2: the row is idempotent per run. Settle's commit cannot run
+/// twice for one run (its transition guard and lease refuse it), so what a
+/// retry after a crash after commit amounts to is the same row offered
+/// again: it is a no-op, and a row under any other decision id for the same
+/// submission is refused by V116's partial unique index.
+#[tokio::test]
+async fn settle_gate_decision_row_is_idempotent_per_submission() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-idempotent-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let written = PgPipelineStore::write_pipeline_gate_decision_on_tx(&tx, &run)
+        .await
+        .expect("offering the same row again is a no-op");
+    assert!(!written, "the row already exists, so nothing is written");
+    tx.commit().await.unwrap();
+    assert_eq!(gate_decision_rows(&tenant, run.submission_id).await, before);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let error = tx
+        .execute(
+            "INSERT INTO trace_gate_decisions (
+                 tenant_id, decision_id, submission_id, gate_policy_version,
+                 gate_version_hash, perplexity_micros, tail_fraction_micros,
+                 perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                 novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                 source, pipeline_run_id
+             ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+            &[
+                &tenant,
+                &uuid::Uuid::new_v4(),
+                &run.submission_id,
+                &uuid::Uuid::new_v4(),
+            ],
+        )
+        .await
+        .expect_err("a second pipeline row for the submission is refused");
+    assert!(
+        db_error_message(&error).contains("trace_gate_decisions_one_pipeline_row"),
+        "{error:?}"
+    );
+}
+
+/// Spec C-D1: a Settle commit refused for a stale lease writes no row.
+#[tokio::test]
+async fn stale_settle_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-stale-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = service.store();
+    let first = store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(1))
+        .await
+        .unwrap()
+        .expect("the Settle-ready run is claimable");
+    tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+    store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the expired lease is reclaimed");
+    let error = store
+        .commit_settle(&first, placeholder_settle_outcome(), "excluded")
+        .await
+        .expect_err("a stale lease cannot commit Settle");
+    assert!(
+        error.to_string().contains("pipeline lease is stale"),
+        "{error}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty(),
+        "a refused Settle commit writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: a Settle commit refused because its policy was suspended
+/// writes no row.
+#[tokio::test]
+async fn suspended_settle_policy_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-suspended-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let store = service.store();
+    let leased = store
+        .claim_run(&tenant, scored.run_id, chrono::Duration::seconds(30))
+        .await
+        .unwrap()
+        .expect("the Settle-ready run is claimable");
+    service
+        .intervene_policy(
+            &tenant,
+            &scored.bundle_id,
+            Phase::Settle,
+            "suspend",
+            &policy_actor(),
+            "suspend_settle_gate_row",
+        )
+        .await
+        .expect("suspend the Settle policy");
+    let error = store
+        .commit_settle(&leased, placeholder_settle_outcome(), "excluded")
+        .await
+        .expect_err("a suspended Settle policy cannot commit");
+    assert!(
+        error
+            .to_string()
+            .contains(PIPELINE_POLICY_NOT_RUNNABLE_LABEL),
+        "{error}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty(),
+        "a refused Settle commit writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: a run rejected in Review never reaches Settle and gets no row,
+/// as `main`'s gate driver writes none for a submission it does not score.
+#[tokio::test]
+async fn rejected_run_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-row-rejected-{}", uuid::Uuid::new_v4());
+    let parked = quarantined_and_parked(&service, &tenant).await;
+    let store = service.store();
+    let claim = store
+        .claim_review(
+            &tenant,
+            parked.run_id,
+            &reviewer_principal_ref('d'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the queued run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("reviewer_declined").unwrap(),
+            vec![],
+        )
+        .await
+        .unwrap();
+    let ended = service
+        .process_run(&tenant, parked.run_id)
+        .await
+        .unwrap()
+        .expect("Review ends the run with the rejection");
+    assert_eq!(ended.state, PipelineRunState::Complete);
+    assert_eq!(ended.next_phase, None);
+    assert!(
+        gate_decision_rows(&tenant, parked.submission_id)
+            .await
+            .is_empty(),
+        "a rejected run writes no gate decision row"
+    );
+}
+
+/// Spec C-D1: only the compatibility bundle's Score evidence has the legacy
+/// fields, so a run under any other bundle writes no row.
+#[tokio::test]
+async fn a_non_compatibility_bundle_writes_no_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("gate-row-minimal-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert!(
+        gate_decision_rows(&tenant, run.submission_id)
+            .await
+            .is_empty(),
+        "a minimal-bundle run writes no gate decision row"
+    );
+}
+
+/// Spec C-D5 / O-C4: the row is written by the pilot's least-privilege
+/// ingest runtime. `runtime_backend` connects as a login whose only grants
+/// come from `trace_ingest_runtime` (and the account admission group), so a
+/// row written through it proves the INSERT those grants allow.
+#[tokio::test]
+async fn pipeline_gate_decision_insert_works_under_the_runtime_role() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let member: bool = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT pg_has_role(current_user, 'trace_ingest_runtime', 'MEMBER')
+                AND NOT has_table_privilege(current_user, 'trace_gate_decisions', 'TRUNCATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(
+        member,
+        "the runtime login is the ingest runtime, not an owner"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-runtime-role-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await.len(),
+        1
+    );
+}
+
+/// Spec C-D3: `credit_withheld_reason` is the Settle leg's label when one of
+/// `main`'s NoveltyUtility checks withheld the award.
+#[tokio::test]
+async fn a_withheld_award_records_its_reason_on_the_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-withheld-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let leg = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(
+        leg.last_error_label.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+    let rows = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].credit_withheld_reason.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+}
+
+/// Gives the submission's gate decision rows the dedup values a sweep would
+/// have written, as the owner (the sweep's own role is the gate driver's).
+async fn stamp_dedup_columns(tenant_id: &str, submission_id: uuid::Uuid) {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let stamped = tx
+        .execute(
+            "UPDATE trace_gate_decisions
+                SET dedup_simhash = 42, dedup_cluster_id = $3,
+                    dedup_cluster_size = 2, dedup_signal_version = 'simhash_v1'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant_id, &submission_id, &uuid::Uuid::new_v4()],
+        )
+        .await
+        .expect("stamp the dedup columns");
+    assert_eq!(stamped, 1, "the submission has its one gate decision row");
+    tx.commit().await.unwrap();
+}
+
+/// The row with its dedup columns cleared and everything else as it was.
+fn without_dedup(row: &GateDecisionRow) -> GateDecisionRow {
+    GateDecisionRow {
+        dedup_simhash: None,
+        dedup_cluster_id: None,
+        dedup_cluster_size: None,
+        dedup_signal_version: None,
+        ..row.clone()
+    }
+}
+
+/// The drain report's gate decision clause for `withdrawal_completion_pending`
+/// (`versioned_pipeline_activation.rs`): a withdrawn submission whose gate
+/// decision row still holds a dedup value is pending.
+async fn dedup_values_left(tenant_id: &str, submission_id: uuid::Uuid) -> bool {
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    let left: bool = tx
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM trace_gate_decisions decision
+                             WHERE decision.tenant_id = $1
+                               AND decision.submission_id = $2
+                               AND (decision.dedup_cluster_id IS NOT NULL
+                                    OR decision.dedup_simhash IS NOT NULL))",
+            &[&tenant_id, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    left
+}
+
+/// A completed compatibility run whose gate decision row carries dedup
+/// values, and that row as stamped.
+async fn completed_run_with_dedup_values(
+    service: &PipelineService,
+    tenant: &str,
+) -> (PipelineRunRecord, GateDecisionRow) {
+    let run = submit_and_complete(service, tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    stamp_dedup_columns(tenant, run.submission_id).await;
+    let rows = gate_decision_rows(tenant, run.submission_id).await;
+    assert_eq!(rows.len(), 1);
+    assert!(dedup_values_left(tenant, run.submission_id).await);
+    (run, rows[0].clone())
+}
+
+/// Spec C-D6: the pipeline withdrawal clears the dedup columns of the
+/// submission's gate decision row, as `main`'s withdrawal does
+/// (`clear_trace_dedup_cluster_for_submission`), and nothing else: the row
+/// stays, so the drain report's `withdrawal_completion_pending` clause reads
+/// nothing left.
+#[tokio::test]
+async fn withdrawal_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-withdrawn-{}", uuid::Uuid::new_v4());
+    let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+    withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&stamped)],
+        "the row stays, with its dedup columns cleared"
+    );
+    assert!(!dedup_values_left(&tenant, run.submission_id).await);
+}
+
+/// Spec C-D6: the pipeline's follow-up of `main`'s revocation clears them
+/// too.
+#[tokio::test]
+async fn revocation_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-revoked-{}", uuid::Uuid::new_v4());
+    let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+    service
+        .store()
+        .follow_up_revocation(&tenant, run.submission_id, RECEIPT_PRINCIPAL)
+        .await
+        .expect("the revocation follow-up runs");
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&stamped)]
+    );
+}
+
+/// Spec C-D6: the pipeline's half of `main`'s retention maintenance clears
+/// them, for an expiry and for a purge.
+#[tokio::test]
+async fn retention_clears_pipeline_row_dedup_columns() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    for action in [
+        PipelineRetentionAction::Expired,
+        PipelineRetentionAction::Purged,
+    ] {
+        let tenant = format!("gate-row-retention-{}", uuid::Uuid::new_v4());
+        let (run, stamped) = completed_run_with_dedup_values(&service, &tenant).await;
+        service
+            .store()
+            .follow_up_retention(&tenant, run.submission_id, action)
+            .await
+            .expect("the retention follow-up runs");
+        assert_eq!(
+            gate_decision_rows(&tenant, run.submission_id).await,
+            vec![without_dedup(&stamped)],
+            "{action:?}"
+        );
+    }
+}
+
+/// Spec C-D6: a withdrawal writes no value of its own into
+/// `credit_withheld_reason` (`main`'s only writer of that column is its gate
+/// path), so a withheld award's reason stays exactly as Settle wrote it.
+#[tokio::test]
+async fn withdrawal_leaves_credit_withheld_reason_as_legacy_does() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-withheld-withdrawn-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let run = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(
+        before[0].credit_withheld_reason.as_deref(),
+        Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
+    );
+    withdraw(&service, &tenant, run.submission_id).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, run.submission_id).await,
+        vec![without_dedup(&before[0])],
+        "the withdrawal changes nothing on the row but the dedup columns"
+    );
+}
+
+/// A legacy gate decision row for `submission_id`, as `main`'s gate writes
+/// one: no `source`, so it reads as `legacy_gate`.
+async fn insert_legacy_gate_decision(tenant_id: &str, submission_id: uuid::Uuid) -> uuid::Uuid {
+    let decision_id = uuid::Uuid::new_v4();
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, tenant_id).await;
+    tx.execute(
+        "INSERT INTO trace_gate_decisions (
+             tenant_id, decision_id, submission_id, gate_policy_version,
+             gate_version_hash, perplexity_micros, tail_fraction_micros,
+             perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+             novelty_passed, embedding_evidence_hash, attestation_chain_hash
+         ) VALUES ($1,$2,$3,'legacy-v1','sha256:legacy',5000000,100000,true,900000,
+                   'sha256:nn',true,'sha256:ee','sha256:aa')",
+        &[&tenant_id, &decision_id, &submission_id],
+    )
+    .await
+    .expect("insert the legacy gate decision row");
+    tx.commit().await.unwrap();
+    decision_id
+}
+
+/// Spec C-D7: `main`'s consumers pick a pipeline row up through their own,
+/// unmodified readers, each run as the role it runs as in production: the
+/// dedup signal and rederive enumerations, the contributor cap enumeration
+/// (joined to the submission's principal) and the score listing as
+/// `trace_gate_driver`, and the account trust fact candidates and recorder
+/// (V85) for the account the receipt principal is linked to.
+#[tokio::test]
+async fn consumers_see_pipeline_rows() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-consumers-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    // After the receipt, which created the tenant row the account needs.
+    let account_id = link_receipt_principal_to_a_new_account(&backend, &tenant).await;
+    let decision_id = expected_pipeline_decision_id(&tenant, run.run_id);
+
+    let dedup = gate.list_dedup_signals(i64::MAX).await.unwrap();
+    assert!(
+        dedup
+            .iter()
+            .any(|row| row.tenant_id == tenant && row.decision_id == decision_id),
+        "the dedup signal enumeration lists the pipeline row"
+    );
+    let rederive = gate.list_dedup_rederive_rows(i64::MAX).await.unwrap();
+    assert!(
+        rederive.iter().any(|row| row.tenant_id == tenant
+            && row.decision_id == decision_id
+            && row.submission_id == run.submission_id),
+        "the dedup rederive enumeration lists the pipeline row"
+    );
+    let cap = gate.list_contributor_cap_signals(i64::MAX).await.unwrap();
+    let cap_row = cap
+        .iter()
+        .find(|row| row.tenant_id == tenant && row.decision_id == decision_id)
+        .expect("the contributor cap enumeration lists the pipeline row");
+    assert_eq!(cap_row.auth_principal_ref, RECEIPT_PRINCIPAL);
+    assert!(cap_row.credit_quality_micros.is_some());
+    let scores = gate
+        .list_scores_by_submission_ids(&[run.submission_id])
+        .await
+        .unwrap();
+    assert_eq!(scores.len(), 1, "the score listing reads the pipeline row");
+    assert!(scores[0].gate_passed);
+
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let candidates = tx
+        .query(
+            "SELECT source_kind, source_id
+               FROM trace_account_trust_fact_candidates($1, $2, 100)",
+            &[&tenant, &account_id],
+        )
+        .await
+        .expect("list the account's trust fact candidates");
+    assert!(
+        candidates.iter().any(|row| {
+            row.get::<_, String>("source_kind") == "gate_evaluation"
+                && row.get::<_, uuid::Uuid>("source_id") == decision_id
+        }),
+        "the pipeline row is a gate evaluation fact candidate"
+    );
+    let outcome: Option<String> = tx
+        .query_one(
+            "SELECT trace_record_account_trust_fact($1, $2, 'gate_evaluation', $3)",
+            &[&tenant, &account_id, &decision_id],
+        )
+        .await
+        .expect("record the gate evaluation fact")
+        .get(0);
+    assert_eq!(
+        outcome.as_deref(),
+        Some("evaluated_passed"),
+        "an accepted pipeline submission that passed both gates"
+    );
+    tx.commit().await.unwrap();
+}
+
+/// Spec C-D3 / O-C3: the credit-quality sweep's enumeration
+/// (`list_gate_decisions_for_credit_scoring`, as `trace_gate_driver`) leaves
+/// a pipeline row out, so the sweep never overwrites the credit quality the
+/// pipeline's Score computed under its bundle; a legacy row with a scored
+/// perplexity in the same tenant is still listed.
+#[tokio::test]
+async fn credit_quality_sweep_does_not_overwrite_pipeline_rows() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-credit-quality-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let pipeline_decision = expected_pipeline_decision_id(&tenant, run.run_id);
+    let pipeline_row = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(pipeline_row.len(), 1);
+    assert!(
+        pipeline_row[0].perplexity_micros > 0,
+        "a scored pipeline row"
+    );
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    let legacy_decision = insert_legacy_gate_decision(&tenant, legacy_submission).await;
+
+    let listed: BTreeSet<uuid::Uuid> = gate
+        .list_gate_decisions_for_credit_scoring(i64::MAX)
+        .await
+        .expect("enumerate as the gate driver")
+        .into_iter()
+        .filter(|input| input.tenant_id == tenant)
+        .map(|input| input.decision_id)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([legacy_decision]),
+        "the legacy row is listed and the pipeline row is not"
+    );
+    assert_ne!(pipeline_decision, legacy_decision);
+}
+
+/// Spec C-D3 / O-C3, the admin perplexity re-score
+/// (`/v1/admin/rescore-perplexity`): its enumeration
+/// (`list_submissions_with_gate_decision`, as `trace_gate_driver`) leaves a
+/// pipeline submission out, even one that also holds a legacy row, so the
+/// re-score never rewrites the gate verdict the pipeline's Score awarded
+/// credit on; a legacy submission in the same tenant is still listed.
+#[tokio::test]
+async fn perplexity_rescore_enumeration_skips_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let owner = owner_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rescore-list-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let mixed = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(mixed.state, PipelineRunState::Complete, "{mixed:?}");
+    insert_legacy_gate_decision(&tenant, mixed.submission_id).await;
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    insert_legacy_gate_decision(&tenant, legacy_submission).await;
+
+    let listed: BTreeSet<uuid::Uuid> = gate
+        .list_submissions_with_gate_decision(i64::MAX)
+        .await
+        .expect("enumerate as the gate driver")
+        .into_iter()
+        .filter(|item| item.tenant_id == tenant)
+        .map(|item| item.submission_id)
+        .collect();
+    assert_eq!(
+        listed,
+        BTreeSet::from([legacy_submission]),
+        "the legacy submission is listed and neither pipeline submission is"
+    );
+}
+
+/// Spec C-D3 / O-C3, the re-score's two writers: called directly for a
+/// pipeline submission (a re-score enumerated before Settle committed),
+/// `update_trace_gate_decision_perplexity` and
+/// `update_trace_gate_decision_author_perplexity` leave the pipeline row as
+/// Settle wrote it, so its verdict still matches the Score that awarded the
+/// credit and its per-author columns stay NULL (O-C2). Each writer reports
+/// the rows it touched: none for the pipeline submission, so the re-score
+/// counts it as skipped rather than rescored (review of #1294), and one for
+/// a legacy submission.
+#[tokio::test]
+async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-rescore-write-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    let before = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].source, "pipeline_settle");
+    assert!(before[0].agent_prose_perplexity_micros.is_none());
+    let rewritten = before[0].perplexity_micros + 1_234_567;
+
+    let touched = backend
+        .update_trace_gate_decision_perplexity(
+            &tenant,
+            run.submission_id,
+            rewritten,
+            Some(rewritten),
+            !before[0].perplexity_passed,
+        )
+        .await
+        .expect("the re-score writer runs under the runtime role");
+    assert_eq!(touched, 0, "the pipeline row is not rewritten");
+    let touched = backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant,
+            run.submission_id,
+            [Some(1), Some(2), Some(3), Some(4), Some(5)],
+        )
+        .await
+        .expect("the author re-score writer runs under the runtime role");
+    assert_eq!(
+        touched, 0,
+        "the pipeline row's author columns are not written"
+    );
+
+    let after = gate_decision_rows(&tenant, run.submission_id).await;
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].perplexity_micros, before[0].perplexity_micros);
+    assert_eq!(
+        after[0].peak_perplexity_micros,
+        before[0].peak_perplexity_micros
+    );
+    assert_eq!(after[0].perplexity_passed, before[0].perplexity_passed);
+    assert_eq!(after[0].agent_prose_perplexity_micros, None);
+    assert_eq!(after[0].attributed_token_fraction_micros, None);
+
+    // The same writers still reach a legacy submission's latest row.
+    let owner = owner_backend().await;
+    let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
+    insert_legacy_gate_decision(&tenant, legacy_submission).await;
+    let touched = backend
+        .update_trace_gate_decision_perplexity(
+            &tenant,
+            legacy_submission,
+            7_000_000,
+            Some(8_000_000),
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(touched, 1);
+    let touched = backend
+        .update_trace_gate_decision_author_perplexity(
+            &tenant,
+            legacy_submission,
+            [Some(1), Some(2), Some(3), Some(4), Some(5)],
+        )
+        .await
+        .unwrap();
+    assert_eq!(touched, 1);
+    let legacy = gate_decision_rows(&tenant, legacy_submission).await;
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0].perplexity_micros, 7_000_000);
+    assert_eq!(legacy[0].peak_perplexity_micros, Some(8_000_000));
+    assert!(!legacy[0].perplexity_passed);
+    assert_eq!(legacy[0].agent_prose_perplexity_micros, Some(1));
+    assert_eq!(legacy[0].attributed_token_fraction_micros, Some(5));
+}
+
+/// Regression on `main`'s gate enumeration (`db/postgres.rs`): a pipeline
+/// submission is never listed for `main`'s gate driver, whether its run is
+/// still in flight (no row yet) or complete (with its pipeline row).
+#[tokio::test]
+async fn legacy_gate_driver_still_skips_pipeline_submissions() {
+    use trace_commons_server::db::Database as _;
+
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let gate = gate_driver_backend().await;
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-driver-{}", uuid::Uuid::new_v4());
+    let complete = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(
+        gate_decision_rows(&tenant, complete.submission_id)
+            .await
+            .len(),
+        1
+    );
+    let (in_flight, _) = run_to_settle_ready(&service, &tenant).await;
+    assert!(
+        gate_decision_rows(&tenant, in_flight.submission_id)
+            .await
+            .is_empty()
+    );
+    let listed = gate
+        .list_submissions_needing_gate_decision(chrono::Utc::now(), 5, 30, 10_000)
+        .await
+        .expect("list as the gate driver");
+    assert!(
+        !listed.iter().any(|item| item.tenant_id == tenant),
+        "no pipeline submission is listed for main's gate: {listed:?}"
+    );
+}
+
+/// Rewrites a run's stored Score evidence as the owner, with the immutability
+/// trigger off for the one statement. `set` is the SQL expression the
+/// evidence becomes. No service write can produce this (`phase_outcomes` rows
+/// are immutable); it stands in for evidence a Score policy could commit.
+async fn rewrite_stored_score_evidence(tenant_id: &str, run_id: uuid::Uuid, set: &str) {
+    let mut client = owner_client().await;
+    let tx = client
+        .transaction()
+        .await
+        .expect("open owner transaction for tampering");
+    tx.batch_execute("ALTER TABLE phase_outcomes DISABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("disable the immutability trigger");
+    let updated = tx
+        .execute(
+            &format!(
+                "UPDATE phase_outcomes SET evidence = {set}
+                  WHERE tenant_id = $1 AND run_id = $2 AND phase = 'score'"
+            ),
+            &[&tenant_id, &run_id],
+        )
+        .await
+        .expect("rewrite the stored Score evidence");
+    assert_eq!(updated, 1, "one stored Score evidence");
+    tx.batch_execute("ALTER TABLE phase_outcomes ENABLE TRIGGER phase_outcomes_reject_update;")
+        .await
+        .expect("enable the immutability trigger");
+    tx.commit().await.expect("commit the tampering transaction");
+}
+
+/// #1294 review 1: the chunk aggregate saturates a perplexity to `u64::MAX`
+/// on purpose. Settle stores it as `i64::MAX`, as `main`'s gate writer does,
+/// and completes, instead of refusing it as incomplete after the legs paid.
+#[tokio::test]
+async fn saturated_score_evidence_saturates_on_the_gate_decision_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-saturated-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    rewrite_stored_score_evidence(
+        &tenant,
+        scored.run_id,
+        "evidence
+           || jsonb_build_object(
+                'perplexity_micros', 18446744073709551615::NUMERIC,
+                'peak_perplexity_micros', 18446744073709551615::NUMERIC,
+                'chunk_count', 4294967295::NUMERIC)",
+    )
+    .await;
+    let settled = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(settled.state, PipelineRunState::Complete, "{settled:?}");
+    let rows = gate_decision_rows(&tenant, scored.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].perplexity_micros, i64::MAX);
+    assert_eq!(rows[0].peak_perplexity_micros, Some(i64::MAX));
+    assert_eq!(rows[0].chunk_count, Some(i32::MAX));
+}
+
+/// #1294 review 2: compatibility evidence the row cannot be built from fails
+/// the run terminally with `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`
+/// on its first Settle attempt, before the index write or any leg settles:
+/// no credit, no row, and no charged retries.
+#[tokio::test]
+async fn incomplete_score_evidence_fails_settle_before_any_leg_settles() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = checked_compatibility_service(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks::default(),
+    )
+    .await;
+    let tenant = format!("gate-row-incomplete-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    rewrite_stored_score_evidence(
+        &tenant,
+        scored.run_id,
+        "jsonb_set(evidence, '{nearest_neighbor_hash}', 'null'::JSONB)",
+    )
+    .await;
+    let failed = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+    );
+    assert_eq!(failed.index_write_state, scored.index_write_state);
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, scored.run_id)
+        .await
+        .unwrap();
+    assert!(
+        settlements
+            .iter()
+            .any(|leg| leg.instrument_id == InstrumentId::trace_credit().as_str()),
+        "Score seeded a Trace Credit leg: {settlements:?}"
+    );
+    assert!(
+        settlements
+            .iter()
+            .all(|leg| leg.operation_state != "complete" && leg.credit_event_id.is_none()),
+        "no leg settled: {settlements:?}"
+    );
+    assert!(
+        gate_decision_rows(&tenant, scored.submission_id)
+            .await
+            .is_empty()
+    );
+}
+
+/// #1294 review 3: a pipeline row for the submission that names another run
+/// is caught by the targetless conflict clause, and Settle fails terminally
+/// with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`, leaving that row as it was.
+#[tokio::test]
+async fn a_pipeline_row_naming_another_run_refuses_settle() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-conflict-{}", uuid::Uuid::new_v4());
+    let (scored, _) = run_to_settle_ready(&service, &tenant).await;
+    let other_run = uuid::Uuid::new_v4();
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_gate_decisions (
+             tenant_id, decision_id, submission_id, gate_policy_version,
+             gate_version_hash, perplexity_micros, tail_fraction_micros,
+             perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+             novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+             source, pipeline_run_id
+         ) VALUES ($1,$2,$3,'v','h',1,0,true,1,'n',true,'e','a','pipeline_settle',$4)",
+        &[
+            &tenant,
+            &expected_pipeline_decision_id(&tenant, other_run),
+            &scored.submission_id,
+            &other_run,
+        ],
+    )
+    .await
+    .expect("another run's pipeline row");
+    tx.commit().await.unwrap();
+    let before = gate_decision_rows(&tenant, scored.submission_id).await;
+
+    let failed = service
+        .process_run(&tenant, scored.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(failed.state, PipelineRunState::Failed, "{failed:?}");
+    assert_eq!(
+        failed.last_error_label.as_deref(),
+        Some(PIPELINE_GATE_DECISION_CONFLICT_LABEL)
+    );
+    assert_eq!(
+        gate_decision_rows(&tenant, scored.submission_id).await,
+        before
     );
 }

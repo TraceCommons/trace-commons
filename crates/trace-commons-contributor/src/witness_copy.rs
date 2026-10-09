@@ -399,6 +399,7 @@ pub struct WitnessReviewCopy {
     pub heading: &'static str,
     pub disclosure: &'static str,
     pub action: &'static str,
+    /// The confirm button. Approved 2026-10-08 (button rule).
     pub confirm: &'static str,
     pub cancel: &'static str,
     pub working: &'static str,
@@ -764,7 +765,7 @@ pub fn witness_copy() -> WitnessCopy {
             heading: "Review with your configured witness",
             disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
             action: "Prepare witness review",
-            confirm: "Send this session for review",
+            confirm: "Send",
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
@@ -827,10 +828,11 @@ pub fn witness_copy() -> WitnessCopy {
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
-            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
-            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
-            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
-            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
+            // Plain-language rewrite (owner, 2026-10-08).
+            start: "Share a session you already have, or finish a new task in a supported agent. Choose its folder in Settings, then come back here to review it.",
+            review: "Open a waiting session and choose Look inside. If you've set up a witness, you're asked before the session is sent to it for review. Check what comes back before you send it.",
+            follow_up: "Follow it in History. Sending, acceptance and credit happen separately. Points are not a spendable NEAR AI balance.",
+            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests with IronWire, and sending what it captures, each need their own setup. This app doesn't create a provider account for you.",
         },
     }
 }

@@ -18,10 +18,10 @@ use trace_commons_gate_api::pipeline::{
     BundlePackage, HumanReviewAssessment, IndexMembershipDecision, InstrumentAward,
     InstrumentAwards, InstrumentId, InstrumentSettlement, InstrumentSettlementProgress,
     Microcredits, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
-    PolicyError, PrivacyRisk, ReasonCode, ReviewDecision, ReviewEvaluation, ReviewEvidence,
-    ReviewInput, ReviewRecommendation, SchemaRef, ScoreDecision, ScoreEvaluation, ScoreEvidence,
-    ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation, SettleEvidence, SettleInput,
-    TenantStorageRef, UnverifiedScoreDecision,
+    PolicyError, PolicyRef, PrivacyRisk, ReasonCode, ReviewDecision, ReviewEvaluation,
+    ReviewEvidence, ReviewInput, ReviewRecommendation, SchemaRef, ScoreDecision, ScoreEvaluation,
+    ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation,
+    SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
@@ -50,8 +50,9 @@ use crate::trace_corpus_storage::{
 };
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
-    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
-    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
+    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+    PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL, PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
+    PipelineAuthorityProvider, PipelinePrivacyBoundary,
 };
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
@@ -136,6 +137,110 @@ pub const PIPELINE_OPERATIONAL_ERROR_LABEL: &str = "minimal_policy_failed";
 pub const PIPELINE_ATTEMPTS_EXHAUSTED_LABEL: &str = "attempts_exhausted";
 pub const PIPELINE_BUNDLE_MISSING_LABEL: &str = "bundle_package_missing";
 pub const PIPELINE_POLICY_NOT_RUNNABLE_LABEL: &str = "bundle_policy_not_runnable";
+/// Settle refuses to write a compatibility run's `trace_gate_decisions` row
+/// (spec 2026-10-08, Slice C) when the run has no committed Score outcome or
+/// its evidence lacks a field the row needs: the commit writes nothing.
+pub const PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL: &str =
+    "pipeline_gate_decision_evidence_incomplete";
+/// Settle refuses to commit when the submission already has a pipeline gate
+/// decision row written by another run (V116 allows one per submission).
+pub const PIPELINE_GATE_DECISION_CONFLICT_LABEL: &str = "pipeline_gate_decision_conflict";
+
+/// The columns of a pipeline gate decision row that come from the Score
+/// evidence alone (spec C-D3), checked before Settle pays any leg and
+/// written by its commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineGateDecisionScoreValues {
+    pub perplexity_micros: i64,
+    pub tail_fraction_micros: i64,
+    pub novelty_score_micros: i64,
+    pub perplexity_passed: bool,
+    pub novelty_passed: bool,
+    pub nearest_neighbor_hash: String,
+    pub embedding_evidence_hash: String,
+    pub peak_perplexity_micros: Option<i64>,
+    pub peak_novelty_micros: Option<i64>,
+    pub chunk_count: Option<i32>,
+    pub chunks_capped: Option<bool>,
+    pub total_chunk_count: Option<i32>,
+    pub credit_quality_micros: Option<i64>,
+    pub credit_quality_version: Option<i32>,
+    pub index_cardinality: Option<i64>,
+}
+
+impl PipelineGateDecisionScoreValues {
+    /// Refuses with `PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL` only
+    /// when a field the row requires is absent. A value too large for its
+    /// column saturates, as `main`'s gate writer stores it: the chunk
+    /// aggregate saturates a perplexity to `u64::MAX` on purpose.
+    pub fn from_evidence(evidence: &ScoreEvidence) -> Result<Self, &'static str> {
+        let micros = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
+        let count = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        let required = |value: Option<u64>| {
+            value
+                .map(micros)
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)
+        };
+        Ok(Self {
+            perplexity_micros: required(evidence.perplexity_micros)?,
+            tail_fraction_micros: required(evidence.tail_fraction_micros)?,
+            novelty_score_micros: required(evidence.novelty_score_micros)?,
+            perplexity_passed: evidence
+                .quality_passed
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            novelty_passed: evidence
+                .novelty_passed
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            nearest_neighbor_hash: evidence
+                .nearest_neighbor_hash
+                .clone()
+                .ok_or(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL)?,
+            embedding_evidence_hash: evidence
+                .embedding_artifact_hash
+                .clone()
+                .unwrap_or_else(|| sha256_prefixed(PIPELINE_NO_INDEX_COMMAND.as_bytes())),
+            peak_perplexity_micros: evidence.peak_perplexity_micros.map(micros),
+            peak_novelty_micros: evidence.peak_novelty_micros.map(micros),
+            chunk_count: evidence.chunk_count.map(count),
+            chunks_capped: evidence.chunks_capped,
+            total_chunk_count: evidence.total_chunk_count.map(count),
+            credit_quality_micros: evidence.credit_quality_micros.map(micros),
+            credit_quality_version: evidence.credit_quality_version,
+            index_cardinality: evidence.index_cardinality.map(micros),
+        })
+    }
+}
+/// What a pipeline gate decision row's `embedding_evidence_hash` hashes when
+/// the Score sealed no index command (spec C-D3).
+pub const PIPELINE_NO_INDEX_COMMAND: &str = "pipeline_no_index_command";
+/// The schema string `pipeline_score_outcome_hash` binds.
+pub const PIPELINE_SCORE_OUTCOME_HASH_SCHEMA: &str = "trace_commons.pipeline_score_outcome_hash.v1";
+
+/// The decision id of a run's `trace_gate_decisions` row (spec C-D2): a
+/// UUIDv5 over the tenant and the run, so the row is idempotent per run.
+pub fn pipeline_gate_decision_id(tenant_id: &str, run_id: Uuid) -> Uuid {
+    Uuid::new_v5(
+        &Uuid::NAMESPACE_URL,
+        format!("trace_commons.pipeline_gate_decision.v1\n{tenant_id}\n{run_id}").as_bytes(),
+    )
+}
+
+/// The content hash of a committed Score outcome, the pipeline row's
+/// `attestation_chain_hash` (spec C-D3): SHA-256 over the canonical JSON of
+/// its decision, evidence and evaluation under a fixed schema string.
+pub fn pipeline_score_outcome_hash(
+    decision: &serde_json::Value,
+    evidence: &serde_json::Value,
+    evaluation: &serde_json::Value,
+) -> Result<String, serde_json::Error> {
+    let bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&serde_json::json!({
+        "schema": PIPELINE_SCORE_OUTCOME_HASH_SCHEMA,
+        "decision": decision,
+        "evidence": evidence,
+        "evaluation": evaluation,
+    }))?;
+    Ok(sha256_prefixed(&bytes))
+}
 /// `intervene_policy` accepts `suspend` and `resume`. `terminate` has a
 /// database state (V111) but no behavior: no specification says what happens
 /// to a run bound to a terminated policy (CMP-003), so it is refused and
@@ -1421,11 +1526,19 @@ macro_rules! rebuildable_index_run_predicate {
 #[derive(Clone)]
 pub struct PgPipelineStore {
     backend: Arc<PgBackend>,
+    /// Per tenant, the last submission id the lost follow-up recovery read
+    /// (`recover_lost_inoperable_follow_ups`); the next pass resumes after
+    /// it. Shared by the store's clones; lost on restart, when the next
+    /// pass starts from the lowest id again.
+    lost_follow_up_cursors: Arc<std::sync::Mutex<std::collections::HashMap<String, Uuid>>>,
 }
 
 impl PgPipelineStore {
     pub fn new(backend: Arc<PgBackend>) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            lost_follow_up_cursors: Arc::default(),
+        }
     }
 
     async fn tenant_transaction<'a>(
@@ -3455,7 +3568,10 @@ impl PgPipelineStore {
     /// caller's transaction: Settle's index dispatch records `complete` or
     /// `cancelled` in the transaction that holds the submission guard
     /// (`submission_guard_on_tx`), so the record commits together with the
-    /// release of that lock.
+    /// release of that lock. That transaction is held across the index
+    /// write, so the lease is compared with `clock_timestamp()`, not with
+    /// `NOW()` (the transaction's start), as the Score commit's is (PR #1283
+    /// review, finding 7).
     pub async fn set_index_write_state_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
@@ -3467,7 +3583,7 @@ impl PgPipelineStore {
                 "UPDATE pipeline_runs
                  SET index_write_state = $3, updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
-                   AND lease_token = $4 AND lease_expires_at > NOW()
+                   AND lease_token = $4 AND lease_expires_at > clock_timestamp()
                  RETURNING *",
                 &[
                     &run.tenant_id,
@@ -4265,7 +4381,11 @@ impl PgPipelineStore {
     /// between the two leaves runs with index work and no queued
     /// invalidation, and export snapshot items that are not invalidated,
     /// which nothing else reaches. This finds at most `limit` such
-    /// submissions of `tenant_id`, in submission id order: revoked, or with
+    /// submissions of `tenant_id`, in submission id order from just after
+    /// the last one the previous pass of this store read for the tenant,
+    /// wrapping to the lowest id (PR #1283 review, finding 4: follow-ups
+    /// that fail on every pass would otherwise fill the window and keep the
+    /// later ones from ever being reached): revoked, or with
     /// a `trace_withdrawals` row, and with either a run whose index write
     /// started (`pending`, `complete`, `failed` or `cancelled`, the states
     /// `end_runs_of_inoperable_submission_on_tx` queues) and no invalidation
@@ -4277,7 +4397,8 @@ impl PgPipelineStore {
     /// queues an invalidation for every such run and invalidates every such
     /// item, so a recovered submission is not found again. A follow-up that
     /// fails is logged by label and the pass goes on to the next
-    /// submission; the failed one is found again on the next pass. Returns
+    /// submission; the failed one is found again when a later pass wraps
+    /// round to it. Returns
     /// how many it recovered, or the first error when every follow-up of
     /// the pass failed. The read probes every revoked or withdrawn
     /// submission of the tenant, recovered or not, so the worker runs it at
@@ -4291,6 +4412,12 @@ impl PgPipelineStore {
         limit: usize,
     ) -> Result<usize, DatabaseError> {
         let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
+        let cursor: Option<Uuid> = self
+            .lost_follow_up_cursors
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(tenant_id)
+            .copied();
         let lost = {
             let mut client = self.backend.trace_pool().get().await?;
             let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
@@ -4345,9 +4472,9 @@ impl PgPipelineStore {
                                AND item.invalidated_at IS NULL
                         )
                       GROUP BY c.submission_id
-                      ORDER BY c.submission_id
+                      ORDER BY (c.submission_id <= $3::uuid) IS TRUE, c.submission_id
                       LIMIT $2",
-                    &[&tenant_id, &limit],
+                    &[&tenant_id, &limit, &cursor],
                 )
                 .await?;
             tx.commit().await?;
@@ -4355,6 +4482,15 @@ impl PgPipelineStore {
                 .map(|row| (row.get::<_, Uuid>(0), row.get::<_, bool>(1)))
                 .collect::<Vec<_>>()
         };
+        // The cursor moves as soon as the window is read, whatever its
+        // follow-ups do: a window whose follow-ups all fail answers an
+        // error, and the next pass must still move past it.
+        if let Some((last_read, _)) = lost.last() {
+            self.lost_follow_up_cursors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(tenant_id.to_string(), *last_read);
+        }
         let mut recovered = 0;
         let mut first_error = None;
         for (submission_id, withdrawn) in &lost {
@@ -4532,6 +4668,7 @@ impl PgPipelineStore {
                 .await?;
             }
         }
+        clear_gate_decision_dedup_on_tx(&tx, tenant_id, &[submission_id]).await?;
         Self::end_runs_of_inoperable_submission_on_tx(&tx, tenant_id, &runs, action.reason_code())
             .await?;
         let run_ids = runs.iter().map(|run| run.run_id).collect::<Vec<_>>();
@@ -4678,6 +4815,10 @@ impl PgPipelineStore {
             outcome,
         )
         .await?;
+        // Spec 2026-10-08, Slice C: the run's gate decision row, on this
+        // transaction, after the lease and policy checks, so a refused
+        // commit writes none.
+        Self::write_pipeline_gate_decision_on_tx(&tx, run).await?;
         let row = tx
             .query_one(
                 "UPDATE pipeline_runs
@@ -4694,6 +4835,163 @@ impl PgPipelineStore {
         let updated = pipeline_run_from_row(&row)?;
         tx.commit().await?;
         Ok(updated)
+    }
+
+    /// Writes the run's `trace_gate_decisions` row on the caller's Settle
+    /// transaction (spec 2026-10-08, Slice C), so `main`'s consumers --
+    /// duplicate clustering, the contributor cap, per-author scoring,
+    /// account trust -- see pipeline traffic with no change to their
+    /// readers. Only a run whose bound bundle's Score policy is the
+    /// compatibility one writes a row: no other Score evidence carries the
+    /// legacy fields (C-D1). Every column comes from the committed Score
+    /// outcome, the bound package's Score configuration hash and the run's
+    /// Trace Credit leg (C-D3); the legacy-only columns stay NULL for the
+    /// sweeps to fill.
+    ///
+    /// The decision id is a UUIDv5 over the tenant and the run (C-D2), and
+    /// offering this run's row twice is a no-op. Returns whether a row was
+    /// written: `false` for a non-compatibility bundle and for this run's
+    /// row already existing. A pipeline row for the same submission that
+    /// names another run refuses with `PIPELINE_GATE_DECISION_CONFLICT_LABEL`.
+    ///
+    /// Fails closed, writing nothing, when the run has no Score outcome or
+    /// its compatibility evidence lacks a field the row needs
+    /// (`PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL`): such a row
+    /// would tell every consumer something the Score did not say. The
+    /// Settle phase runs the same evidence check before any leg settles
+    /// (`PipelineGateDecisionScoreValues::from_evidence`), so this refusal
+    /// is reached only if the outcome changed between the two.
+    pub async fn write_pipeline_gate_decision_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+    ) -> Result<bool, DatabaseError> {
+        let incomplete = || {
+            DatabaseError::Constraint(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL.to_string())
+        };
+        let score_policy = tx
+            .query_opt(
+                "SELECT package #> '{manifest,score}' AS score_policy
+                   FROM pipeline_bundle_packages
+                  WHERE tenant_id = $1 AND bundle_id = $2",
+                &[&run.tenant_id, &run.bundle_id],
+            )
+            .await?
+            .ok_or_else(incomplete)?;
+        let score_policy = serde_json::from_value::<PolicyRef>(score_policy.get("score_policy"))
+            .map_err(|_| incomplete())?;
+        if score_policy.implementation_id != COMPATIBILITY_SCORE_IMPLEMENTATION {
+            return Ok(false);
+        }
+        let outcome = tx
+            .query_opt(
+                "SELECT decision, evidence, evaluation FROM phase_outcomes
+                  WHERE tenant_id = $1 AND run_id = $2 AND phase = $3",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &phase_as_db(Some(Phase::Score)),
+                ],
+            )
+            .await?
+            .ok_or_else(incomplete)?;
+        let decision: serde_json::Value = outcome.get("decision");
+        let evidence_value: serde_json::Value = outcome.get("evidence");
+        let evaluation: serde_json::Value = outcome.get("evaluation");
+        let evidence = serde_json::from_value::<ScoreEvidence>(evidence_value.clone())
+            .map_err(|_| incomplete())?;
+        let values =
+            PipelineGateDecisionScoreValues::from_evidence(&evidence).map_err(|_| incomplete())?;
+        let attestation_chain_hash =
+            pipeline_score_outcome_hash(&decision, &evidence_value, &evaluation)
+                .map_err(|_| incomplete())?;
+        // The Trace Credit leg's label when one of `main`'s NoveltyUtility
+        // checks withheld it: `complete` with no credit event, the shape
+        // only `settle_internal_credit`'s withheld branch writes (Ruling
+        // F-I1, as `commit_settle_from_progress` reads it).
+        let credit_withheld_reason: Option<String> = tx
+            .query_opt(
+                "SELECT last_error_label FROM pipeline_run_settlements
+                  WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = $3
+                    AND operation_state = 'complete' AND credit_event_id IS NULL",
+                &[
+                    &run.tenant_id,
+                    &run.run_id,
+                    &InstrumentId::trace_credit().as_str(),
+                ],
+            )
+            .await?
+            .and_then(|row| row.get("last_error_label"));
+        let decision_id = pipeline_gate_decision_id(&run.tenant_id, run.run_id);
+        let gate_policy_version = format!("pipeline:{}", run.bundle_id);
+        let written = tx
+            .execute(
+                "INSERT INTO trace_gate_decisions (
+                     tenant_id, decision_id, submission_id, gate_policy_version,
+                     gate_version_hash, perplexity_micros, tail_fraction_micros,
+                     perplexity_passed, novelty_score_micros, nearest_neighbor_hash,
+                     novelty_passed, embedding_evidence_hash, attestation_chain_hash,
+                     decided_at, credit_withheld_reason,
+                     peak_perplexity_micros, peak_novelty_micros, chunk_count,
+                     chunks_capped, total_chunk_count,
+                     credit_quality_micros, credit_quality_calibration_version,
+                     index_cardinality_at_scoring, source, pipeline_run_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,NOW(),$14,
+                           $15,$16,$17,$18,$19,$20,$21,$22,'pipeline_settle',$23)
+                 ON CONFLICT DO NOTHING",
+                &[
+                    &run.tenant_id,
+                    &decision_id,
+                    &run.submission_id,
+                    &gate_policy_version,
+                    &score_policy.configuration_hash,
+                    &values.perplexity_micros,
+                    &values.tail_fraction_micros,
+                    &values.perplexity_passed,
+                    &values.novelty_score_micros,
+                    &values.nearest_neighbor_hash,
+                    &values.novelty_passed,
+                    &values.embedding_evidence_hash,
+                    &attestation_chain_hash,
+                    &credit_withheld_reason,
+                    &values.peak_perplexity_micros,
+                    &values.peak_novelty_micros,
+                    &values.chunk_count,
+                    &values.chunks_capped,
+                    &values.total_chunk_count,
+                    &values.credit_quality_micros,
+                    &values.credit_quality_version,
+                    &values.index_cardinality,
+                    &run.run_id,
+                ],
+            )
+            .await?;
+        if written == 1 {
+            return Ok(true);
+        }
+        // The targetless conflict clause covers both the primary key and
+        // V116's `trace_gate_decisions_one_pipeline_row`. Nothing was
+        // written, so the submission's pipeline row must already be this
+        // run's (a retried commit); a row naming another run means a second
+        // run reached Settle for the same submission, which
+        // `insert_pipeline_receipt` is meant to prevent. That refuses here,
+        // classified, rather than leaving the other run's row standing as
+        // this run's verdict.
+        let owner: Option<Uuid> = tx
+            .query_opt(
+                "SELECT pipeline_run_id FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle'",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+            .and_then(|row| row.get("pipeline_run_id"));
+        if owner == Some(run.run_id) {
+            Ok(false)
+        } else {
+            Err(DatabaseError::Constraint(
+                PIPELINE_GATE_DECISION_CONFLICT_LABEL.to_string(),
+            ))
+        }
     }
 
     /// Fails the run terminally under its live lease. When the
@@ -6620,6 +6918,38 @@ async fn invalidate_pipeline_exports_on_tx(
         &[&tenant_id, &submission_ids],
     )
     .await?;
+    clear_gate_decision_dedup_on_tx(tx, tenant_id, submission_ids).await?;
+    Ok(())
+}
+
+/// Clears the dedup columns of the submissions' `trace_gate_decisions` rows
+/// on the caller's transaction (spec 2026-10-08, Slice C, C-D6): the same
+/// UPDATE as `main`'s `clear_trace_dedup_cluster_for_submission`, and
+/// nothing else. The row stays (account trust keeps the gate evaluation as
+/// history), and no withdrawal value is written into
+/// `credit_withheld_reason`, whose only `main` writer is the gate path.
+/// Idempotent.
+async fn clear_gate_decision_dedup_on_tx(
+    tx: &Transaction<'_>,
+    tenant_id: &str,
+    submission_ids: &[Uuid],
+) -> Result<(), DatabaseError> {
+    if submission_ids.is_empty() {
+        return Ok(());
+    }
+    // The version stamp goes with the value it names (V57).
+    tx.execute(
+        "UPDATE trace_gate_decisions
+            SET dedup_simhash = NULL,
+                dedup_cluster_id = NULL,
+                dedup_cluster_size = NULL,
+                dedup_signal_version = NULL
+          WHERE tenant_id = $1 AND submission_id = ANY($2)
+            AND (dedup_simhash IS NOT NULL OR dedup_cluster_id IS NOT NULL
+                 OR dedup_cluster_size IS NOT NULL OR dedup_signal_version IS NOT NULL)",
+        &[&tenant_id, &submission_ids],
+    )
+    .await?;
     Ok(())
 }
 
@@ -7871,6 +8201,19 @@ impl PipelineService {
         self.settle_evaluations.load(Ordering::SeqCst)
     }
 
+    /// The tenant's authority as the provider resolves it now: `None`
+    /// with no provider or no authority for the tenant, an error (its
+    /// label) when the provider's read fails.
+    async fn resolve_authority(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Option<crate::trace_authority::SubmissionAuthority>> {
+        match self.authority.as_ref() {
+            Some(provider) => provider.resolve_authority(tenant_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub fn dependency_qualification(&self) -> PipelineDependencyQualification {
         PipelineDependencyQualification {
             scorer: self
@@ -8709,11 +9052,14 @@ impl PipelineService {
 
         // 1. The authority lookup and the privacy-boundary presence check
         // run before any database work, so a tenant with a missing control
-        // fails closed with no run and no staging row (Ruling T2-1).
+        // fails closed with no run and no staging row (Ruling T2-1). The
+        // authority is resolved now, as `main`'s admission resolves it: a
+        // policy read from the database is read here, on its own pooled
+        // connection, returned before anything else checks one out. A
+        // failed read refuses with its label.
         let authority = self
-            .authority
-            .as_ref()
-            .and_then(|provider| provider.authority_for_tenant(tenant_id))
+            .resolve_authority(tenant_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!(PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL))?;
         let privacy = self
             .privacy
@@ -10456,12 +10802,39 @@ impl PipelineService {
                 )
                 .await
             }
+            // The tenant authority could not be read (a tenant whose policy
+            // `main` reads from the database, and the read failed). It is
+            // not the trace's fault either: the same uncharged suspension,
+            // so an outage cannot spend the run's attempts and fail it, and
+            // the retry reads the policy again. No leg settles without it:
+            // the Settle reads run before the dispatch and before the
+            // ledger transaction.
+            Err(error) if error.to_string() == PIPELINE_AUTHORITY_READ_FAILED_LABEL => {
+                self.mark_transient_retry_or_record_lease_expired(
+                    &run,
+                    PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+                )
+                .await
+            }
             Err(error) => {
                 let label = error.to_string();
                 if label == PIPELINE_INDEX_CONFLICT_LABEL {
                     return self
                         .mark_failed_or_record_lease_expired(&run, PIPELINE_INDEX_CONFLICT_LABEL)
                         .await;
+                }
+                // Spec 2026-10-08, Slice C: Settle's gate decision row
+                // cannot be written -- the compatibility Score evidence lacks
+                // a field the row needs, or the submission's pipeline row
+                // names another run. Both are deterministic, so the run fails
+                // terminally instead of spending its attempts. Settle checks
+                // the evidence before any leg settles, and `mark_failed`
+                // resolves only legs still open, so a completed leg stays
+                // complete.
+                if label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL
+                {
+                    return self.mark_failed_or_record_lease_expired(&run, &label).await;
                 }
                 // In Review, an inoperable
                 // submission (withdrawn, expired, or purged) is permanent --
@@ -11499,6 +11872,14 @@ impl PipelineService {
                 && *score_decision.awards() == score_evaluation.awards,
             "score_outcome_invalid"
         );
+        // Spec 2026-10-08, Slice C: a compatibility run's commit writes a
+        // gate decision row from this evidence. Checked here, before the
+        // index write or any leg settles, so evidence the row cannot be
+        // built from fails the run with nothing paid.
+        if bundle.package.manifest.score.implementation_id == COMPATIBILITY_SCORE_IMPLEMENTATION {
+            PipelineGateDecisionScoreValues::from_evidence(&score_evidence)
+                .map_err(|label| anyhow::anyhow!(label))?;
+        }
 
         // Step 2 (brief 3C, `ensure_operations_match_committed_awards`):
         // the settlement rows Score seeded (decision D5) must still be
@@ -11898,11 +12279,20 @@ impl PipelineService {
                             .and_then(|award| award.trace_credit_microcredits())
                             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
                     let withheld = {
+                        // Resolved before the transaction takes a pooled
+                        // connection: a policy read from the database uses
+                        // its own, as `main`'s credit check reads it.
+                        let authority = self.resolve_authority(&run.tenant_id).await?;
                         let mut client = self.backend.trace_pool().get().await?;
                         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id)
                             .await?;
                         let withheld = self
-                            .novelty_utility_withheld_reason(&tx, &run, amount.get())
+                            .novelty_utility_withheld_reason(
+                                &tx,
+                                &run,
+                                amount.get(),
+                                authority.as_ref(),
+                            )
                             .await?;
                         tx.commit().await?;
                         withheld
@@ -12382,8 +12772,15 @@ impl PipelineService {
             // verbatim (as for Review and Score above), so it is re-raised
             // bare. The commit wrote nothing; the legs this attempt completed
             // stay complete, and the retry after the resume commits from them.
+            //
+            // The gate decision row's refusals are re-raised bare for the
+            // same reason, and `process_claimed_run` fails the run
+            // terminally on them: both are deterministic, so a retry would
+            // fail the same way.
             Err(DatabaseError::Constraint(label))
-                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+                if label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL
+                    || label == PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL
+                    || label == PIPELINE_GATE_DECISION_CONFLICT_LABEL =>
             {
                 return Err(anyhow::anyhow!(label));
             }
@@ -12614,6 +13011,16 @@ impl PipelineService {
         let witness_provenance_class = self
             .credit_witness_provenance_class(&run.tenant_id, run.submission_id)
             .await;
+        // The tenant authority the `NoveltyUtility` check below reads,
+        // resolved now, before the credit transaction takes a pooled
+        // connection: `main` reads the tenant policy, then credits in a
+        // separate transaction, and so does this.
+        let novelty_utility_authority =
+            if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
+                self.resolve_authority(&run.tenant_id).await?
+            } else {
+                None
+            };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -12695,7 +13102,12 @@ impl PipelineService {
         // the Score decision stays as it was.
         if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
             if let Some(label) = self
-                .novelty_utility_withheld_reason(&tx, run, amount.get())
+                .novelty_utility_withheld_reason(
+                    &tx,
+                    run,
+                    amount.get(),
+                    novelty_utility_authority.as_ref(),
+                )
                 .await?
             {
                 update_settlement_on_tx(
@@ -12851,7 +13263,9 @@ impl PipelineService {
     ///   T15-9); the tenant authority's own allowlists were applied to this
     ///   submission at the receipt (`SubmissionAuthority::permits`).
     /// - The tenant policy comes from the authority provider, the source the
-    ///   receipt uses. No authority for the tenant, no policy while one is
+    ///   receipt uses, resolved by the caller just before its transaction
+    ///   (`resolve_authority`; a failed read is an error, retried, never a
+    ///   withheld leg). No authority for the tenant, no policy while one is
     ///   required, or a submission row whose scopes or uses do not decode is
     ///   `credit_check_error`, where `main` fails the call; a withheld leg is
     ///   never a charged Settle error.
@@ -12869,6 +13283,7 @@ impl PipelineService {
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
         amount_microcredits: u64,
+        authority: Option<&crate::trace_authority::SubmissionAuthority>,
     ) -> anyhow::Result<Option<&'static str>> {
         let checks = &self.novelty_utility_checks;
         if checks.require_production_gate {
@@ -12892,11 +13307,7 @@ impl PipelineService {
         if checks.issuer_principal_ref.is_none() {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         }
-        let Some(authority) = self
-            .authority
-            .as_ref()
-            .and_then(|provider| provider.authority_for_tenant(&run.tenant_id))
-        else {
+        let Some(authority) = authority else {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         };
         if authority.policy.is_none() && authority.require_policy {

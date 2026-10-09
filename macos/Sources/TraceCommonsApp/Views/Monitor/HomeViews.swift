@@ -111,6 +111,11 @@ private struct HomeOverview: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // The inspector stays closed on Home (owner, 2026-10-08), so
+                // the core's health, the undos, the offers and the
+                // first-contribution note head the page, as they head the
+                // Traces tree.
+                InspectorPromptsHeader(traces: traces)
                 watching
                 stats
                 // Ron's Missions card: the local drafts, under his Drafts tag.
@@ -201,40 +206,39 @@ private struct HomeOverview: View {
 
     /// Ron's status card: the dot, the watching line in 600, and under it
     /// the sessions waiting and how many are worth a second look, 12 apart.
+    /// The whole card is the way into the tree, a chevron at its end as the
+    /// other Home cards have (owner, 2026-10-08: no Open Traces link).
     private var watching: some View {
         let state = state
-        return GlassCard {
-            HStack(spacing: GlassTokens.Space.s6) {
-                // #1146 `home-view.tsx`: the dot is the two lines' sibling,
-                // so the second line starts under the first line's words,
-                // after the dot, never under the dot.
-                VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
-                    status(state)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                    // Ron's #1146 second line: sessions waiting and how many
-                    // are worth a second look. Only from the core's count:
-                    // an unknown count draws no line, never "nothing".
-                    if let line = HomeFormat.waitingLine(traces.decisionsOwed, sessions: traces.tree.allSessions) {
-                        Text(line)
-                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .alignmentGuide(.homeStatusText) { $0[.leading] }
+        return Button(action: openTraces) {
+            GlassCard(interactive: true) {
+                HStack(spacing: GlassTokens.Space.s6) {
+                    // #1146 `home-view.tsx`: the dot is the two lines' sibling,
+                    // so the second line starts under the first line's words,
+                    // after the dot, never under the dot.
+                    VStack(alignment: .homeStatusText, spacing: GlassTokens.Space.s1) {
+                        status(state)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                        // Ron's #1146 second line: sessions waiting and how many
+                        // are worth a second look. Only from the core's count:
+                        // an unknown count draws no line, never "nothing".
+                        if let line = HomeFormat.waitingLine(traces.decisionsOwed, sessions: traces.tree.allSessions) {
+                            Text(line)
+                                .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                                .foregroundStyle(GlassColor.textSecondary)
+                                .alignmentGuide(.homeStatusText) { $0[.leading] }
+                        }
                     }
+                    Spacer(minLength: 0)
+                    HomeChevron()
                 }
-                .accessibilityElement(children: .combine)
-                Spacer(minLength: 0)
-                // The way into the tree, as #1146's status card has it.
-                Button(action: openTraces) {
-                    HStack(spacing: GlassTokens.Space.s1) {
-                        Text(HomeFormat.openTracesWord)
-                        Image(systemName: "chevron.right").glassGlyph(9, weight: .semibold).accessibilityHidden(true)
-                    }
-                }
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
+                .foregroundStyle(GlassColor.textPrimary)
             }
-            .foregroundStyle(GlassColor.textPrimary)
         }
+        .buttonStyle(GlassPressStyle())
+        // One element: the status lines, then what pressing it does.
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(HomeFormat.openTracesWord)
     }
 
     @ViewBuilder

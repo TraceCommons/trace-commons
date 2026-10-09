@@ -32,26 +32,41 @@ struct FirstContributionGlassNote: View {
     let reviewing: Bool
 
     @State private var agentSetupOpen = false
+    /// Closed with its X, for good on this Mac (owner, 2026-10-08). It
+    /// leaves by itself once History has a row anyway.
+    @AppStorage("monitor.firstContributionDismissed") private var dismissed = false
 
     var body: some View {
-        GlassCard(quiet: true) {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                Text(copy.heading)
-                    .glassType(GlassTokens.TypeScale.bodyStrong)
-                    .foregroundStyle(GlassColor.textPrimary)
-                Group {
-                    Text(reviewing ? copy.review : copy.start)
-                    Text(copy.followUp)
-                }
-                .glassType(GlassTokens.TypeScale.caption)
-                .foregroundStyle(GlassColor.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                GlassExpander(QueueLegacyWords.agentSetup, isOpen: $agentSetupOpen)
-                if agentSetupOpen {
-                    Text(copy.agentSetup)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
+        if !dismissed {
+            // Drawn as the Private AI offer beside it is: the title and the
+            // body at the same sizes and colour (owner, 2026-10-08).
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    Text(copy.heading)
+                        .glassType(GlassTokens.TypeScale.title)
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                        .padding(.trailing, CardClose.clearance)
+                    VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                        Text(reviewing ? copy.review : copy.start)
+                        Text(copy.followUp)
+                    }
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    GlassExpander(QueueLegacyWords.agentSetup, isOpen: $agentSetupOpen)
+                    if agentSetupOpen {
+                        Text(copy.agentSetup)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                CardClose(label: ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) {
+                    dismissed = true
                 }
             }
         }
@@ -126,29 +141,42 @@ struct PrivateAIOfferGlassCard: View {
         textStyle: .caption2, size: 10, weight: .heavy, lineHeight: 10, tracking: 1.6,
         design: .monospaced, uppercase: true, tabular: false)
 
+    /// The rest of the offer's paragraphs are shown.
+    @State private var learnMore = false
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 Text(copy.destination)
                     .glassType(Self.destinationType)
                     .foregroundStyle(GlassColor.accentText)
+                    .padding(.top, GlassTokens.Space.s1)
                     .padding(.bottom, GlassTokens.Space.s3)
                 Text(copy.offerTitle)
                     .glassType(GlassTokens.TypeScale.title)
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
-                // What it does, what it exposes, what it does not do, and
-                // that it is asked once: four paragraphs drawn alike.
+                    .padding(.trailing, CardClose.clearance)
+                // What it does and, in one line, what it exposes; the full
+                // exposure, what it does not do and that it is asked once
+                // behind Learn more (owner, 2026-10-08).
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     Text(copy.offerWhat)
-                    Text(copy.offerExposure)
-                    Text(copy.offerNoRepoint)
-                    Text(copy.offerAskedOnce)
+                    Text(copy.offerExposureShort)
+                    if learnMore {
+                        Text(copy.offerExposure)
+                        Text(copy.offerNoRepoint)
+                        Text(copy.offerAskedOnce)
+                    }
                 }
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
+                if !learnMore {
+                    Button(copy.offerLearnMore) { learnMore = true }
+                        .buttonStyle(GlassButtonStyle(.link))
+                }
                 HStack(spacing: GlassTokens.Space.s3) {
                     Button(copy.offerDecline, action: onDecline)
                         .buttonStyle(GlassButtonStyle(.glass))
@@ -157,7 +185,42 @@ struct PrivateAIOfferGlassCard: View {
                 }
             }
         }
+        // The X answers as Not now does: the offer is asked once, so
+        // closing it is an answer, not a deferral (owner, 2026-10-08).
+        .overlay(alignment: .topTrailing) { CardClose(label: copy.offerDecline, action: onDecline) }
         .accessibilityElement(children: .contain)
+    }
+}
+
+/// A card's close X (owner, 2026-10-08): the glyph alone, no container,
+/// the same distance from the card's top and trailing edges; secondary,
+/// primary under the pointer, with a control-sized target.
+private struct CardClose: View {
+    let label: String
+    let action: () -> Void
+    @State private var hovering = false
+
+    /// The glyph's inset from the card's top and trailing edges.
+    static let inset: CGFloat = GlassTokens.Space.s6
+    /// The glyph's side.
+    static let glyph: CGFloat = 12
+    /// What a heading beside the X leaves free on its trailing side.
+    static let clearance: CGFloat = glyph + GlassTokens.Space.s4
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "xmark")
+                .glassGlyph(Self.glyph, weight: .semibold)
+                .foregroundStyle(hovering ? GlassColor.textPrimary : GlassColor.textSecondary)
+                // A larger target than the glyph, centred so the glyph sits
+                // exactly `inset` from both edges.
+                .padding(Self.inset)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .onHover { hovering = $0 }
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 

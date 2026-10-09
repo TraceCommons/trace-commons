@@ -25,11 +25,13 @@ use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper};
 
 /// A store read that reached the object and found it missing or not what its
 /// receipt names: not found, a tenant, kind, key, object-ref or hash
-/// mismatch, an invalidated object, or a decode, decrypt or parse failure
-/// (Zaki's approval of #1143, follow-up ZA-2). Retrying cannot change it,
-/// unlike a transport or availability failure -- an I/O error reading the
-/// object, a remote fetch that failed, a key-wrap service that could not
-/// unwrap the key -- which carries no such marker. It wraps the failure as a
+/// mismatch, an invalidated object, a decode, decrypt or parse failure, or
+/// a wrapped DEK the key wrapper cannot decode, size or authenticate (Zaki's
+/// approval of #1143, follow-up ZA-2; PR #1283 review, finding 1). Retrying
+/// cannot change it, unlike a transport or availability failure -- an I/O
+/// error reading the object, a remote fetch that failed, a key-wrap service
+/// call that failed, a record of another wrapper kind -- which carries no
+/// such marker. It wraps the failure as a
 /// context whose message is the failure's own, so a read's error message is
 /// what it was; `is_trace_artifact_integrity_error` tells the two apart.
 #[derive(Debug, Clone)]
@@ -986,6 +988,41 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
         )
     }
 
+    /// Whether the object at `object_ref` decrypts under this store's key
+    /// wrapper: its record is read and verified as `read_scoped_artifact`
+    /// does, its DEK unwrapped under the wrapper, and its ciphertext
+    /// decrypted. The plaintext is never returned or written, and is
+    /// zeroized when dropped. Only a v2 record (a wrapped DEK) passes: a v1
+    /// record never touched the wrapper.
+    pub fn verify_scoped_artifact_decrypts(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<()> {
+        let artifact = self.read_scoped_artifact(expected_scope, object_ref)?;
+        anyhow::ensure!(
+            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2,
+            "trace_artifact_not_key_wrapped"
+        );
+        let wrapped = artifact
+            .wrapped_dek
+            .as_ref()
+            .context("trace_artifact_not_key_wrapped")?;
+        let dek = self.kek.unwrap_dek(
+            wrapped,
+            &KekContext {
+                tenant_storage_ref: expected_scope.tenant_storage_ref.clone(),
+                artifact_kind: object_ref.artifact_kind.clone(),
+            },
+        )?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(artifact.ciphertext_base64.as_bytes())
+            .context("trace_artifact_ciphertext_invalid")?;
+        let plaintext = Zeroizing::new(aead_decrypt_with_dek(&dek, &ciphertext)?);
+        drop(plaintext);
+        Ok(())
+    }
+
     pub fn invalidate_scoped_artifact(
         &self,
         expected_scope: &TraceArtifactScope,
@@ -1880,10 +1917,12 @@ fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
     artifact: &EncryptedTraceArtifact,
     artifact_kind: &TraceArtifactKind,
 ) -> anyhow::Result<T> {
-    // The key-wrap service's unwrap is the one step that can fail for a
-    // reason outside the object (the service is unavailable), so it is the
-    // one failure left unmarked; every other failure is an integrity
-    // failure.
+    // Every failure here is an integrity failure except two inside the
+    // unwrap, which the wrapper leaves unmarked: its key-wrap service call
+    // (the service may be unavailable) and a record of another wrapper kind
+    // (a key-provider migration). The wrapper marks the unwrap's failures
+    // that come from the record's own bytes (`trace_artifact_kek`), and the
+    // context below keeps that marker.
     match artifact.schema_version.as_str() {
         v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION => {
             if artifact.wrapped_dek.is_some() {
@@ -3446,5 +3485,157 @@ mod tests {
             .read_artifact("tenant:sha256:abc123", &receipt)
             .expect_err("deleted artifact should not read");
         assert!(error.to_string().contains("failed to read trace artifact"));
+    }
+
+    /// PR #1283 review, finding 1: the wrapped DEK is bytes inside the
+    /// object that no hash covers, so a key-wrap record the wrapper cannot
+    /// decode, size, or authenticate is an integrity failure, charged like
+    /// any other corrupt object. A key-wrap service that is unreachable,
+    /// and a record wrapped by another kind of wrapper (what a key-provider
+    /// migration would show on every record), stay transport: uncharged.
+    #[test]
+    fn a_corrupt_wrapped_dek_is_an_integrity_failure_and_an_unwrap_outage_is_not() {
+        use crate::trace_artifact_kek::{CloudKmsKeyWrapper, InMemoryCloudKmsClient, WrappedDek};
+
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let kind = TraceArtifactKind::ContributionEnvelope;
+
+        // The local wrapper.
+        let store = test_remote_store();
+        let prepared = store
+            .prepare_scoped_bytes(&scope, kind.clone(), "kek-object", br#"{"safe":true}"#)
+            .expect("the artifact prepares");
+        let read = |artifact: &EncryptedTraceArtifact| {
+            decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+                &store.crypto,
+                &store.kek,
+                artifact,
+                &kind,
+            )
+        };
+        assert_eq!(
+            read(&prepared.artifact).expect("the artifact reads"),
+            json!({"safe": true})
+        );
+        let with_wrapped = |ciphertext_base64: String| {
+            let mut artifact = prepared.artifact.clone();
+            artifact.wrapped_dek.as_mut().unwrap().ciphertext_base64 = ciphertext_base64;
+            artifact
+        };
+        let packed = base64::engine::general_purpose::STANDARD
+            .decode(
+                &prepared
+                    .artifact
+                    .wrapped_dek
+                    .as_ref()
+                    .unwrap()
+                    .ciphertext_base64,
+            )
+            .unwrap();
+        let mut flipped = packed.clone();
+        *flipped.last_mut().unwrap() ^= 0x01;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for (case, ciphertext_base64) in [
+            ("not base64", "!!! not base64 !!!".to_string()),
+            ("too short", encode(&[0u8])),
+            ("salt longer than the buffer", encode(&[200u8, 1, 2, 3])),
+            ("ciphertext that does not authenticate", encode(&flipped)),
+        ] {
+            let error = read(&with_wrapped(ciphertext_base64)).expect_err(case);
+            assert!(
+                is_trace_artifact_integrity_error(&error),
+                "{case}: {error:#}"
+            );
+        }
+        let mut other_kind = prepared.artifact.clone();
+        other_kind.wrapped_dek.as_mut().unwrap().wrapper_kind = "gcp_cloud_kms".to_string();
+        let error = read(&other_kind).expect_err("another wrapper's record");
+        assert!(
+            !is_trace_artifact_integrity_error(&error),
+            "a wrapper-kind mismatch is transport: {error:#}"
+        );
+
+        // The cloud wrapper, over the in-memory KMS.
+        let cloud = CloudKmsKeyWrapper::new(
+            InMemoryCloudKmsClient::new_with_master([7u8; 32], "projects/p/keys/k"),
+            "gcp_cloud_kms",
+        );
+        let context = KekContext {
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            artifact_kind: kind.clone(),
+        };
+        let read_cloud = |wrapped: WrappedDek| {
+            let mut artifact = prepared.artifact.clone();
+            artifact.wrapped_dek = Some(wrapped);
+            decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+                &store.crypto,
+                &cloud,
+                &artifact,
+                &kind,
+            )
+        };
+        let mut not_base64 = cloud.wrap_dek(&[1u8; 32], &context).unwrap();
+        not_base64.ciphertext_base64 = "!!! not base64 !!!".to_string();
+        let error = read_cloud(not_base64).expect_err("not base64");
+        assert!(is_trace_artifact_integrity_error(&error), "{error:#}");
+
+        /// A KMS whose decrypt answers a short key, and one that cannot be
+        /// reached.
+        struct ShortKeyKms;
+        impl crate::trace_artifact_kek::CloudKmsClient for ShortKeyKms {
+            fn encrypt(&self, plaintext: &[u8], _aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+                Ok(plaintext.to_vec())
+            }
+            fn decrypt(
+                &self,
+                _ciphertext: &[u8],
+                _aad: &[u8],
+            ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+                Ok(Zeroizing::new(vec![0u8; 16]))
+            }
+            fn key_ref(&self) -> &str {
+                "short"
+            }
+        }
+        struct UnreachableKms;
+        impl crate::trace_artifact_kek::CloudKmsClient for UnreachableKms {
+            fn encrypt(&self, plaintext: &[u8], _aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+                Ok(plaintext.to_vec())
+            }
+            fn decrypt(
+                &self,
+                _ciphertext: &[u8],
+                _aad: &[u8],
+            ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+                anyhow::bail!("kms unavailable")
+            }
+            fn key_ref(&self) -> &str {
+                "unreachable"
+            }
+        }
+        let short = CloudKmsKeyWrapper::new(ShortKeyKms, "gcp_cloud_kms");
+        let wrapped = short.wrap_dek(&[1u8; 32], &context).unwrap();
+        let mut artifact = prepared.artifact.clone();
+        artifact.wrapped_dek = Some(wrapped.clone());
+        let error = decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+            &store.crypto,
+            &short,
+            &artifact,
+            &kind,
+        )
+        .expect_err("a DEK of the wrong length");
+        assert!(is_trace_artifact_integrity_error(&error), "{error:#}");
+        let unreachable = CloudKmsKeyWrapper::new(UnreachableKms, "gcp_cloud_kms");
+        let error = decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+            &store.crypto,
+            &unreachable,
+            &artifact,
+            &kind,
+        )
+        .expect_err("an unreachable KMS");
+        assert!(
+            !is_trace_artifact_integrity_error(&error),
+            "a KMS call that fails is transport: {error:#}"
+        );
     }
 }

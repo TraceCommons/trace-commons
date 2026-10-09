@@ -157,3 +157,10 @@ See `CLAUDE.md`: build and verification commands (note CI applies
 `RUSTFLAGS=-D warnings`, so plain `cargo check` does not catch what CI catches),
 the CI job inventory, hash-only logging, fail-closed defaults, tenant scoping,
 RLS, and the repo's known gotchas.
+
+## Product text
+
+When adding or changing user-facing UI text, follow
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
+preserved context, separate titles and accessibility names, and shared-copy
+review checks.

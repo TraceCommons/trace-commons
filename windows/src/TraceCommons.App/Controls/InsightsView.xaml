@@ -330,7 +330,7 @@
                     <TextBlock x:Name="SelectedFile" Text="{Binding [no_file]}" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <Button Content="{Binding [analyze]}" Click="OnAnalyze" IsEnabled="{Binding Idle}" />
-                        <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" />
+                        <Button Content="{Binding [save]}" Click="OnSave" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [save_accessibility]}" />
                         <Button Content="{Binding [cancel]}" Click="OnCancel" IsEnabled="{Binding Busy}" />
                     </StackPanel>
                     <TextBlock Text="{Binding [save_notice]}" TextWrapping="Wrap" />
@@ -361,11 +361,11 @@
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
                     </Expander>
-                    <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" />
+                    <Button Content="{Binding [refresh]}" Click="OnRefresh" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [refresh_accessibility]}" />
                     <ListView x:Name="SavedList" ItemsSource="{Binding Saved}" DisplayMemberPath="Label" MaxHeight="200" SelectionMode="Multiple" IsEnabled="{Binding Idle}" AutomationProperties.Name="{Binding [saved]}" />
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <Button Content="{Binding [explain]}" Click="OnExplain" IsEnabled="{Binding Idle}" />
-                        <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" />
+                        <Button Content="{Binding [delete]}" Click="OnDelete" IsEnabled="{Binding HasSavedSelection}" AutomationProperties.Name="{Binding [delete_accessibility]}" />
                     </StackPanel>
                     <Expander Header="{Binding [card_title]}" HorizontalAlignment="Stretch">
                         <StackPanel Spacing="10">
@@ -451,7 +451,7 @@
                                 </ComboBox>
                             </StackPanel>
                             <StackPanel Orientation="Horizontal" Spacing="12">
-                                <Button Content="{Binding [episode_save_assessment]}" Click="OnSaveEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
+                                <Button Content="{Binding [episode_save_assessment]}" Click="OnSaveEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" AutomationProperties.Name="{Binding [episode_save_assessment_accessibility]}" />
                                 <Button Content="{Binding [episode_clear_assessment]}" Click="OnClearEpisodeAssessment" IsEnabled="{Binding HasEpisodeSelection}" />
                                 <Button Content="{Binding [episode_delete]}" Click="OnDeleteEpisode" IsEnabled="{Binding HasEpisodeSelection}" />
                             </StackPanel>

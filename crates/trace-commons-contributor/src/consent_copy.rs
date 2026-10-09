@@ -265,8 +265,8 @@ pub const VOID_PROJECT_REARM: &str = "You can turn automatic contributing back o
 /// the terms now in force. A shell sends it as `set_project_mode` with the
 /// element's `project_id` and `auto_upload` -- the same call, and the same
 /// `armed-auto-upload` audit row, as arming the project by hand. Arming
-/// clears the notice.
-pub const VOID_REARM_ACTION: &str = "Turn back on";
+/// clears the notice. Approved 2026-10-08 (button rule).
+pub const VOID_REARM_ACTION: &str = "Turn on";
 
 /// Shown when the daemon refuses the re-arm (no config to record terms from,
 /// a project it no longer knows, the unknown bucket). The notice stays, and
@@ -530,8 +530,8 @@ pub const VOID_GRANT_REGRANT: &str = "You can turn automatic contributing back o
 /// The button beside [`VOID_GRANT_REGRANT`]. It opens the grant screens; it
 /// gives nothing by itself.
 ///
-/// Approved 2026-10-06.
-pub const VOID_GRANT_REGRANT_ACTION: &str = "Review and turn back on";
+/// Approved 2026-10-06. Approved 2026-10-08 (button rule).
+pub const VOID_GRANT_REGRANT_ACTION: &str = "Review settings";
 
 /// A void notice for a shell that can give the Flow 1 grant.
 ///
@@ -637,11 +637,40 @@ pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice 
 /// armed when its first one lands.
 pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
 
+/// The automatic path's first line, which a shell shows on its own with
+/// [`AUTO_PATH_AUTOMATIC_DETAIL`] behind an info button.
+///
+/// Approved 2026-10-08 (owner, dictated).
+pub const AUTO_PATH_AUTOMATIC_TITLE: &str =
+    "Contribute automatically from projects that first appear.";
+
+/// The rest of [`AUTO_PATH_AUTOMATIC`], behind the title line's info
+/// button, so the K3/K4 meaning is all still said: only projects that first
+/// appear after the grant are armed, and a project with sessions on disk
+/// keeps asking.
+///
+/// First sentence: approved 2026-10-08 -- written from the owner's example, to keep "after you turn this on" now that the title
+/// line drops it. Second sentence: [`AUTO_PATH_AUTOMATIC`]'s own, approved
+/// 2026-10-06.
+pub const AUTO_PATH_AUTOMATIC_DETAIL: &str = "Only projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
+
 /// The ask-first path, as the path question offers it.
 ///
-/// Approved 2026-10-06. "Contributed", not "sent": reviewing with a
-/// witness or the privacy scan sends a session somewhere before approval.
-pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
+/// Approved 2026-10-06; the closing clause ("and you can set a project to
+/// contribute automatically later") removed by the owner 2026-10-08.
+/// "Contributed", not "sent": reviewing with a witness or the privacy scan
+/// sends a session somewhere before approval.
+pub const AUTO_PATH_ASK_FIRST: &str =
+    "Review each session yourself. Nothing is contributed until you approve it.";
+
+/// The ask-first path's first line, shown on its own with
+/// [`AUTO_PATH_ASK_FIRST_DETAIL`] behind an info button. Approved
+/// 2026-10-08 (owner, dictated).
+pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each session yourself.";
+
+/// The rest of [`AUTO_PATH_ASK_FIRST`]. Approved 2026-10-08 (owner,
+/// dictated).
+pub const AUTO_PATH_ASK_FIRST_DETAIL: &str = "Nothing is contributed until you approve it.";
 
 /// The short tag beside the floor scope (`consent_options`' `always_on`).
 /// One spelling, read by `consent_options` and the first-run Uses screen
@@ -731,6 +760,13 @@ pub struct AutomaticGrantCopy {
     pub scope_required: &'static str,
     pub path_automatic: &'static str,
     pub path_ask_first: &'static str,
+    /// The path answers split for a shell that shows one line and puts the
+    /// rest behind an info button (the first run's Sharing card). Together
+    /// each pair says what its whole sentence says.
+    pub path_automatic_title: &'static str,
+    pub path_automatic_detail: &'static str,
+    pub path_ask_first_title: &'static str,
+    pub path_ask_first_detail: &'static str,
     pub raw_send: &'static str,
 }
 
@@ -766,6 +802,10 @@ pub fn automatic_grant_copy(
         scope_required: AUTO_SCOPE_REQUIRED,
         path_automatic: AUTO_PATH_AUTOMATIC,
         path_ask_first: AUTO_PATH_ASK_FIRST,
+        path_automatic_title: AUTO_PATH_AUTOMATIC_TITLE,
+        path_automatic_detail: AUTO_PATH_AUTOMATIC_DETAIL,
+        path_ask_first_title: AUTO_PATH_ASK_FIRST_TITLE,
+        path_ask_first_detail: AUTO_PATH_ASK_FIRST_DETAIL,
         raw_send: AUTO_RAW_SEND_BOTH_ENCLAVES,
     }
 }
@@ -880,8 +920,8 @@ pub const LEGACY_MIGRATION_OFFER_TITLE: &str = "Move to your NEAR AI account";
 /// declining changes nothing, because coexistence is the default.
 pub const LEGACY_MIGRATION_OFFER_BODY: &str = "You joined with an invite. You can move your contributions to your NEAR AI account instead. Nothing changes unless you choose to, and your invite keeps working if you don't.";
 
-/// Approved 2026-10-06. The button that starts the move.
-pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move to my NEAR AI account";
+/// Approved 2026-10-06. The button that starts the move. Approved 2026-10-08 (button rule).
+pub const LEGACY_MIGRATION_OFFER_ACTION: &str = "Move";
 
 /// Approved 2026-10-06. Shown while the move runs.
 pub const LEGACY_MIGRATION_WORKING: &str = "Moving to your NEAR AI account...";
@@ -2846,6 +2886,32 @@ mod tests {
         assert!(!AUTO_PATH_AUTOMATIC.contains("already on this computer"));
     }
 
+    /// The split path answers (owner, 2026-10-08) lose nothing: the
+    /// ask-first pair is its sentence exactly, and the automatic detail
+    /// still says the grant arms only projects that appear after it and
+    /// that a project with sessions on disk keeps asking.
+    #[test]
+    fn the_split_path_answers_keep_their_whole_meaning() {
+        assert_eq!(
+            format!("{AUTO_PATH_ASK_FIRST_TITLE} {AUTO_PATH_ASK_FIRST_DETAIL}"),
+            AUTO_PATH_ASK_FIRST
+        );
+        assert!(!AUTO_PATH_ASK_FIRST.contains("later"));
+        assert!(AUTO_PATH_AUTOMATIC.starts_with(AUTO_PATH_AUTOMATIC_TITLE.trim_end_matches('.')));
+        assert!(AUTO_PATH_AUTOMATIC_DETAIL.contains("after you turn this on"));
+        assert!(AUTO_PATH_AUTOMATIC_DETAIL.contains("already have sessions"));
+        assert!(
+            AUTO_PATH_AUTOMATIC_DETAIL.ends_with(
+                "Projects that already have sessions on this computer keep asking first."
+            )
+        );
+        let copy = automatic_grant_copy(crate::daemon::automatic_gate::Disclosure::PatternsOnly);
+        assert_eq!(copy.path_ask_first_title, AUTO_PATH_ASK_FIRST_TITLE);
+        assert_eq!(copy.path_ask_first_detail, AUTO_PATH_ASK_FIRST_DETAIL);
+        assert_eq!(copy.path_automatic_title, AUTO_PATH_AUTOMATIC_TITLE);
+        assert_eq!(copy.path_automatic_detail, AUTO_PATH_AUTOMATIC_DETAIL);
+    }
+
     /// The statement, character for character.
     ///
     /// Written out here rather than compared to itself: this is the claim
@@ -3095,7 +3161,7 @@ mod tests {
     /// an action on this project, and the refusal line says nothing changed.
     #[test]
     fn the_rearm_button_turns_it_back_on_and_a_refusal_changes_nothing() {
-        assert_eq!(VOID_REARM_ACTION, "Turn back on");
+        assert_eq!(VOID_REARM_ACTION, "Turn on");
         assert!(VOID_REARM_FAILED.contains("still asks first"));
         assert!(VOID_PROJECT_REARM.contains("agrees to the new settings"));
     }

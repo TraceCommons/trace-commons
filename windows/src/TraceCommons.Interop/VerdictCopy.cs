@@ -32,7 +32,7 @@ public static class VerdictCopy
     /// one-click unanswered submit; this is the opt-in path for answering
     /// once for the whole group, never a step in front of it.
     /// </summary>
-    public const string SubmitAllAs = "Submit all as...";
+    public const string SubmitAllAs = "Submit as...";
 
     public const string SubmitAllAsTooltip =
         "Record the same outcome for every session in this group.";

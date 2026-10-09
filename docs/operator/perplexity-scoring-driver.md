@@ -223,10 +223,15 @@ the backlog with repeated limited calls.
 An author-only pass can only add. For a submission where the scorer
 attributes nothing -- it reports no token lengths, or lengths that never
 tile the chunk -- nothing is written and any value an earlier pass computed
-is left alone. The pass logs three counts when it finishes: `rescored`,
-`failed`, and `author_unattributed`. A pass that reports mostly
-`author_unattributed` has a scorer that supplies no usable token lengths;
-fix that before running it again, because rerunning will not help. A full
+is left alone. The pass logs four counts when it finishes: `rescored`,
+`failed`, `author_unattributed`, and `pipeline_row_skipped`. A pass that
+reports mostly `author_unattributed` has a scorer that supplies no usable
+token lengths; fix that before running it again, because rerunning will not
+help. `pipeline_row_skipped` counts submissions the pass enumerated before
+the pipeline's Settle wrote a row for them: the writers leave such a row
+exactly as Settle wrote it, so nothing is written and the submission is not
+counted in `rescored`. It is expected to be 0 or small, and it is not a
+failure. A full
 (non-author-only) re-score is different: it has just rewritten the row's
 perplexity under the current scorer, so it clears per-author values it
 cannot recompute rather than leave them describing an older scoring.

@@ -44,6 +44,14 @@
 //!   `filesystem_restore_local_only`: a local filesystem copy is not a
 //!   remote restore.
 //!
+//! `pipeline.py promote remote-restore` (spec B-D2) runs the same two tests
+//! with a remote store in place of the artifact root
+//! (`TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE`): the seed writes into the
+//! live store under a namespace of its own, `pipeline_remote_restore_run`
+//! copies that namespace into the scratch store as ciphertext, and the resume
+//! runs on the scratch store and writes a report for `promote` instead of
+//! emitting `pipeline_restore_drill`.
+//!
 //! The fingerprints port `ef97a459:scripts/operator/pipeline-backup-restore-smoke.sh`:
 //! the authoritative SQL (lines 134-173), run here in tenant transactions as
 //! the runtime login, and the artifact tree hash (lines 191-205), taken here
@@ -57,22 +65,25 @@ use std::path::{Path, PathBuf};
 
 use super::pipeline_corpus_pg_tests::{
     ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, TEST_MASTER_KEY_VAR,
-    fixture_envelope, id_hash, load_corpus, main_corpus_path, sha256_bytes, write_atomically,
+    assemble_production_harness_service, fixture_envelope, id_hash, load_corpus, main_corpus_path,
+    production_test_package, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
     assemble_compatibility_pipeline_service_with, expire_run_lease, join_within, mains_database,
-    mains_database_at, pilot_runtime_login, post_trace, qualification_candidate_package,
-    runtime_backend, runtime_backend_at, serve_pipeline_app, tenant_tx, wait_for_pipeline_ready,
-    wait_for_run_complete, wait_for_settle_selection,
+    mains_database_at, pilot_runtime_login, pipeline_http_database_url, post_trace,
+    qualification_candidate_package, runtime_backend, runtime_backend_at, serve_pipeline_app,
+    tenant_tx, wait_for_pipeline_ready, wait_for_run_complete, wait_for_settle_selection,
 };
 use trace_commons_gate_api::SettlementAdapter;
-use trace_commons_gate_api::pipeline::{InstrumentId, Phase};
+use trace_commons_gate_api::pipeline::{BundlePackage, InstrumentId, Phase, TenantStorageRef};
 use trace_commons_server::db::postgres::{TRACE_COMMONS_RLS_TABLES, registered_migrations};
 use trace_commons_server::versioned_pipeline::{PipelineCrashPoint, pipeline_tenant_storage_ref};
 use trace_commons_server::versioned_pipeline_bundle::MINIMAL_INDEX_ID;
 use trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter;
+use trace_commons_server::versioned_pipeline_harness::{HarnessAssembly, HarnessDependencies};
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_production::PRODUCTION_COMPATIBILITY_INDEX_ID;
 use trace_commons_server::versioned_pipeline_qualification::{
     PipelineCheckEmitter, PipelineCheckStatus,
 };
@@ -290,26 +301,68 @@ const AUTHORITATIVE_FINGERPRINT_SQL: &str = r"
 // Configuration and the seed fingerprint file.
 // ---------------------------------------------------------------------------
 
-/// The variables `pipeline.py restore-drill` sets for both tests.
+/// The variables `pipeline.py restore-drill` sets for both tests, and
+/// `pipeline.py promote remote-restore` too, with a remote store in place of
+/// the artifact root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RestoreConfig {
-    artifact_root: PathBuf,
+    artifacts: RestoreArtifacts,
     master_key_hex: String,
     fingerprint_path: PathBuf,
 }
 
+/// Where the seed writes its artifacts and the resume reads them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RestoreArtifacts {
+    /// `pipeline.py restore-drill`: a directory, copied between the two.
+    Local(PathBuf),
+    /// `promote remote-restore` (spec B-D2): a remote store, the live one for
+    /// the seed and the scratch one for the resume, restored between the two
+    /// by `pipeline_remote_restore_run`.
+    Remote(RemoteArtifacts),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteArtifacts {
+    kind: RemoteStoreKind,
+    location: RemoteStoreLocation,
+    /// Where the resume writes what it measured, in place of the
+    /// `pipeline_restore_drill` result (`promote` builds its own result from
+    /// it). The seed ignores it.
+    resume_report_path: Option<PathBuf>,
+}
+
 impl RestoreConfig {
-    /// `Ok(None)` when none of the three variables is set (nothing to run);
-    /// all three otherwise.
+    /// `Ok(None)` when none of the variables is set (nothing to run). The
+    /// master key and the fingerprint path, with exactly one of: the artifact
+    /// root; or a remote store, its kind, and the drill's namespace (and the
+    /// double's root exactly when the kind is the double).
     fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
+        let artifacts = match (var(ARTIFACT_ROOT_VAR), var(REMOTE_ARTIFACT_STORE_VAR)) {
+            (None, None) => None,
+            (Some(root), None) => Some(RestoreArtifacts::Local(PathBuf::from(root))),
+            (None, Some(store)) => {
+                let (Some(kind), Some(namespace)) =
+                    (var(REMOTE_STORE_KIND_VAR), var(REMOTE_NAMESPACE_VAR))
+                else {
+                    return Err("restore_environment_incomplete");
+                };
+                Some(RestoreArtifacts::Remote(RemoteArtifacts {
+                    kind: RemoteStoreKind::from_vars(&kind, var(REMOTE_DOUBLE_ROOT_VAR))?,
+                    location: RemoteStoreLocation::parse(&store, &namespace)?,
+                    resume_report_path: var(REMOTE_RESUME_REPORT_PATH_VAR).map(PathBuf::from),
+                }))
+            }
+            (Some(_), Some(_)) => return Err("restore_environment_incomplete"),
+        };
         match (
-            var(ARTIFACT_ROOT_VAR),
+            artifacts,
             var(TEST_MASTER_KEY_VAR),
             var(RESTORE_FINGERPRINT_PATH_VAR),
         ) {
             (None, None, None) => Ok(None),
-            (Some(artifact_root), Some(master_key_hex), Some(fingerprint_path)) => Ok(Some(Self {
-                artifact_root: PathBuf::from(artifact_root),
+            (Some(artifacts), Some(master_key_hex), Some(fingerprint_path)) => Ok(Some(Self {
+                artifacts,
                 master_key_hex,
                 fingerprint_path: PathBuf::from(fingerprint_path),
             })),
@@ -401,6 +454,524 @@ fn is_sha256_label(value: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
+}
+
+// ---------------------------------------------------------------------------
+// Remote stores (`promote remote-restore`, spec B-D2).
+// ---------------------------------------------------------------------------
+
+/// The remote store the seed writes to (the live store) or the resume reads
+/// from (the scratch store), as `bucket[/prefix]`; its kind; and the drill's
+/// own namespace under it, fresh for each run, so the drill writes nothing
+/// beside the store's own objects and lists only its own.
+const REMOTE_ARTIFACT_STORE_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE";
+const REMOTE_STORE_KIND_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND";
+const REMOTE_NAMESPACE_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_NAMESPACE";
+/// The directory the directory double keeps its buckets in.
+const REMOTE_DOUBLE_ROOT_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_DOUBLE_ROOT";
+/// The remote resume's report (`REMOTE_RESUME_REPORT_SCHEMA`).
+const REMOTE_RESUME_REPORT_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_RESUME_REPORT_PATH";
+/// `pipeline_remote_restore_run`'s two stores and its report.
+const REMOTE_SOURCE_STORE_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_SOURCE_STORE";
+const REMOTE_SCRATCH_STORE_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_SCRATCH_STORE";
+const REMOTE_COPY_REPORT_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_REMOTE_COPY_REPORT_PATH";
+const REMOTE_RESUME_REPORT_SCHEMA: &str = "trace_commons.pipeline_remote_restore_resume.v1";
+
+/// Which `GcsObjectClient` a remote store is opened with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteStoreKind {
+    /// Google Cloud Storage (`ProdGcsObjectClient`, the `gcs-client` build).
+    Gcs,
+    /// `DirectoryGcsObjectClient` over this directory: the drill's processes
+    /// run locally against it. Its kind is not a remote store, so `promote`
+    /// never passes a result measured on it.
+    DirectoryDouble(PathBuf),
+}
+
+impl RemoteStoreKind {
+    fn from_vars(kind: &str, double_root: Option<String>) -> Result<Self, &'static str> {
+        match (kind, double_root) {
+            ("gcs", None) => Ok(Self::Gcs),
+            ("gcs_directory_double", Some(root)) => Ok(Self::DirectoryDouble(PathBuf::from(root))),
+            ("gcs" | "gcs_directory_double", _) => Err("restore_environment_incomplete"),
+            _ => Err("remote_restore_store_kind_invalid"),
+        }
+    }
+
+    /// The report's `object_store_kind`.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Gcs => "gcs",
+            Self::DirectoryDouble(_) => "gcs_directory_double",
+        }
+    }
+}
+
+/// A store name split into its bucket and the key prefix the drill writes
+/// under: the name's own prefix segments, then the namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteStoreLocation {
+    bucket: String,
+    prefix: String,
+}
+
+impl RemoteStoreLocation {
+    /// `name` is `promote`'s store name shape (`_store_name`): a bucket name,
+    /// then optional prefix segments; `namespace` is one prefix segment.
+    fn parse(name: &str, namespace: &str) -> Result<Self, &'static str> {
+        let mut segments = name.split('/');
+        let bucket = segments.next().unwrap_or_default();
+        let prefix: Vec<&str> = segments.collect();
+        if !is_bucket_name(bucket)
+            || !prefix.iter().all(|segment| is_prefix_segment(segment))
+            || !is_prefix_segment(namespace)
+        {
+            return Err("remote_restore_store_name_invalid");
+        }
+        let mut prefix = prefix;
+        prefix.push(namespace);
+        Ok(Self {
+            bucket: bucket.to_string(),
+            prefix: prefix.join("/"),
+        })
+    }
+}
+
+/// `[a-z0-9][a-z0-9._-]{1,61}[a-z0-9]`, as `promote` checks it.
+fn is_bucket_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let edge = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    (3..=63).contains(&bytes.len())
+        && edge(&bytes[0])
+        && edge(&bytes[bytes.len() - 1])
+        && bytes
+            .iter()
+            .all(|byte| edge(byte) || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// `[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}`, never `.` or `..`, as `promote`
+/// checks it.
+fn is_prefix_segment(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 128
+        && bytes[0] != b'.'
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+/// `promote`'s `_overlaps`: one name's segments are a leading part of the
+/// other's.
+fn remote_store_names_overlap(first: &str, second: &str) -> bool {
+    let first: Vec<&str> = first.split('/').collect();
+    let second: Vec<&str> = second.split('/').collect();
+    let shorter = first.len().min(second.len());
+    first[..shorter] == second[..shorter]
+}
+
+/// A bucket as a directory, one file per object, for the drill's processes
+/// to share without a bucket. Versioning is reported off: a directory has no
+/// such policy. Test-only, and only ever selected by
+/// `TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND=gcs_directory_double`.
+struct DirectoryGcsObjectClient {
+    root: PathBuf,
+}
+
+impl DirectoryGcsObjectClient {
+    fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    fn path(&self, key: &str) -> anyhow::Result<PathBuf> {
+        anyhow::ensure!(
+            !key.is_empty()
+                && key
+                    .split('/')
+                    .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+            "gcs_directory_double_key_invalid"
+        );
+        Ok(self.root.join(key))
+    }
+}
+
+impl trace_commons_server::trace_artifact_gcs::GcsObjectClient for DirectoryGcsObjectClient {
+    fn put_object(
+        &self,
+        key: &str,
+        body: bytes::Bytes,
+        _metadata: BTreeMap<String, String>,
+    ) -> anyhow::Result<()> {
+        let path = self.path(key)?;
+        std::fs::create_dir_all(path.parent().expect("a key path has a parent"))?;
+        let temporary = path.with_extension(format!("tmp-{}", Uuid::new_v4()));
+        std::fs::write(&temporary, &body)?;
+        std::fs::rename(&temporary, &path)?;
+        Ok(())
+    }
+
+    fn get_object(
+        &self,
+        key: &str,
+    ) -> anyhow::Result<trace_commons_server::trace_artifact_gcs::GcsObjectFetch> {
+        match std::fs::read(self.path(key)?) {
+            Ok(body) => Ok(trace_commons_server::trace_artifact_gcs::GcsObjectFetch {
+                body: bytes::Bytes::from(body),
+                metadata: BTreeMap::new(),
+            }),
+            // As `InMemoryGcsObjectClient` and the bucket's 404 answer.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(anyhow::Error::from(
+                trace_commons_server::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: not found".to_string(),
+                ),
+            )),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn delete_object(&self, key: &str) -> anyhow::Result<bool> {
+        match std::fs::remove_file(self.path(key)?) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn restore_deleted_object(&self, _key: &str) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        fn walk(root: &Path, dir: &Path, keys: &mut Vec<String>) -> std::io::Result<()> {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                if path.is_dir() {
+                    walk(root, &path, keys)?;
+                } else if path.is_file() {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("a walked path lies under its root");
+                    let key = relative
+                        .components()
+                        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    keys.push(key);
+                }
+            }
+            Ok(())
+        }
+        let mut keys = Vec::new();
+        walk(&self.root, &self.root, &mut keys)?;
+        keys.retain(|key| key.starts_with(prefix));
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        Ok(false)
+    }
+}
+
+type RemoteClient = Arc<
+    trace_commons_server::trace_artifact_gcs::PrefixedGcsObjectClient<
+        Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient>,
+    >,
+>;
+type RemoteProvider =
+    trace_commons_server::trace_artifact_gcs::GcsRemoteTraceArtifactProvider<RemoteClient>;
+
+/// The bucket's client, confined to the location's prefix.
+async fn remote_client(kind: &RemoteStoreKind, location: &RemoteStoreLocation) -> RemoteClient {
+    let bucket: Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient> = match kind {
+        RemoteStoreKind::Gcs => gcs_bucket_client(&location.bucket).await,
+        RemoteStoreKind::DirectoryDouble(root) => {
+            Arc::new(DirectoryGcsObjectClient::new(root.join(&location.bucket)))
+        }
+    };
+    Arc::new(
+        trace_commons_server::trace_artifact_gcs::PrefixedGcsObjectClient::new(
+            bucket,
+            location.prefix.clone(),
+        )
+        .unwrap_or_else(|_| panic!("remote_restore_store_name_invalid")),
+    )
+}
+
+#[cfg(feature = "gcs-client")]
+async fn gcs_bucket_client(
+    bucket: &str,
+) -> Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient> {
+    Arc::new(
+        trace_commons_server::trace_artifact_gcs::prod_client::ProdGcsObjectClient::try_new(
+            bucket.to_string(),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("remote_restore_gcs_client_unavailable")),
+    )
+}
+
+#[cfg(not(feature = "gcs-client"))]
+async fn gcs_bucket_client(
+    _bucket: &str,
+) -> Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient> {
+    panic!("remote_restore_gcs_client_not_compiled")
+}
+
+/// The provider the store writes through, keyed as `remote_gcs` keys the
+/// live store (`TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE`).
+fn remote_provider(client: &RemoteClient, location: &RemoteStoreLocation) -> RemoteProvider {
+    trace_commons_server::trace_artifact_gcs::GcsRemoteTraceArtifactProvider::new(
+        client.clone(),
+        location.bucket.clone(),
+        TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+    )
+}
+
+/// The key wrapper the deployment selects (`TRACE_COMMONS_KEK_PROVIDER`:
+/// GCP KMS on the pilot, the local master key otherwise). On GCS it must be
+/// a production one (`require_production_kek`).
+async fn remote_kek(
+    kind: &RemoteStoreKind,
+    master_key_hex: &str,
+) -> Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync> {
+    let kek =
+        build_selected_kek_wrapper_async(secrecy::SecretString::from(master_key_hex.to_string()))
+            .await
+            .unwrap_or_else(|_| panic!("remote_restore_kek_unavailable"));
+    require_production_kek(kind, kek.is_production_trust_boundary())
+        .unwrap_or_else(|label| panic!("{label}"));
+    kek
+}
+
+/// On GCS the unwrap count is evidence about the deployment's key wrapper,
+/// so the wrapper must be a production trust boundary: under the local
+/// master key the drill would pass and prove nothing about KMS. The
+/// directory double runs on the local key and can never pass anyway.
+fn require_production_kek(
+    kind: &RemoteStoreKind,
+    production_trust_boundary: bool,
+) -> Result<(), &'static str> {
+    match kind {
+        RemoteStoreKind::Gcs if !production_trust_boundary => {
+            Err("remote_restore_kek_not_production")
+        }
+        _ => Ok(()),
+    }
+}
+
+fn remote_crypto(master_key_hex: &str) -> SecretsCrypto {
+    SecretsCrypto::new(secrecy::SecretString::from(master_key_hex.to_string()))
+        .unwrap_or_else(|_| panic!("remote_restore_master_key_invalid"))
+}
+
+/// The service-owned store over one remote location, as the deployment
+/// configures it, and a provider over the same client to fingerprint it.
+struct RemoteRestoreStore {
+    configured: ConfiguredTraceArtifactStore,
+    provider: RemoteProvider,
+}
+
+impl RemoteRestoreStore {
+    async fn open(
+        kind: &RemoteStoreKind,
+        location: &RemoteStoreLocation,
+        master_key_hex: &str,
+    ) -> Self {
+        let client = remote_client(kind, location).await;
+        let kek = remote_kek(kind, master_key_hex).await;
+        let kek_status = kek.safe_status();
+        let store = ServiceOwnedTraceArtifactStore::new(
+            TraceArtifactProviderConfig::service_owned_remote(
+                TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+            )
+            .expect("the service remote store name is valid"),
+            remote_crypto(master_key_hex),
+            kek,
+            remote_provider(&client, location),
+        );
+        Self {
+            configured: ConfiguredTraceArtifactStore::service_remote_for_test(
+                Arc::new(store),
+                "gcs",
+                kek_status,
+            ),
+            provider: remote_provider(&client, location),
+        }
+    }
+
+    fn configured(&self) -> &ConfiguredTraceArtifactStore {
+        &self.configured
+    }
+
+    fn is_empty(&self) -> bool {
+        self.provider
+            .stored_object_keys()
+            .unwrap_or_else(|_| panic!("remote_restore_list_failed"))
+            .is_empty()
+    }
+
+    fn fingerprint(&self) -> String {
+        trace_commons_server::versioned_pipeline_remote_restore::stored_artifact_fingerprint(
+            &self.provider,
+        )
+        .unwrap_or_else(|error| panic!("{error}"))
+        .fingerprint
+    }
+}
+
+/// The artifact store one lifetime of the drill runs on.
+enum RestoreStore {
+    Local {
+        root: PathBuf,
+        configured: ConfiguredTraceArtifactStore,
+    },
+    Remote(RemoteRestoreStore),
+}
+
+impl RestoreStore {
+    async fn open(config: &RestoreConfig) -> Self {
+        match &config.artifacts {
+            RestoreArtifacts::Local(root) => Self::Local {
+                root: root.clone(),
+                configured: ConfiguredTraceArtifactStore::legacy(test_artifact_store_with_key(
+                    root,
+                    &config.master_key_hex,
+                )),
+            },
+            RestoreArtifacts::Remote(remote) => Self::Remote(
+                RemoteRestoreStore::open(&remote.kind, &remote.location, &config.master_key_hex)
+                    .await,
+            ),
+        }
+    }
+
+    fn configured(&self) -> &ConfiguredTraceArtifactStore {
+        match self {
+            Self::Local { configured, .. } => configured,
+            Self::Remote(remote) => remote.configured(),
+        }
+    }
+
+    /// The local tree's fingerprint, or the remote store's stored-object
+    /// fingerprint: each is the same function of the same objects on both
+    /// sides of its restore.
+    fn fingerprint(&self) -> String {
+        match self {
+            Self::Local { root, .. } => artifact_fingerprint(root),
+            Self::Remote(remote) => remote.fingerprint(),
+        }
+    }
+}
+
+/// What `pipeline_remote_restore_run` reads from its environment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteCopyConfig {
+    kind: RemoteStoreKind,
+    source: RemoteStoreLocation,
+    scratch: RemoteStoreLocation,
+    master_key_hex: String,
+    report_path: PathBuf,
+}
+
+impl RemoteCopyConfig {
+    /// `Ok(None)` when none of the variables is set; all of them (the
+    /// double's root exactly for the double) otherwise. The scratch store is
+    /// never the source, nor inside it, nor around it.
+    fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Option<Self>, &'static str> {
+        let names = [
+            REMOTE_STORE_KIND_VAR,
+            REMOTE_SOURCE_STORE_VAR,
+            REMOTE_SCRATCH_STORE_VAR,
+            REMOTE_NAMESPACE_VAR,
+            TEST_MASTER_KEY_VAR,
+            REMOTE_COPY_REPORT_PATH_VAR,
+        ];
+        let values: Vec<Option<String>> = names.iter().map(|name| var(name)).collect();
+        if values.iter().all(Option::is_none) && var(REMOTE_DOUBLE_ROOT_VAR).is_none() {
+            return Ok(None);
+        }
+        let [
+            Some(kind),
+            Some(source),
+            Some(scratch),
+            Some(namespace),
+            Some(master_key_hex),
+            Some(report_path),
+        ] = <[Option<String>; 6]>::try_from(values).expect("six names")
+        else {
+            return Err("remote_restore_environment_incomplete");
+        };
+        let kind =
+            RemoteStoreKind::from_vars(&kind, var(REMOTE_DOUBLE_ROOT_VAR)).map_err(|label| {
+                match label {
+                    "restore_environment_incomplete" => "remote_restore_environment_incomplete",
+                    other => other,
+                }
+            })?;
+        if remote_store_names_overlap(&source, &scratch) {
+            return Err("remote_restore_scratch_overlaps_live_store");
+        }
+        Ok(Some(Self {
+            kind,
+            source: RemoteStoreLocation::parse(&source, &namespace)?,
+            scratch: RemoteStoreLocation::parse(&scratch, &namespace)?,
+            master_key_hex,
+            report_path: PathBuf::from(report_path),
+        }))
+    }
+}
+
+/// The copy step: every object the seed wrote under the source's namespace
+/// restored into the scratch store's (`restore_remote_artifacts`), measured,
+/// and the measurement written to the report path and returned.
+async fn run_remote_copy(config: &RemoteCopyConfig) -> serde_json::Value {
+    let source = remote_client(&config.kind, &config.source).await;
+    let scratch = remote_client(&config.kind, &config.scratch).await;
+    let kek = remote_kek(&config.kind, &config.master_key_hex).await;
+    let copy = trace_commons_server::versioned_pipeline_remote_restore::restore_remote_artifacts(
+        &remote_provider(&source, &config.source),
+        remote_provider(&scratch, &config.scratch),
+        TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE,
+        remote_crypto(&config.master_key_hex),
+        kek,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let report = serde_json::json!({
+        "schema": trace_commons_server::versioned_pipeline_remote_restore::REMOTE_RESTORE_COPY_SCHEMA,
+        "object_store_kind": config.kind.label(),
+        "object_count": copy.object_count,
+        "artifact_fingerprint": copy.artifact_fingerprint,
+        "restored_artifact_fingerprint": copy.restored_artifact_fingerprint,
+        "kek_unwrap_verified_count": copy.kek_unwrap_verified_count,
+        "versioning_enabled": copy.versioning_enabled,
+    });
+    let mut bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&report)
+        .expect("the copy report serialises");
+    bytes.push(b'\n');
+    write_atomically(&config.report_path, &bytes);
+    report
+}
+
+/// `pipeline.py promote remote-restore`, between the restore of the seed's
+/// database and the resume: restores the seed's objects from the live store
+/// into the scratch store at the provider, as ciphertext, and writes the
+/// measurement. Hash-only: no store, bucket, or key name reaches the report
+/// or a panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "the artifact restore of `pipeline.py promote remote-restore`: run it through that command"]
+async fn pipeline_remote_restore_run() {
+    let Some(config) = RemoteCopyConfig::from_vars(|name| std::env::var(name).ok())
+        .unwrap_or_else(|label| panic!("{label}"))
+    else {
+        return;
+    };
+    run_remote_copy(&config).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +1186,33 @@ async fn committed_selection_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> Str
     text
 }
 
+/// Whether `RESTORE_TENANT`'s run for `submission_id` has a durable Settle
+/// selection with at least one settlement operation.
+async fn settle_selection_settles(backend: &Arc<PgBackend>, submission_id: Uuid) -> bool {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_selection_rows_connection_failed");
+    let tx = tenant_tx(&mut client, RESTORE_TENANT).await;
+    let settles: bool = tx
+        .query_one(
+            r"SELECT COALESCE(jsonb_array_length(
+                         settle_selection::jsonb -> 'decision' -> 'settlement_operations') > 0,
+                     false)
+                FROM pipeline_runs
+               WHERE tenant_id = $1 AND submission_id = $2",
+            &[&RESTORE_TENANT, &submission_id],
+        )
+        .await
+        .expect("restore_selection_rows_query_failed")
+        .get(0);
+    tx.commit()
+        .await
+        .expect("restore_selection_rows_query_failed");
+    settles
+}
+
 /// Rows that exist more than once where one logical effect allows one: a
 /// second outcome for a run's phase, a second settlement leg for a run's
 /// instrument, a credit event shared by two legs, and a second ledger event
@@ -678,25 +1276,218 @@ impl RecordingAdapters {
     }
 }
 
-/// The compatibility bundle's service (the `compatibility` bundle of
-/// `pipeline.py run`: a 2_500_000 microcredit `NoveltyUtility` delta, the
-/// pass-through privacy boundary), on the runtime login, over `artifacts`,
-/// with the caller's index, adapters, and crash point.
-fn compatibility_service(
-    runtime: &Arc<PgBackend>,
-    artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
-    index: &Arc<IsolatedPipelineIndex>,
-    adapters: &RecordingAdapters,
-    crash_point: Option<PipelineCrashPoint>,
-) -> Arc<PipelineService> {
-    assemble_compatibility_pipeline_service_with(
-        runtime.clone(),
-        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
-        index.clone(),
-        COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
-        Arc::new(PassThroughPipelinePrivacyBoundary),
-        adapters.registry(),
-        crash_point,
+/// What the drill's services run on (spec B-D1). One value backs every
+/// service of one test, so the services of the seed's two lifetimes see each
+/// other's index writes.
+enum RestoreDependencies {
+    /// The compatibility candidate (the `compatibility` bundle of
+    /// `pipeline.py run`: a 2_500_000 microcredit `NoveltyUtility` delta)
+    /// over an isolated index and one recording `trace_credit` adapter.
+    Reference {
+        index: Arc<IsolatedPipelineIndex>,
+        adapters: RecordingAdapters,
+    },
+    /// The production assembly serving the signed production `package`
+    /// (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`), over
+    /// `PipelineGateComponents::from_env`'s components on the operator host.
+    /// Its settlement adapter is the production one, which records nothing:
+    /// the drill counts settlement from the ledger instead. `rebuilt` is a
+    /// second, empty index the resume rebuilds into for its last comparison.
+    Production {
+        package: Box<BundlePackage>,
+        dependencies: HarnessDependencies,
+        rebuilt: Option<RebuildIndex>,
+    },
+}
+
+/// The resume's rebuild target: a second index, empty when the resume starts.
+struct RebuildIndex {
+    reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
+    writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+}
+
+impl RestoreDependencies {
+    fn reference() -> Self {
+        Self::Reference {
+            index: IsolatedPipelineIndex::new(),
+            adapters: RecordingAdapters::new(),
+        }
+    }
+
+    fn assembly(&self) -> HarnessAssembly {
+        match self {
+            Self::Reference { .. } => HarnessAssembly::Reference,
+            Self::Production { .. } => HarnessAssembly::Production,
+        }
+    }
+
+    /// The package the drill's result names: the one every service serves.
+    fn package(&self) -> BundlePackage {
+        match self {
+            Self::Reference { .. } => {
+                qualification_candidate_package().expect("restore_candidate_package_invalid")
+            }
+            Self::Production { package, .. } => package.as_ref().clone(),
+        }
+    }
+
+    /// The service, on the runtime login, over `artifacts`, with the
+    /// pass-through privacy boundary and `crash_point`.
+    fn service(
+        &self,
+        runtime: &Arc<PgBackend>,
+        store: &ConfiguredTraceArtifactStore,
+        crash_point: Option<PipelineCrashPoint>,
+    ) -> Arc<PipelineService> {
+        match self {
+            Self::Reference { index, adapters } => assemble_compatibility_pipeline_service_with(
+                runtime.clone(),
+                store,
+                index.clone(),
+                COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+                Arc::new(PassThroughPipelinePrivacyBoundary),
+                adapters.registry(),
+                crash_point,
+            ),
+            Self::Production {
+                package,
+                dependencies,
+                ..
+            } => assemble_production_harness_service(
+                runtime.clone(),
+                store,
+                package,
+                dependencies.clone(),
+                crash_point,
+            ),
+        }
+    }
+
+    /// The live index's entries for `tenant`, as one hash: the isolated
+    /// index's entry set, or the production index's snapshot hash (entry
+    /// ids and content hashes, order-free), read through the trait.
+    fn index_hash(&self, tenant: &TenantStorageRef) -> String {
+        match self {
+            Self::Reference { index, .. } => index.entry_set_hash(tenant, MINIMAL_INDEX_ID),
+            Self::Production { dependencies, .. } => {
+                index_snapshot_hash(dependencies.index_reader().as_ref(), tenant)
+            }
+        }
+    }
+
+    /// The hash an index with no entries for `tenant` has.
+    fn empty_index_hash(&self, tenant: &TenantStorageRef) -> String {
+        match self {
+            Self::Reference { .. } => {
+                IsolatedPipelineIndex::new().entry_set_hash(tenant, MINIMAL_INDEX_ID)
+            }
+            Self::Production { .. } => {
+                index_snapshot_hash(IsolatedPipelineIndex::new().as_ref(), tenant)
+            }
+        }
+    }
+
+    /// The live index's writer, for the resume's rebuild.
+    fn index_writer(&self) -> Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter> {
+        match self {
+            Self::Reference { index, .. } => index.clone(),
+            Self::Production { dependencies, .. } => dependencies.index_writer(),
+        }
+    }
+
+    /// A second, empty index: its writer for a rebuild, and the hash of what
+    /// the rebuild wrote, read after it.
+    fn rebuilt_index(
+        &self,
+    ) -> (
+        Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+        Box<dyn Fn(&TenantStorageRef) -> String + '_>,
+    ) {
+        match self {
+            Self::Reference { .. } => {
+                let rebuilt = IsolatedPipelineIndex::new();
+                let reader = rebuilt.clone();
+                (
+                    rebuilt,
+                    Box::new(move |tenant| reader.entry_set_hash(tenant, MINIMAL_INDEX_ID)),
+                )
+            }
+            Self::Production { rebuilt, .. } => {
+                let rebuilt = rebuilt.as_ref().expect("restore_rebuild_index_missing");
+                (
+                    rebuilt.writer.clone(),
+                    Box::new(move |tenant| index_snapshot_hash(rebuilt.reader.as_ref(), tenant)),
+                )
+            }
+        }
+    }
+
+    /// The run of every request the recording adapter received; `None` in
+    /// production mode, whose adapter records nothing.
+    fn request_runs(&self) -> Option<Vec<Uuid>> {
+        match self {
+            Self::Reference { adapters, .. } => Some(adapters.request_runs()),
+            Self::Production { .. } => None,
+        }
+    }
+}
+
+/// The production compatibility index's snapshot hash for `tenant`.
+fn index_snapshot_hash(
+    reader: &dyn trace_commons_gate_api::IdentifiedIndexReader,
+    tenant: &TenantStorageRef,
+) -> String {
+    reader
+        .snapshot(tenant, PRODUCTION_COMPATIBILITY_INDEX_ID)
+        .expect("restore_index_snapshot_failed")
+        .snapshot_hash
+}
+
+/// The dependencies the two ignored tests run on: the reference ones, or,
+/// under `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`, the signed
+/// production package served over `PipelineGateComponents::from_env`'s
+/// components, whose index opens at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`
+/// (`pipeline.py` gives the seed and the resume one each, inside the run).
+/// With `rebuild`, a second, empty usearch index beside it is the resume's
+/// rebuild target.
+async fn restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
+    match HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}")) {
+        HarnessAssembly::Reference => RestoreDependencies::reference(),
+        HarnessAssembly::Production => production_restore_dependencies_from_env(rebuild).await,
+    }
+}
+
+#[cfg(feature = "near-ai-scorer")]
+async fn production_restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
+    use trace_commons_server::versioned_pipeline_harness::{
+        harness_dependencies_from_env, open_harness_rebuild_index, verified_package_from_lookup,
+    };
+    let lookup = |var: &str| std::env::var(var).ok();
+    let package = verified_package_from_lookup(&lookup).unwrap_or_else(|error| panic!("{error}"));
+    let dependencies = harness_dependencies_from_env()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let rebuilt = rebuild.then(|| {
+        let index = open_harness_rebuild_index().unwrap_or_else(|error| panic!("{error}"));
+        RebuildIndex {
+            reader: index.clone(),
+            writer: index,
+        }
+    });
+    RestoreDependencies::Production {
+        package: Box::new(package),
+        dependencies,
+        rebuilt,
+    }
+}
+
+/// Never reached: `HarnessAssembly::from_env` refuses production mode
+/// without `near-ai-scorer`.
+#[cfg(not(feature = "near-ai-scorer"))]
+async fn production_restore_dependencies_from_env(_rebuild: bool) -> RestoreDependencies {
+    panic!(
+        "{}",
+        trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
     )
 }
 
@@ -708,16 +1499,22 @@ fn compatibility_service(
 fn restore_app_state(
     state_dir: &Path,
     mains: &Arc<dyn Database>,
-    artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
+    artifacts: &ConfiguredTraceArtifactStore,
     runtime: &Arc<PgBackend>,
     service: Arc<PipelineService>,
 ) -> Arc<AppState> {
-    let mut state = test_state_with_options(
+    // `test_state_with_options`'s defaults, with the drill's own store.
+    let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
         state_dir.to_path_buf(),
         Some(mains.clone()),
         Some(artifacts.clone()),
         false,
         false,
+        false,
+        false,
+        false,
+        false,
+        BTreeMap::new(),
         false,
         false,
     );
@@ -1154,6 +1951,12 @@ async fn pipeline_restore_seed() {
     let Some(config) = RestoreConfig::from_env() else {
         return;
     };
+    let dependencies = restore_dependencies_from_env(false).await;
+    restore_seed(&config, &dependencies).await;
+}
+
+/// The seed over `dependencies`: the body of `pipeline_restore_seed`.
+async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies) {
     let (corpus, _) = load_corpus(&main_corpus_path()).unwrap_or_else(|label| panic!("{label}"));
     let [completed_fixture, pending_fixture, ..] = corpus.fixtures.as_slice() else {
         panic!("restore_corpus_too_small");
@@ -1171,15 +1974,18 @@ async fn pipeline_restore_seed() {
         .expect("the same variable runtime_backend read is set");
     let mains = mains_database().await;
     let state_dir = tempfile::tempdir().expect("temp dir");
-    let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
-    // Shared by both lifetimes (PF-2): the in-memory index and the recording
-    // adapter see each other's writes only when the same instances back both
-    // apps.
-    let index = IsolatedPipelineIndex::new();
-    let adapters = RecordingAdapters::new();
+    let store = RestoreStore::open(config).await;
+    // A remote seed writes into a namespace of its own, fresh for the run:
+    // anything already there is not this seed's.
+    if let RestoreStore::Remote(remote) = &store {
+        assert!(remote.is_empty(), "remote_restore_seed_store_not_empty");
+    }
+    let artifacts = store.configured();
+    // Shared by both lifetimes (PF-2): the index and the recording adapter
+    // see each other's writes only when the same instances back both apps.
     let start = |crash_point: Option<PipelineCrashPoint>| {
-        let service = compatibility_service(&runtime, &artifacts, &index, &adapters, crash_point);
-        restore_app_state(state_dir.path(), &mains, &artifacts, &runtime, service)
+        let service = dependencies.service(&runtime, artifacts, crash_point);
+        restore_app_state(state_dir.path(), &mains, artifacts, &runtime, service)
     };
     let client = reqwest::Client::new();
 
@@ -1223,6 +2029,14 @@ async fn pipeline_restore_seed() {
         "restore_seed_receipt_refused"
     );
     wait_for_settle_selection(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
+    // The resume must have legs to settle. The reference candidate always
+    // selects some; a production package selects none when the second
+    // fixture misses its floors under the deployment's scorer and embedder,
+    // and the drill then fails here, naming that, rather than in the resume.
+    assert!(
+        settle_selection_settles(&runtime, pending_envelope.submission_id).await,
+        "restore_seed_pending_selection_settles_nothing"
+    );
     stop.send(())
         .expect("send shutdown to the seed's second app");
     join_within(server, 20, "the seed's second app").await;
@@ -1232,11 +2046,7 @@ async fn pipeline_restore_seed() {
     expire_run_lease(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
     // PR 5's activation state, for a tenant of its own (G23), written before
     // the fingerprints are taken so that they cover it.
-    seed_activation_state(
-        &runtime,
-        &compatibility_service(&runtime, &artifacts, &index, &adapters, None),
-    )
-    .await;
+    seed_activation_state(&runtime, &dependencies.service(&runtime, artifacts, None)).await;
     require_activation_state(&runtime, "restore_seed").await;
 
     // The seed is the shape the drill needs: one complete run with four
@@ -1297,29 +2107,40 @@ async fn pipeline_restore_seed() {
     );
     // The adapter saw the completed run's legs and the second tenant's, and
     // nothing of the pending run. Only `RESTORE_TENANT`'s count is recorded:
-    // the resume adds the pending run's to it.
-    let request_runs = adapters.request_runs();
-    let completed_requests = request_runs
-        .iter()
-        .filter(|run| **run == completed.run_id)
-        .count();
+    // the resume adds the pending run's to it. The production adapter
+    // records nothing (its effect is the ledger row), so in production mode
+    // the count is the completed run's settlement legs, which the ledger
+    // assertions above already tie to one credit event each.
+    let completed_requests = match dependencies.request_runs() {
+        Some(request_runs) => {
+            let completed_requests = request_runs
+                .iter()
+                .filter(|run| **run == completed.run_id)
+                .count();
+            assert!(
+                request_runs
+                    .iter()
+                    .all(|run| *run == completed.run_id || *run == second.run_id)
+                    && completed_requests == completed.settlement_count
+                    && request_runs.len() - completed_requests == second.settlement_count,
+                "restore_seed_adapter_requests_unexpected"
+            );
+            completed_requests
+        }
+        None => completed.settlement_count,
+    };
     assert!(
-        request_runs
-            .iter()
-            .all(|run| *run == completed.run_id || *run == second.run_id)
-            && completed_requests == completed.settlement_count
-            && request_runs.len() - completed_requests == second.settlement_count
-            && completed.settlement_count > 0,
+        completed.settlement_count > 0,
         "restore_seed_adapter_requests_unexpected"
     );
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
-    let entry_set_hash = index.entry_set_hash(&tenant, MINIMAL_INDEX_ID);
+    let entry_set_hash = dependencies.index_hash(&tenant);
     assert_ne!(
         entry_set_hash,
-        IsolatedPipelineIndex::new().entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.empty_index_hash(&tenant),
         "restore_seed_index_empty"
     );
-    let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
+    let artifact_fingerprint = store.fingerprint();
 
     // What the resume compares across the restore, taken from the database
     // the dump reads: the RLS diagnostic over every trace table, the runtime
@@ -1379,17 +2200,30 @@ async fn pipeline_restore_resume() {
     let Some(config) = RestoreConfig::from_env() else {
         return;
     };
+    let url = restored_database_url()
+        .await
+        .expect("restore_database_url_missing");
+    let dependencies = restore_dependencies_from_env(true).await;
+    restore_resume(&config, &url, &dependencies).await;
+}
+
+/// The resume over `dependencies` against the restored database at `url`:
+/// the body of `pipeline_restore_resume`.
+async fn restore_resume(config: &RestoreConfig, url: &str, dependencies: &RestoreDependencies) {
+    if let RestoreArtifacts::Remote(remote) = &config.artifacts {
+        assert!(
+            remote.resume_report_path.is_some(),
+            "remote_restore_resume_report_path_missing"
+        );
+    }
     let seed = RestoreFingerprint::parse(
         &std::fs::read(&config.fingerprint_path).expect("restore_fingerprint_unreadable"),
     )
     .unwrap_or_else(|label| panic!("{label}"));
-    let url = restored_database_url()
-        .await
-        .expect("restore_database_url_missing");
     // `runtime_backend_at` checks the login is neither SUPERUSER nor
     // BYPASSRLS before anything else connects.
-    let runtime = runtime_backend_at(&url, 8).await;
-    let mains = mains_database_at(&url).await;
+    let runtime = runtime_backend_at(url, 8).await;
+    let mains = mains_database_at(url).await;
     let tables = pipeline_table_security(&runtime).await;
     assert_eq!(
         tables
@@ -1448,7 +2282,7 @@ async fn pipeline_restore_resume() {
     );
     // Every tenant's rows, read by the restored database's owner.
     let owner = Arc::new(
-        PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        PgBackend::new(&DatabaseConfig::from_postgres_url(url, 2))
             .await
             .expect("restore_owner_connection_failed"),
     );
@@ -1474,7 +2308,8 @@ async fn pipeline_restore_resume() {
     // row and its event, the suspension and its intervention, the
     // qualification, and the fence, each as the seed wrote it.
     require_activation_state(&runtime, "restore").await;
-    let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
+    let store = RestoreStore::open(config).await;
+    let artifact_fingerprint = store.fingerprint();
     assert_eq!(
         artifact_fingerprint, seed.artifact_fingerprint,
         "restore_artifact_fingerprint_mismatch"
@@ -1511,13 +2346,11 @@ async fn pipeline_restore_resume() {
     // A fresh index rebuilt from the sealed commands, before the app starts
     // (no withdrawal can race it: nothing else runs yet).
     let state_dir = tempfile::tempdir().expect("temp dir");
-    let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
-    let index = IsolatedPipelineIndex::new();
-    let adapters = RecordingAdapters::new();
-    let service = compatibility_service(&runtime, &artifacts, &index, &adapters, None);
+    let artifacts = store.configured();
+    let service = dependencies.service(&runtime, artifacts, None);
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
     let rebuild = service
-        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, index.clone())
+        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, dependencies.index_writer())
         .await
         .expect("restore_index_rebuild_failed");
     assert_eq!(
@@ -1525,7 +2358,7 @@ async fn pipeline_restore_resume() {
         completed.len(),
         "restore_index_rebuild_command_count"
     );
-    let index_entry_set_hash = index.entry_set_hash(&tenant, MINIMAL_INDEX_ID);
+    let index_entry_set_hash = dependencies.index_hash(&tenant);
     assert_eq!(
         index_entry_set_hash, seed.index_entry_set_hash,
         "restore_index_entry_set_mismatch"
@@ -1535,7 +2368,7 @@ async fn pipeline_restore_resume() {
     // drill is one of the four checks that test the qualification
     // candidate (P5-D15), so its result names that package: the service the
     // drill resumed on serves exactly it.
-    let package = qualification_candidate_package().expect("restore_candidate_package_invalid");
+    let package = dependencies.package();
     assert!(
         *service.default_package() == package,
         "restore_service_not_the_candidate"
@@ -1543,7 +2376,7 @@ async fn pipeline_restore_resume() {
     let state = restore_app_state(
         state_dir.path(),
         &mains,
-        &artifacts,
+        artifacts,
         &runtime,
         service.clone(),
     );
@@ -1596,15 +2429,23 @@ async fn pipeline_restore_resume() {
         resumed.credited_once() && resumed.credit_events == seed.completed_credit_event_count,
         "restore_pending_run_credit_events"
     );
-    let request_runs = adapters.request_runs();
-    assert!(
-        request_runs.iter().all(|run| *run == pending.run_id)
-            && request_runs.len() == resumed.settlement_count,
-        "restore_adapter_requests_unexpected"
-    );
+    // The adapter was asked for the resumed run's legs and nothing else. In
+    // production mode (an adapter that records nothing) the ledger answers
+    // instead: the legs settled after the restore are the resumed run's.
+    let resumed_requests = match dependencies.request_runs() {
+        Some(request_runs) => {
+            assert!(
+                request_runs.iter().all(|run| *run == pending.run_id)
+                    && request_runs.len() == resumed.settlement_count,
+                "restore_adapter_requests_unexpected"
+            );
+            request_runs.len()
+        }
+        None => resumed.settlement_count,
+    };
     let legs: usize = after.iter().map(|run| run.settlement_count).sum();
     assert_eq!(
-        seed.adapter_request_count + request_runs.len(),
+        seed.adapter_request_count + resumed_requests,
         legs,
         "restore_adapter_request_count_mismatch"
     );
@@ -1622,43 +2463,72 @@ async fn pipeline_restore_resume() {
     assert_eq!(pending_runs_resumed, 1, "restore_pending_run_not_resumed");
     // The resumed run's index write landed: the live index equals a rebuild
     // from every sealed command, the resumed run's included.
-    let rebuilt = IsolatedPipelineIndex::new();
+    let (rebuilt, rebuilt_hash) = dependencies.rebuilt_index();
     service
-        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, rebuilt.clone())
+        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, rebuilt)
         .await
         .expect("restore_index_rebuild_failed");
     assert_eq!(
-        index.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
-        rebuilt.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.index_hash(&tenant),
+        rebuilt_hash(&tenant),
         "restore_resumed_index_mismatch"
     );
     assert_ne!(
-        index.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.index_hash(&tenant),
         seed.index_entry_set_hash,
         "restore_resumed_index_unchanged"
     );
 
+    // A remote resume reports to `promote remote-restore`, which writes
+    // `pipeline_remote_restore` from it; the production run's own
+    // `pipeline_restore_drill` comes from its package checks, so nothing
+    // is emitted here.
+    if let RestoreArtifacts::Remote(remote) = &config.artifacts {
+        let report = serde_json::json!({
+            "schema": REMOTE_RESUME_REPORT_SCHEMA,
+            "database_fingerprint": database_fingerprint,
+            "artifact_fingerprint": artifact_fingerprint,
+            "pending_runs_resumed": pending_runs_resumed,
+            "duplicate_effects": duplicate_effects,
+        });
+        let mut bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&report)
+            .expect("the resume report serialises");
+        bytes.push(b'\n');
+        write_atomically(
+            remote
+                .resume_report_path
+                .as_deref()
+                .unwrap_or_else(|| panic!("remote_restore_resume_report_path_missing")),
+            &bytes,
+        );
+        return;
+    }
+    let mut evidence = serde_json::json!({
+        "database_fingerprint": database_fingerprint,
+        "artifact_fingerprint": artifact_fingerprint,
+        "index_entry_set_hash": index_entry_set_hash,
+        "pending_runs_resumed": pending_runs_resumed,
+        "duplicate_effects": duplicate_effects,
+        "rls_tables_checked": rls_tables_checked,
+        "rls_policy_set_hash": rls_policy_set_hash,
+        "rls_policy_count": rls_policy_count,
+        "rls_flag_set_hash": rls_flag_set_hash,
+        "rls_flag_table_count": rls_flag_table_count,
+        "runtime_privilege_set_hash": runtime_privilege_set_hash,
+        "tenant_fingerprint": tenants.hash,
+        "tenant_count": tenants.tenants.len(),
+        "audit_events_verified": audit_events_verified,
+    });
+    // A reference result's evidence is exactly what it always was.
+    if dependencies.assembly() == HarnessAssembly::Production {
+        evidence["harness_assembly"] = serde_json::json!(dependencies.assembly().label());
+    }
     PipelineCheckEmitter::emit_from_env(
         RESTORE_CHECK_ID,
         PipelineCheckStatus::Pass,
         Some(&package),
         &RESTORE_SAFE_BLOCKERS,
-        serde_json::json!({
-            "database_fingerprint": database_fingerprint,
-            "artifact_fingerprint": artifact_fingerprint,
-            "index_entry_set_hash": index_entry_set_hash,
-            "pending_runs_resumed": pending_runs_resumed,
-            "duplicate_effects": duplicate_effects,
-            "rls_tables_checked": rls_tables_checked,
-            "rls_policy_set_hash": rls_policy_set_hash,
-            "rls_policy_count": rls_policy_count,
-            "rls_flag_set_hash": rls_flag_set_hash,
-            "rls_flag_table_count": rls_flag_table_count,
-            "runtime_privilege_set_hash": runtime_privilege_set_hash,
-            "tenant_fingerprint": tenants.hash,
-            "tenant_count": tenants.tenants.len(),
-            "audit_events_verified": audit_events_verified,
-        }),
+        evidence,
     );
 }
 
@@ -1683,7 +2553,7 @@ fn restore_config_requires_all_three_variables_or_none() {
             (RESTORE_FINGERPRINT_PATH_VAR, "/tmp/fingerprint.json"),
         ])),
         Ok(Some(RestoreConfig {
-            artifact_root: PathBuf::from("/tmp/root"),
+            artifacts: RestoreArtifacts::Local(PathBuf::from("/tmp/root")),
             master_key_hex: "00".to_string(),
             fingerprint_path: PathBuf::from("/tmp/fingerprint.json"),
         }))
@@ -1817,4 +2687,422 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         RestoreFingerprint::parse(b"not json"),
         Err("restore_fingerprint_invalid")
     );
+}
+
+/// An embedder double that puts every distinct text on its own axis, so
+/// any two of the drill's fixtures are fully novel to each other. The
+/// reference embedder puts the first two corpus fixtures at novelty 0.44,
+/// under the production test package's 0.5 floor, so the pending run would
+/// select nothing to settle.
+struct DistinctTextEmbedder;
+
+impl trace_commons_gate_api::Embedder for DistinctTextEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(plaintext);
+        let axis = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) % 1024;
+        let mut vector = vec![0.0f32; 1024];
+        vector[axis as usize] = 1.0;
+        Ok(vector)
+    }
+}
+
+/// Production restore dependencies over doubles, never production-qualified
+/// (the operator's run has `from_env`'s NEAR AI, fastembed and usearch index,
+/// and a second usearch index, in their place):
+/// their service is the production assembly serving the production
+/// package, their index hash is the snapshot read through the trait, and
+/// they record no adapter requests, so the drill counts settlement from the
+/// ledger. Needs no database: assembly opens no connection.
+fn production_restore_doubles(package: BundlePackage) -> RestoreDependencies {
+    let index = IsolatedPipelineIndex::new();
+    let rebuilt = IsolatedPipelineIndex::new();
+    RestoreDependencies::Production {
+        package: Box::new(package),
+        dependencies: HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(trace_commons_gate_api::ReferencePerplexityScorer::new()),
+                embedder: Arc::new(DistinctTextEmbedder),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        ),
+        rebuilt: Some(RebuildIndex {
+            reader: rebuilt.clone(),
+            writer: rebuilt,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn production_restore_dependencies_serve_the_production_package() {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let runtime = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = ConfiguredTraceArtifactStore::legacy(test_artifact_store_with_key(
+        dir.path(),
+        &trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    ));
+    let package = production_test_package();
+    let dependencies = production_restore_doubles(package.clone());
+    assert_eq!(dependencies.assembly(), HarnessAssembly::Production);
+    assert_eq!(dependencies.package(), package);
+    assert!(dependencies.request_runs().is_none());
+    for crash_point in [None, Some(PipelineCrashPoint::AfterSettleSelection)] {
+        let service = dependencies.service(&runtime, &artifacts, crash_point);
+        assert!(*service.default_package() == package);
+        let qualification = service.bundle_qualification(&package).unwrap();
+        assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
+        assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+        // Only `PipelineGateComponents::from_env` qualifies the adapters.
+        assert!(!qualification.scorer.production_qualified);
+        assert!(!qualification.embedder.production_qualified);
+    }
+    let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
+    assert_eq!(
+        dependencies.index_hash(&tenant),
+        dependencies.empty_index_hash(&tenant)
+    );
+    let (_, rebuilt_hash) = dependencies.rebuilt_index();
+    assert_eq!(
+        rebuilt_hash(&tenant),
+        dependencies.empty_index_hash(&tenant)
+    );
+    // The reference dependencies serve the reference candidate, as before.
+    let reference = RestoreDependencies::reference();
+    assert_eq!(reference.assembly(), HarnessAssembly::Reference);
+    assert_eq!(
+        reference.package(),
+        qualification_candidate_package().unwrap()
+    );
+    assert_eq!(reference.request_runs(), Some(Vec::new()));
+}
+
+/// The restore drill end to end in production mode over doubles:
+/// the seed, then the resume against the same database (no dump and
+/// restore between, which `pipeline.py restore-drill` adds), through the
+/// bodies the two ignored tests run. Ignored: it writes the drill's fixed
+/// tenants into the shared pilot-shaped database, which the rest of the
+/// suite also uses, so it runs alone:
+/// `cargo test -p trace-commons-server --bin trace-commons-ingest
+/// production_restore_drill_resumes_once_over_doubles -- --ignored --exact`
+/// against a fresh `TRACE_COMMONS_PG_TEST_DATABASE_URL`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "writes the drill's fixed tenants into the shared database: run alone"]
+async fn production_restore_drill_resumes_once_over_doubles() {
+    let Some(url) = pipeline_http_database_url().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = RestoreConfig {
+        artifacts: RestoreArtifacts::Local(dir.path().join("artifacts")),
+        master_key_hex: trace_commons_server::secrets::keychain::generate_master_key_hex(),
+        fingerprint_path: dir.path().join("fingerprint.json"),
+    };
+    let dependencies = production_restore_doubles(production_test_package());
+    restore_seed(&config, &dependencies).await;
+    let resume = production_restore_doubles(production_test_package());
+    restore_resume(&config, &url, &resume).await;
+}
+
+fn vars_from(set: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> + use<> {
+    let set: BTreeMap<String, String> = set
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    move |name: &str| set.get(name).cloned()
+}
+
+/// `promote remote-restore` replaces the artifact root with a remote store:
+/// the store's name, its kind, and the drill's namespace under it, never
+/// both an artifact root and a remote store.
+#[test]
+fn restore_config_reads_a_remote_store_in_place_of_an_artifact_root() {
+    let remote = [
+        (REMOTE_ARTIFACT_STORE_VAR, "tracecommons-scratch/drill"),
+        (REMOTE_STORE_KIND_VAR, "gcs"),
+        (
+            REMOTE_NAMESPACE_VAR,
+            "pipeline-remote-restore-q0000000a-1234abcd",
+        ),
+        (TEST_MASTER_KEY_VAR, "00"),
+        (RESTORE_FINGERPRINT_PATH_VAR, "/tmp/fingerprint.json"),
+    ];
+    let expected_location = RemoteStoreLocation {
+        bucket: "tracecommons-scratch".to_string(),
+        prefix: "drill/pipeline-remote-restore-q0000000a-1234abcd".to_string(),
+    };
+    assert_eq!(
+        RestoreConfig::from_vars(vars_from(&remote)),
+        Ok(Some(RestoreConfig {
+            artifacts: RestoreArtifacts::Remote(RemoteArtifacts {
+                kind: RemoteStoreKind::Gcs,
+                location: expected_location.clone(),
+                resume_report_path: None,
+            }),
+            master_key_hex: "00".to_string(),
+            fingerprint_path: PathBuf::from("/tmp/fingerprint.json"),
+        }))
+    );
+    let mut with_report = remote.to_vec();
+    with_report.push((REMOTE_RESUME_REPORT_PATH_VAR, "/tmp/resume.json"));
+    let Ok(Some(RestoreConfig {
+        artifacts: RestoreArtifacts::Remote(read),
+        ..
+    })) = RestoreConfig::from_vars(vars_from(&with_report))
+    else {
+        panic!("a remote config with a resume report reads");
+    };
+    assert_eq!(
+        read.resume_report_path,
+        Some(PathBuf::from("/tmp/resume.json"))
+    );
+
+    let mut double = remote.to_vec();
+    double[1] = (REMOTE_STORE_KIND_VAR, "gcs_directory_double");
+    double.push((REMOTE_DOUBLE_ROOT_VAR, "/tmp/buckets"));
+    let Ok(Some(RestoreConfig {
+        artifacts: RestoreArtifacts::Remote(read),
+        ..
+    })) = RestoreConfig::from_vars(vars_from(&double))
+    else {
+        panic!("a directory-double config reads");
+    };
+    assert_eq!(
+        read.kind,
+        RemoteStoreKind::DirectoryDouble(PathBuf::from("/tmp/buckets"))
+    );
+
+    let refused = |set: Vec<(&str, &str)>, label: &str| {
+        assert_eq!(
+            RestoreConfig::from_vars(vars_from(&set)),
+            Err(label),
+            "{set:?}"
+        );
+    };
+    // Both an artifact root and a remote store.
+    let mut both = remote.to_vec();
+    both.push((ARTIFACT_ROOT_VAR, "/tmp/root"));
+    refused(both, "restore_environment_incomplete");
+    // A remote store without its kind or namespace.
+    for missing in [REMOTE_STORE_KIND_VAR, REMOTE_NAMESPACE_VAR] {
+        refused(
+            remote
+                .iter()
+                .copied()
+                .filter(|(key, _)| *key != missing)
+                .collect(),
+            "restore_environment_incomplete",
+        );
+    }
+    // A double with no root, a root with no double, an unknown kind.
+    let mut no_root = remote.to_vec();
+    no_root[1] = (REMOTE_STORE_KIND_VAR, "gcs_directory_double");
+    refused(no_root, "restore_environment_incomplete");
+    let mut stray_root = remote.to_vec();
+    stray_root.push((REMOTE_DOUBLE_ROOT_VAR, "/tmp/buckets"));
+    refused(stray_root, "restore_environment_incomplete");
+    let mut unknown = remote.to_vec();
+    unknown[1] = (REMOTE_STORE_KIND_VAR, "s3");
+    refused(unknown, "remote_restore_store_kind_invalid");
+    // A store name or namespace outside the shapes.
+    for name in [
+        "gs://bucket",
+        "Bucket",
+        "bucket/../live",
+        "bucket//x",
+        "bucket/",
+    ] {
+        let mut bad = remote.to_vec();
+        bad[0] = (REMOTE_ARTIFACT_STORE_VAR, name);
+        refused(bad, "remote_restore_store_name_invalid");
+    }
+    for namespace in ["", "a/b", "..", "has space"] {
+        let mut bad = remote.to_vec();
+        bad[2] = (REMOTE_NAMESPACE_VAR, namespace);
+        refused(bad, "remote_restore_store_name_invalid");
+    }
+}
+
+#[test]
+fn remote_store_names_take_a_bucket_and_an_optional_prefix() {
+    assert_eq!(
+        RemoteStoreLocation::parse("tracecommons-artifacts", "ns"),
+        Ok(RemoteStoreLocation {
+            bucket: "tracecommons-artifacts".to_string(),
+            prefix: "ns".to_string(),
+        })
+    );
+    assert_eq!(
+        RemoteStoreLocation::parse("tracecommons-artifacts/a/b_c", "ns"),
+        Ok(RemoteStoreLocation {
+            bucket: "tracecommons-artifacts".to_string(),
+            prefix: "a/b_c/ns".to_string(),
+        })
+    );
+    // `promote`'s overlap rule: one name is the other or holds it.
+    let overlaps = |a: &str, b: &str| remote_store_names_overlap(a, b);
+    assert!(overlaps("live", "live"));
+    assert!(overlaps("live", "live/scratch"));
+    assert!(overlaps("live/a", "live"));
+    assert!(!overlaps("live/a", "live/ab"));
+    assert!(!overlaps("live", "scratch"));
+}
+
+#[test]
+fn remote_copy_config_requires_every_variable_or_none() {
+    let full = [
+        (REMOTE_STORE_KIND_VAR, "gcs"),
+        (REMOTE_SOURCE_STORE_VAR, "tracecommons-artifacts"),
+        (REMOTE_SCRATCH_STORE_VAR, "tracecommons-scratch/drill"),
+        (REMOTE_NAMESPACE_VAR, "ns"),
+        (TEST_MASTER_KEY_VAR, "00"),
+        (REMOTE_COPY_REPORT_PATH_VAR, "/tmp/copy.json"),
+    ];
+    assert_eq!(RemoteCopyConfig::from_vars(vars_from(&[])), Ok(None));
+    assert_eq!(
+        RemoteCopyConfig::from_vars(vars_from(&full)),
+        Ok(Some(RemoteCopyConfig {
+            kind: RemoteStoreKind::Gcs,
+            source: RemoteStoreLocation {
+                bucket: "tracecommons-artifacts".to_string(),
+                prefix: "ns".to_string(),
+            },
+            scratch: RemoteStoreLocation {
+                bucket: "tracecommons-scratch".to_string(),
+                prefix: "drill/ns".to_string(),
+            },
+            master_key_hex: "00".to_string(),
+            report_path: PathBuf::from("/tmp/copy.json"),
+        }))
+    );
+    for index in 0..full.len() {
+        let mut partial = full.to_vec();
+        partial.remove(index);
+        assert_eq!(
+            RemoteCopyConfig::from_vars(vars_from(&partial)),
+            Err("remote_restore_environment_incomplete"),
+            "{partial:?}"
+        );
+    }
+    let mut same = full.to_vec();
+    same[2] = (REMOTE_SCRATCH_STORE_VAR, "tracecommons-artifacts/scratch");
+    assert_eq!(
+        RemoteCopyConfig::from_vars(vars_from(&same)),
+        Err("remote_restore_scratch_overlaps_live_store")
+    );
+}
+
+#[test]
+fn a_directory_double_round_trips_lists_and_reports_no_versioning() {
+    use trace_commons_server::trace_artifact_gcs::GcsObjectClient as _;
+    let root = tempfile::tempdir().expect("temp dir");
+    let client = DirectoryGcsObjectClient::new(root.path().join("bucket"));
+    client
+        .put_object("a/b/1", bytes::Bytes::from_static(b"one"), BTreeMap::new())
+        .unwrap();
+    client
+        .put_object("a/2", bytes::Bytes::from_static(b"two"), BTreeMap::new())
+        .unwrap();
+    client
+        .put_object("c/3", bytes::Bytes::from_static(b"three"), BTreeMap::new())
+        .unwrap();
+    assert_eq!(&client.get_object("a/b/1").unwrap().body[..], b"one");
+    assert_eq!(client.list_object_keys("a/").unwrap(), ["a/2", "a/b/1"]);
+    assert!(client.delete_object("a/2").unwrap());
+    assert!(!client.delete_object("a/2").unwrap());
+    let missing = client.get_object("a/2").map(|_| ()).unwrap_err();
+    assert!(
+        trace_commons_server::trace_artifact_store::is_trace_artifact_integrity_error(&missing)
+    );
+    assert!(!client.bucket_versioning_enabled().unwrap());
+    for key in ["", "a//b", "../x", "a/./b", "/a"] {
+        assert!(
+            client
+                .put_object(key, bytes::Bytes::new(), BTreeMap::new())
+                .is_err(),
+            "{key:?}"
+        );
+    }
+}
+
+/// The copy step end to end over the directory double, in one process: the
+/// seed's objects (written through the drill's own store) come back in the
+/// scratch store with the same fingerprint, every one unwraps, and the
+/// double reports its kind and no versioning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_remote_copy_step_restores_a_seeded_store_over_the_directory_double() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let master_key_hex = trace_commons_server::secrets::keychain::generate_master_key_hex();
+    let kind = RemoteStoreKind::DirectoryDouble(root.path().to_path_buf());
+    let source = RemoteStoreLocation::parse("tracecommons-live", "ns").unwrap();
+    let seeded = RemoteRestoreStore::open(&kind, &source, &master_key_hex).await;
+    assert!(seeded.is_empty(), "a fresh namespace holds nothing");
+    for index in 0..3 {
+        seeded
+            .configured()
+            .store
+            .put_serialized_json(
+                "tenant:sha256:a",
+                TraceArtifactKind::ContributionEnvelope,
+                &format!("object-{index}"),
+                br#"{"n":1}"#,
+            )
+            .expect("the seed writes");
+    }
+    let seeded_fingerprint = seeded.fingerprint();
+    let report_path = root.path().join("reports").join("copy.json");
+    let report = run_remote_copy(&RemoteCopyConfig {
+        kind,
+        source,
+        scratch: RemoteStoreLocation::parse("tracecommons-scratch/drill", "ns").unwrap(),
+        master_key_hex,
+        report_path: report_path.clone(),
+    })
+    .await;
+    assert_eq!(
+        report,
+        serde_json::json!({
+            "schema": "trace_commons.pipeline_remote_restore_copy.v1",
+            "object_store_kind": "gcs_directory_double",
+            "object_count": 3,
+            "artifact_fingerprint": seeded_fingerprint,
+            "restored_artifact_fingerprint": seeded_fingerprint,
+            "kek_unwrap_verified_count": 3,
+            "versioning_enabled": false,
+        })
+    );
+    let written: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    assert_eq!(written, report);
+    assert!(
+        root.path().join("tracecommons-scratch/drill/ns").is_dir(),
+        "the restore lands under the scratch prefix and namespace"
+    );
+}
+
+/// A drill on GCS proves the restored objects unwrap under the deployment's
+/// key wrapper only when that wrapper is a production one: under the local
+/// master key every count would pass and say nothing about KMS. The double
+/// runs on the local key.
+#[test]
+fn a_gcs_drill_refuses_a_key_wrapper_that_is_not_production() {
+    assert_eq!(
+        require_production_kek(&RemoteStoreKind::Gcs, false),
+        Err("remote_restore_kek_not_production")
+    );
+    assert_eq!(require_production_kek(&RemoteStoreKind::Gcs, true), Ok(()));
+    let double = RemoteStoreKind::DirectoryDouble(PathBuf::from("/tmp/buckets"));
+    assert_eq!(require_production_kek(&double, false), Ok(()));
 }

@@ -1190,10 +1190,28 @@ The pilot host has no Rust toolchain; binaries are built by Cloud Build and
 pulled from GCS. From a clean checkout at the commit you intend to ship:
 
 ```sh
+REV=$(python3 scripts/operator/pipeline.py revision) && \
 gcloud builds submit --config cloudbuild.yaml \
   --project tracecommons-pilot-2026 \
-  --substitutions _TAG=$(git rev-parse --short HEAD)
+  --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH="$REV"
 ```
+
+`_CODE_REVISION_HASH` becomes `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` in the
+build. Compute it in the same clean checkout you upload: `pipeline.py revision`
+hashes the git tree, which `.gcloudignore` keeps out of the upload, so the build
+cannot compute it itself. Computing it before `gcloud builds submit`, as above,
+means a failed `pipeline.py revision` stops the command before anything is
+uploaded.
+
+Only a `sha256:` digest or the literal `none` builds. Any other value fails the
+build, and so does an empty or missing one, so an empty command substitution
+cannot be mistaken for a choice. `none` builds a binary with no revision. On a
+binary with no pipeline runtime that changes little: the pipeline's
+qualification, activation and rollback routes answer `404` `pipeline runtime
+not configured` before they read the revision. Once a pipeline runtime is
+configured, those routes refuse with `bundle_runtime_revision_unknown`, and a
+start that emits the production adapters check refuses with
+`pipeline_check_revision_mismatch`.
 
 Roughly 6 minutes on `E2_HIGHCPU_32`. **Wait for `SUCCESS` before installing:**
 

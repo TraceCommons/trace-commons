@@ -56,7 +56,8 @@ pub fn ui_copy() -> BTreeMap<String, String> {
         ("refresh", "Refresh drafts"),
         ("refreshed", "Local mission drafts refreshed."),
         ("show", "Inspect draft"),
-        ("delete", "Delete local draft"),
+        // Approved 2026-10-08 (button rule).
+        ("delete", "Delete"),
         ("delete_confirm_title", "Delete local mission draft?"),
         ("delete_confirm", "Delete this draft from the local inbox? The selected source file will remain."),
         ("added", "Draft added to the local inbox."),
