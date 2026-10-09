@@ -12337,8 +12337,12 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     async fn confirmation(
         &self,
         idempotency_key: &str,
-    ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
-        self.0.confirmation(idempotency_key)
+    ) -> trace_commons_server::versioned_pipeline_credit::NearPayoutConfirmation {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::confirmation(
+            &self.0,
+            idempotency_key,
+        )
+        .await
     }
 }
 

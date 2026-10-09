@@ -76,7 +76,7 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter,
+    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter, NearPayoutConfirmation,
     PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
@@ -23716,7 +23716,7 @@ impl NearPayoutAdapter for CountingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         self.confirmations.fetch_add(1, Ordering::SeqCst);
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
@@ -23759,6 +23759,7 @@ struct NearOutboxRow {
     instrument_id: Option<String>,
     amount_micros: Option<i64>,
     near_call_json: serde_json::Value,
+    near_transaction_hash: Option<String>,
 }
 
 /// Every `trace_near_credit_outbox` row of `tenant_id`.
@@ -23773,7 +23774,7 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
         .query(
             "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
                     (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
-                    near_call_json
+                    near_call_json, near_transaction_hash
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1
               ORDER BY created_at, near_outbox_id",
@@ -23790,6 +23791,7 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
             instrument_id: row.get("instrument_id"),
             amount_micros: row.get("amount_micros"),
             near_call_json: row.get("near_call_json"),
+            near_transaction_hash: row.get("near_transaction_hash"),
         })
         .collect()
 }
@@ -23924,6 +23926,62 @@ async fn payout_submits_once_and_confirms() {
         0,
         "a confirmed payout is not listed again"
     );
+}
+
+/// A submitted line whose transaction the adapter reports as failed on
+/// chain becomes `failed` and keeps its transaction hash; the leg's payout
+/// is `failed` under `near_transaction_failed`, and no later pass submits
+/// the line again.
+#[tokio::test]
+async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox[0].status, "submitted");
+    let transaction_hash = outbox[0].near_transaction_hash.clone();
+    assert!(transaction_hash.is_some());
+
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(
+        outbox[0].near_transaction_hash, transaction_hash,
+        "the failed line keeps its transaction hash"
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
+    );
+
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a failed payout is not listed again"
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
 }
 
 /// Review Focus 5: a crash right after the outbox records the submit
@@ -24347,9 +24405,9 @@ impl NearPayoutAdapter for BadEvidenceNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.bad_keys.lock().unwrap().contains(idempotency_key) {
-            return Some(NearConfirmationEvidence {
+            return NearPayoutConfirmation::Confirmed(NearConfirmationEvidence {
                 transaction_hash_hash: "plain-transaction-reference".to_string(),
                 receipt_hash: format!("sha256:{}", "b".repeat(64)),
             });
@@ -24568,7 +24626,7 @@ impl NearPayoutAdapter for HoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
 }
@@ -24691,7 +24749,7 @@ impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;

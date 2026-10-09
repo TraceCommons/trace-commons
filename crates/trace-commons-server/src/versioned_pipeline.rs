@@ -63,10 +63,10 @@ use crate::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
 };
 use crate::versioned_pipeline_credit::{
-    DryRunNearPayoutAdapter, NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
-    PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
-    SettlementAdapterRegistry, credit_account_hash, disabled_near_call,
-    microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
+    DryRunNearPayoutAdapter, NearPayoutAdapter, NearPayoutConfirmation, PIPELINE_CREDIT_ACTOR_ROLE,
+    PIPELINE_CREDIT_REASON, PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
+    PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry, credit_account_hash,
+    disabled_near_call, microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
 };
@@ -357,6 +357,10 @@ pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 /// A Trace Credit leg's payout label when the NEAR adapter refused or
 /// failed its submit; the payout is then `failed`.
 pub const PIPELINE_NEAR_SUBMIT_FAILED_LABEL: &str = "near_submit_failed";
+/// A Trace Credit leg's payout label when the adapter reports the
+/// transaction of a submitted line as failed on chain; the payout is then
+/// `failed`.
+pub const PIPELINE_NEAR_TRANSACTION_FAILED_LABEL: &str = "near_transaction_failed";
 /// Payout labels for an error in one run's payout (Ruling T10-5): the
 /// payout pass records it on that run's leg, which ends `failed`, and goes
 /// on with the next run. `payout_operation_failed` covers any error without
@@ -13918,6 +13922,10 @@ impl PipelineService {
     ///   re-read here sees that.
     /// - Confirmation evidence is hash-only (else `near_confirmation_invalid`);
     ///   the evidence and the `confirmed` status commit together.
+    /// - A `submitted` line whose transaction the adapter reports as failed
+    ///   on chain becomes `failed` under `near_transaction_failed`, in the
+    ///   mode that submitted it, and keeps its transaction hash. The pass
+    ///   does not submit it again.
     /// - The one policy guard (GRD-004) sits at the dispatch, where a line
     ///   would be sent to the adapter -- a first submit, or a new submit of a
     ///   `failed` line under `retry_failed` -- and before anything that
@@ -14122,8 +14130,41 @@ impl PipelineService {
                 if submission_mode.as_deref() != Some(mode) {
                     continue;
                 }
-                let Some(evidence) = adapter.confirmation(&call.idempotency_key).await else {
-                    continue;
+                let evidence = match adapter.confirmation(&call.idempotency_key).await {
+                    NearPayoutConfirmation::Pending => continue,
+                    NearPayoutConfirmation::Confirmed(evidence) => evidence,
+                    NearPayoutConfirmation::Failed => {
+                        // The transaction failed on chain. The line becomes
+                        // `failed` only in the mode that submitted it, and
+                        // keeps its transaction hash; no pass submits it
+                        // again.
+                        let tx =
+                            PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+                        let _failed_rows = tx
+                            .execute(
+                                "UPDATE trace_near_credit_outbox
+                                    SET status = 'failed', confirmed_at = NULL,
+                                        last_error_hash = $3
+                                  WHERE tenant_id = $1 AND near_outbox_id = $2
+                                    AND status = 'submitted'
+                                    AND COALESCE(
+                                            near_call_json ->> 'pipeline_submission_mode',
+                                            $5::TEXT
+                                        ) = $4",
+                                &[
+                                    &run.tenant_id,
+                                    &outbox_id,
+                                    &sha256_prefixed(
+                                        PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes(),
+                                    ),
+                                    &mode,
+                                    &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
+                                ],
+                            )
+                            .await?;
+                        tx.commit().await?;
+                        continue;
+                    }
                 };
                 if !(evidence.transaction_hash_hash.starts_with("sha256:")
                     && evidence.receipt_hash.starts_with("sha256:"))
@@ -14442,7 +14483,8 @@ async fn mark_near_outbox_line_failed(
 
 /// Records a leg's payout state from its batch's outbox lines: every line
 /// `confirmed` is `confirmed`, any `failed` line is `failed` under
-/// `near_submit_failed`, every line `submitted` or `confirmed` is
+/// `near_submit_failed` (`near_transaction_failed` when the line's stored
+/// hash is that label's), every line `submitted` or `confirmed` is
 /// `submitted`, and otherwise (no line yet, or one still `pending`)
 /// `pending`.
 async fn record_payout_state_on(
@@ -14453,7 +14495,7 @@ async fn record_payout_state_on(
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let statuses = tx
         .query(
-            "SELECT status
+            "SELECT status, last_error_hash
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1 AND settlement_batch_id = $2
                 AND instrument_id = $3",
@@ -14465,21 +14507,35 @@ async fn record_payout_state_on(
         )
         .await?
         .iter()
-        .map(|row| row.get::<_, String>("status"))
+        .map(|row| {
+            (
+                row.get::<_, String>("status"),
+                row.get::<_, Option<String>>("last_error_hash"),
+            )
+        })
         .collect::<Vec<_>>();
     tx.commit().await?;
+    let transaction_failed_hash =
+        sha256_prefixed(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes());
     let (payout, label) =
-        if !statuses.is_empty() && statuses.iter().all(|status| status == "confirmed") {
+        if !statuses.is_empty() && statuses.iter().all(|(status, _)| status == "confirmed") {
             (TraceCreditSettlementNearStatus::Confirmed, None)
-        } else if statuses.iter().any(|status| status == "failed") {
+        } else if statuses.iter().any(|(status, _)| status == "failed") {
+            let transaction_failed = statuses.iter().any(|(status, hash)| {
+                status == "failed" && hash.as_deref() == Some(transaction_failed_hash.as_str())
+            });
             (
                 TraceCreditSettlementNearStatus::Failed,
-                Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL),
+                Some(if transaction_failed {
+                    PIPELINE_NEAR_TRANSACTION_FAILED_LABEL
+                } else {
+                    PIPELINE_NEAR_SUBMIT_FAILED_LABEL
+                }),
             )
         } else if !statuses.is_empty()
             && statuses
                 .iter()
-                .all(|status| status == "submitted" || status == "confirmed")
+                .all(|(status, _)| status == "submitted" || status == "confirmed")
         {
             (TraceCreditSettlementNearStatus::Submitted, None)
         } else {
