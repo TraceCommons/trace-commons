@@ -25,8 +25,9 @@
 //! characters of the characters a model id uses, else `unknown`. Never a
 //! prompt, a response, a body reference, a body digest, the provider's
 //! exchange identifier, a session id, a credential or a URL. Nothing here is
-//! logged. While the Insights ledger feed is on (owner decision D3, open),
-//! each call also carries its four token counts as recorded.
+//! logged. While the Insights ledger feed is on (the default; owner decision
+//! D3, settled 2026-10-09), each call also carries its four token counts as
+//! recorded.
 //!
 //! # Every unknown is `unknown`
 //!
@@ -809,8 +810,8 @@ fn token_count(recorded: Option<i64>) -> serde_json::Value {
 
 /// [`calls_page`], and with `tokens` each row also carries the ledger's four
 /// token counters as recorded, each `null` when not known. Only while the
-/// Insights ledger feed is on (owner decision D3, open); a shell never sums
-/// them, and nothing here reads them as cost.
+/// Insights ledger feed is on (the default; owner decision D3, settled
+/// 2026-10-09); a shell never sums them, and nothing here reads them as cost.
 #[must_use]
 pub fn calls_page_with(
     rows: &[RoutedExchange],
@@ -1942,8 +1943,8 @@ mod tests {
         assert_eq!(value["observed_destinations"], serde_json::json!([]));
     }
 
-    /// With the Insights ledger feed off (owner decision D3, open) a row
-    /// carries no `tokens` key at all; on, it carries the four counters as
+    /// With the Insights ledger feed turned off a row carries no `tokens`
+    /// key at all; on, it carries the four counters as
     /// recorded, each `null` when not known. No sum, no cost.
     #[test]
     fn tokens_ride_on_a_call_only_with_the_ledger_feed_on() {
@@ -2042,6 +2043,15 @@ mod tests {
         s.install_routing_ledger_for_test(
             crate::routing::ironwire::IronWireLedger::with_rows_for_test(vec![r]),
         );
+        let page =
+            super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})))
+                .result
+                .unwrap();
+        assert_eq!(
+            page["calls"][0]["tokens"]["input"], 7,
+            "on by default (owner decision D3, settled 2026-10-09)"
+        );
+        s.settings.lock().unwrap().insights_ledger_feed = false;
         let page =
             super::super::ipc::handle_request(&s, &call("inference_calls", serde_json::json!({})))
                 .result
