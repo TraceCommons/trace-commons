@@ -283,7 +283,11 @@ stay. In a fleet, one running process with a runtime must list the tenant.
 Two exceptions hold, and the code enforces both. The index rebuild after a
 restore ([backup-restore.md](backup-restore.md), steps 3 to 5) unsets both
 lists and sets them back. A build with no runtime refuses to start while the
-drain list is set, so a rollback to such a build unsets it. Keep the tenant
+drain list is set, so a rollback to such a build unsets it.
+A third case is not enforced by the code: the rollback to an older build
+that has a runtime ([deployment.md](deployment.md), the steps before that
+install in "V110 to V113"). That text states the cost and says when to put
+the tenant back on the drain list. Keep the tenant
 listed also for as long as its contributors need their pipeline submissions'
 statuses: the status route (`POST /v1/contributors/me/submission-status`)
 reads the pipeline's view only for a tenant on either list. A tenant on
@@ -1657,9 +1661,15 @@ row says `received`. A quarantined or rejected receipt's event has that
 status. When the append fails, the upload answers `500`, and the run exists
 and is processed. Such a failure usually leaves the tenant's audit chain one
 event ahead in the database. Until the audit-chain repair, each new upload of
-the tenant answers `500` with its run created. A retry answers `409` until
-the admission lease ends. After that, the retry is a replay, which appends
-nothing. A bounded account is charged again for that retry.
+the tenant answers `500` with its run created. Each such upload logs
+`Trace Commons ingestion operation failed` with the `error_hash`
+`sha256:e1952ac96e302f8cb4b697909cb337f842acfee308b9813cbac12e69a85bda4d`.
+That line names no tenant. A retry answers `409` until the admission lease
+ends. After that, the retry is a replay, which appends nothing. A bounded
+account is charged again for that retry. When that charge is more than the
+account's remaining allowance, the retry answers `429`
+`account_limit_reached` until the allowance permits it. Under the older
+anchor admission, the retry also needs evidence that is still valid.
 If the process stops between the receipt's commit and the append, the run has
 no `submitted` event, and a retry (a replay) does not append it.
 
@@ -1739,9 +1749,16 @@ A stale audit chain is the usual cause of a repeated
 (see [audit-trail-forensics.md](audit-trail-forensics.md)). The worker can
 append the assessment event before the route does. The route then logs
 `pipeline_review_audit_append_failed` although the event exists. The pass
-appends nothing for a tenant whose process does not require the database
-mirror. It logs `pipeline_worker_review_audit_failed` with the label
-`pipeline_review_audit_mirror_not_required` for such a tenant.
+appends nothing in a process that does not require the database
+mirror. Each pass that finds a marked run then logs
+`pipeline_worker_review_audit_failed`. That line holds no label. Its
+`error_hash` is
+`sha256:648a4de4f8a56bcfffa17f11bd9457fddce2899ea2da3179b89f2e95de730755`,
+the SHA-256 of `pipeline_review_audit_mirror_not_required`. Set
+`TRACE_COMMONS_REQUIRE_DB_MIRROR_WRITES` and start the process again. The
+markers stay, and the next pass appends the events. A pass takes the
+tenant's 32 oldest marked runs. While each of them fails, the later runs
+wait.
 
 Two other events release a parked run to `pending`:
 
@@ -1793,8 +1810,11 @@ not the trace's fault:
   A failed store call of Settle's read of the stored index command is
   charged under `index_command_unreadable`, with one hour between attempts.
   The run fails about four hours after the first failure. Its open
-  settlement legs are forfeited when the run fails. A stored command with
-  wrong content keeps `index_command_invalid` and the short backoff.
+  settlement legs are forfeited when the run fails.
+  Correct the store within that time. The `work` list of the pipeline
+  operational summary shows the run with the phase `settle`, the state
+  `retry` and the reason label `index_command_unreadable`. A stored command
+  with wrong content keeps `index_command_invalid` and the short backoff.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
   rule, under the store's own label -- a store that cannot derive an object
@@ -1957,7 +1977,8 @@ settlement adapter is missing), deletes the objects it wrote.
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
 revoked as before, and, when the submission has a pipeline run, then make
 the pipeline's follow-up in one transaction (with no runtime injected,
-through the database, for the worker of a later runtime that lists the tenant): the export snapshot invalidations and payload deletions above,
+through the database, for the worker of a later runtime that lists the
+tenant): the export snapshot invalidations and payload deletions above,
 the run's index invalidation (reason `revoked`), and the release of a run
 parked in `awaiting_review`. Settle reads the revoked status and forfeits
 every leg it has not completed. `main`'s completion of a source-session
@@ -1996,8 +2017,8 @@ one read of `pipeline_runs`; its submissions are not read. One follow-up that fa
 and a hash of the submission id), does not stop the others of the pass,
 and is retried when a later run wraps round to it. Because each run starts
 after the last one, 32 or more follow-ups that fail every time cannot hold
-the window: the submissions after them are reached on the next run. A recovery that recovers nothing because
-of a failure is logged as `pipeline_worker_lost_follow_up_recovery_failed`
+the window: the submissions after them are reached on the next run. A
+recovery that recovers nothing because of a failure is logged as `pipeline_worker_lost_follow_up_recovery_failed`
 and retried a minute later.
 
 The response is `main`'s withdrawal response plus two follow-up states,
@@ -2032,9 +2053,11 @@ index. A `failed` invalidation is not final. Once the fault is fixed,
 credential; the tenant is the credential's) moves every `failed`
 invalidation of the tenant back to `pending`, with no attempt charged and
 due at once, and answers `{"requeued": <count>}`; the worker's next pass
-on the same ingest process tries each again. Each call appends a `vector_index` audit row with the
-count (`pipeline_index_invalidations_requeued`) and nothing else. Queuing the same revision's invalidation again (a repeated
-withdrawal, for example) resets it in the same way.
+on the same ingest process tries each again. Each call appends a
+`vector_index` audit row with the count
+(`pipeline_index_invalidations_requeued`) and nothing else. Queuing the same
+revision's invalidation again (a repeated withdrawal, for example) resets it
+in the same way.
 
 ## NEAR payout
 
@@ -2091,7 +2114,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
   | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. A leg `dry_run` confirms ends `confirmed` for good, as on `main`: a later switch to `http` does not pay it, because the payout skips a `confirmed` leg. Use `dry_run` only for legs that need no real payment. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. A `submitted` line with no recorded mode (code from before this rule submitted it) reads as `http`: `http` confirms it, and `dry_run` leaves it `submitted`. A build of `main` from before this rule also submits lines with no recorded mode. Such a line that `dry_run` submitted there stays `submitted` after the upgrade and is not confirmed; it never reached NEAR, so no money moves. Before a change between `http` and `dry_run`, stop the worker and check that no pipeline outbox line is `pending` or `failed`: the mode is recorded only after the submit, so a line in those states may have reached NEAR, and the other mode would submit it again as its own. A `failed` line needs the same care as a `pending` one: an `http` submit that errors ambiguously (a timeout after the transaction was broadcast) marks the line `failed`, and a direct `process_payout` with `retry_failed` under `dry_run` would submit it again, confirm it synthetically and overwrite its recorded mode. Resolve each such line against NEAR before the change. Both windows are accepted and are not tracked (#1185, C4 and finding 3b): the check before a mode change is the control. A line that is `failed` under `near_transaction_failed` is resolved when the operator's own record of the payment by hand exists. |
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_ENABLED` | not applied | It starts `main`'s scheduler. It does not stop the pipeline payout. `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled` stops it, and `main`'s payouts too. |
-  | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT`, `..._SCHEDULER_CONFIRM_LIMIT` | not applied | They bound `main`'s rows for each tick. The pipeline pass takes at most 32 legs of a tenant and runs again when it took 32. No setting bounds its submits or its confirmations. |
+  | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_SUBMIT_LIMIT`, `..._SCHEDULER_CONFIRM_LIMIT` | not applied | They bound `main`'s rows for each tick. The pipeline pass takes at most 32 legs of a tenant and runs again when it processed 32. No setting bounds its submits or its confirmations. |
   | `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_DRY_RUN` | not applied | It is `main`'s preview. The pipeline's dry run is the mode `dry_run` of `TRACE_COMMONS_NEAR_SETTLEMENT_MODE`. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
   | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
@@ -2158,10 +2181,28 @@ below). With payout disabled, nothing is submitted to NEAR.
   payout: nothing an operator can reach calls `process_payout`. A submitted
   line whose transaction the adapter reports as failed on chain becomes
   `failed` under `near_transaction_failed`. The contributor is not paid. No
-  pass submits that line again, and no route pays or closes it in this
-  release. The label is the `reason_label` of the `trace_credit` entry in
-  `instruments` of the run's forensic trace. A payment by hand goes into the
-  operator's own record. An operator
+  pass and no direct `process_payout` submits that line again, and no route
+  pays or closes it in this release. The label is the `reason_label` of the
+  `trace_credit` entry in `instruments` of the run's forensic trace. A
+  payment by hand goes into the operator's own record. No log line and no
+  route names the run. To find it, list the legs whose payout is `failed`,
+  in one session. Set the tenant first: `pipeline_run_settlements` forces
+  row security.
+
+  ```sql
+  SELECT set_config('trace_commons.trace_tenant_id', '<tenant>', false);
+  SELECT run_id, last_error_label, updated_at
+    FROM pipeline_run_settlements
+   WHERE tenant_id = '<tenant>'
+     AND instrument_id = 'trace_credit'
+     AND payout_state = 'failed'
+   ORDER BY updated_at;
+  ```
+
+  `last_error_label` is `near_transaction_failed` for a transaction that
+  failed on chain, and `near_submit_failed` for a submit that may have
+  reached NEAR. The forensic trace of each `run_id` gives the amount
+  (`atomic_units`) and the batch (`settlement_batch_id`). An operator
   sees the leg's payout as `failed` with its label (for example
   `near_submit_failed`) in the run's forensic trace
   (`GET /v1/admin/pipeline/runs/{run_id}/forensic`) and in the contributor

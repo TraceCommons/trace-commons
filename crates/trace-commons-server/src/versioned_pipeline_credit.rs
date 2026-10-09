@@ -204,7 +204,8 @@ pub struct NearLogicalRequest {
 /// repeated key with a different method. A confirmation exists only once a
 /// test records one (`record_confirmation`) or a failure on chain
 /// (`record_failure`); a recorded failure wins over a recorded
-/// confirmation. `fail_next` makes the next submit fail. It presents no credential unless built `authenticated`.
+/// confirmation. `fail_next` makes the next submit fail. It presents no
+/// credential unless built `authenticated`.
 ///
 /// It is in the library, not behind `#[cfg(test)]`, because the integration
 /// tests and the ingest binary's tests link the library built without

@@ -14546,8 +14546,8 @@ async fn mark_near_outbox_line_failed(
 
 /// Records a leg's payout state from its batch's outbox lines: every line
 /// `confirmed` is `confirmed`, any `failed` line is `failed` under
-/// `near_submit_failed` (`near_transaction_failed` when the line's stored
-/// hash is that label's), every line `submitted` or `confirmed` is
+/// `near_submit_failed` (`near_transaction_failed` when each `failed` line's
+/// stored hash is that label's), every line `submitted` or `confirmed` is
 /// `submitted`, and otherwise (no line yet, or one still `pending`)
 /// `pending`.
 async fn record_payout_state_on(

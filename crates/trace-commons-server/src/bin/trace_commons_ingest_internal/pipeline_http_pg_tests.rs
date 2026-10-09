@@ -13597,6 +13597,32 @@ async fn a_review_audit_item_that_fails_keeps_its_marker() {
     assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
 }
 
+/// The clear is conditional on the listed marker: a marker set again after
+/// the list (a newer decision) stays, so its event is not lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_audit_marker_set_after_the_list_is_not_cleared() {
+    let Some((fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let store = fixture.service.store();
+    let listed = store
+        .list_pending_review_audits(&fixture.tenant, 32)
+        .await
+        .expect("the list reads");
+    let item = listed
+        .iter()
+        .find(|item| item.run_id == run.run_id)
+        .expect("the run is listed");
+    set_review_audit_marker(&fixture, run.run_id).await;
+    store
+        .clear_review_audit_pending(&fixture.tenant, item)
+        .await
+        .expect("the clear runs");
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+}
+
 /// With a database mirror that is not required, the file line is written
 /// before the row, so a failed mirror write would leave an event that the
 /// read by id cannot see. The pass appends nothing there, answers an error
