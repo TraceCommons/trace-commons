@@ -1078,8 +1078,8 @@ change came first: read the routing again before you decide. If the answer is
    credential, after the first one has run clean.
 4. Watch the tenant. Read `GET /v1/admin/pipeline/operational-summary` (work by
    state, `retryable_error_count`, `terminal_error_count`,
-   `suspended_policy_count`, the index and invalidation counts, the NEAR outbox
-   by state) and `GET /v1/admin/pipeline/routing` (the events).
+   `suspended_policy_count`, the index and invalidation counts, the pipeline's
+   NEAR outbox lines by state) and `GET /v1/admin/pipeline/routing` (the events).
 5. Contain on doubt: `POST` `contain`, with the `expected_record_id` that you
    read when you have time to read the routing first. In an emergency, send
    `contain` with no expectation: it then works from any state. New uploads
@@ -2075,8 +2075,9 @@ below). With payout disabled, nothing is submitted to NEAR.
   an `instrument_id`): `GET /v1/admin/near-credit-outbox` leaves it out, and
   `POST /v1/workers/near-credit-outbox/mark-status` answers `404` (`NEAR
   credit outbox item not found`) and leaves it unchanged. The pipeline
-  confirms its rows only with its adapter's evidence. The operational
-  summary's NEAR outbox counts still include them.
+  confirms its rows only with its adapter's evidence. Only the pipeline
+  operational summary's `near_outbox_by_state` counts them. `main`'s
+  operational summary does not.
 - Confirmation of a submitted payout is polled without the lock, at most
   once per `main`'s NEAR scheduler interval,
   `TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS` (60 seconds
@@ -2093,7 +2094,9 @@ below). With payout disabled, nothing is submitted to NEAR.
   (`GET /v1/admin/pipeline/runs/{run_id}/forensic`) and in the contributor
   status, the outbox line as `failed` in the pipeline operational summary's
   `near_outbox_by_state` (`GET /v1/admin/pipeline/operational-summary`), and
-  the settled credit itself unchanged. `main`'s operational summary, its
+  the settled credit itself unchanged. That field counts only the pipeline's
+  outbox lines (the rows with an `instrument_id`). `main`'s lines are in
+  `main`'s operational summary. `main`'s operational summary, its
   promotion gates, and the rollout-smoke readiness built from them read
   `main`'s outbox lines only, as `main`'s outbox listing does, so a failed
   pipeline line never holds them. The payout stays

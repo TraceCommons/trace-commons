@@ -1210,6 +1210,7 @@ impl PipelineProductStore {
                 "SELECT status, COUNT(*) AS item_count
                    FROM trace_near_credit_outbox
                   WHERE tenant_id = $1
+                    AND instrument_id IS NOT NULL
                   GROUP BY status
                   ORDER BY status",
                 &[&tenant_id],
