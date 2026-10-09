@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { ResponsiveOverlay } from "../../../components/responsive-overlay";
 import { useWithdrawalConfirmationPrompt } from "../../../lib/tauri/use-contributor-copy";
-import { canWithdrawStatus } from "../withdrawal-eligibility";
+import { canWithdrawStatus } from "../withdrawal-eligibility.ts";
 import type { HistoryRecord, WithdrawalResult } from "../types";
 
 const reachCopy: Record<
