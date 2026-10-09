@@ -72399,6 +72399,38 @@ impl Database for PerplexityDriverTestDb {
             .collect())
     }
 
+    /// In-memory analogue of the Postgres `list_recent_gate_decision_keys`:
+    /// every decision row (any tenant), sorted `decided_at DESC,
+    /// decision_id DESC` as the real query orders it, capped at `limit`.
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow> = self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tenant_id, row)| {
+                trace_commons_server::trace_corpus_storage::GateDecisionKeyRow {
+                    tenant_id: tenant_id.clone(),
+                    submission_id: row.submission_id,
+                    decision_id: row.decision_id,
+                    decided_at: row.decided_at,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then(b.decision_id.cmp(&a.decision_id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// In-memory analogue of the Postgres `list_dedup_rederive_rows`
     /// enumeration: every decision row (any tenant), sorted
     /// `decided_at ASC, decision_id ASC` as the real query orders it, capped
@@ -99970,6 +100002,7 @@ mod credit_estimate_tests {
         _temp: tempfile::TempDir,
         _artifact_temp: tempfile::TempDir,
         state: Arc<AppState>,
+        db: Arc<PerplexityDriverTestDb>,
         submission_ids: Vec<Uuid>,
         features: Vec<LocalEstimateFeatures>,
     }
@@ -100066,6 +100099,7 @@ mod credit_estimate_tests {
             _temp: temp,
             _artifact_temp: artifact_temp,
             state,
+            db,
             submission_ids,
             features,
         }
@@ -100098,18 +100132,18 @@ mod credit_estimate_tests {
         assert!(response.fit.is_none());
         assert_eq!(response.rows.len(), 3);
 
-        for (i, tenant_id) in TENANTS.iter().enumerate().take(3) {
+        for i in 0..3 {
             let row = response
                 .rows
                 .iter()
                 .find(|row| row.features == fx.features[i])
                 .unwrap_or_else(|| panic!("row {i} present"));
-            assert_eq!(row.tenant_hash, sha256_prefixed(tenant_id));
+            assert!(row.tenant_tag.starts_with('t'), "{}", row.tenant_tag);
             match i {
-                0 => assert_eq!(row.credit_quality_micros, Some(150_000)),
-                1 => assert_eq!(row.credit_quality_micros, Some(220_000)),
+                0 => assert_eq!(row.displayed_credit, Some(1.5)),
+                1 => assert_eq!(row.displayed_credit, Some(2.2)),
                 _ => {
-                    assert_eq!(row.credit_quality_micros, None);
+                    assert_eq!(row.displayed_credit, None);
                     assert_eq!(row.withheld, Some(EstimateWithheldLabel::Duplicate));
                 }
             }
@@ -100126,6 +100160,87 @@ mod credit_estimate_tests {
         for needle in ["tenant-a", "tenant-b", "ESTIMATE-FIXTURE", "decided_at"] {
             assert!(!json.contains(needle), "{needle} leaked: {json}");
         }
+    }
+
+    /// Kristi's #1285 review, finding 3: a capped run reads the NEWEST
+    /// decisions, so it reaches the calibration the fit trains on, and
+    /// every submission it reaches has its latest decision -- the one its
+    /// label comes from -- among the rows. Decisions are dated in fixture
+    /// order, so the newest two are submission 3 (unlabelled) and
+    /// submission 2 (withheld); oldest-first would read 0 and 1.
+    #[tokio::test]
+    async fn a_capped_eval_reads_the_newest_decisions() {
+        let fx = eval_fixture().await;
+        let base = Utc::now() - chrono::Duration::days(1);
+        for (_, row) in fx.db.gate_decisions.write().unwrap().iter_mut() {
+            let i = fx
+                .submission_ids
+                .iter()
+                .position(|id| *id == row.submission_id)
+                .expect("fixture submission");
+            row.decided_at = base + chrono::Duration::minutes(i as i64);
+        }
+        let response = run_credit_estimate_eval(
+            fx.state.as_ref(),
+            &CreditEstimateEvalQuery {
+                dry_run: false,
+                limit: Some(2),
+                fit: false,
+            },
+        )
+        .await
+        .expect("eval runs");
+        assert_eq!(response.counts.decisions, 2, "{:?}", response.counts);
+        assert_eq!(response.counts.unlabelled, 1, "{:?}", response.counts);
+        assert_eq!(response.counts.labelled, 1, "{:?}", response.counts);
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].features, fx.features[2]);
+    }
+
+    /// Kristi's #1285 review, finding 4: shuffling alone does not unlink a
+    /// row. Neither the exact credit quality, which sits beside the
+    /// submission id in `trace_gate_decisions`, nor an unsalted tenant hash,
+    /// which anyone with the tenant id can recompute, may appear in a row.
+    /// The label is displayed credit (2 decimals), and the tenant is a tag
+    /// that only says which rows share a tenant within this one run.
+    #[tokio::test]
+    async fn eval_rows_carry_no_value_that_joins_back_to_a_decision() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        let json = serde_json::to_value(&response).expect("serializes");
+        let text = json.to_string();
+        for tenant_id in TENANTS {
+            let hash = sha256_prefixed(tenant_id);
+            assert!(!text.contains(&hash), "unsalted tenant hash: {text}");
+        }
+        for micros in ["150000", "220000", "credit_quality_micros"] {
+            assert!(!text.contains(micros), "{micros} leaked: {text}");
+        }
+        let rows = json["rows"].as_array().expect("rows");
+        let tag_of = |features: &LocalEstimateFeatures| {
+            let row = rows
+                .iter()
+                .find(|row| row["features"] == serde_json::to_value(features).unwrap())
+                .expect("row present");
+            row["tenant_tag"]
+                .as_str()
+                .expect("a tenant tag")
+                .to_string()
+        };
+        // Rows 0 and 1 are tenant-a, row 2 tenant-b.
+        assert_eq!(tag_of(&fx.features[0]), tag_of(&fx.features[1]));
+        assert_ne!(tag_of(&fx.features[0]), tag_of(&fx.features[2]));
+        let shown: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|row| row["displayed_credit"].as_f64())
+            .map(|credit| format!("{credit:.2}"))
+            .collect();
+        assert_eq!(
+            shown,
+            BTreeSet::from(["1.50".to_string(), "2.20".to_string()])
+        );
     }
 
     /// A dry run reads labels only: no envelope is loaded or decrypted and
@@ -100198,6 +100313,17 @@ mod credit_estimate_tests {
             ),
             (
                 "/v1/admin/credit-estimate-eval?dry_run=true&fit=true",
+                StatusCode::BAD_REQUEST,
+            ),
+            // Kristi's #1285 review, finding 3: a limit over the cap is
+            // refused, before any dependency is looked at, rather than
+            // run unbounded.
+            (
+                "/v1/admin/credit-estimate-eval?limit=10001",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?limit=-1",
                 StatusCode::BAD_REQUEST,
             ),
         ] {

@@ -5633,6 +5633,39 @@ impl Database for PgBackend {
             .collect())
     }
 
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The four columns are in the
+        // role's V45 column grants, so the query needs no migration.
+        let rows = client
+            .query(
+                "SELECT tenant_id, submission_id, decision_id, decided_at
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at DESC, decision_id DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateDecisionKeyRow {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+                decision_id: row.get("decision_id"),
+                decided_at: row.get("decided_at"),
+            })
+            .collect())
+    }
+
     async fn list_dedup_rederive_rows(
         &self,
         limit: i64,

@@ -463,25 +463,38 @@ impl MissionJoin {
             // folder the cwd cache holds no readable session for. Adding
             // their languages cannot change `match_missions`, which looks
             // a language up only for a readable session's own folder.
+            //
+            // An entry's folder is probed only when `readable_sessions` lets
+            // the entry itself through, the same gate `fit` applies: never
+            // for an entry whose adapter is off, in a Never folder or under
+            // a Never override, or kept or withdrawn. Checking which files
+            // exist at a folder's root is reading it (M1). An entry queued
+            // before its folder went Never, or before its adapter was
+            // switched off, is still waiting.
             let roots: Vec<(String, PathBuf)> = {
-                let entry_folders: BTreeSet<String> = {
+                let entries: Vec<SeenSession> = {
                     let queue = shared.queue.lock().expect("queue lock");
                     queue
                         .pending()
                         .into_iter()
-                        .map(|e| e.project_key.clone())
-                        .filter(|f| f != UNKNOWN_PROJECT_KEY)
-                        .filter(|f| !facts.folder_languages.contains_key(f))
+                        .filter(|e| e.project_key != UNKNOWN_PROJECT_KEY)
+                        .filter(|e| !facts.folder_languages.contains_key(&e.project_key))
+                        .map(|e| SeenSession {
+                            tool: Some(e.displayed_source().to_string()),
+                            adapter: Some(e.source.clone()),
+                            folder: e.project_key.clone(),
+                            path: e.path.to_string_lossy().to_string(),
+                        })
                         .collect()
                 };
                 let policy = shared.policy.lock().expect("policy lock");
+                let entry_folders: BTreeSet<String> =
+                    readable_sessions(&policy, &gates.tools_on, &gates.excluded_paths, &entries)
+                        .into_iter()
+                        .map(|s| s.folder)
+                        .collect();
                 entry_folders
                     .into_iter()
-                    // Never means nothing in the folder is read, the files
-                    // at its root included: the same `resolve` gate as
-                    // `readable_sessions`. An entry queued before its folder
-                    // went Never is still waiting.
-                    .filter(|f| policy.resolve(f) != ProjectMode::Ignore)
                     .map(|f| {
                         let root = language_root(&policy, &f);
                         (f, root)
@@ -1407,65 +1420,6 @@ mod tests {
         assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "Never folder");
     }
 
-    /// A waiting entry in a Never folder must not have its folder probed
-    /// for language markers: Never means nothing in that folder is read,
-    /// and that includes checking which files exist at its root. The entry
-    /// can still be waiting because the folder was set to Never after it
-    /// was queued. `never-repo` holds a `pyproject.toml`, so a probe would
-    /// leave `python` in the slot's language cache.
-    #[test]
-    fn a_never_folders_waiting_entry_is_not_language_probed() {
-        let (_dir, s, work) = seeded();
-        let never = key_under(&work, "never-repo");
-        pend(
-            &s,
-            "claude-code",
-            "sha256:never",
-            &never,
-            "/s/claude-never.jsonl",
-        );
-        receive(&s, catalogue());
-        let listed = list_pending(&s);
-        assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
-        let cached = s
-            .mission_catalogue
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("live catalogue")
-            .folder_languages
-            .clone();
-        assert!(
-            !cached.contains_key(&never),
-            "Never folder was probed: {cached:?}"
-        );
-    }
-
-    /// The same under a Never contribution override: every folder is Never,
-    /// so no waiting entry's folder is probed.
-    #[test]
-    fn no_waiting_entry_is_language_probed_under_a_never_override() {
-        let (_dir, s, work) = seeded();
-        let ask = key_under(&work, "ask-repo");
-        pend(&s, "codex", "sha256:codex", &ask, "/s/codex-ask.jsonl");
-        s.policy
-            .lock()
-            .unwrap()
-            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
-            .unwrap();
-        receive(&s, catalogue());
-        list_pending(&s);
-        let cached = s
-            .mission_catalogue
-            .lock()
-            .unwrap()
-            .as_ref()
-            .expect("live catalogue")
-            .folder_languages
-            .clone();
-        assert!(cached.is_empty(), "probed under Never: {cached:?}");
-    }
-
     /// Under a Never contribution override nothing is read, so every entry
     /// fits nothing -- a known zero, since the catalogue is live.
     #[test]
@@ -1694,5 +1648,91 @@ mod tests {
             answer
         );
         assert_eq!(format!("{:?}", s.mission_catalogue.lock().unwrap()), before);
+    }
+
+    /// The languages the live slot has cached, by folder key.
+    fn cached_languages(s: &DaemonShared) -> BTreeMap<String, BTreeSet<String>> {
+        s.mission_catalogue
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("live catalogue")
+            .folder_languages
+            .clone()
+    }
+
+    /// Kristi's #1285 review, finding 1 (and #1298, poldsam 1): a waiting
+    /// entry's folder is probed for language markers only when
+    /// `readable_sessions` would let the entry through. Under a languages
+    /// catalogue, an entry in a Never folder and an entry whose adapter is
+    /// off (codex, in a folder no readable session ran in) each leave their
+    /// folder unprobed, while an Ask me entry with its adapter on is probed.
+    #[test]
+    fn waiting_entries_in_never_folders_or_off_adapters_are_not_language_probed() {
+        let (_dir, s, work) = seeded();
+        let off_dir = work.path().join("off-repo");
+        std::fs::create_dir_all(&off_dir).unwrap();
+        std::fs::write(off_dir.join("pyproject.toml"), "").unwrap();
+        let (ask, never, off) = (
+            key_under(&work, "ask-repo"),
+            key_under(&work, "never-repo"),
+            key_under(&work, "off-repo"),
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:never",
+            &never,
+            "/s/claude-never.jsonl",
+        );
+        pend(&s, "codex", "sha256:off", &off, "/s/codex-off.jsonl");
+        receive(&s, catalogue());
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
+        assert_eq!(fit_of(&listed, "sha256:off"), Some(0), "{listed}");
+        let cached = cached_languages(&s);
+        assert!(
+            cached.contains_key(&ask),
+            "Ask me folder probed: {cached:?}"
+        );
+        assert!(
+            !cached.contains_key(&never),
+            "Never folder probed: {cached:?}"
+        );
+        assert!(
+            !cached.contains_key(&off),
+            "off adapter's folder probed: {cached:?}"
+        );
+    }
+
+    /// Under a Never contribution override every folder is Never, so no
+    /// waiting entry's folder is probed, whatever its own mode.
+    #[test]
+    fn no_waiting_entry_is_language_probed_under_a_never_override() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
+            .unwrap();
+        receive(&s, catalogue());
+        list_pending(&s);
+        let cached = cached_languages(&s);
+        assert!(cached.is_empty(), "probed under Never: {cached:?}");
     }
 }
