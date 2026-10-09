@@ -121,5 +121,5 @@ enum ActionNoticeWords {
     /// The core's word for dismissing a notice, for every glass notice that
     /// can be put away; nil when the core's copy does not decode, and the
     /// caller falls back to `dismissWord`.
-    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
+    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction
 }

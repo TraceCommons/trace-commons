@@ -481,12 +481,11 @@ final class MonitorNavigationTests: XCTestCase {
                 case .monitor: openWindow(id: WindowID.monitor)
                 case nil: break
                 }
-                // Settings is the Monitor's modal (#1241 Task 10): a Settings
-                // destination raises the Monitor and asks it for Settings at the
-                // section.
+                // A Settings destination opens the Settings window at the section
+                // (owner, 2026-10-08: Settings is its own window).
                 if let section = opening.settings {
-                    openWindow(id: WindowID.monitor)
                     navigation.requestSettings(at: section)
+                    openWindow(id: WindowID.settings)
                 }
             }
         """), "Settings must open from the opening, outside the window switch")
@@ -507,7 +506,7 @@ final class MonitorNavigationTests: XCTestCase {
 
         land(.inference)
         XCTAssertEqual(tab, .inference)
-        XCTAssertTrue(inspector, "the Private AI switch and sign-in live in the Inference inspector")
+        XCTAssertFalse(inspector, "the inspector stays closed on Inference (owner, 2026-10-09)")
 
         inspector = false
         land(.traces(entryId: nil))
@@ -637,8 +636,8 @@ final class MonitorNavigationTests: XCTestCase {
         // title switch comes first).
         let land = try XCTUnwrap(window.range(of: "static func land("))
         let inference = try XCTUnwrap(window.range(of: "case .inference:", range: land.upperBound ..< window.endIndex))
-        XCTAssertTrue(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
-                      "the Private AI switch and sign-in live in the Inference inspector")
+        XCTAssertFalse(window[inference.upperBound...].prefix(200).contains("showsInspector = true"),
+                       "the inspector stays closed on Inference (owner, 2026-10-09)")
         // Settings is the Monitor's modal (#1241 Task 10): a request while
         // it is open is a new request, and the modal scrolls to it.
         let modal = try Self.text("Views/Monitor/SettingsModal.swift")
@@ -693,21 +692,18 @@ final class MonitorNavigationTests: XCTestCase {
         let map = try XCTUnwrap(window.range(of: "private struct MonitorMapPane"))
         XCTAssertEqual(window[pane.lowerBound ..< map.lowerBound].components(separatedBy: "GlassSegmentedTabs(").count - 1, 1,
                        "a second tab strip in the main pane would escape the gate")
-        // Both tab switches (the main pane's content and the inspector)
-        // switch on the shown tab, never the restored one.
-        XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 2)
+        // The main pane's content switches on the shown tab, never the
+        // restored one, and the inspector reads the shown tab too.
+        XCTAssertEqual(window.components(separatedBy: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {").count - 1, 1)
         XCTAssertFalse(window.contains("switch tab {"), "a switch on the restored tab would draw Home or Traces during onboarding")
-        XCTAssertTrue(window.contains("""
-                    GlassPane(insets: GlassPaneInsets.inspector) {
-                        // An empty branch would leave the pane nothing to draw, and
-                        // it would vanish while the layout still reserved its width.
-                        // While onboarding is required only Inference is shown, so
-                        // the Private AI inspector is the only one admitted (R-38).
-                        if !model.onboardingKnown {
-                            Color.clear
-                        } else {
-                            switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
-        """), "the inspector must draw nothing until onboarding is known, and the shown tab's after")
+        XCTAssertTrue(window.contains("ScrollView {\n                    inspectorContent\n"),
+                      "the inspector pane draws the inspector column")
+        // The inspector draws nothing until onboarding is known, and
+        // nothing where it may not open: while onboarding is required only
+        // Inference is shown, and its inspector stays closed.
+        XCTAssertTrue(window.contains("if !model.onboardingKnown || !inspectorAvailable {\n            Color.clear\n"),
+                      "the inspector must draw nothing until onboarding is known")
+        XCTAssertTrue(window.contains("Self.inspectorAvailable(shownTab, homePage: homePage)"))
     }
 
     /// Finishing first run closes it and opens the Monitor on Home.

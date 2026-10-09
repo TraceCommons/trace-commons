@@ -118,7 +118,7 @@ pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        "Can't reach Trace Commons' background service.",
+        "Can't reach the Trace Commons service.",
         "Nothing is being watched or sent while it's down. Your queue and the sessions \
          already sent are safe, and sessions from while it was down will be picked up when \
          it's running again.",
@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach Trace Commons' background service.");
+        assert_eq!(copy.title, "Can't reach the Trace Commons service.");
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),

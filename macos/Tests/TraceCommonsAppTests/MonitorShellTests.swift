@@ -68,7 +68,8 @@ final class MonitorShellTests: XCTestCase {
             "EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)",
             "GlassHairline(GlassTokens.Color.rule.color)",
             ".transition(.move(edge: .bottom).combined(with: .opacity))",
-            "GlassPane(insets: GlassPaneInsets.inspector) {",
+            // The inspector's 16 by 18, on the column it scrolls.
+            ".padding(GlassPaneInsets.inspector)",
             "GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {",
             "GlassMapField()",
             ".padding(GlassTokens.Space.mapOverlayInset)",
@@ -88,7 +89,10 @@ final class MonitorShellTests: XCTestCase {
                        "GlassMenuItem(MonitorShellWords.showIgnoredFolders, checked: showsIgnored)",
                        "GlassToolbarButton(MonitorShellWords.graphToggle(shown: showsGraph),",
                        "GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap),",
-                       "GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector),",
+                       // Disabled, and reading hidden, where the inspector
+                       // cannot open (Home but for History).
+                       "MonitorShellWords.inspectorToggle(shown: showsInspector && inspectorAvailable),",
+                       ".disabled(!inspectorAvailable)",
                        "@SceneStorage(\"monitor.showsIgnored\") private var showsIgnored = true",
                        ".onChange(of: showsIgnored) { _, shows in traces.showsIgnored = shows }"] {
             XCTAssertTrue(window.contains(needle), "MonitorWindowView.swift lacks \(needle)")

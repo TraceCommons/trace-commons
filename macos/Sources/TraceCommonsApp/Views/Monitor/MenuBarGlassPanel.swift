@@ -389,8 +389,8 @@ struct MenuBarGlassPanel: View {
             Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: WindowID.monitor)
                 navigation.requestSettings()
+                openWindow(id: WindowID.settings)
             }
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }

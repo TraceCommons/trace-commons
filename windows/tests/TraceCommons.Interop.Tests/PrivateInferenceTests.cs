@@ -232,10 +232,10 @@ public class PrivateInferenceTests
         PrivateInferenceCopy copy = Copy();
         foreach (string sentence in new[] { copy.StatePortInUse, copy.StateStartFailed, copy.StateCrashed })
         {
-            Assert.Contains("off and on again", sentence, StringComparison.Ordinal);
+            Assert.Contains("off and on", sentence, StringComparison.Ordinal);
         }
 
-        Assert.Contains("will not retry by itself", copy.StateCrashed, StringComparison.Ordinal);
+        Assert.Contains("won't retry on its own", copy.StateCrashed, StringComparison.Ordinal);
     }
 
     /// <summary>

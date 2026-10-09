@@ -827,10 +827,11 @@ pub fn witness_copy() -> WitnessCopy {
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
-            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
-            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
-            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
-            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
+            // Plain-language rewrite (owner, 2026-10-08).
+            start: "Share a session you already have, or finish a new task in a supported agent. Choose its folder in Settings, then come back here to review it.",
+            review: "Open a waiting session and choose Look inside. If you've set up a witness, you're asked before the session is sent to it for review. Check what comes back before you send it.",
+            follow_up: "Follow it in History. Sending, acceptance and credit happen separately. Points are not a spendable NEAR AI balance.",
+            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests with IronWire, and sending what it captures, each need their own setup. This app doesn't create a provider account for you.",
         },
     }
 }

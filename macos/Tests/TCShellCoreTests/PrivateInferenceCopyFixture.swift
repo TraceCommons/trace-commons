@@ -32,7 +32,7 @@ enum PrivateInferenceCopyFixture {
     /// from, so an assertion that reads the wrong field says which one.
     static let complete = """
         {"destination":"DESTINATION","subtitle":"SUBTITLE",
-         "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE",
+         "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE","offer_exposure_short":"EXPOSURE SHORT","offer_learn_more":"MORE",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
          "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",

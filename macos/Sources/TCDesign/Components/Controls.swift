@@ -566,28 +566,21 @@ public struct GlassToggleStyle: ToggleStyle {
         self.showsLabel = showsLabel
     }
 
-    /// The track colour when on.
+    /// The track colour when on. The watch switch takes the Settings
+    /// purple, as every switch matches (owner, 2026-10-08): its knob lost
+    /// the dark ring that let a white knob read on the bright watch green,
+    /// and white on that green is about 1.8:1, under the 3:1 floor.
     static func onColor(_ kind: GlassSwitchKind) -> GlassRGBA {
         switch kind {
         case .standard: GlassTokens.Color.toggleOn
-        case .settings: GlassTokens.Color.toggleOnSettings
-        case .watch: GlassTokens.Color.watchOn
+        case .settings, .watch: GlassTokens.Color.toggleOnSettings
         }
     }
 
-    /// The knob: white on every track, the watch switch's too, as #1146
-    /// draws it.
+    /// The knob: plain white on every track, with no ring (owner,
+    /// 2026-10-08), as #1146 draws it.
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
         GlassTokens.Color.textOnAccent
-    }
-
-    /// A hairline ring inside the knob. On the bright watch green white is
-    /// about 1.8:1, so the knob is told apart from its track by this ring
-    /// instead, which clears the 3:1 glyph floor against the track
-    /// (SwitchContrastTests; owner ruling, 2026-10-07: hold the WCAG
-    /// floors). Every other knob clears it by itself.
-    static func knobEdge(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA? {
-        kind == .watch && isOn ? GlassTokens.Color.switchKnobEdge : nil
     }
 
     /// How long the knob takes to slide: #1146's `--tc-dur` (220ms) for a
@@ -619,11 +612,6 @@ public struct GlassToggleStyle: ToggleStyle {
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)
-                        .overlay {
-                            if let edge = Self.knobEdge(kind, isOn: configuration.isOn) {
-                                Circle().strokeBorder(edge.color, lineWidth: 1)
-                            }
-                        }
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
