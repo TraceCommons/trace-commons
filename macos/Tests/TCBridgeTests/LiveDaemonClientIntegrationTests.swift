@@ -171,6 +171,30 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         client.finishEvents()
     }
 
+    /// In process, a declaration changes by registering the same handler
+    /// anew and ending the old registration: afterwards the handler gets
+    /// each frame exactly as often as an untouched subscription does, not
+    /// twice as often and not never.
+    func testRedeclaringInProcessDeliversEachFrameOnce() throws {
+        let daemon = try startDaemon()
+        let seen = FrameLog()
+        let control = FrameLog()
+        let plain = try XCTUnwrap(daemon.subscribe { seen.add($0) })
+        let declared = try XCTUnwrap(daemon.redeclare(plain, accepts: ["reengage_due"]))
+        defer { daemon.unsubscribe(declared) }
+        let untouched = try XCTUnwrap(daemon.subscribe { control.add($0) })
+        defer { daemon.unsubscribe(untouched) }
+        _ = daemon.call("pause", params: "{}")
+        let deadline = Date().addingTimeInterval(10)
+        while control.count(of: "status_changed") == 0, Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        // Give a late copy, if there were one, time to land.
+        RunLoop.current.run(until: Date().addingTimeInterval(0.6))
+        XCTAssertGreaterThan(control.count(of: "status_changed"), 0)
+        XCTAssertEqual(seen.count(of: "status_changed"), control.count(of: "status_changed"))
+    }
+
     /// The stream the app feeds from its one `tc_subscribe` callback: opens
     /// with a snapshot of the real queue, then carries the daemon's frames.
     func testEventsOpenWithASnapshotAndCarryRealFrames() async throws {
@@ -199,5 +223,24 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         let next = await iterator.next()
         XCTAssertEqual(next, .statusChanged)
         client.finishEvents()
+    }
+}
+
+/// Event names a subscription callback received, from the Rust thread.
+private final class FrameLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var names: [String] = []
+
+    func add(_ json: String) {
+        let name = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])?["event"] as? String
+        lock.lock()
+        names.append(name ?? "")
+        lock.unlock()
+    }
+
+    func count(of name: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return names.filter { $0 == name }.count
     }
 }

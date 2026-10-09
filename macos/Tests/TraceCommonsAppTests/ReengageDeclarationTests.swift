@@ -23,53 +23,45 @@ final class ReengageDeclarationTests: XCTestCase {
 
     @MainActor
     func testTheDeclarationFollowsWhatCanBePosted() {
-        let recorder = SubscribeRecorder()
+        let recorder = RedeclareRecorder()
         let declaration = recorder.declaration()
 
         declaration.update(accepts: [])
-        XCTAssertEqual(recorder.subscribed, [], "a denied app declared")
+        XCTAssertEqual(recorder.calls, [], "a denied app declared")
         XCTAssertFalse(declaration.isDeclared)
 
         declaration.update(accepts: ["reengage_due"])
-        XCTAssertEqual(recorder.subscribed, [["reengage_due"]])
+        XCTAssertEqual(recorder.calls, [Call(token: 0, accepts: ["reengage_due"])])
         XCTAssertTrue(declaration.isDeclared)
+        XCTAssertEqual(declaration.token, 1, "the replacement subscription is the one kept")
 
-        // Asked again with the same answer: still one declaration.
+        // Asked again with the same answer (every time the app comes
+        // forward): nothing is re-registered.
         declaration.update(accepts: ["reengage_due"])
-        XCTAssertEqual(recorder.subscribed, [["reengage_due"]])
+        XCTAssertEqual(recorder.calls.count, 1)
 
-        // Permission withdrawn in System Settings: the declaration goes.
+        // Permission withdrawn in System Settings: the declaration goes, on
+        // the same subscription.
         declaration.update(accepts: [])
-        XCTAssertEqual(recorder.unsubscribed, [1])
+        XCTAssertEqual(recorder.calls.last, Call(token: 1, accepts: []))
         XCTAssertFalse(declaration.isDeclared)
+        XCTAssertEqual(declaration.token, 2)
     }
 
-    /// An unsubscribe the ABI refused leaves the declaration standing, so
-    /// the next update tries again rather than forgetting it.
+    /// A refused re-registration leaves the old subscription and its
+    /// declaration standing, so the next update tries again.
     @MainActor
-    func testARefusedWithdrawalIsRetried() {
-        let recorder = SubscribeRecorder()
+    func testARefusedRedeclarationIsRetried() {
+        let recorder = RedeclareRecorder()
         let declaration = recorder.declaration()
+        recorder.refuse = true
         declaration.update(accepts: ["reengage_due"])
-        recorder.refuseUnsubscribe = true
-        declaration.update(accepts: [])
-        XCTAssertTrue(declaration.isDeclared)
-        recorder.refuseUnsubscribe = false
-        declaration.withdraw()
         XCTAssertFalse(declaration.isDeclared)
-        XCTAssertEqual(recorder.unsubscribed, [1, 1])
-    }
-
-    /// The declaring subscription hands on `reengage_due` alone: the app's
-    /// plain subscription already delivers every ordinary frame.
-    func testTheDeclaringSubscriptionForwardsOnlyReengagement() {
-        let frame = #"""
-            {"event":"reengage_due","data":{"kind":"idle_sessions","title":"T","body":"B",
-             "actions":[{"id":"review","label":"R"}]}}
-            """#
-        XCTAssertEqual(ReengageDeclaration<Int>.reengageDue(frame)?.kind, "idle_sessions")
-        XCTAssertNil(ReengageDeclaration<Int>.reengageDue(#"{"event":"status_changed","data":{}}"#))
-        XCTAssertNil(ReengageDeclaration<Int>.reengageDue(#"{"event":"reengage_due","data":{}}"#))
+        XCTAssertEqual(declaration.token, 0)
+        recorder.refuse = false
+        declaration.update(accepts: ["reengage_due"])
+        XCTAssertTrue(declaration.isDeclared)
+        XCTAssertEqual(recorder.calls.count, 2)
     }
 
     private let settings = #"{"claude_source":{"mode":"off"},"codex_source":{"mode":"off"}}"#
@@ -92,26 +84,58 @@ final class ReengageDeclarationTests: XCTestCase {
             XCTAssertEqual(model.declaresReengagement, declared, "\(accepts)")
         }
     }
+
+    /// Attached to a daemon another process runs, the declaration rides
+    /// on the app's one subscription: the screens keep receiving frames
+    /// after it is made. (A second subscription on an attached handle
+    /// would take the first one's event sink.)
+    @MainActor
+    func testAnAttachedAppStillHearsTheDaemonAfterDeclaring() async throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/tc-ra-\(UUID().uuidString.prefix(8))")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let incumbent = try TCDaemon(configDir: directory.path, settingsJSON: settings)
+        defer { incumbent.shutdown() }
+
+        let model = AppModel(reengageAccepts: { ["reengage_due"] })
+        defer { model.shutdown() }
+        let started = expectation(description: "attached")
+        model.startDaemon(at: directory.path, settingsJSON: settings) { _ in started.fulfill() }
+        await fulfillment(of: [started], timeout: 10)
+        XCTAssertTrue(model.isAttachedDaemon)
+        await model.refreshReengageDeclaration()
+        XCTAssertTrue(model.declaresReengagement)
+
+        // Let the start-up reads settle, then move status from the other
+        // side; only a frame on the app's subscription can tell it.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(model.status.paused)
+        _ = incumbent.call("pause", params: "{}")
+        let deadline = Date().addingTimeInterval(10)
+        while !model.status.paused, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertTrue(model.status.paused, "the app stopped hearing the daemon")
+    }
+}
+
+private struct Call: Equatable {
+    let token: Int
+    let accepts: [String]
 }
 
 @MainActor
-private final class SubscribeRecorder {
-    var subscribed: [[String]] = []
-    var unsubscribed: [Int] = []
-    var refuseUnsubscribe = false
+private final class RedeclareRecorder {
+    var calls: [Call] = []
+    var refuse = false
     private var next = 0
 
     func declaration() -> ReengageDeclaration<Int> {
-        ReengageDeclaration(
-            subscribe: { [unowned self] accepts, _ in
-                subscribed.append(accepts)
-                next += 1
-                return next
-            },
-            unsubscribe: { [unowned self] token in
-                unsubscribed.append(token)
-                return !refuseUnsubscribe
-            },
-            deliver: { _ in })
+        ReengageDeclaration(token: 0) { [unowned self] token, accepts in
+            calls.append(Call(token: token, accepts: accepts))
+            guard !refuse else { return nil }
+            next += 1
+            return next
+        }
     }
 }

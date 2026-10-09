@@ -76,7 +76,20 @@ private final class StandInDaemonSocket: @unchecked Sendable {
         }
     }
 
+    private var latest: Int32 = -1
+
+    /// Pushes `line` to the most recent connection.
+    func push(_ line: String) {
+        lock.lock()
+        let connection = latest
+        lock.unlock()
+        write(connection, line)
+    }
+
     private func handle(_ connection: Int32) {
+        lock.lock()
+        latest = connection
+        lock.unlock()
         defer { close(connection) }
         var buffer = Data()
         var chunk = [UInt8](repeating: 0, count: 4096)
@@ -141,6 +154,38 @@ final class SubscribeAcceptsDeclarationTests: XCTestCase {
             return XCTFail("not a reengage_due: \(frame)")
         }
         XCTAssertEqual(due.kind, "idle_sessions")
+    }
+
+    /// An attached handle has one event sink per connection: a second
+    /// subscription would take the first's frames, and any unsubscribe
+    /// clears the sink. So a declaration changes by re-subscribing the
+    /// same handler on the connection, which the daemon reads as a
+    /// replacement, and never by unsubscribing the old token.
+    func testRedeclaringAnAttachedSubscriptionKeepsItsHandler() throws {
+        let socket = try StandInDaemonSocket()
+        defer { socket.stop() }
+        let daemon = try attach(socket)
+        let frames = Frames()
+        let plain = try XCTUnwrap(daemon.subscribe { frames.add($0) })
+        XCTAssertTrue(socket.waitForSubscribe())
+
+        let declared = try XCTUnwrap(daemon.redeclare(plain, accepts: ["reengage_due"]))
+        XCTAssertTrue(socket.waitForSubscribe())
+        let frame = try XCTUnwrap(frames.next(), "the original handler lost its frames")
+        guard case .reengageDue = DaemonDataEventParser.parse(frame) else { return XCTFail(frame) }
+
+        let withdrawn = try XCTUnwrap(daemon.redeclare(declared, accepts: []))
+        XCTAssertTrue(socket.waitForSubscribe())
+        let requests = socket.subscribeRequests()
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertNil(requests[0]["accepts"] as? [String])
+        XCTAssertEqual(requests[1]["accepts"] as? [String], ["reengage_due"])
+        XCTAssertNil(requests[2]["accepts"] as? [String])
+        // The connection still delivers to the handler: a pushed frame
+        // after the last change arrives.
+        socket.push(StandInDaemonSocket.reengageFrame)
+        XCTAssertNotNil(frames.next(), "the sink was cleared")
+        daemon.unsubscribe(withdrawn)
     }
 
     func testAPlainSubscriberDeclaresNothing() throws {

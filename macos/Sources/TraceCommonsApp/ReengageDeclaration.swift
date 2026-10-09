@@ -1,8 +1,7 @@
 import Foundation
-import TCShellCore
 
-/// Holds this app's `reengage_due` declaration exactly while it can post
-/// the notification the daemon would announce.
+/// The app's one subscription, and what it declares: `reengage_due` exactly
+/// while this app can post the notification the daemon would announce.
 ///
 /// The arbiter publishes a standalone re-engagement notification, stamps it
 /// against its caps, and retires the idle sessions it named, only while a
@@ -10,63 +9,34 @@ import TCShellCore
 /// "Opt-in events"). So the declaration follows `Notifier.acceptedEvents`:
 /// made when the system lets the app post, withdrawn when it does not.
 ///
-/// It is a second subscription beside the app's plain one. Replacing the
-/// plain one to change what it declares would drop or repeat ordinary
-/// frames in between; this one hands on `reengage_due` and ignores the
-/// rest, which the plain subscription already delivers.
+/// It is changed on the one subscription (`TCDaemon.redeclare`), never by
+/// adding a second: on an attached handle there is one event sink per
+/// connection, and a second subscription would take the first one's frames.
 @MainActor
 final class ReengageDeclaration<Token> {
-    typealias Subscribe = (_ accepts: [String], _ handler: @escaping (String) -> Void) -> Token?
-    /// Answers whether the subscription was ended; a refusal keeps it.
-    typealias Unsubscribe = (Token) -> Bool
+    /// Re-registers the subscription with a new declaration; nil when the
+    /// ABI refused, and the old one still stands.
+    typealias Redeclare = (_ token: Token, _ accepts: [String]) -> Token?
 
-    private let subscribe: Subscribe
-    private let unsubscribe: Unsubscribe
-    private let deliver: (DaemonData.ReengageDue) -> Void
-    private var token: Token?
+    private let redeclare: Redeclare
+    private(set) var token: Token
+    private(set) var accepts: [String]
 
-    /// `deliver` runs on whatever thread the subscription's callback does.
-    init(
-        subscribe: @escaping Subscribe,
-        unsubscribe: @escaping Unsubscribe,
-        deliver: @escaping (DaemonData.ReengageDue) -> Void
-    ) {
-        self.subscribe = subscribe
-        self.unsubscribe = unsubscribe
-        self.deliver = deliver
+    /// `token` is a subscription that declares nothing.
+    init(token: Token, redeclare: @escaping Redeclare) {
+        self.token = token
+        self.accepts = []
+        self.redeclare = redeclare
     }
 
-    var isDeclared: Bool { token != nil }
+    var isDeclared: Bool { !accepts.isEmpty }
 
-    /// Declares when `accepts` names anything, and withdraws when it names
-    /// nothing. Asking again with the same answer changes nothing.
-    func update(accepts: [String]) {
-        if accepts.isEmpty {
-            guard let token else { return }
-            if unsubscribe(token) { self.token = nil }
-        } else if token == nil {
-            token = subscribe(accepts, Self.handler(deliver))
-        }
-    }
-
-    /// Withdraws the declaration, for teardown.
-    func withdraw() {
-        update(accepts: [])
-    }
-
-    /// The subscription's callback, made outside the main actor: it runs on
-    /// the Rust thread the subscription delivers on.
-    private nonisolated static func handler(
-        _ deliver: @escaping (DaemonData.ReengageDue) -> Void
-    ) -> (String) -> Void {
-        { json in
-            if let due = reengageDue(json) { deliver(due) }
-        }
-    }
-
-    /// The `reengage_due` a frame carries, or nil for any other frame.
-    nonisolated static func reengageDue(_ json: String) -> DaemonData.ReengageDue? {
-        guard case .reengageDue(let due) = DaemonEventParser.parse(json) else { return nil }
-        return due
+    /// Declares `accepts`, or withdraws with none. The same answer again
+    /// changes nothing, so it can be asked as often as the app comes
+    /// forward.
+    func update(accepts wanted: [String]) {
+        guard wanted != accepts, let replaced = redeclare(token, wanted) else { return }
+        token = replaced
+        accepts = wanted
     }
 }
