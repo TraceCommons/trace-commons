@@ -2128,6 +2128,90 @@ class PackageCommandTests(_CorpusRunCase):
                 self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
                 self.assertEqual(self._cargo_calls(), [])
 
+    def test_package_production_passes_only_the_env_files_package_variables(self):
+        """Spec B-D5: `package --bundle production` builds the production
+        package offline from the deployment's env file. The writer receives
+        the descriptor and gate variables and nothing else from it: never
+        the NEAR AI key or endpoint, never a database URL."""
+        output = self.tmp / "out" / "package.json"
+        key_output = self.tmp / "out" / "trusted-key.json"
+        env_file = self.tmp / "ingest.env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "# the pilot's env file",
+                    "TRACE_COMMONS_GATE_SERVICE=enclave_near_ai",
+                    "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8",
+                    'TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF="-8.0"',
+                    "TRACE_COMMONS_NEAR_AI_API_KEY=secret-near-ai-key",
+                    "TRACE_COMMONS_NEAR_AI_BASE_URL=https://example.invalid/v1",
+                    "TRACE_COMMONS_EMBEDDER_MODEL_ID='BAAI/bge-large-en-v1.5'",
+                    "TRACE_COMMONS_VECTOR_INDEX_DIM=1024",
+                    "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000",
+                    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0",
+                    "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=2.5",
+                    "DATABASE_URL=postgres://ingest@db/trace",
+                    "",
+                ]
+            )
+        )
+
+        def fake_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            Path(env["TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT"]).write_text(
+                json.dumps({"package": {"bundle_id": _fake_hash("bundle")},
+                            "signature": {"package_hash": _fake_hash("package")}})
+            )
+            Path(env["TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT"]).write_text("{}")
+
+        code = self._main(
+            ["package", "--bundle", "production", "--env-file", str(env_file), "--output", str(output),
+             "--public-key-output", str(key_output)],
+            cargo=fake_cargo,
+        )
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, step, cargo_args, test_filter, env, _, _)] = self._cargo_calls()
+        self.assertEqual((step, cargo_args, test_filter), ("package_write", _INGEST_ARGS, _PACKAGE_WRITER))
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": "production",
+                "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output.resolve()),
+                "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output.resolve()),
+                "TRACE_COMMONS_NEAR_AI_MODEL": "Qwen/Qwen3.6-35B-A3B-FP8",
+                "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF": "-8.0",
+                "TRACE_COMMONS_EMBEDDER_MODEL_ID": "BAAI/bge-large-en-v1.5",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM": "1024",
+                "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS": "500000",
+                "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS": "0",
+                "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA": "2.5",
+            },
+        )
+        self.assertNotIn("secret-near-ai-key", self.stdout.getvalue() + self.stderr.getvalue())
+
+        bad_line = self.tmp / "bad.env"
+        bad_line.write_text("TRACE_COMMONS_NEAR_AI_API_KEY secret-near-ai-key\n")
+        for argv, label in (
+            (["--bundle", "production"], "package_env_file_required"),
+            (["--bundle", "minimal", "--env-file", str(env_file)], "package_env_file_unexpected"),
+            (["--bundle", "production", "--env-file", str(self.tmp / "missing.env")], "env_file_unreadable"),
+            (["--bundle", "production", "--env-file", str(bad_line)], "env_file_invalid"),
+        ):
+            with self.subTest(label=label):
+                self.calls.clear()
+                self.stderr = io.StringIO()
+                code = self._main(
+                    ["package", *argv, "--output", str(output), "--public-key-output", str(key_output)],
+                    cargo=fake_cargo,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertNotIn("secret-near-ai-key", self.stderr.getvalue())
+                self.assertEqual(self._cargo_calls(), [])
+
+        # `run` serves no production bundle: its package comes from `package`.
+        self.assertNotIn("production", pipeline.BUNDLES)
+
 
 # ---------------------------------------------------------------------------
 # Task 10: `pipeline.py restore-drill`.

@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from pipeline_tooling import promote
+from pipeline_tooling import envfile, promote
 from pipeline_tooling.cargo import cargo_test
 from pipeline_tooling.catalog import CATALOG_NAME, update_catalog
 from pipeline_tooling.checks import (
@@ -73,6 +73,9 @@ PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
 ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
 KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
+# `package` also builds the production package (spec B-D5), from the
+# deployment's env file; `run` never serves it as a built-in bundle.
+PACKAGE_BUNDLES = (*BUNDLES, "production")
 
 # The maximum age a signed result carries when `--evidence-max-age-seconds` is
 # not given, and the longest the server accepts
@@ -209,7 +212,13 @@ def build_parser():
     run_parser.set_defaults(handler=run_corpus)
 
     package_parser = subparsers.add_parser("package", help="Build and sign a bundle package (this does not qualify it)")
-    package_parser.add_argument("--bundle", choices=BUNDLES, required=True)
+    package_parser.add_argument("--bundle", choices=PACKAGE_BUNDLES, required=True)
+    package_parser.add_argument(
+        "--env-file",
+        dest="env_file",
+        default=None,
+        help="The deployment's env file (--bundle production only); only its descriptor and gate variables are read.",
+    )
     package_parser.add_argument("--output", required=True, help="Where to write the signed package.")
     package_parser.add_argument(
         "--public-key-output", dest="public_key_output", required=True, help="Where to write the trusted key."
@@ -554,11 +563,18 @@ def run_package(args, run):
     output = Path(args.output).resolve()
     key_output = Path(args.public_key_output).resolve()
     require(output != key_output, "package_outputs_must_differ")
+    production = args.bundle == "production"
+    require(not production or args.env_file is not None, "package_env_file_required")
+    require(production or args.env_file is None, "package_env_file_unexpected")
     extra = {
         "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": args.bundle,
         "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output),
         "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output),
     }
+    if production:
+        # Spec B-D5: the production package from the deployment's own
+        # descriptor and gate variables, offline; nothing else of the file.
+        extra.update(envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_VARIABLES))
     if args.signing_key is not None:
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_SIGNING_KEY_PATH"] = str(Path(args.signing_key).resolve())
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID"] = args.key_id

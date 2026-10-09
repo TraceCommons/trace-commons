@@ -516,6 +516,33 @@ impl CorpusRunConfig {
     }
 }
 
+/// The production package (spec B-D5): the scorer and embedder descriptors
+/// `lookup` names, through the parsers the deployed binary uses, under
+/// `main_gate`. Loads no model and calls no network
+/// (`production_compatibility_package` reads descriptors only).
+fn production_bundle_package(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    main_gate: &trace_commons_server::versioned_pipeline_compat::MainGateConfig,
+) -> anyhow::Result<BundlePackage> {
+    let scorer = production_assembly::near_ai_scorer_descriptor_from_lookup(lookup)?;
+    let embedder = production_assembly::fastembed_descriptor_from_lookup(lookup)?;
+    trace_commons_server::versioned_pipeline_production::production_compatibility_package(
+        &scorer, &embedder, main_gate,
+    )
+}
+
+/// [`production_bundle_package`] from the process environment, with
+/// `main`'s gate configuration parsed exactly as ingest parses it under a
+/// pipeline runtime. `pipeline.py package --bundle production` passes the
+/// env file's descriptor and gate variables, and nothing else.
+fn production_bundle_package_from_env() -> anyhow::Result<BundlePackage> {
+    let main_gate = pipeline_main_gate_config_from_env(
+        true,
+        parse_novelty_utility_credit_points_delta_from_env()?,
+    )?;
+    production_bundle_package(&|var: &str| std::env::var(var).ok(), &main_gate)
+}
+
 /// The built-in bundles, by name: PR 2's minimal package with the
 /// `storage_rebate` award, and the qualification candidate, the
 /// compatibility package over `local_reference()` with a 2_500_000
@@ -2010,8 +2037,18 @@ async fn pipeline_package_write() {
         _ => panic!("package_environment_incomplete"),
     };
     assert_ne!(output, key_output, "package_outputs_must_differ");
-    let package =
-        corpus_bundle_package(&bundle).unwrap_or_else(|_| panic!("package_bundle_invalid"));
+    let package = if bundle == "production" {
+        let package =
+            production_bundle_package_from_env().unwrap_or_else(|error| panic!("{error}"));
+        trace_commons_server::versioned_pipeline_qualification::validate_production_package(
+            &package,
+        )
+        .unwrap_or_else(|_| panic!("package_production_invalid"));
+        production_package_pins(&package).unwrap_or_else(|error| panic!("{error}"));
+        package
+    } else {
+        corpus_bundle_package(&bundle).unwrap_or_else(|_| panic!("package_bundle_invalid"))
+    };
     let (pkcs8, key_id) = match (var(PACKAGE_SIGNING_KEY_PATH_VAR), var(PACKAGE_KEY_ID_VAR)) {
         (Some(path), Some(key_id)) => (
             zeroize::Zeroizing::new(
@@ -3360,4 +3397,66 @@ async fn production_corpus_run_serves_the_signed_package_over_doubles() {
         report["package_hash"],
         package_digests(&package).unwrap().package_hash
     );
+}
+
+/// Spec B-D5, plan B6: `pipeline.py package --bundle production` builds the
+/// production package from the deployment's env file alone. The
+/// descriptors come from the variables the deployed binary parses, the
+/// scorer and embedder are never loaded, and no network is reachable: the
+/// package validates as a production package and is the one the production
+/// assembler serves for the same configuration.
+#[test]
+fn production_package_build_needs_no_network() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+
+    let env = BTreeMap::from([
+        ("TRACE_COMMONS_NEAR_AI_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8"),
+        ("TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF", "-8.0"),
+        ("TRACE_COMMONS_EMBEDDER_MODEL_ID", "BAAI/bge-large-en-v1.5"),
+        ("TRACE_COMMONS_VECTOR_INDEX_DIM", "1024"),
+        // Never read: the build has no endpoint and no key.
+        (
+            "TRACE_COMMONS_NEAR_AI_BASE_URL",
+            "https://unreachable.invalid/v1",
+        ),
+    ]);
+    let lookup = |var: &str| env.get(var).map(|value| value.to_string());
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+    };
+    let package = production_bundle_package(&lookup, &gate).expect("builds offline");
+    trace_commons_server::versioned_pipeline_qualification::validate_production_package(&package)
+        .expect("a production package");
+    assert_eq!(package, production_test_package());
+    let pins = production_package_pins(&package).unwrap();
+    assert_eq!(pins.main_gate, gate);
+    assert_eq!(pins.scorer_descriptor.model, "Qwen/Qwen3.6-35B-A3B-FP8");
+
+    // No model pin, no package; an all-zero floor configuration is refused
+    // as `main` refuses it.
+    let no_model = |var: &str| {
+        (var != "TRACE_COMMONS_NEAR_AI_MODEL")
+            .then(|| lookup(var))
+            .flatten()
+    };
+    assert_eq!(
+        production_bundle_package(&no_model, &gate)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_scorer_model_missing"
+    );
+    let zero = MainGateConfig {
+        novelty_floor_micros: Some(0),
+        ..gate
+    };
+    assert!(production_bundle_package(&lookup, &zero).is_err());
 }
