@@ -2183,7 +2183,7 @@ pub fn leaves_this_mac_phrase(label: &str) -> Option<&'static str> {
         LEAVES_CORRECTION => "your correction",
         LEAVES_USES => "the uses you allowed",
         LEAVES_REDACTION_SUMMARY => "what scrubbing removed, as counts",
-        LEAVES_SESSION_ID => "the tool's own trace id",
+        LEAVES_SESSION_ID => "the tool's own session id",
         LEAVES_TRACE_IDS => "random ids for this trace",
         LEAVES_CONTRIBUTOR_ID => "a pseudonymous contributor id",
         LEAVES_TENANT => "the commons you joined",
