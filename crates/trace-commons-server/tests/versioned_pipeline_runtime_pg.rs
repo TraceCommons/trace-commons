@@ -30022,8 +30022,8 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
 /// Multi-lens review C5, residual: a failed store call of Settle's read of
 /// the stored index command is charged as `index_command_unreadable`, one
 /// hour between attempts, so a store fault spans hours in which an operator
-/// can correct it. The run fails only after its last attempt, and its open
-/// legs are forfeited. (A command that is read but wrong keeps
+/// can correct it. The run fails only after its last attempt, and it has no
+/// settlement leg, since Settle reads the command first. (A command that is read but wrong keeps
 /// `index_command_invalid` and the short backoff:
 /// `stored_command_binding_failures_fail_closed`.)
 #[tokio::test]
@@ -30106,12 +30106,10 @@ async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
         .await
         .unwrap();
     // Settle reads the command before it creates any leg, so a run that
-    // failed here has none; a leg that did exist would be forfeited.
+    // failed here has none.
     assert!(
-        settlements
-            .iter()
-            .all(|settlement| settlement.operation_state == "forfeited"),
-        "no leg is left open: {settlements:?}"
+        settlements.is_empty(),
+        "the failed run has no settlement leg: {settlements:?}"
     );
 }
 
