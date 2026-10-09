@@ -52,11 +52,12 @@ use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, Offset, Utc, 
 use serde::{Deserialize, Serialize};
 use trace_commons_protocol::insights_usage_series::{
     DigestKey, DigestKeyError, DigestKeyStore, InMemoryDigestKeyStore, KeyedDigest, UsageSeries,
-    key_fingerprint, project_digest, session_key,
+    harness_session_digest, key_fingerprint, project_digest, session_key,
 };
 
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
+use crate::insights::SourceFormat;
 use crate::insights::analytics_constants::PATTERN_BAR_WEEKS;
 use crate::insights::analytics_constants::{
     COUNTER_PASS_EXCLUDES_NEVER_FOLDERS, COUNTER_PASS_MAX_BYTES_PER_TICK,
@@ -65,6 +66,7 @@ use crate::insights::analytics_constants::{
     DIGEST_KEY_CUSTODY, DigestKeyCustody,
 };
 use crate::insights::goals::WeekFigures;
+use crate::insights::session_identity::harness_session_id;
 use crate::insights::usage::NativeTokenCounts;
 use crate::insights::usage_evidence::{PersistedUsageEvidence, extract_codex_usage_evidence};
 use crate::insights::week_glance::{counter_overview, dated_weeks};
@@ -130,6 +132,15 @@ struct CounterRow {
     /// Order the row was made in, for the rollup's overlap rule.
     seq: u64,
     body: RowBody,
+    /// Keyed digest of the one session ID the transcript records, under the
+    /// counter key, so a proxy ledger row can be joined to this row inside
+    /// the daemon (owner decision D15, extended to feed T: the keyed
+    /// harness-session digest under the counter key is feed T's join key).
+    /// `None` when the file records none, more than one, or could not be
+    /// read. Stored only; never on the wire, and never the engine's
+    /// `SessionInput::harness_session`, so the overlap rule is unchanged.
+    #[serde(default)]
+    harness_session: Option<KeyedDigest>,
 }
 
 impl CounterRow {
@@ -387,6 +398,7 @@ impl CounterPass {
             }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             removals.remove(&session);
+            let (body, harness_session) = read_body(source, candidate, &key);
             reads.push((
                 session,
                 CounterRow {
@@ -395,7 +407,8 @@ impl CounterPass {
                     placed_at: candidate.started_at,
                     project: project_digest(&key, &project_key),
                     seq: 0,
-                    body: read_body(source, candidate, &key),
+                    body,
+                    harness_session,
                 },
             ));
         }
@@ -630,6 +643,14 @@ fn analytics_source(adapter: &str) -> Option<AnalyticsSource> {
     }
 }
 
+/// The transcript format a counted source is read as.
+fn source_format(source: AnalyticsSource) -> SourceFormat {
+    match source {
+        AnalyticsSource::ClaudeCode => SourceFormat::ClaudeCode,
+        AnalyticsSource::Codex => SourceFormat::Codex,
+    }
+}
+
 fn never_digests(key: &DigestKey, never_project_keys: &[String]) -> BTreeSet<KeyedDigest> {
     if !COUNTER_PASS_EXCLUDES_NEVER_FOLDERS {
         return BTreeSet::new();
@@ -641,17 +662,26 @@ fn never_digests(key: &DigestKey, never_project_keys: &[String]) -> BTreeSet<Key
 }
 
 /// One session's counters, or unknown when they cannot be read. Never zero
-/// in place of unknown.
-fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &DigestKey) -> RowBody {
+/// in place of unknown. Beside them, the keyed digest of the one session ID
+/// the transcript records, under the harness name the adapter reports (the
+/// same string the proxy ledger's attribution uses); `None` when there is
+/// none or more than one, as a saved snapshot's identity does.
+fn read_body(
+    source: AnalyticsSource,
+    candidate: &CounterCandidate,
+    key: &DigestKey,
+) -> (RowBody, Option<KeyedDigest>) {
     let unknown = RowBody::Unknown {
         source,
         reason: UnknownReason::NoUsageCounters,
     };
     // The bound is on the file read; `size_bytes` is the whole group's.
     let Some(bytes) = bounded_read(&candidate.path, COUNTER_PASS_MAX_SESSION_BYTES) else {
-        return unknown;
+        return (unknown, None);
     };
-    match source {
+    let harness_session = harness_session_id(source_format(source), &bytes)
+        .map(|id| harness_session_digest(key, candidate.source, &id));
+    let body = match source {
         AnalyticsSource::ClaudeCode => {
             match crate::insights::turn_series::extract_claude_turn_series(&bytes, key) {
                 Ok(evidence) => {
@@ -675,7 +705,8 @@ fn read_body(source: AnalyticsSource, candidate: &CounterCandidate, key: &Digest
             },
             Err(_) => unknown,
         },
-    }
+    };
+    (body, harness_session)
 }
 
 /// Codex's first-to-last observed change. Cached input is a subset of input
@@ -1315,6 +1346,7 @@ mod tests {
                     project: KeyedDigest([9; 32]),
                     seq: u64::from(i),
                     body: RowBody::Codex { observed: None },
+                    harness_session: None,
                 },
             );
         }
@@ -1352,6 +1384,72 @@ mod tests {
             })
             .unwrap();
         assert_eq!(summary.dropped, 1);
+    }
+
+    fn stored_rows(pass: &CounterPass) -> Vec<CounterRow> {
+        pass.load_cached()
+            .unwrap()
+            .map(|store| store.rows.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn key_for(seed: u8) -> DigestKey {
+        InMemoryDigestKeyStore::with_seed([seed; 32])
+            .load_or_create()
+            .unwrap()
+    }
+
+    #[test]
+    fn each_row_stores_the_keyed_harness_session_digest() {
+        let f = Fixture::new();
+        let claude = f.write("c.jsonl", &claude_bytes());
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &claude),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let key = key_for(3);
+        let mut stored: Vec<KeyedDigest> = stored_rows(&f.pass)
+            .iter()
+            .map(|row| row.harness_session.expect("one session id"))
+            .collect();
+        stored.sort();
+        let mut expected = vec![
+            harness_session_digest(
+                &key,
+                SOURCE_CLAUDE_CODE,
+                "11111111-2222-4333-8444-PRIVATESESS1",
+            ),
+            harness_session_digest(&key, SOURCE_CODEX, "PRIVATE-CODEX-ID"),
+        ];
+        expected.sort();
+        assert_eq!(stored, expected);
+
+        // The digest is the store's own; it never crosses.
+        let wire = f.week(&[]).to_string();
+        for digest in &expected {
+            let hex = hex::encode(digest.0);
+            assert!(!wire.contains(&hex), "digest on the wire: {wire}");
+            assert!(!wire.contains(&hex[..16]), "digest prefix on the wire");
+        }
+    }
+
+    #[test]
+    fn an_ambiguous_or_unreadable_file_stores_no_session_digest() {
+        let f = Fixture::new();
+        let mut ambiguous = claude_bytes();
+        ambiguous.extend_from_slice(b"{\"type\":\"user\",\"sessionId\":\"ANOTHER-ID\"}\n");
+        let two = f.write("two.jsonl", &ambiguous);
+        let none = f.write("none.jsonl", b"{\"type\":\"user\"}\n");
+        let missing = f.dir.path().join("missing.jsonl");
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &two),
+            candidate(SOURCE_CLAUDE_CODE, &none),
+            candidate(SOURCE_CODEX, &missing),
+        ]);
+        let rows = stored_rows(&f.pass);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.harness_session.is_none()));
     }
 
     #[test]
