@@ -14911,7 +14911,16 @@ async fn route_pipeline_receipt(
         .await
         .map_err(pipeline_receipt_error)?;
     match result {
-        PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
+        PipelineReceiptResult::Created(run) => {
+            // `main`'s upload appends this event after its submission writes,
+            // and answers 500 when the append fails. The receipt has
+            // committed and the run exists; a retry replays and appends
+            // nothing.
+            append_pipeline_receipt_submitted_event(state, tenant, envelope, &run)
+                .await
+                .map_err(internal_error)?;
+            Ok(Some(pipeline_processing_receipt()))
+        }
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
         | PipelineReceiptResult::ContentConflict) => {
             // A replay means a run already exists for this key, created by
@@ -14991,6 +15000,66 @@ async fn route_pipeline_receipt(
             Err(internal_error("pipeline_routing_result_unexpected"))
         }
     }
+}
+
+/// Appends `main`'s `submitted` audit event for a receipt that has just
+/// created `run`. No submission record is in scope, so the event is built
+/// here from the same fields `TraceCommonsAuditEvent::submitted` sets. Its
+/// status follows the Admission decision; an admitted receipt has the stored
+/// status `received`, which `main`'s audit status type does not have, so its
+/// event has none and its row says `received`. The row carries the privacy
+/// risk the receipt stored in `trace_submissions`.
+async fn append_pipeline_receipt_submitted_event(
+    state: &AppState,
+    tenant: &TenantCtx,
+    envelope: &TraceContributionEnvelope,
+    run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
+) -> anyhow::Result<()> {
+    let (status, stored_status) = match run.admission_decision.as_str() {
+        "quarantine" => (
+            Some(TraceCorpusStatus::Quarantined),
+            StorageTraceCorpusStatus::Quarantined,
+        ),
+        "reject" => (
+            Some(TraceCorpusStatus::Rejected),
+            StorageTraceCorpusStatus::Rejected,
+        ),
+        "admit" => (None, StorageTraceCorpusStatus::Received),
+        _ => anyhow::bail!("pipeline_receipt_decision_unexpected"),
+    };
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id().to_string(),
+        submission_id: run.submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status,
+        actor_role: Some(tenant.role()),
+        actor_principal_ref: Some(tenant.principal_ref().to_string()),
+        reason: Some(tenant.auth_method_reason()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    append_audit_event_mirrored(
+        state,
+        tenant.auth(),
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Submit,
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: stored_status,
+                privacy_risk: serde_storage_string(&envelope.privacy.residual_pii_risk)?,
+            },
+            object_ref_id: Some(run.source_object_ref_id),
+            actor_role_label: None,
+        },
+        "submission audit event",
+    )
+    .await?;
+    Ok(())
 }
 
 /// Claims `submission_id` for the legacy path before its first write, when
@@ -72175,12 +72244,13 @@ fn normalize_audit_event_metadata(
     metadata: StorageTraceAuditSafeMetadata,
 ) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
     if action == StorageTraceAuditAction::Submit && event.kind == "submitted" {
-        let expected_status = event.status.map(storage_corpus_status).ok_or_else(|| {
-            anyhow::anyhow!(
-                "submitted audit event {} requires canonical status",
-                event.event_id
-            )
-        })?;
+        // A pipeline receipt's event for an admitted trace has no status:
+        // its stored status is `received`, which the audit status type does
+        // not have.
+        let expected_status = match event.status {
+            Some(status) => storage_corpus_status(status),
+            None => StorageTraceCorpusStatus::Received,
+        };
         return match metadata {
             StorageTraceAuditSafeMetadata::Submission { status, .. }
                 if status == expected_status =>
@@ -74759,6 +74829,14 @@ fn audit_backfill_storage_projection(
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
+        // A `submitted` event with no status is a pipeline receipt's for an
+        // admitted trace (stored status `received`). After a database
+        // restore this backfill is the only repair of the audit rows, and
+        // one event it cannot write blocks each later event of the tenant.
+        "submitted" if event.status.is_none() => StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        },
         "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub" => event
             .status
             .map(|status| StorageTraceAuditSafeMetadata::Submission {

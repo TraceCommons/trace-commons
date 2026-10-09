@@ -12807,3 +12807,219 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
         }
     }
 }
+
+/// A routed tenant's fixture for the tests of the `submitted` audit event of
+/// a pipeline receipt: the receipts list holds the tenant, the service
+/// routes without a routing row, and an audit append writes its database
+/// row before its file line, the order a routed tenant has in production.
+async fn submitted_audit_fixture() -> Option<WithdrawalFixture> {
+    let mut fixture = withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_test_pipeline_service_configured(
+                runtime,
+                artifacts,
+                IsolatedPipelineIndex::new(),
+                None,
+                Vec::new(),
+                None,
+                true,
+            )
+        },
+        false,
+    )
+    .await?;
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+    let tenant = fixture.tenant.clone();
+    let state_mut = Arc::make_mut(&mut fixture.state);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    Some(fixture)
+}
+
+/// The tenant's `submitted` events for `submission_id`, from the file log.
+fn submitted_file_events(
+    root: &Path,
+    tenant: &str,
+    submission_id: Uuid,
+) -> Vec<TraceCommonsAuditEvent> {
+    read_all_audit_events(root, tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.kind == "submitted" && event.submission_id == submission_id)
+        .collect()
+}
+
+/// A new pipeline receipt appends `main`'s `submitted` audit event, in the
+/// file log and as a database row, as `main`'s upload appends it: the
+/// uploader's principal reference, the `auth_method` reason, and no status
+/// for an admitted receipt (its stored status is `received`, which `main`'s
+/// audit status type does not have). The row says `submit` with the stored
+/// status and the privacy risk of the submission row. `main`'s chain
+/// verification and the backfill projection accept it. A replay appends
+/// nothing. When the file append fails after the database row committed, the
+/// route answers 500 and the run exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_receipt_appends_mains_submitted_audit_event() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    let root = fixture.state.root.clone();
+
+    let Json(receipt) = test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .expect("the receipt of the routed tenant succeeds");
+    assert_eq!(receipt.status, "processing");
+
+    // 1. One event in the file log, the uploader's reference, no status.
+    let events = submitted_file_events(&root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(
+        event.actor_principal_ref.as_deref(),
+        Some(principal.as_str())
+    );
+    assert_eq!(event.actor_role, Some(TokenRole::Contributor));
+    assert_eq!(event.reason.as_deref(), Some("auth_method=static_token"));
+    assert_eq!(event.status, None);
+
+    // 2. Its database row.
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event.event_id)
+        .expect("the event has its database row");
+    assert_eq!(row.action, StorageTraceAuditAction::Submit);
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: submission.privacy_risk.clone(),
+        }
+    );
+    assert_eq!(submission.privacy_risk, "low");
+
+    // 3. `main`'s audit verification finds no mismatch.
+    let report = verify_audit_chain(fixture.state.as_ref(), &tenant)
+        .await
+        .expect("the audit chain verifies");
+    assert!(report.verified, "{:?}", report.failures);
+    let mirror = report.db_mirror.expect("the database chain is verified");
+    assert!(mirror.verified, "{:?}", mirror.failures);
+    let projection = collect_db_audit_canonical_projection_failures(&rows)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(projection.is_empty(), "{projection:?}");
+
+    // 4. A replay answers success and appends nothing.
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the replay succeeds");
+    assert_eq!(
+        submitted_file_events(&root, &tenant, envelope.submission_id).len(),
+        1
+    );
+
+    // 5. The backfill projection of the event is accepted.
+    let (action, metadata) = audit_backfill_storage_projection(event);
+    let metadata = normalize_audit_event_metadata(event, action, metadata)
+        .expect("the backfill projection of the event is accepted");
+    assert_eq!(action, StorageTraceAuditAction::Submit);
+    assert_eq!(
+        metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+
+    // 6. The last step: the file append fails after the database row
+    // committed, which leaves the tenant's chain stale. The tenant is this
+    // test's own, so no later test reads it.
+    let mut failing = sample_envelope().await;
+    failing.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut failing);
+    fail_next_audit_file_append(&root, &tenant);
+    let (status, _) = test_submit(fixture.state.clone(), &fixture.token, failing.clone())
+        .await
+        .expect_err("the failed append answers an error");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let run = fixture
+        .service
+        .replay_receipt(
+            &tenant,
+            &failing.submission_id.to_string(),
+            &serde_json::to_vec(&failing).unwrap(),
+        )
+        .await
+        .expect("the run reads");
+    assert!(run.is_some(), "the run exists");
+}
+
+/// An admitted receipt's event has no status; a receipt that Admission
+/// quarantines has the status `quarantined`, in the event and in the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quarantined_pipeline_receipt_appends_a_quarantined_submitted_event() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Quarantined));
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Quarantined,
+            privacy_risk: "medium".to_string(),
+        }
+    );
+}

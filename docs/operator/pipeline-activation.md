@@ -1638,6 +1638,17 @@ retry of the same bytes replays the same run and does not call the boundary
 again. `approved_content_hash` is the hash of the stored, transformed
 content. Score and exports read that content only.
 
+A new pipeline receipt appends `main`'s `submitted` audit event after the
+receipt commits. The event holds the uploader's principal reference, as
+`main`'s event does. An admitted receipt's event has no status, and its audit
+row says `received`. A quarantined or rejected receipt's event has that
+status. When the append fails, the upload answers `500`, and the run exists
+and is processed. Such a failure usually leaves the tenant's audit chain one
+event ahead in the database. Until the audit-chain repair, each new upload of
+the tenant answers `500` with its run created. A retry answers `409` until
+the admission lease ends. After that, the retry is a replay, which appends
+nothing. A bounded account is charged again for that retry.
+
 The authority provider and the privacy boundary are dependencies like the
 scorer and the index. An unqualified one refuses startup with
 `pipeline_runtime_dependencies_not_production_qualified` whenever tenants
