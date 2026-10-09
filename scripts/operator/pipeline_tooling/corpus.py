@@ -77,6 +77,19 @@ LOCAL_BLOCKERS = (
     "synthetic_settlement",
     "static_bearer_authentication",
 )
+# A production-mode report's blockers (`PRODUCTION_HARNESS_BLOCKERS` in
+# `pipeline_corpus_pg_tests.rs`, spec B-D1): the production assembly scored
+# it, but it is still a harness run on static credentials, the test
+# authority and the pass-through privacy boundary.
+PRODUCTION_HARNESS_BLOCKERS = (
+    "local_test_only",
+    "static_bearer_authentication",
+    "harness_test_authority",
+    "harness_pass_through_privacy",
+)
+# What a report's `harness_assembly` may say. A reference report carries no
+# such field, exactly as before the switch existed.
+HARNESS_ASSEMBLIES = ("reference", "production")
 
 _REPORT_HASH = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _REPORT_LABEL = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
@@ -94,6 +107,8 @@ _TERMINAL_STATES = ("complete", "rejected")
 # The observed fields compared with their `expected_` counterpart, in the
 # order `pipeline_corpus_pg_tests::fixture_mismatches` names them.
 _COMPARED_STATES = ("consent_state", "privacy_state", "scoring_state", "settlement_state")
+# The states real scoring and the deployment's floors can move (production mode).
+_SCORING_STATES = ("scoring_state", "settlement_state")
 _REQUIRED_FLAGS = ("replay_same_run", "changed_content_refused", "tenant_isolation")
 
 # Every HF download made by `export_hf_corpus` stays inside the worktree:
@@ -348,23 +363,37 @@ def evidence_digests(report):
     return corpus_digest, sha256_digest(canonical(requests))
 
 
-def fixture_mismatches(item):
+def report_harness_assembly(report):
+    """`reference` for a report without `harness_assembly` (every report
+    before the switch), `production` for a production-mode report; a report
+    that names `reference` explicitly, or anything else, is refused, so one
+    report has one spelling."""
+    if "harness_assembly" not in report:
+        return "reference"
+    require(report["harness_assembly"] == "production", "invalid_report_harness_assembly")
+    return "production"
+
+
+def fixture_mismatches(item, mode="reference"):
     """The labels of every expectation `item` misses, in the harness's
     order: the same rule `pipeline_corpus_pg_tests::fixture_mismatches`
-    applies when it fills `mismatches`."""
+    applies when it fills `mismatches`. In `production` mode (spec section 2,
+    O-B3) the outcome count, the scoring and settlement states and the
+    instrument legs are evidence only and not compared."""
+    compare_scoring = mode == "reference"
     found = []
     if item["state"] not in _TERMINAL_STATES:
         found.append("run_not_terminal")
     if item["admission_decision"] != item["expected_admission_decision"]:
         found.append("admission_decision")
-    if item["phase_count"] != item["expected_outcome_count"]:
+    if compare_scoring and item["phase_count"] != item["expected_outcome_count"]:
         found.append("outcome_count")
     for field in _COMPARED_STATES:
-        if item[field] != item[f"expected_{field}"]:
+        if (compare_scoring or field not in _SCORING_STATES) and item[field] != item[f"expected_{field}"]:
             found.append(field)
-    if item["instrument_count"] != item["expected_instrument_count"]:
+    if compare_scoring and item["instrument_count"] != item["expected_instrument_count"]:
         found.append("instrument_count")
-    if item["instrument_states"] != item["expected_instrument_states"]:
+    if compare_scoring and item["instrument_states"] != item["expected_instrument_states"]:
         found.append("instrument_states")
     for flag in _REQUIRED_FLAGS:
         if item[flag] is not True:
@@ -389,7 +418,9 @@ def _validate_report(report):
     require(isinstance(report, dict) and report.get("schema") == REPORT_SCHEMA, "unsupported_report_schema")
     require(report.get("scope") == "local_test" and report.get("production_ready") is False, "invalid_report_scope")
     require(report.get("external_payout_enabled") is False, "payout_enabled")
-    require(set(LOCAL_BLOCKERS).issubset(report.get("safe_blockers") or ()), "missing_local_blockers")
+    mode = report_harness_assembly(report)
+    blockers = PRODUCTION_HARNESS_BLOCKERS if mode == "production" else LOCAL_BLOCKERS
+    require(set(blockers).issubset(report.get("safe_blockers") or ()), "missing_local_blockers")
     require(safe_report_value(report) == report, "unsafe_report")
     require(report.get("check_id") in CORPUS_CHECK_IDS, "invalid_report_check_id")
     for field in ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "report_digest"):
@@ -428,7 +459,7 @@ def _validate_report(report):
                 == {instrument["instrument_id"]: instrument["internal_settlement_state"] for instrument in item["instruments"]},
                 "instrument_states_mismatch",
             )
-            require(item.get("mismatches") == fixture_mismatches(item), "qualification_mismatch_not_failed")
+            require(item.get("mismatches") == fixture_mismatches(item, mode), "qualification_mismatch_not_failed")
         require(
             sum(bool(item["mismatches"]) for item in fixtures) == section.get("failure_count"),
             "failure_count_invalid",

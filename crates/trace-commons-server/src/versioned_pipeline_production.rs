@@ -98,6 +98,26 @@ impl NearAiScorerDescriptor {
         format!("sha256:{}", sha256_hex(&self.bytes()))
     }
 
+    /// The descriptor whose [`Self::bytes`] are exactly `bytes` (a package's
+    /// stored scorer descriptor), or `None`. The cutoff comes back from its
+    /// micros, and the round trip is checked, so a descriptor this cannot
+    /// reproduce byte for byte is refused rather than approximated.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object()?;
+        if object.len() != 4 || object.get("schema")?.as_str()? != NEAR_AI_SCORER_DESCRIPTOR_SCHEMA
+        {
+            return None;
+        }
+        let micros = object.get("tail_logprob_cutoff_micros")?.as_i64()?;
+        let descriptor = Self {
+            model: object.get("model")?.as_str()?.to_string(),
+            tail_logprob_cutoff: (micros as f64 / 1_000_000.0) as f32,
+            logprobs_top_k: u32::try_from(object.get("logprobs_top_k")?.as_u64()?).ok()?,
+        };
+        (descriptor.bytes() == bytes).then_some(descriptor)
+    }
+
     /// The compatibility configuration's `scorer_model_id` (spec A-D10):
     /// `near_ai:` and the descriptor's SHA-256, so the stored configuration
     /// carries no model name in clear.
@@ -132,6 +152,78 @@ impl FastEmbedDescriptor {
     pub fn hash(&self) -> String {
         format!("sha256:{}", sha256_hex(&self.bytes()))
     }
+
+    /// The descriptor whose [`Self::bytes`] are exactly `bytes`, or `None`
+    /// (see [`NearAiScorerDescriptor::from_bytes`]).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object()?;
+        if object.len() != 5
+            || object.get("schema")?.as_str()? != FASTEMBED_EMBEDDER_DESCRIPTOR_SCHEMA
+        {
+            return None;
+        }
+        let size =
+            |field: &str| -> Option<usize> { usize::try_from(object.get(field)?.as_u64()?).ok() };
+        let matryoshka_dim = match object.get("matryoshka_dim")? {
+            serde_json::Value::Null => None,
+            _ => Some(size("matryoshka_dim")?),
+        };
+        let descriptor = Self {
+            model_id: object.get("model_id")?.as_str()?.to_string(),
+            output_dim: size("output_dim")?,
+            max_tokens: size("max_tokens")?,
+            matryoshka_dim,
+        };
+        (descriptor.bytes() == bytes).then_some(descriptor)
+    }
+}
+
+/// Stands in for the scorer and embedder when only a package is built: the
+/// package names its dependencies by their descriptors alone, so building it
+/// loads no model and calls no network. Never served.
+struct NotLoaded;
+
+const PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL: &str = "production_dependency_not_loaded";
+
+impl PerplexityScorer for NotLoaded {
+    fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+
+    fn score_chunk(&self, _chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+}
+
+impl Embedder for NotLoaded {
+    fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+}
+
+/// The production compatibility package (spec A-D10, B-D5): the package
+/// [`assemble_production_pipeline`] serves for these descriptors and `main`'s
+/// gate configuration. It reads only the descriptors, so `pipeline.py
+/// package --bundle production` builds it offline, and the assembler builds
+/// its own package through this same function, so the two cannot differ.
+pub fn production_compatibility_package(
+    scorer_descriptor: &NearAiScorerDescriptor,
+    embedder_descriptor: &FastEmbedDescriptor,
+    main_gate: &MainGateConfig,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
+    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+    let config = CompatibilityBundleConfig::production_compatible(
+        scorer_descriptor.compatibility_scorer_model_id(),
+        PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+        PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+        main_gate,
+    )?;
+    let scorer = NearAiPipelineScorer::new(Arc::new(NotLoaded), scorer_descriptor.clone());
+    let embedder = FastEmbedPipelineEmbedder::new(Arc::new(NotLoaded), embedder_descriptor.clone());
+    MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
 }
 
 /// The NEAR AI scorer as the pipeline names it (spec A-D4). Holds the
@@ -536,6 +628,37 @@ impl PipelineGateComponents {
         &self.parts
     }
 
+    /// These components with `authority` and the privacy boundary `privacy`
+    /// in place of their own, and nothing else changed: the scorer, the
+    /// embedder, their descriptors, the index, and whether the adapters are
+    /// production-qualified stay as they are, so this cannot qualify a
+    /// double. The qualification harness (spec B-D1) drives fixed test
+    /// tenants, which a deployment's tenant policies and classifier must not
+    /// decide.
+    pub fn with_boundaries(
+        &self,
+        authority: Arc<dyn PipelineAuthorityProvider>,
+        privacy: Arc<dyn PipelinePrivacyBoundary>,
+    ) -> Self {
+        let parts = &self.parts;
+        Self {
+            parts: PipelineGateComponentParts {
+                scorer: parts.scorer.clone(),
+                scorer_descriptor: parts.scorer_descriptor.clone(),
+                embedder: parts.embedder.clone(),
+                embedder_descriptor: parts.embedder_descriptor.clone(),
+                index_reader: parts.index_reader.clone(),
+                index_writer: parts.index_writer.clone(),
+                index_root_shared_with_legacy: parts.index_root_shared_with_legacy,
+                authority,
+                tenant_policy_count: 0,
+                privacy: Some(privacy),
+                privacy_backend: None,
+            },
+            adapters_production_qualified: self.adapters_production_qualified,
+        }
+    }
+
     pub fn adapters_production_qualified(&self) -> bool {
         self.adapters_production_qualified
     }
@@ -596,6 +719,17 @@ pub struct ProductionPipelineInputs {
 pub fn assemble_production_pipeline(
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<PipelineService> {
+    production_pipeline_builder(inputs)?.build()
+}
+
+/// The builder [`assemble_production_pipeline`] builds: every production
+/// dependency set, nothing else. The qualification harness's restore drill
+/// adds only a crash point to it before building (spec B-D1), so the drill
+/// crashes the production assembly rather than a copy of it.
+#[doc(hidden)]
+pub fn production_pipeline_builder(
+    inputs: ProductionPipelineInputs,
+) -> anyhow::Result<crate::versioned_pipeline::PipelineServiceBuilder> {
     use crate::versioned_pipeline::PipelineServiceBuilder;
     use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
     use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
@@ -635,7 +769,7 @@ pub fn assemble_production_pipeline(
     if let Some(privacy) = components.privacy.clone() {
         builder = builder.with_privacy(privacy);
     }
-    builder.build()
+    Ok(builder)
 }
 
 /// The check the production assembly's startup emits (spec A-D11).
@@ -955,6 +1089,52 @@ mod tests {
             privacy: None,
             privacy_backend: None,
         }
+    }
+
+    /// `with_boundaries` replaces the authority and the privacy boundary and
+    /// nothing else: the scorer, embedder and index are the same objects,
+    /// and whether the adapters are production-qualified is carried over,
+    /// never raised. The qualification harness relies on both halves.
+    #[test]
+    fn with_boundaries_replaces_only_authority_and_privacy() {
+        fn same<T: ?Sized>(left: &Arc<T>, right: &Arc<T>) -> bool {
+            std::ptr::eq(
+                Arc::as_ptr(left) as *const (),
+                Arc::as_ptr(right) as *const (),
+            )
+        }
+        let authority: Arc<dyn PipelineAuthorityProvider> =
+            Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+                Arc::new(BTreeMap::new()),
+                false,
+                Arc::new(|_: &str| false),
+                None,
+            ));
+        let privacy: Arc<dyn PipelinePrivacyBoundary> =
+            Arc::new(crate::versioned_pipeline_authority::DeterministicPipelinePrivacyBoundary);
+        let check = |original: PipelineGateComponents| {
+            let replaced = original.with_boundaries(authority.clone(), privacy.clone());
+            let (before, after) = (original.parts(), replaced.parts());
+            assert!(same(&before.scorer, &after.scorer));
+            assert!(same(&before.embedder, &after.embedder));
+            assert!(same(&before.index_reader, &after.index_reader));
+            assert!(same(&before.index_writer, &after.index_writer));
+            assert_eq!(before.scorer_descriptor, after.scorer_descriptor);
+            assert_eq!(before.embedder_descriptor, after.embedder_descriptor);
+            assert!(same(&after.authority, &authority));
+            assert!(same(after.privacy.as_ref().unwrap(), &privacy));
+            assert!(after.privacy_backend.is_none());
+            assert_eq!(
+                replaced.adapters_production_qualified(),
+                original.adapters_production_qualified()
+            );
+            replaced.adapters_production_qualified()
+        };
+        assert!(!check(PipelineGateComponents::with_unqualified_adapters(
+            double_parts()
+        )));
+        #[cfg(feature = "near-ai-scorer")]
+        assert!(check(PipelineGateComponents::production(double_parts())));
     }
 
     /// PR #1295 review round 2, Major 1: the scorer and embedder adapters

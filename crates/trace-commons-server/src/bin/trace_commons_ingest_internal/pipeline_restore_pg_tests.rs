@@ -57,22 +57,25 @@ use std::path::{Path, PathBuf};
 
 use super::pipeline_corpus_pg_tests::{
     ARTIFACT_ROOT_VAR, COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS, TEST_MASTER_KEY_VAR,
-    fixture_envelope, id_hash, load_corpus, main_corpus_path, sha256_bytes, write_atomically,
+    assemble_production_harness_service, fixture_envelope, id_hash, load_corpus, main_corpus_path,
+    production_test_package, sha256_bytes, write_atomically,
 };
 use super::pipeline_http_pg_tests::{
     PIPELINE_HTTP_RUNTIME_ROLE, PassThroughPipelinePrivacyBoundary, account_owner_backend,
     assemble_compatibility_pipeline_service_with, expire_run_lease, join_within, mains_database,
-    mains_database_at, pilot_runtime_login, post_trace, qualification_candidate_package,
-    runtime_backend, runtime_backend_at, serve_pipeline_app, tenant_tx, wait_for_pipeline_ready,
-    wait_for_run_complete, wait_for_settle_selection,
+    mains_database_at, pilot_runtime_login, pipeline_http_database_url, post_trace,
+    qualification_candidate_package, runtime_backend, runtime_backend_at, serve_pipeline_app,
+    tenant_tx, wait_for_pipeline_ready, wait_for_run_complete, wait_for_settle_selection,
 };
 use trace_commons_gate_api::SettlementAdapter;
-use trace_commons_gate_api::pipeline::{InstrumentId, Phase};
+use trace_commons_gate_api::pipeline::{BundlePackage, InstrumentId, Phase, TenantStorageRef};
 use trace_commons_server::db::postgres::{TRACE_COMMONS_RLS_TABLES, registered_migrations};
 use trace_commons_server::versioned_pipeline::{PipelineCrashPoint, pipeline_tenant_storage_ref};
 use trace_commons_server::versioned_pipeline_bundle::MINIMAL_INDEX_ID;
 use trace_commons_server::versioned_pipeline_credit::RecordingSettlementAdapter;
+use trace_commons_server::versioned_pipeline_harness::{HarnessAssembly, HarnessDependencies};
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+use trace_commons_server::versioned_pipeline_production::PRODUCTION_COMPATIBILITY_INDEX_ID;
 use trace_commons_server::versioned_pipeline_qualification::{
     PipelineCheckEmitter, PipelineCheckStatus,
 };
@@ -615,6 +618,33 @@ async fn committed_selection_rows(backend: &Arc<PgBackend>, run_id: Uuid) -> Str
     text
 }
 
+/// Whether `RESTORE_TENANT`'s run for `submission_id` has a durable Settle
+/// selection with at least one settlement operation.
+async fn settle_selection_settles(backend: &Arc<PgBackend>, submission_id: Uuid) -> bool {
+    let mut client = backend
+        .trace_pool_for_test()
+        .get()
+        .await
+        .expect("restore_selection_rows_connection_failed");
+    let tx = tenant_tx(&mut client, RESTORE_TENANT).await;
+    let settles: bool = tx
+        .query_one(
+            r"SELECT COALESCE(jsonb_array_length(
+                         settle_selection::jsonb -> 'decision' -> 'settlement_operations') > 0,
+                     false)
+                FROM pipeline_runs
+               WHERE tenant_id = $1 AND submission_id = $2",
+            &[&RESTORE_TENANT, &submission_id],
+        )
+        .await
+        .expect("restore_selection_rows_query_failed")
+        .get(0);
+    tx.commit()
+        .await
+        .expect("restore_selection_rows_query_failed");
+    settles
+}
+
 /// Rows that exist more than once where one logical effect allows one: a
 /// second outcome for a run's phase, a second settlement leg for a run's
 /// instrument, a credit event shared by two legs, and a second ledger event
@@ -678,25 +708,219 @@ impl RecordingAdapters {
     }
 }
 
-/// The compatibility bundle's service (the `compatibility` bundle of
-/// `pipeline.py run`: a 2_500_000 microcredit `NoveltyUtility` delta, the
-/// pass-through privacy boundary), on the runtime login, over `artifacts`,
-/// with the caller's index, adapters, and crash point.
-fn compatibility_service(
-    runtime: &Arc<PgBackend>,
-    artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
-    index: &Arc<IsolatedPipelineIndex>,
-    adapters: &RecordingAdapters,
-    crash_point: Option<PipelineCrashPoint>,
-) -> Arc<PipelineService> {
-    assemble_compatibility_pipeline_service_with(
-        runtime.clone(),
-        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
-        index.clone(),
-        COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
-        Arc::new(PassThroughPipelinePrivacyBoundary),
-        adapters.registry(),
-        crash_point,
+/// What the drill's services run on (spec B-D1). One value backs every
+/// service of one test, so the services of the seed's two lifetimes see each
+/// other's index writes.
+enum RestoreDependencies {
+    /// The compatibility candidate (the `compatibility` bundle of
+    /// `pipeline.py run`: a 2_500_000 microcredit `NoveltyUtility` delta)
+    /// over an isolated index and one recording `trace_credit` adapter.
+    Reference {
+        index: Arc<IsolatedPipelineIndex>,
+        adapters: RecordingAdapters,
+    },
+    /// The production assembly serving the signed production `package`
+    /// (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`), over
+    /// `PipelineGateComponents::from_env`'s components on the operator host.
+    /// Its settlement adapter is the production one, which records nothing:
+    /// the drill counts settlement from the ledger instead. `rebuilt` is a
+    /// second, empty index the resume rebuilds into for its last comparison.
+    Production {
+        package: Box<BundlePackage>,
+        dependencies: HarnessDependencies,
+        rebuilt: Option<RebuildIndex>,
+    },
+}
+
+/// The resume's rebuild target: a second index, empty when the resume starts.
+struct RebuildIndex {
+    reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
+    writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+}
+
+impl RestoreDependencies {
+    fn reference() -> Self {
+        Self::Reference {
+            index: IsolatedPipelineIndex::new(),
+            adapters: RecordingAdapters::new(),
+        }
+    }
+
+    fn assembly(&self) -> HarnessAssembly {
+        match self {
+            Self::Reference { .. } => HarnessAssembly::Reference,
+            Self::Production { .. } => HarnessAssembly::Production,
+        }
+    }
+
+    /// The package the drill's result names: the one every service serves.
+    fn package(&self) -> BundlePackage {
+        match self {
+            Self::Reference { .. } => {
+                qualification_candidate_package().expect("restore_candidate_package_invalid")
+            }
+            Self::Production { package, .. } => package.as_ref().clone(),
+        }
+    }
+
+    /// The service, on the runtime login, over `artifacts`, with the
+    /// pass-through privacy boundary and `crash_point`.
+    fn service(
+        &self,
+        runtime: &Arc<PgBackend>,
+        artifacts: &Arc<LocalEncryptedTraceArtifactStore>,
+        crash_point: Option<PipelineCrashPoint>,
+    ) -> Arc<PipelineService> {
+        let store = ConfiguredTraceArtifactStore::legacy(artifacts.clone());
+        match self {
+            Self::Reference { index, adapters } => assemble_compatibility_pipeline_service_with(
+                runtime.clone(),
+                &store,
+                index.clone(),
+                COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+                Arc::new(PassThroughPipelinePrivacyBoundary),
+                adapters.registry(),
+                crash_point,
+            ),
+            Self::Production {
+                package,
+                dependencies,
+                ..
+            } => assemble_production_harness_service(
+                runtime.clone(),
+                &store,
+                package,
+                dependencies.clone(),
+                crash_point,
+            ),
+        }
+    }
+
+    /// The live index's entries for `tenant`, as one hash: the isolated
+    /// index's entry set, or the production index's snapshot hash (entry
+    /// ids and content hashes, order-free), read through the trait.
+    fn index_hash(&self, tenant: &TenantStorageRef) -> String {
+        match self {
+            Self::Reference { index, .. } => index.entry_set_hash(tenant, MINIMAL_INDEX_ID),
+            Self::Production { dependencies, .. } => {
+                index_snapshot_hash(dependencies.index_reader().as_ref(), tenant)
+            }
+        }
+    }
+
+    /// The hash an index with no entries for `tenant` has.
+    fn empty_index_hash(&self, tenant: &TenantStorageRef) -> String {
+        match self {
+            Self::Reference { .. } => {
+                IsolatedPipelineIndex::new().entry_set_hash(tenant, MINIMAL_INDEX_ID)
+            }
+            Self::Production { .. } => {
+                index_snapshot_hash(IsolatedPipelineIndex::new().as_ref(), tenant)
+            }
+        }
+    }
+
+    /// The live index's writer, for the resume's rebuild.
+    fn index_writer(&self) -> Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter> {
+        match self {
+            Self::Reference { index, .. } => index.clone(),
+            Self::Production { dependencies, .. } => dependencies.index_writer(),
+        }
+    }
+
+    /// A second, empty index: its writer for a rebuild, and the hash of what
+    /// the rebuild wrote, read after it.
+    fn rebuilt_index(
+        &self,
+    ) -> (
+        Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+        Box<dyn Fn(&TenantStorageRef) -> String + '_>,
+    ) {
+        match self {
+            Self::Reference { .. } => {
+                let rebuilt = IsolatedPipelineIndex::new();
+                let reader = rebuilt.clone();
+                (
+                    rebuilt,
+                    Box::new(move |tenant| reader.entry_set_hash(tenant, MINIMAL_INDEX_ID)),
+                )
+            }
+            Self::Production { rebuilt, .. } => {
+                let rebuilt = rebuilt.as_ref().expect("restore_rebuild_index_missing");
+                (
+                    rebuilt.writer.clone(),
+                    Box::new(move |tenant| index_snapshot_hash(rebuilt.reader.as_ref(), tenant)),
+                )
+            }
+        }
+    }
+
+    /// The run of every request the recording adapter received; `None` in
+    /// production mode, whose adapter records nothing.
+    fn request_runs(&self) -> Option<Vec<Uuid>> {
+        match self {
+            Self::Reference { adapters, .. } => Some(adapters.request_runs()),
+            Self::Production { .. } => None,
+        }
+    }
+}
+
+/// The production compatibility index's snapshot hash for `tenant`.
+fn index_snapshot_hash(
+    reader: &dyn trace_commons_gate_api::IdentifiedIndexReader,
+    tenant: &TenantStorageRef,
+) -> String {
+    reader
+        .snapshot(tenant, PRODUCTION_COMPATIBILITY_INDEX_ID)
+        .expect("restore_index_snapshot_failed")
+        .snapshot_hash
+}
+
+/// The dependencies the two ignored tests run on: the reference ones, or,
+/// under `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`, the signed
+/// production package served over `PipelineGateComponents::from_env`'s
+/// components, whose index opens at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`
+/// (`pipeline.py` gives the seed and the resume one each, inside the run).
+/// With `rebuild`, a second, empty usearch index beside it is the resume's
+/// rebuild target.
+async fn restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
+    match HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}")) {
+        HarnessAssembly::Reference => RestoreDependencies::reference(),
+        HarnessAssembly::Production => production_restore_dependencies_from_env(rebuild).await,
+    }
+}
+
+#[cfg(feature = "near-ai-scorer")]
+async fn production_restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
+    use trace_commons_server::versioned_pipeline_harness::{
+        harness_dependencies_from_env, open_harness_rebuild_index, verified_package_from_lookup,
+    };
+    let lookup = |var: &str| std::env::var(var).ok();
+    let package = verified_package_from_lookup(&lookup).unwrap_or_else(|error| panic!("{error}"));
+    let dependencies = harness_dependencies_from_env()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"));
+    let rebuilt = rebuild.then(|| {
+        let index = open_harness_rebuild_index().unwrap_or_else(|error| panic!("{error}"));
+        RebuildIndex {
+            reader: index.clone(),
+            writer: index,
+        }
+    });
+    RestoreDependencies::Production {
+        package: Box::new(package),
+        dependencies,
+        rebuilt,
+    }
+}
+
+/// Never reached: `HarnessAssembly::from_env` refuses production mode
+/// without `near-ai-scorer`.
+#[cfg(not(feature = "near-ai-scorer"))]
+async fn production_restore_dependencies_from_env(_rebuild: bool) -> RestoreDependencies {
+    panic!(
+        "{}",
+        trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
     )
 }
 
@@ -1154,6 +1378,12 @@ async fn pipeline_restore_seed() {
     let Some(config) = RestoreConfig::from_env() else {
         return;
     };
+    let dependencies = restore_dependencies_from_env(false).await;
+    restore_seed(&config, &dependencies).await;
+}
+
+/// The seed over `dependencies`: the body of `pipeline_restore_seed`.
+async fn restore_seed(config: &RestoreConfig, dependencies: &RestoreDependencies) {
     let (corpus, _) = load_corpus(&main_corpus_path()).unwrap_or_else(|label| panic!("{label}"));
     let [completed_fixture, pending_fixture, ..] = corpus.fixtures.as_slice() else {
         panic!("restore_corpus_too_small");
@@ -1172,13 +1402,10 @@ async fn pipeline_restore_seed() {
     let mains = mains_database().await;
     let state_dir = tempfile::tempdir().expect("temp dir");
     let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
-    // Shared by both lifetimes (PF-2): the in-memory index and the recording
-    // adapter see each other's writes only when the same instances back both
-    // apps.
-    let index = IsolatedPipelineIndex::new();
-    let adapters = RecordingAdapters::new();
+    // Shared by both lifetimes (PF-2): the index and the recording adapter
+    // see each other's writes only when the same instances back both apps.
     let start = |crash_point: Option<PipelineCrashPoint>| {
-        let service = compatibility_service(&runtime, &artifacts, &index, &adapters, crash_point);
+        let service = dependencies.service(&runtime, &artifacts, crash_point);
         restore_app_state(state_dir.path(), &mains, &artifacts, &runtime, service)
     };
     let client = reqwest::Client::new();
@@ -1223,6 +1450,14 @@ async fn pipeline_restore_seed() {
         "restore_seed_receipt_refused"
     );
     wait_for_settle_selection(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
+    // The resume must have legs to settle. The reference candidate always
+    // selects some; a production package selects none when the second
+    // fixture misses its floors under the deployment's scorer and embedder,
+    // and the drill then fails here, naming that, rather than in the resume.
+    assert!(
+        settle_selection_settles(&runtime, pending_envelope.submission_id).await,
+        "restore_seed_pending_selection_settles_nothing"
+    );
     stop.send(())
         .expect("send shutdown to the seed's second app");
     join_within(server, 20, "the seed's second app").await;
@@ -1232,11 +1467,7 @@ async fn pipeline_restore_seed() {
     expire_run_lease(&runtime, RESTORE_TENANT, pending_envelope.submission_id).await;
     // PR 5's activation state, for a tenant of its own (G23), written before
     // the fingerprints are taken so that they cover it.
-    seed_activation_state(
-        &runtime,
-        &compatibility_service(&runtime, &artifacts, &index, &adapters, None),
-    )
-    .await;
+    seed_activation_state(&runtime, &dependencies.service(&runtime, &artifacts, None)).await;
     require_activation_state(&runtime, "restore_seed").await;
 
     // The seed is the shape the drill needs: one complete run with four
@@ -1297,26 +1528,37 @@ async fn pipeline_restore_seed() {
     );
     // The adapter saw the completed run's legs and the second tenant's, and
     // nothing of the pending run. Only `RESTORE_TENANT`'s count is recorded:
-    // the resume adds the pending run's to it.
-    let request_runs = adapters.request_runs();
-    let completed_requests = request_runs
-        .iter()
-        .filter(|run| **run == completed.run_id)
-        .count();
+    // the resume adds the pending run's to it. The production adapter
+    // records nothing (its effect is the ledger row), so in production mode
+    // the count is the completed run's settlement legs, which the ledger
+    // assertions above already tie to one credit event each.
+    let completed_requests = match dependencies.request_runs() {
+        Some(request_runs) => {
+            let completed_requests = request_runs
+                .iter()
+                .filter(|run| **run == completed.run_id)
+                .count();
+            assert!(
+                request_runs
+                    .iter()
+                    .all(|run| *run == completed.run_id || *run == second.run_id)
+                    && completed_requests == completed.settlement_count
+                    && request_runs.len() - completed_requests == second.settlement_count,
+                "restore_seed_adapter_requests_unexpected"
+            );
+            completed_requests
+        }
+        None => completed.settlement_count,
+    };
     assert!(
-        request_runs
-            .iter()
-            .all(|run| *run == completed.run_id || *run == second.run_id)
-            && completed_requests == completed.settlement_count
-            && request_runs.len() - completed_requests == second.settlement_count
-            && completed.settlement_count > 0,
+        completed.settlement_count > 0,
         "restore_seed_adapter_requests_unexpected"
     );
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
-    let entry_set_hash = index.entry_set_hash(&tenant, MINIMAL_INDEX_ID);
+    let entry_set_hash = dependencies.index_hash(&tenant);
     assert_ne!(
         entry_set_hash,
-        IsolatedPipelineIndex::new().entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.empty_index_hash(&tenant),
         "restore_seed_index_empty"
     );
     let artifact_fingerprint = artifact_fingerprint(&config.artifact_root);
@@ -1379,17 +1621,24 @@ async fn pipeline_restore_resume() {
     let Some(config) = RestoreConfig::from_env() else {
         return;
     };
+    let url = restored_database_url()
+        .await
+        .expect("restore_database_url_missing");
+    let dependencies = restore_dependencies_from_env(true).await;
+    restore_resume(&config, &url, &dependencies).await;
+}
+
+/// The resume over `dependencies` against the restored database at `url`:
+/// the body of `pipeline_restore_resume`.
+async fn restore_resume(config: &RestoreConfig, url: &str, dependencies: &RestoreDependencies) {
     let seed = RestoreFingerprint::parse(
         &std::fs::read(&config.fingerprint_path).expect("restore_fingerprint_unreadable"),
     )
     .unwrap_or_else(|label| panic!("{label}"));
-    let url = restored_database_url()
-        .await
-        .expect("restore_database_url_missing");
     // `runtime_backend_at` checks the login is neither SUPERUSER nor
     // BYPASSRLS before anything else connects.
-    let runtime = runtime_backend_at(&url, 8).await;
-    let mains = mains_database_at(&url).await;
+    let runtime = runtime_backend_at(url, 8).await;
+    let mains = mains_database_at(url).await;
     let tables = pipeline_table_security(&runtime).await;
     assert_eq!(
         tables
@@ -1448,7 +1697,7 @@ async fn pipeline_restore_resume() {
     );
     // Every tenant's rows, read by the restored database's owner.
     let owner = Arc::new(
-        PgBackend::new(&DatabaseConfig::from_postgres_url(&url, 2))
+        PgBackend::new(&DatabaseConfig::from_postgres_url(url, 2))
             .await
             .expect("restore_owner_connection_failed"),
     );
@@ -1512,12 +1761,10 @@ async fn pipeline_restore_resume() {
     // (no withdrawal can race it: nothing else runs yet).
     let state_dir = tempfile::tempdir().expect("temp dir");
     let artifacts = test_artifact_store_with_key(&config.artifact_root, &config.master_key_hex);
-    let index = IsolatedPipelineIndex::new();
-    let adapters = RecordingAdapters::new();
-    let service = compatibility_service(&runtime, &artifacts, &index, &adapters, None);
+    let service = dependencies.service(&runtime, &artifacts, None);
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
     let rebuild = service
-        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, index.clone())
+        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, dependencies.index_writer())
         .await
         .expect("restore_index_rebuild_failed");
     assert_eq!(
@@ -1525,7 +1772,7 @@ async fn pipeline_restore_resume() {
         completed.len(),
         "restore_index_rebuild_command_count"
     );
-    let index_entry_set_hash = index.entry_set_hash(&tenant, MINIMAL_INDEX_ID);
+    let index_entry_set_hash = dependencies.index_hash(&tenant);
     assert_eq!(
         index_entry_set_hash, seed.index_entry_set_hash,
         "restore_index_entry_set_mismatch"
@@ -1535,7 +1782,7 @@ async fn pipeline_restore_resume() {
     // drill is one of the four checks that test the qualification
     // candidate (P5-D15), so its result names that package: the service the
     // drill resumed on serves exactly it.
-    let package = qualification_candidate_package().expect("restore_candidate_package_invalid");
+    let package = dependencies.package();
     assert!(
         *service.default_package() == package,
         "restore_service_not_the_candidate"
@@ -1596,15 +1843,23 @@ async fn pipeline_restore_resume() {
         resumed.credited_once() && resumed.credit_events == seed.completed_credit_event_count,
         "restore_pending_run_credit_events"
     );
-    let request_runs = adapters.request_runs();
-    assert!(
-        request_runs.iter().all(|run| *run == pending.run_id)
-            && request_runs.len() == resumed.settlement_count,
-        "restore_adapter_requests_unexpected"
-    );
+    // The adapter was asked for the resumed run's legs and nothing else. In
+    // production mode (an adapter that records nothing) the ledger answers
+    // instead: the legs settled after the restore are the resumed run's.
+    let resumed_requests = match dependencies.request_runs() {
+        Some(request_runs) => {
+            assert!(
+                request_runs.iter().all(|run| *run == pending.run_id)
+                    && request_runs.len() == resumed.settlement_count,
+                "restore_adapter_requests_unexpected"
+            );
+            request_runs.len()
+        }
+        None => resumed.settlement_count,
+    };
     let legs: usize = after.iter().map(|run| run.settlement_count).sum();
     assert_eq!(
-        seed.adapter_request_count + request_runs.len(),
+        seed.adapter_request_count + resumed_requests,
         legs,
         "restore_adapter_request_count_mismatch"
     );
@@ -1622,43 +1877,48 @@ async fn pipeline_restore_resume() {
     assert_eq!(pending_runs_resumed, 1, "restore_pending_run_not_resumed");
     // The resumed run's index write landed: the live index equals a rebuild
     // from every sealed command, the resumed run's included.
-    let rebuilt = IsolatedPipelineIndex::new();
+    let (rebuilt, rebuilt_hash) = dependencies.rebuilt_index();
     service
-        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, rebuilt.clone())
+        .rebuild_index_from_authoritative_commands(RESTORE_TENANT, rebuilt)
         .await
         .expect("restore_index_rebuild_failed");
     assert_eq!(
-        index.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
-        rebuilt.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.index_hash(&tenant),
+        rebuilt_hash(&tenant),
         "restore_resumed_index_mismatch"
     );
     assert_ne!(
-        index.entry_set_hash(&tenant, MINIMAL_INDEX_ID),
+        dependencies.index_hash(&tenant),
         seed.index_entry_set_hash,
         "restore_resumed_index_unchanged"
     );
 
+    let mut evidence = serde_json::json!({
+        "database_fingerprint": database_fingerprint,
+        "artifact_fingerprint": artifact_fingerprint,
+        "index_entry_set_hash": index_entry_set_hash,
+        "pending_runs_resumed": pending_runs_resumed,
+        "duplicate_effects": duplicate_effects,
+        "rls_tables_checked": rls_tables_checked,
+        "rls_policy_set_hash": rls_policy_set_hash,
+        "rls_policy_count": rls_policy_count,
+        "rls_flag_set_hash": rls_flag_set_hash,
+        "rls_flag_table_count": rls_flag_table_count,
+        "runtime_privilege_set_hash": runtime_privilege_set_hash,
+        "tenant_fingerprint": tenants.hash,
+        "tenant_count": tenants.tenants.len(),
+        "audit_events_verified": audit_events_verified,
+    });
+    // A reference result's evidence is exactly what it always was.
+    if dependencies.assembly() == HarnessAssembly::Production {
+        evidence["harness_assembly"] = serde_json::json!(dependencies.assembly().label());
+    }
     PipelineCheckEmitter::emit_from_env(
         RESTORE_CHECK_ID,
         PipelineCheckStatus::Pass,
         Some(&package),
         &RESTORE_SAFE_BLOCKERS,
-        serde_json::json!({
-            "database_fingerprint": database_fingerprint,
-            "artifact_fingerprint": artifact_fingerprint,
-            "index_entry_set_hash": index_entry_set_hash,
-            "pending_runs_resumed": pending_runs_resumed,
-            "duplicate_effects": duplicate_effects,
-            "rls_tables_checked": rls_tables_checked,
-            "rls_policy_set_hash": rls_policy_set_hash,
-            "rls_policy_count": rls_policy_count,
-            "rls_flag_set_hash": rls_flag_set_hash,
-            "rls_flag_table_count": rls_flag_table_count,
-            "runtime_privilege_set_hash": runtime_privilege_set_hash,
-            "tenant_fingerprint": tenants.hash,
-            "tenant_count": tenants.tenants.len(),
-            "audit_events_verified": audit_events_verified,
-        }),
+        evidence,
     );
 }
 
@@ -1817,4 +2077,131 @@ fn restore_fingerprint_file_refuses_unknown_fields_and_bad_hashes() {
         RestoreFingerprint::parse(b"not json"),
         Err("restore_fingerprint_invalid")
     );
+}
+
+/// An embedder double that puts every distinct text on its own axis, so
+/// any two of the drill's fixtures are fully novel to each other. The
+/// reference embedder puts the first two corpus fixtures at novelty 0.44,
+/// under the production test package's 0.5 floor, so the pending run would
+/// select nothing to settle.
+struct DistinctTextEmbedder;
+
+impl trace_commons_gate_api::Embedder for DistinctTextEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        use sha2::Digest as _;
+        let digest = sha2::Sha256::digest(plaintext);
+        let axis = u64::from_be_bytes(digest[..8].try_into().expect("eight bytes")) % 1024;
+        let mut vector = vec![0.0f32; 1024];
+        vector[axis as usize] = 1.0;
+        Ok(vector)
+    }
+}
+
+/// Production restore dependencies over doubles, never production-qualified
+/// (the operator's run has `from_env`'s NEAR AI, fastembed and usearch index,
+/// and a second usearch index, in their place):
+/// their service is the production assembly serving the production
+/// package, their index hash is the snapshot read through the trait, and
+/// they record no adapter requests, so the drill counts settlement from the
+/// ledger. Needs no database: assembly opens no connection.
+fn production_restore_doubles(package: BundlePackage) -> RestoreDependencies {
+    let index = IsolatedPipelineIndex::new();
+    let rebuilt = IsolatedPipelineIndex::new();
+    RestoreDependencies::Production {
+        package: Box::new(package),
+        dependencies: HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(trace_commons_gate_api::ReferencePerplexityScorer::new()),
+                embedder: Arc::new(DistinctTextEmbedder),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        ),
+        rebuilt: Some(RebuildIndex {
+            reader: rebuilt.clone(),
+            writer: rebuilt,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn production_restore_dependencies_serve_the_production_package() {
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let runtime = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = test_artifact_store_with_key(
+        dir.path(),
+        &trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    );
+    let package = production_test_package();
+    let dependencies = production_restore_doubles(package.clone());
+    assert_eq!(dependencies.assembly(), HarnessAssembly::Production);
+    assert_eq!(dependencies.package(), package);
+    assert!(dependencies.request_runs().is_none());
+    for crash_point in [None, Some(PipelineCrashPoint::AfterSettleSelection)] {
+        let service = dependencies.service(&runtime, &artifacts, crash_point);
+        assert!(*service.default_package() == package);
+        let qualification = service.bundle_qualification(&package).unwrap();
+        assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
+        assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+        // Only `PipelineGateComponents::from_env` qualifies the adapters.
+        assert!(!qualification.scorer.production_qualified);
+        assert!(!qualification.embedder.production_qualified);
+    }
+    let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
+    assert_eq!(
+        dependencies.index_hash(&tenant),
+        dependencies.empty_index_hash(&tenant)
+    );
+    let (_, rebuilt_hash) = dependencies.rebuilt_index();
+    assert_eq!(
+        rebuilt_hash(&tenant),
+        dependencies.empty_index_hash(&tenant)
+    );
+    // The reference dependencies serve the reference candidate, as before.
+    let reference = RestoreDependencies::reference();
+    assert_eq!(reference.assembly(), HarnessAssembly::Reference);
+    assert_eq!(
+        reference.package(),
+        qualification_candidate_package().unwrap()
+    );
+    assert_eq!(reference.request_runs(), Some(Vec::new()));
+}
+
+/// The restore drill end to end in production mode over doubles:
+/// the seed, then the resume against the same database (no dump and
+/// restore between, which `pipeline.py restore-drill` adds), through the
+/// bodies the two ignored tests run. Ignored: it writes the drill's fixed
+/// tenants into the shared pilot-shaped database, which the rest of the
+/// suite also uses, so it runs alone:
+/// `cargo test -p trace-commons-server --bin trace-commons-ingest
+/// production_restore_drill_resumes_once_over_doubles -- --ignored --exact`
+/// against a fresh `TRACE_COMMONS_PG_TEST_DATABASE_URL`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "writes the drill's fixed tenants into the shared database: run alone"]
+async fn production_restore_drill_resumes_once_over_doubles() {
+    let Some(url) = pipeline_http_database_url().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let config = RestoreConfig {
+        artifact_root: dir.path().join("artifacts"),
+        master_key_hex: trace_commons_server::secrets::keychain::generate_master_key_hex(),
+        fingerprint_path: dir.path().join("fingerprint.json"),
+    };
+    let dependencies = production_restore_doubles(production_test_package());
+    restore_seed(&config, &dependencies).await;
+    let resume = production_restore_doubles(production_test_package());
+    restore_resume(&config, &url, &resume).await;
 }

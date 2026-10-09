@@ -1503,7 +1503,13 @@ def _harness_evidence_digests(partitions):
 
 
 def _write_harness_outputs(
-    env, fixtures_by_partition=None, emit=True, digests=None, result_overrides=None, evidence_overrides=None
+    env,
+    fixtures_by_partition=None,
+    emit=True,
+    digests=None,
+    result_overrides=None,
+    evidence_overrides=None,
+    report_assembly=None,
 ):
     """What `pipeline_corpus_run` leaves behind: the report at
     `TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH` and, when every fixture
@@ -1511,7 +1517,11 @@ def _write_harness_outputs(
     result names the corpus report's package (`digests=True`) or none
     (`digests=False`); by default only `pipeline_http_corpus_minimal`, which
     serves a test bundle, names none (P5-D15). `result_overrides` replaces
-    fields of the result (a digest that differs from the report's)."""
+    fields of the result (a digest that differs from the report's). Under
+    `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production` the report and the
+    evidence say `harness_assembly: production` and the report carries the
+    production harness's blockers, as the Rust harness writes them;
+    `report_assembly` forces the report's mode either way."""
     paths = [("corpus", env["TRACE_COMMONS_PIPELINE_CORPUS_PATH"])]
     if "TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH" in env:
         paths = [
@@ -1526,6 +1536,11 @@ def _write_harness_outputs(
         partitions.append((name, _digest(data), fixtures))
     check_id = env["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"]
     report = _corpus_report(check_id, partitions)
+    production = env.get("TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY") == "production"
+    if (report_assembly or ("production" if production else "reference")) == "production":
+        report["harness_assembly"] = "production"
+        report["safe_blockers"] = list(corpus.PRODUCTION_HARNESS_BLOCKERS)
+        report = _resigned(report)
     report_bytes = results.canonical(report) + b"\n"
     Path(env["TRACE_COMMONS_PIPELINE_CORPUS_REPORT_PATH"]).write_bytes(report_bytes)
     if not emit:
@@ -1541,6 +1556,8 @@ def _write_harness_outputs(
         "corpus_digest": corpus_digest,
         "input_digest": input_digest,
     }
+    if production:
+        evidence["harness_assembly"] = "production"
     for key, value in (evidence_overrides or {}).items():
         if value is _DROP:
             del evidence[key]
@@ -1984,6 +2001,79 @@ class CorpusReportValidationTests(unittest.TestCase):
         self.assertIn("admission_decision", corpus.markdown(resign(failed)))
 
 
+class ProductionCorpusReportTests(unittest.TestCase):
+    """Spec section 2, O-B3 (plan B3): a production-mode corpus report
+    compares only the deterministic fields, says it is a production-mode
+    report, and carries the harness's own blockers."""
+
+    def _production(self, **fixture_overrides):
+        report = _corpus_report(
+            "pipeline_http_corpus_compatibility",
+            [("corpus", _fake_hash("corpus"), [_fixture_report("alpha_fixture", **fixture_overrides)])],
+        )
+        report.pop("report_digest")
+        report["harness_assembly"] = "production"
+        report["safe_blockers"] = list(corpus.PRODUCTION_HARNESS_BLOCKERS)
+        return _resigned(report)
+
+    def test_production_corpus_mode_compares_only_deterministic_fields(self):
+        moved = {
+            "phase_count": 3,
+            "scoring_state": "complete",
+            "settlement_state": "incomplete",
+            "instrument_count": 0,
+            "instruments": [],
+            "instrument_states": {},
+        }
+        item = _fixture_report("alpha_fixture", **moved)
+        self.assertEqual(
+            corpus.fixture_mismatches(item),
+            ["outcome_count", "settlement_state", "instrument_count", "instrument_states"],
+        )
+        self.assertEqual(corpus.fixture_mismatches(item, "production"), [])
+        corpus.validate_report(self._production(**moved))  # must not raise
+        for field, value in (
+            ("state", "awaiting_review"),
+            ("admission_decision", "quarantine"),
+            ("consent_state", "refused"),
+            ("privacy_state", "medium"),
+            ("replay_same_run", False),
+            ("changed_content_refused", False),
+            ("tenant_isolation", False),
+        ):
+            with self.subTest(field=field):
+                changed = _fixture_report("alpha_fixture", **{field: value})
+                self.assertEqual(len(corpus.fixture_mismatches(changed, "production")), 1)
+
+        # A production report that names a scoring mismatch it no longer
+        # compares does not match its own rule.
+        with self.assertRaises(errors.ToolingError) as ctx:
+            corpus.validate_report(self._production(**moved, mismatches=["settlement_state"]))
+        self.assertEqual(str(ctx.exception), "qualification_mismatch_not_failed")
+
+    def test_production_blockers_agree_with_the_harness(self):
+        source = (
+            environment.ROOT / "crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs"
+        ).read_text()
+        match = re.search(r"const PRODUCTION_HARNESS_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(re.findall(r'"([a-z0-9_]+)"', match.group(1))), corpus.PRODUCTION_HARNESS_BLOCKERS)
+
+    def test_production_report_carries_its_own_blockers_and_mode(self):
+        report = self._production()
+        corpus.validate_report(report)  # must not raise
+        cases = {
+            "missing_local_blockers": _resigned(dict(report, safe_blockers=["local_test_only"])),
+            "invalid_report_harness_assembly": _resigned(dict(report, harness_assembly="reference")),
+            "invalid_report_harness_assembly:other": _resigned(dict(report, harness_assembly="staging")),
+        }
+        for case, value in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    corpus.validate_report(value)
+                self.assertEqual(str(ctx.exception), case.split(":")[0])
+
+
 class PackageCommandTests(_CorpusRunCase):
     def test_package_runs_the_package_writer_with_its_own_variables(self):
         output = self.tmp / "out" / "package.json"
@@ -2054,6 +2144,90 @@ class PackageCommandTests(_CorpusRunCase):
                 self.assertEqual(code, 1)
                 self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
                 self.assertEqual(self._cargo_calls(), [])
+
+    def test_package_production_passes_only_the_env_files_package_variables(self):
+        """Spec B-D5: `package --bundle production` builds the production
+        package offline from the deployment's env file. The writer receives
+        the descriptor and gate variables and nothing else from it: never
+        the NEAR AI key or endpoint, never a database URL."""
+        output = self.tmp / "out" / "package.json"
+        key_output = self.tmp / "out" / "trusted-key.json"
+        env_file = self.tmp / "ingest.env"
+        env_file.write_text(
+            "\n".join(
+                [
+                    "# the pilot's env file",
+                    "TRACE_COMMONS_GATE_SERVICE=enclave_near_ai",
+                    "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8",
+                    'TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF="-8.0"',
+                    "TRACE_COMMONS_NEAR_AI_API_KEY=secret-near-ai-key",
+                    "TRACE_COMMONS_NEAR_AI_BASE_URL=https://example.invalid/v1",
+                    "TRACE_COMMONS_EMBEDDER_MODEL_ID='BAAI/bge-large-en-v1.5'",
+                    "TRACE_COMMONS_VECTOR_INDEX_DIM=1024",
+                    "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS=500000",
+                    "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS=0",
+                    "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=2.5",
+                    "DATABASE_URL=postgres://ingest@db/trace",
+                    "",
+                ]
+            )
+        )
+
+        def fake_cargo(run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            Path(env["TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT"]).write_text(
+                json.dumps({"package": {"bundle_id": _fake_hash("bundle")},
+                            "signature": {"package_hash": _fake_hash("package")}})
+            )
+            Path(env["TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT"]).write_text("{}")
+
+        code = self._main(
+            ["package", "--bundle", "production", "--env-file", str(env_file), "--output", str(output),
+             "--public-key-output", str(key_output)],
+            cargo=fake_cargo,
+        )
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        [(_, step, cargo_args, test_filter, env, _, _)] = self._cargo_calls()
+        self.assertEqual((step, cargo_args, test_filter), ("package_write", _INGEST_ARGS, _PACKAGE_WRITER))
+        self.assertEqual(
+            {key: value for key, value in env.items() if key.startswith("TRACE_COMMONS_")},
+            {
+                "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": "production",
+                "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output.resolve()),
+                "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output.resolve()),
+                "TRACE_COMMONS_NEAR_AI_MODEL": "Qwen/Qwen3.6-35B-A3B-FP8",
+                "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF": "-8.0",
+                "TRACE_COMMONS_EMBEDDER_MODEL_ID": "BAAI/bge-large-en-v1.5",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM": "1024",
+                "TRACE_COMMONS_GATE_NOVELTY_FLOOR_MICROS": "500000",
+                "TRACE_COMMONS_GATE_PERPLEXITY_FLOOR_MICROS": "0",
+                "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA": "2.5",
+            },
+        )
+        self.assertNotIn("secret-near-ai-key", self.stdout.getvalue() + self.stderr.getvalue())
+
+        bad_line = self.tmp / "bad.env"
+        bad_line.write_text("TRACE_COMMONS_NEAR_AI_API_KEY secret-near-ai-key\n")
+        for argv, label in (
+            (["--bundle", "production"], "package_env_file_required"),
+            (["--bundle", "minimal", "--env-file", str(env_file)], "package_env_file_unexpected"),
+            (["--bundle", "production", "--env-file", str(self.tmp / "missing.env")], "env_file_unreadable"),
+            (["--bundle", "production", "--env-file", str(bad_line)], "env_file_invalid"),
+        ):
+            with self.subTest(label=label):
+                self.calls.clear()
+                self.stderr = io.StringIO()
+                code = self._main(
+                    ["package", *argv, "--output", str(output), "--public-key-output", str(key_output)],
+                    cargo=fake_cargo,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(self.stderr.getvalue().strip(), f"PipelineFailure: {label}")
+                self.assertNotIn("secret-near-ai-key", self.stderr.getvalue())
+                self.assertEqual(self._cargo_calls(), [])
+
+        # `run` serves no production bundle: its package comes from `package`.
+        self.assertNotIn("production", pipeline.BUNDLES)
 
 
 # ---------------------------------------------------------------------------
@@ -2355,6 +2529,201 @@ class RestoreDrillTests(_RestoreDrillCase):
             pipeline.artifact_fingerprint(root),
             "sha256:9be20bc7d0122e748a727bf0433d393ba50edb9e2be45a3e106ab10e52be2716",
         )
+
+
+_PRODUCTION_HARNESS_ENV = {
+    "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY": "production",
+    "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH": "/run/signed-package.json",
+    "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH": "/run/trusted-package-key.json",
+    "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": "/run/indexes",
+    "TRACE_COMMONS_NEAR_AI_BASE_URL": "https://near-ai.invalid/v1",
+    "TRACE_COMMONS_NEAR_AI_API_KEY": "near-ai-test-key",
+}
+
+
+class ProductionHarnessRunnerTests(_RestoreDrillCase):
+    """The runners `qualify` uses, in the production mode `promote
+    package-checks` starts them in (spec B-D1): the corpus and restore
+    evidence must say the production assembly made it exactly when the
+    harness variables switched to it, and `run_package_checks` starts the
+    four package checks with those variables and the pilot's features."""
+
+    @contextlib.contextmanager
+    def _environment(self, cargo):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(environment, "_invoke", self._invoke))
+            stack.enter_context(mock.patch.object(pipeline, "cargo_test", cargo))
+            stack.enter_context(contextlib.redirect_stdout(self.stdout))
+            stack.enter_context(contextlib.redirect_stderr(self.stderr))
+            with pipeline.Environment(self.run, postgres_admin_url=_ADMIN_URL) as env:
+                yield env
+
+    def _restore(self, extra_env, **overrides):
+        with self._environment(self._fake_cargo(**overrides)) as env:
+            return pipeline.run_restore_drill(
+                self.run, env, extra_env=extra_env, cargo_args=(*_INGEST_ARGS, *_PROMOTE_FEATURES)
+            )
+
+    def test_production_restore_evidence_says_production(self):
+        self._restore(_PRODUCTION_HARNESS_ENV, evidence={"harness_assembly": "production"})
+        cargo = self._cargo_calls()
+        self.assertEqual([call[3] for call in cargo], [_RESTORE_SEED, _RESTORE_RESUME])
+        for call, step in zip(cargo, ("seed", "resume")):
+            self.assertEqual(call[2], (*_INGEST_ARGS, *_PROMOTE_FEATURES))
+            for key, value in _PRODUCTION_HARNESS_ENV.items():
+                if key == "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT":
+                    # The seed and the resume each open their own index.
+                    value = f"/run/indexes/{step}"
+                self.assertEqual(call[4][key], value, key)
+
+    def test_reference_restore_opens_no_production_index(self):
+        self._restore(None)
+        for call in self._cargo_calls():
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT", call[4])
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY", call[4])
+
+    def test_production_restore_refuses_evidence_without_the_assembly(self):
+        with self.assertRaises(errors.ToolingError) as ctx:
+            self._restore(_PRODUCTION_HARNESS_ENV)
+        self.assertEqual(str(ctx.exception), "restore_evidence_mismatch")
+
+    def test_reference_restore_refuses_production_evidence(self):
+        with self.assertRaises(errors.ToolingError) as ctx:
+            self._restore(None, evidence={"harness_assembly": "production"})
+        self.assertEqual(str(ctx.exception), "restore_evidence_mismatch")
+
+    def _corpus(self, step, extra_env, **harness):
+        corpus_path = self.tmp / f"{step}.json"
+        corpus_path.write_text(json.dumps(_direct_corpus(["alpha_fixture", "beta_fixture"])))
+        corpus_run = pipeline.CorpusRun(
+            "compatibility",
+            None,
+            self.tmp / "signed-package.json",
+            self.tmp / "trusted-package-key.json",
+            [corpus_path],
+            [load_direct_corpus_digest(corpus_path)],
+        )
+
+        def cargo(run, step_name, cargo_args, test_filter, env, *, exact=False, ignored=False):
+            self.calls.append(("cargo", step_name, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+            _write_harness_outputs(env, **harness)
+
+        with self._environment(cargo) as env:
+            return pipeline.run_corpus_check(
+                self.run, env, corpus_run, step=step, extra_env=extra_env, cargo_args=(*_INGEST_ARGS, *_PROMOTE_FEATURES)
+            )
+
+    def test_production_corpus_report_and_evidence_say_production(self):
+        _, report = self._corpus("corpus_production", _PRODUCTION_HARNESS_ENV)
+        self.assertEqual(report["harness_assembly"], "production")
+        [call] = self._cargo_calls()
+        self.assertEqual(call[2], (*_INGEST_ARGS, *_PROMOTE_FEATURES))
+        self.assertEqual(call[4]["TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"], "production")
+        self.assertEqual(call[4]["TRACE_COMMONS_PIPELINE_CORPUS_CHECK_ID"], "pipeline_http_corpus_compatibility")
+        self.assertIn("TRACE_COMMONS_PIPELINE_CORPUS_PACKAGE_PATH", call[4])
+        self.assertNotIn("TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE", call[4])
+
+    def test_corpus_mode_must_match_the_harness_variables(self):
+        cases = {
+            "corpus_report_harness_assembly_mismatch:reference report in production": (
+                _PRODUCTION_HARNESS_ENV,
+                {"report_assembly": "reference"},
+            ),
+            "corpus_report_harness_assembly_mismatch:production report in reference": (
+                None,
+                {"report_assembly": "production"},
+            ),
+            "corpus_evidence_mismatch:production evidence without the assembly": (
+                _PRODUCTION_HARNESS_ENV,
+                {"evidence_overrides": {"harness_assembly": _DROP}},
+            ),
+        }
+        for index, (case, (extra_env, harness)) in enumerate(cases.items()):
+            with self.subTest(case=case):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    self._corpus(f"corpus_case_{index}", extra_env, **harness)
+                self.assertEqual(str(ctx.exception), case.split(":")[0])
+
+    def test_run_package_checks_starts_the_four_checks_on_the_production_assembly(self):
+        bootstrap = self.tmp / "bootstrap-corpus.json"
+        holdout = self.tmp / "holdout-corpus.json"
+        bootstrap.write_text(json.dumps(_direct_corpus(["alpha_fixture"])))
+        holdout.write_text(json.dumps(_direct_corpus(["beta_fixture"], prefix="2")))
+        pin = self.tmp / "pin-network.json"
+        started = []
+
+        class FakeEnvironment:
+            def __init__(self, run, postgres_admin_url=None):
+                started.append(("environment", postgres_admin_url))
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def scenario(self, step):
+                return ("scenario", step)
+
+        def partitions(run, path, expected_digest):
+            started.append(("partitions", Path(path), expected_digest))
+            return True, [bootstrap, holdout]
+
+        def database_check(run, scenario, check, *, extra_env=None):
+            started.append(("database", scenario, check, extra_env))
+
+        def corpus_check(run, environment_, corpus_run, *, step=None, extra_env=None, cargo_args=None):
+            started.append(("corpus", corpus_run, extra_env, cargo_args))
+
+        def restore(run, environment_, *, extra_env=None, cargo_args=None):
+            started.append(("restore", extra_env, cargo_args))
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(pipeline, "Environment", FakeEnvironment))
+            stack.enter_context(mock.patch.object(pipeline, "_corpus_partitions", partitions))
+            stack.enter_context(mock.patch.object(pipeline, "run_database_check", database_check))
+            stack.enter_context(mock.patch.object(pipeline, "run_corpus_check", corpus_check))
+            stack.enter_context(mock.patch.object(pipeline, "run_restore_drill", restore))
+            pipeline.run_package_checks(
+                self.run,
+                harness_env=_PRODUCTION_HARNESS_ENV,
+                cargo_features=_PROMOTE_FEATURES,
+                network_pin=pin,
+                postgres_admin_url=_ADMIN_URL,
+            )
+
+        def index_root(check_id):
+            return {**_PRODUCTION_HARNESS_ENV, "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": f"/run/indexes/{check_id}"}
+
+        cargo_args = (*_INGEST_ARGS, *_PROMOTE_FEATURES)
+        # The HF export runs before any database starts.
+        self.assertEqual(started[0], ("partitions", pin, None))
+        self.assertEqual(started[1], ("environment", _ADMIN_URL))
+        [database] = [event for event in started if event[0] == "database"]
+        self.assertEqual(database[2].check_id, "pipeline_bundle_qualification")
+        self.assertEqual(database[2].cargo_args[-2:], _PROMOTE_FEATURES)
+        self.assertEqual(database[1], ("scenario", "pipeline_bundle_qualification"))
+        self.assertEqual(database[3], index_root("pipeline_bundle_qualification"))
+        corpus_runs = [event for event in started if event[0] == "corpus"]
+        self.assertEqual(
+            [event[1].check_id for event in corpus_runs],
+            ["pipeline_http_corpus_compatibility", "pipeline_http_corpus_hf_local"],
+        )
+        for event in corpus_runs:
+            corpus_run = event[1]
+            self.assertIsNone(corpus_run.bundle)
+            self.assertEqual(corpus_run.package_path, Path("/run/signed-package.json"))
+            self.assertEqual(corpus_run.key_path, Path("/run/trusted-package-key.json"))
+            self.assertEqual(event[2], index_root(corpus_run.check_id))
+            self.assertEqual(event[3], cargo_args)
+        self.assertEqual(corpus_runs[0][1].partitions, [pipeline.DEFAULT_CORPUS])
+        self.assertEqual(corpus_runs[1][1].partitions, [bootstrap, holdout])
+        [restore_event] = [event for event in started if event[0] == "restore"]
+        self.assertEqual(restore_event[1:], (index_root("pipeline_restore_drill"), cargo_args))
+
+
+def load_direct_corpus_digest(path):
+    return pipeline.load_direct_corpus(path)[1]
 
 
 class RestorePrivilegeTests(unittest.TestCase):
@@ -4540,6 +4909,21 @@ class _PromoteCase(unittest.TestCase):
         self.downloaded = 2
         self.report = _remote_report()
         self.harness_calls = []
+        # The deployment's env file: variables `package-checks` reads, and
+        # three it must never pass on (the live index root among them).
+        self.env_path = self.root / "inputs" / "ingest.env"
+        self.env_path.write_text(
+            "# the deployment's env file\n"
+            "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n"
+            'TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n'
+            "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n"
+            "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS=90\n"
+            "TRACE_COMMONS_VECTOR_INDEX_DIM=1024\n"
+            "TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/trace-commons-vector-index\n"
+            "TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/trace-commons-embedder\n"
+            "TRACE_COMMONS_DATABASE_URL=postgres://ingest@127.0.0.1/trace_commons\n"
+            "TRACE_COMMONS_ARTIFACT_MASTER_KEY_HEX=00112233\n"
+        )
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -4616,11 +5000,17 @@ class _PromoteCase(unittest.TestCase):
     def _failure(self):
         return self.stderr.getvalue().strip()
 
-    def _write_production_result(self, production_run_id, check_id, *, package=None, **overrides):
+    def _write_production_result(self, production_run_id, check_id, *, package=None, evidence=None, **overrides):
+        """A passing result of the production run. A package check's evidence
+        says `harness_assembly: production`, as the harness writes it in that
+        mode, unless `evidence` replaces it."""
         run_id = production_run_id
         package_hash, configuration_digest, dependency_digest = package or _package_triple(self.signed)
         record = json.loads((self._runs_dir() / run_id / promote.PROMOTE_RUN_FILE).read_text())
-        evidence = {"observed": check_id}
+        if evidence is None:
+            evidence = {"observed": check_id}
+            if check_id in promote.package_check_ids():
+                evidence["harness_assembly"] = "production"
         raw = {
             "schema": results.SCHEMA,
             "run_id": run_id,
@@ -4733,7 +5123,7 @@ class PromoteTests(_PromoteCase):
         run_id = self._init()
         for argv in (
             ["promote", "init", "--package", str(self.package_path), "--trusted-key", str(self.key_path)],
-            ["promote", "package-checks", "--run-id", run_id],
+            ["promote", "package-checks", "--run-id", run_id, "--env-file", str(self.env_path)],
             ["promote", "hf-canary", "--run-id", run_id, "--pin", str(self.root / "pin.json")],
             ["promote", "remote-restore", "--run-id", run_id, "--source-store", "live-bucket", "--scratch-store", "scratch-bucket"],
             ["promote", "adapters", "--run-id", run_id],
@@ -4807,25 +5197,229 @@ class PromoteTests(_PromoteCase):
 
     def test_promote_commands_reopen_the_init_run(self):
         run_id = self._init()
-        code = self._main(["promote", "package-checks", "--run-id", run_id], tree=_fake_hash("another tree"))
+        env_file = ["--env-file", str(self.env_path)]
+        code = self._main(["promote", "package-checks", "--run-id", run_id, *env_file], tree=_fake_hash("another tree"))
         self.assertEqual(code, 1)
         self.assertEqual(self._failure(), "PipelineFailure: promote_code_revision_changed")
         self.stderr.seek(0)
         self.stderr.truncate()
-        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "q00000000"]), 1)
+        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "q00000000", *env_file]), 1)
         self.assertEqual(self._failure(), "PipelineFailure: promote_run_missing")
         self.stderr.seek(0)
         self.stderr.truncate()
-        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "../escape"]), 1)
+        self.assertEqual(self._main(["promote", "package-checks", "--run-id", "../escape", *env_file]), 1)
         self.assertEqual(self._failure(), "PipelineFailure: promote_run_id_invalid")
         self.assertEqual(self._runs(), [run_id], "only init keeps a run directory")
 
-    def test_package_checks_refuse_until_the_harness_runs_the_production_assembly(self):
+
+
+def _network_pin(manifest):
+    """`pin-local.json` as `hf-pin record` turns it into a network pin: no
+    local directory, a revision, and the digests `manifest` computed."""
+    local = json.loads(promote.HF_LOCAL_PIN.read_text())
+    pin = {key: value for key, value in local.items() if key != "local_jsonl_dir"}
+    pin["revision"] = _HEX40
+    for field in promote.HF_PIN_DIGEST_FIELDS:
+        pin[field] = manifest[field]
+    return pin
+
+
+class PromotePackageChecksTests(_PromoteCase):
+    """`promote package-checks` (spec B-D1, B-2): the four package checks on
+    the production assembly. `run_package_checks`, which starts the
+    harnesses, is replaced by a fake that writes the four results the way
+    the production harness does; `ProductionHarnessRunnerTests` covers it."""
+
+    def setUp(self):
+        super().setUp()
+        # The committed pin, where `promote` looks for it under the scratch root.
+        self.pin_path = self.root / promote.HF_NETWORK_PIN_PATH
+        self.pin_path.parent.mkdir(parents=True, exist_ok=True)
+        self.pin_path.write_text(json.dumps(_network_pin(self.manifest)))
+        self.hook_calls = []
+        self.hook_evidence = {}
+        self.hook_package = None
+
+    def _fake_package_checks(self, run, *, harness_env, cargo_features, network_pin, postgres_admin_url):
+        index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
+        self.hook_calls.append(
+            {
+                "run_id": run.run_id,
+                "harness_env": dict(harness_env),
+                "cargo_features": tuple(cargo_features),
+                "network_pin": Path(network_pin),
+                "postgres_admin_url": postgres_admin_url,
+                "index_root_left_over": index_root.exists(),
+                "attestations_left_over": sorted(path.name for path in run.results_dir.glob("*.attestation.json")),
+            }
+        )
+        for check_id in promote.package_check_ids():
+            self._write_production_result(
+                run.run_id, check_id, package=self.hook_package, evidence=self.hook_evidence.get(check_id)
+            )
+
+    def _package_checks(self, run_id, *extra, env_file=None):
+        argv = ["promote", "package-checks", "--run-id", run_id, "--env-file", str(env_file or self.env_path)]
+        with mock.patch.object(pipeline, "run_package_checks", self._fake_package_checks):
+            return self._main([*argv, *extra])
+
+    def test_package_checks_run_the_production_assembly_from_the_env_file(self):
         run_id = self._init()
-        self.assertEqual(self._main(["promote", "package-checks", "--run-id", run_id]), 1)
-        self.assertEqual(self._failure(), "PipelineFailure: harness_production_assembly_unavailable")
-        self.assertEqual(self.calls, [])
+        self.assertEqual(self._package_checks(run_id), 0, self.stderr.getvalue())
+        [call] = self.hook_calls
+        run_dir = (self._runs_dir() / run_id).resolve()
+        env = call["harness_env"]
+        self.assertEqual(call["run_id"], run_id)
+        self.assertEqual(
+            set(env),
+            {
+                "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY",
+                "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH",
+                "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH",
+                "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT",
+                "TRACE_COMMONS_NEAR_AI_BASE_URL",
+                "TRACE_COMMONS_NEAR_AI_API_KEY",
+                "TRACE_COMMONS_NEAR_AI_MODEL",
+                "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS",
+                "TRACE_COMMONS_EMBEDDER_CACHE_DIR",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM",
+            },
+            "only the allowlisted variables of the env file reach the harness",
+        )
+        self.assertEqual(env["TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"], "production")
+        self.assertEqual(env["TRACE_COMMONS_NEAR_AI_API_KEY"], "near-ai-test-key")
+        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH"]).resolve(), run_dir / promote.PACKAGE_FILE)
+        self.assertEqual(
+            Path(env["TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"]).resolve(), run_dir / promote.TRUSTED_KEY_FILE
+        )
+        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT"]).resolve(), run_dir / promote.INDEX_DIR)
+        self.assertEqual(call["cargo_features"], _PROMOTE_FEATURES)
+        self.assertEqual(call["network_pin"].resolve(), self.pin_path.resolve())
+        self.assertIsNone(call["postgres_admin_url"])
+        for check_id in promote.package_check_ids():
+            result, evidence = self._result(run_id, check_id)
+            self.assertEqual(
+                (result["package_hash"], result["configuration_digest"], result["dependency_digest"]),
+                _package_triple(self.signed),
+            )
+            self.assertEqual(evidence["harness_assembly"], "production")
+        output = self.stdout.getvalue()
+        self.assertIn("PipelinePromotePackageChecksOK:", output)
+        self.assertNotIn(str(self.root), output)
+        self.assertNotIn("near-ai-test-key", output + self.stderr.getvalue())
+
+    def test_package_checks_pass_the_admin_url_through(self):
+        run_id = self._init()
+        self.assertEqual(self._package_checks(run_id, "--postgres-admin-url", _ADMIN_URL), 0, self.stderr.getvalue())
+        self.assertEqual(self.hook_calls[0]["postgres_admin_url"], _ADMIN_URL)
+
+    def test_package_checks_refuse_an_incomplete_env_file_before_anything_runs(self):
+        run_id = self._init()
+        complete = self.env_path.read_text()
+        cases = {
+            "promote_env_file_incomplete:no key": complete.replace('TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n', ""),
+            "promote_env_file_incomplete:blank key": complete.replace('"near-ai-test-key"', '""'),
+            "promote_env_file_incomplete:no model": complete.replace(
+                "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n", ""
+            ),
+            "promote_env_file_incomplete:no endpoint": complete.replace(
+                "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n", ""
+            ),
+            "env_file_invalid:not an assignment": complete + "export TRACE_COMMONS_NEAR_AI_MODEL\n",
+        }
+        for case, text in cases.items():
+            with self.subTest(case=case):
+                env_file = self.root / "inputs" / "case.env"
+                env_file.write_text(text)
+                self.stderr.seek(0)
+                self.stderr.truncate()
+                self.assertEqual(self._package_checks(run_id, env_file=env_file), 1)
+                self.assertEqual(self._failure(), f"PipelineFailure: {case.split(':')[0]}")
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._package_checks(run_id, env_file=self.root / "inputs" / "absent.env"), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: env_file_unreadable")
+        self.assertEqual(self.hook_calls, [])
         self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_package_checks_take_only_the_committed_network_pin(self):
+        run_id = self._init()
+        committed = self.pin_path.read_text()
+
+        def refused(label, *extra):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._package_checks(run_id, *extra), 1)
+            self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+
+        # The same bytes elsewhere are the committed pin.
+        copy = self.root / "scratch" / "pin-network.json"
+        copy.parent.mkdir()
+        copy.write_text(committed)
+        self.assertEqual(self._package_checks(run_id, "--pin", str(copy)), 0, self.stderr.getvalue())
+        self.assertEqual(self.hook_calls[-1]["network_pin"].resolve(), self.pin_path.resolve())
+        calls = len(self.hook_calls)
+        # A pin for another revision, or none at the path given.
+        other = dict(_network_pin(self.manifest), revision="f" * 40)
+        copy.write_text(json.dumps(other))
+        refused("hf_network_pin_not_committed", "--pin", str(copy))
+        refused("hf_network_pin_not_committed", "--pin", str(self.root / "absent.json"))
+        # The committed pin itself must be a network pin, and must exist.
+        self.pin_path.write_text(json.dumps({**_network_pin(self.manifest), "local_jsonl_dir": "fixtures"}))
+        refused("hf_network_pin_has_local_dir")
+        self.pin_path.unlink()
+        refused("hf_network_pin_missing")
+        refused("hf_network_pin_missing", "--pin", str(copy))
+        self.assertEqual(len(self.hook_calls), calls)
+
+    def test_package_checks_refuse_a_result_not_from_the_production_assembly(self):
+        run_id = self._init()
+        for check_id in promote.package_check_ids():
+            for evidence in ({"observed": check_id}, {"observed": check_id, "harness_assembly": "reference"}):
+                with self.subTest(check_id=check_id, evidence=evidence):
+                    self.hook_evidence = {check_id: evidence}
+                    self.stderr.seek(0)
+                    self.stderr.truncate()
+                    self.assertEqual(self._package_checks(run_id), 1)
+                    self.assertEqual(
+                        self._failure(), f"PipelineFailure: promote_harness_assembly_not_production:{check_id}"
+                    )
+
+    def test_package_checks_refuse_another_package(self):
+        run_id = self._init()
+        self.hook_package = (_fake_hash("p"), _fake_hash("c"), _fake_hash("d"))
+        self.assertEqual(self._package_checks(run_id), 1)
+        self.assertIn(
+            self._failure(),
+            ("PipelineFailure: qualification_evidence_mixed_package", "PipelineFailure: promote_package_mismatch"),
+        )
+
+    def test_a_rerun_starts_from_empty_indexes_and_drops_attestations(self):
+        run_id = self._init()
+        run_dir = self._runs_dir() / run_id
+        (run_dir / promote.INDEX_DIR / "pipeline_restore_drill" / "resume").mkdir(parents=True)
+        (run_dir / promote.INDEX_DIR / "pipeline_restore_drill" / "resume" / "stale.usearch").write_bytes(b"stale")
+        (self._results_dir(run_id) / "pipeline_hf_network_canary.attestation.json").write_text("{}")
+        self.assertEqual(self._package_checks(run_id), 0, self.stderr.getvalue())
+        [call] = self.hook_calls
+        self.assertFalse(call["index_root_left_over"])
+        self.assertEqual(call["attestations_left_over"], [])
+
+    def test_promote_sign_refuses_a_package_check_not_from_the_production_assembly(self):
+        run_id = self._init()
+        production = promote.production_check_ids()
+        for check_id in production:
+            self._write_production_result(run_id, check_id)
+        [first] = promote.package_check_ids()[:1]
+        self._write_production_result(run_id, first, evidence={"observed": first})
+        key = self.root / "inputs" / "check-key.pk8"
+        key.write_bytes(b"fake pkcs8")
+        code = self._main(
+            ["promote", "sign", "--run-id", run_id, "--signing-key", str(key), "--signing-key-id", "operator_check_key"]
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(self._failure(), f"PipelineFailure: promote_harness_assembly_not_production:{first}")
+        self.assertEqual([call for call in self.calls if call[0] == "cargo"], [])
 
 
 class HfNetworkPinTests(_PromoteCase):

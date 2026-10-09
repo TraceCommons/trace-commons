@@ -213,6 +213,25 @@ impl CompatibilityBundleConfig {
         Ok(config)
     }
 
+    /// The `main` gate configuration this configuration holds: the inverse
+    /// of [`Self::production_compatible`], every floor present. The
+    /// qualification harness reads a production package's gate settings
+    /// back through it (spec 2026-10-08, B-D1).
+    pub fn main_gate(&self) -> MainGateConfig {
+        MainGateConfig {
+            perplexity_floor_micros: Some(self.perplexity_floor_micros),
+            tail_fraction_floor_micros: Some(self.tail_fraction_floor_micros),
+            novelty_floor_micros: Some(self.novelty_floor_micros),
+            embed_insert_novelty_micros: self.embed_insert_novelty_micros,
+            top_k: self.top_k,
+            chunk_target_tokens: self.chunk_target_tokens,
+            chunk_max_tokens: self.chunk_max_tokens,
+            chunk_cap: self.chunk_cap,
+            chunk_min_tokens: self.chunk_min_tokens,
+            novelty_utility_microcredits: self.novelty_utility_microcredits,
+        }
+    }
+
     /// Whether this configuration holds every value of `main`'s gate
     /// configuration `gate`. A floor `main` has no value for matches nothing.
     pub fn matches_main_gate(&self, gate: &MainGateConfig) -> bool {
