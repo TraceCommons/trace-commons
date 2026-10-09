@@ -80,6 +80,7 @@ use trace_commons_server::versioned_pipeline_credit::{
     PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
+use trace_commons_server::versioned_pipeline_harness::HarnessAssembly;
 use trace_commons_server::versioned_pipeline_index::{IndexFault, IsolatedPipelineIndex};
 use trace_commons_server::versioned_pipeline_product::{
     PIPELINE_EXPORT_ITEM_MAX, PipelineContributorStatus, PipelineCreditStatus,
@@ -2861,56 +2862,267 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
     // The qualification candidate (P5-D15). The Q and U doubles above prove
     // that qualification reads the objects the constructor received; the
     // check result names a package, so it must be a package this test
-    // served: a second service, constructed from the candidate package with
-    // the reference scorer and embedder it names, qualifies that package.
-    let candidate_service = compatibility_test_service(
-        backend,
-        artifact_store(&dir),
-        qualification_candidate_config(),
-    )
-    .await;
-    let candidate = candidate_service.default_package().clone();
-    let candidate_qualification = candidate_service.bundle_qualification(&candidate);
-    let candidate_resolved = candidate_qualification.is_ok();
-    assert!(
-        candidate_resolved,
-        "the candidate resolves against the dependencies its service was built with"
-    );
-    let candidate_qualification = candidate_qualification.expect("resolved above");
-    let candidate_scorer_is_reference =
-        candidate_qualification.scorer.identity == "reference_perplexity_test_only";
-    let candidate_embedder_is_reference =
-        candidate_qualification.embedder.identity == "reference_embedder_test_only";
-    assert!(candidate_scorer_is_reference);
-    assert!(candidate_embedder_is_reference);
-    assert!(!candidate_qualification.scorer.production_qualified);
-    assert!(!candidate_qualification.embedder.production_qualified);
-    // Computed from the package's own configuration: the candidate is the
-    // local reference configuration, which no production run can qualify.
-    assert!(!candidate_qualification.configuration_qualifiable);
+    // served. In reference mode (the default) a second service, constructed
+    // from the candidate package with the reference scorer and embedder it
+    // names, qualifies that package. In production mode
+    // (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`, operator-only,
+    // spec B-D1) the production assembler builds it over the signed
+    // production package `promote init` recorded.
+    let assembly = HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}"));
+    let candidate_service = match assembly {
+        HarnessAssembly::Reference => {
+            compatibility_test_service(
+                backend,
+                artifact_store(&dir),
+                qualification_candidate_config(),
+            )
+            .await
+        }
+        HarnessAssembly::Production => production_candidate_service_from_env(backend, &dir).await,
+    };
+    let candidate = bundle_candidate(assembly, &candidate_service);
     assert_ne!(
-        candidate.bundle_id, package.bundle_id,
+        candidate.package.bundle_id, package.bundle_id,
         "the candidate is not the Q package above: that one names the counting scorer"
     );
 
     // The evidence is about the package the result names. The facts about the
     // Q package (the constructor proof) are kept apart from the candidate's.
-    PipelineCheckEmitter::emit_pass_from_env(
-        "pipeline_bundle_qualification",
-        Some(&candidate),
+    let evidence = bundle_qualification_evidence(
+        assembly,
+        &candidate,
         serde_json::json!({
-            "candidate_resolved": candidate_resolved,
-            "candidate_scorer_identity_is_reference": candidate_scorer_is_reference,
-            "candidate_embedder_identity_is_reference": candidate_embedder_is_reference,
-            "candidate_scorer_production_qualified": candidate_qualification.scorer.production_qualified,
-            "candidate_embedder_production_qualified": candidate_qualification.embedder.production_qualified,
-            "constructor_object_proof": {
-                "scorer_identity_is_q": scorer_identity_is_q,
-                "scorer_identity_u_absent": scorer_identity_u_absent,
-                "score_calls_u": score_calls_u,
-            },
+            "scorer_identity_is_q": scorer_identity_is_q,
+            "scorer_identity_u_absent": scorer_identity_u_absent,
+            "score_calls_u": score_calls_u,
         }),
     );
+    PipelineCheckEmitter::emit_pass_from_env(
+        "pipeline_bundle_qualification",
+        Some(&candidate.package),
+        evidence,
+    );
+}
+
+/// What `pipeline_bundle_qualification` found about its candidate: the
+/// package the candidate service serves, and that package's qualification
+/// against the service.
+struct BundleCandidate {
+    package: BundlePackage,
+    scorer_identity: String,
+    embedder_identity: String,
+    scorer_production_qualified: bool,
+    embedder_production_qualified: bool,
+    configuration_qualifiable: bool,
+}
+
+/// Qualifies `candidate_service`'s own package and asserts what `assembly`
+/// requires of it (spec B-D1's table). In both modes the candidate resolves
+/// against the dependencies its service was built with. Reference: the
+/// reference scorer and embedder, neither production-qualified, and a
+/// configuration no production run can qualify (the local reference
+/// configuration). Production: the NEAR AI scorer and fastembed embedder
+/// adapters, both qualified, and a qualifiable configuration.
+fn bundle_candidate(
+    assembly: HarnessAssembly,
+    candidate_service: &PipelineService,
+) -> BundleCandidate {
+    let package = candidate_service.default_package().clone();
+    let qualification = candidate_service.bundle_qualification(&package);
+    assert!(
+        qualification.is_ok(),
+        "the candidate resolves against the dependencies its service was built with"
+    );
+    let qualification = qualification.expect("resolved above");
+    let candidate = BundleCandidate {
+        package,
+        scorer_identity: qualification.scorer.identity.clone(),
+        embedder_identity: qualification.embedder.identity.clone(),
+        scorer_production_qualified: qualification.scorer.production_qualified,
+        embedder_production_qualified: qualification.embedder.production_qualified,
+        configuration_qualifiable: qualification.configuration_qualifiable,
+    };
+    match assembly {
+        HarnessAssembly::Reference => {
+            assert!(candidate.scorer_identity == "reference_perplexity_test_only");
+            assert!(candidate.embedder_identity == "reference_embedder_test_only");
+            assert!(!candidate.scorer_production_qualified);
+            assert!(!candidate.embedder_production_qualified);
+            // Computed from the package's own configuration: the candidate is
+            // the local reference configuration, which no production run can
+            // qualify.
+            assert!(!candidate.configuration_qualifiable);
+        }
+        HarnessAssembly::Production => {
+            assert!(candidate.scorer_identity == "near_ai_perplexity_scorer");
+            assert!(candidate.embedder_identity == "fastembed_text_embedder");
+            assert!(candidate.scorer_production_qualified);
+            assert!(candidate.embedder_production_qualified);
+            assert!(candidate.configuration_qualifiable);
+        }
+    }
+    candidate
+}
+
+/// The evidence `pipeline_bundle_qualification` emits. Reference mode
+/// emits exactly what it always has. Production mode records the two
+/// identities as labels instead of the two `_is_reference` booleans, the
+/// configuration's qualifiability, and `harness_assembly`, so a production
+/// result can never be read as a reference one or the reverse.
+fn bundle_qualification_evidence(
+    assembly: HarnessAssembly,
+    candidate: &BundleCandidate,
+    constructor_object_proof: serde_json::Value,
+) -> serde_json::Value {
+    match assembly {
+        HarnessAssembly::Reference => serde_json::json!({
+            "candidate_resolved": true,
+            "candidate_scorer_identity_is_reference":
+                candidate.scorer_identity == "reference_perplexity_test_only",
+            "candidate_embedder_identity_is_reference":
+                candidate.embedder_identity == "reference_embedder_test_only",
+            "candidate_scorer_production_qualified": candidate.scorer_production_qualified,
+            "candidate_embedder_production_qualified": candidate.embedder_production_qualified,
+            "constructor_object_proof": constructor_object_proof,
+        }),
+        HarnessAssembly::Production => serde_json::json!({
+            "harness_assembly": assembly.label(),
+            "candidate_resolved": true,
+            "candidate_scorer_identity": candidate.scorer_identity,
+            "candidate_embedder_identity": candidate.embedder_identity,
+            "candidate_scorer_production_qualified": candidate.scorer_production_qualified,
+            "candidate_embedder_production_qualified": candidate.embedder_production_qualified,
+            "candidate_configuration_qualifiable": candidate.configuration_qualifiable,
+            "constructor_object_proof": constructor_object_proof,
+        }),
+    }
+}
+
+/// The production harness's candidate service: [`production_harness_service_for`]
+/// with the package it must serve as the source of its pins.
+fn production_harness_service(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    package: &BundlePackage,
+    dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
+) -> anyhow::Result<Arc<PipelineService>> {
+    production_harness_service_for(backend, artifact_store, package, package, dependencies)
+}
+
+/// The production assembler over `dependencies`, under the pins `pins_from`
+/// carries, refused unless it serves exactly `expected`. A real run passes
+/// the same package twice; the second argument exists so a test can show
+/// the refusal.
+fn production_harness_service_for(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    expected: &BundlePackage,
+    pins_from: &BundlePackage,
+    dependencies: trace_commons_server::versioned_pipeline_harness::HarnessDependencies,
+) -> anyhow::Result<Arc<PipelineService>> {
+    use trace_commons_server::versioned_pipeline_harness::{
+        assemble_harness_production, harness_production_components, production_package_pins,
+    };
+    use trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs;
+    let pins = production_package_pins(pins_from)?;
+    let components = harness_production_components(
+        &pins,
+        dependencies,
+        allow_all_authority(),
+        default_privacy_boundary(),
+    );
+    Ok(Arc::new(assemble_harness_production(
+        expected,
+        ProductionPipelineInputs {
+            backend,
+            artifact_store,
+            object_store_name: "local".to_string(),
+            lease_config: PipelineLeaseConfig::default(),
+            novelty_utility_checks: issuing_checks(),
+            unqualified_routing_allowed: false,
+            main_gate: pins.main_gate,
+            components,
+        },
+    )?))
+}
+
+/// Production mode on the operator host: the signed production package and
+/// its trusted key, the real dependencies its descriptors name (NEAR AI,
+/// fastembed, a usearch index at `TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT`),
+/// built from the environment `pipeline.py promote package-checks` passes.
+#[cfg(feature = "near-ai-scorer")]
+async fn production_candidate_service_from_env(
+    backend: Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    use trace_commons_server::versioned_pipeline_harness::{
+        HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL, TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT,
+        harness_dependencies_from_env, production_package_pins, verified_package_from_lookup,
+    };
+    let lookup = |var: &str| std::env::var(var).ok();
+    let package = verified_package_from_lookup(&lookup).unwrap_or_else(|error| panic!("{error}"));
+    let pins = production_package_pins(&package).unwrap_or_else(|error| panic!("{error}"));
+    let index_root = lookup(TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT)
+        .unwrap_or_else(|| panic!("{HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL}"));
+    let dependencies =
+        harness_dependencies_from_env(&pins, std::path::Path::new(&index_root), &lookup)
+            .await
+            .unwrap_or_else(|error| panic!("{error}"));
+    production_harness_service(backend, artifact_store(dir), &package, dependencies)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Never reached: `HarnessAssembly::from_env` refuses production mode
+/// without `near-ai-scorer`.
+#[cfg(not(feature = "near-ai-scorer"))]
+async fn production_candidate_service_from_env(
+    _backend: Arc<PgBackend>,
+    _dir: &tempfile::TempDir,
+) -> Arc<PipelineService> {
+    panic!(
+        "{}",
+        trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
+    )
+}
+
+/// Two production packages that differ only in a floor: the pilot's
+/// descriptors and gate settings, and the same with another novelty floor.
+fn production_test_packages() -> (BundlePackage, BundlePackage) {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        FastEmbedDescriptor, NearAiScorerDescriptor, production_compatibility_package,
+    };
+    let scorer = NearAiScorerDescriptor {
+        model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+        tail_logprob_cutoff: -8.0,
+        logprobs_top_k: 1,
+    };
+    let embedder = FastEmbedDescriptor {
+        model_id: "BAAI/bge-large-en-v1.5".to_string(),
+        output_dim: 1024,
+        max_tokens: 512,
+        matryoshka_dim: None,
+    };
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: 2_500_000,
+    };
+    let other_gate = MainGateConfig {
+        novelty_floor_micros: Some(600_000),
+        ..gate
+    };
+    (
+        production_compatibility_package(&scorer, &embedder, &gate).unwrap(),
+        production_compatibility_package(&scorer, &embedder, &other_gate).unwrap(),
+    )
 }
 
 /// PR #1295 review, Major 1: the production assembly is library code, so
@@ -2998,6 +3210,148 @@ async fn production_assembly_is_constructible_from_the_library() {
     assert!(qualification.scorer.production_qualified);
     assert!(qualification.embedder.production_qualified);
     assert!(qualification.configuration_qualifiable);
+}
+
+/// Spec 5.2 item 3 (B-2): `pipeline_bundle_qualification` in production
+/// mode. The candidate service comes from the production assembler over
+/// the package a signed production package names, through
+/// `production_harness_service`, the function the operator's run calls
+/// with real NEAR AI scoring, bge embedding and a usearch index; here the
+/// dependencies are qualified doubles behind the same trait objects, so no
+/// network and no model. The five reference assertions take their
+/// production form, the evidence says `harness_assembly: production`, and
+/// the result names the production package. A service that would serve any
+/// other package is refused. Needs no database: assembly opens no
+/// connection.
+#[tokio::test]
+async fn bundle_qualification_production_mode_inverts_the_reference_assertions() {
+    use trace_commons_server::versioned_pipeline_harness::{
+        HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL, HarnessDependencies, verified_package,
+    };
+
+    let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let backend = Arc::new(
+        PgBackend::new(&DatabaseConfig::from_postgres_url(
+            &format!("postgres://nobody@127.0.0.1:{unused_port}/none"),
+            1,
+        ))
+        .await
+        .unwrap(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The package `pipeline.py package --bundle production` signs, and the
+    // load path a production harness reads it through.
+    let (package, other_package) = production_test_packages();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let signed = sign_bundle_package(package.clone(), "production_test_key", pkcs8.as_ref())
+        .expect("sign the production package");
+    let trusted = trusted_key_for_pkcs8("production_test_key", pkcs8.as_ref()).unwrap();
+    let package_path = dir.path().join("signed-package.json");
+    let key_path = dir.path().join("trusted-package-key.json");
+    std::fs::write(&package_path, serde_json::to_vec(&signed).unwrap()).unwrap();
+    std::fs::write(&key_path, serde_json::to_vec(&trusted).unwrap()).unwrap();
+    let served = verified_package(&package_path, &key_path).expect("the signed package verifies");
+    assert_eq!(served, package);
+
+    let doubles = || {
+        let index = IsolatedPipelineIndex::new();
+        HarnessDependencies {
+            scorer: Arc::new(ReferencePerplexityScorer::new()),
+            embedder: Arc::new(ReferenceEmbedder::new()),
+            index_reader: index.clone(),
+            index_writer: index,
+        }
+    };
+    let candidate_service =
+        production_harness_service(backend.clone(), artifact_store(&dir), &served, doubles())
+            .expect("the production assembler serves the signed package");
+    let candidate = bundle_candidate(HarnessAssembly::Production, &candidate_service);
+    assert_eq!(candidate.package, package);
+    assert_eq!(candidate.scorer_identity, "near_ai_perplexity_scorer");
+    assert_eq!(candidate.embedder_identity, "fastembed_text_embedder");
+    assert!(candidate.scorer_production_qualified);
+    assert!(candidate.embedder_production_qualified);
+    assert!(candidate.configuration_qualifiable);
+
+    let proof = serde_json::json!({
+        "scorer_identity_is_q": true,
+        "scorer_identity_u_absent": true,
+        "score_calls_u": 0,
+    });
+    let evidence = bundle_qualification_evidence(HarnessAssembly::Production, &candidate, proof);
+    assert_eq!(evidence["harness_assembly"], "production");
+    assert_eq!(
+        evidence["candidate_scorer_identity"],
+        "near_ai_perplexity_scorer"
+    );
+    assert_eq!(
+        evidence["candidate_embedder_identity"],
+        "fastembed_text_embedder"
+    );
+    assert_eq!(evidence["candidate_scorer_production_qualified"], true);
+    assert_eq!(evidence["candidate_embedder_production_qualified"], true);
+    assert_eq!(evidence["candidate_configuration_qualifiable"], true);
+    assert!(
+        evidence
+            .get("candidate_scorer_identity_is_reference")
+            .is_none()
+    );
+    assert!(
+        evidence
+            .get("candidate_embedder_identity_is_reference")
+            .is_none()
+    );
+
+    let results = tempfile::tempdir().unwrap();
+    let emitter = PipelineCheckEmitter::new(
+        results.path().to_path_buf(),
+        "q0123abcd",
+        &format!("sha256:{}", "a".repeat(64)),
+    )
+    .unwrap();
+    emitter
+        .emit(
+            "pipeline_bundle_qualification",
+            PipelineCheckStatus::Pass,
+            Some(&candidate.package),
+            &[],
+            evidence,
+        )
+        .unwrap();
+    let result: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            results
+                .path()
+                .join("pipeline_bundle_qualification.result.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let digests = package_digests(&package).unwrap();
+    assert_eq!(result["package_hash"], digests.package_hash);
+    assert_eq!(result["configuration_digest"], digests.configuration_digest);
+    assert_eq!(result["dependency_digest"], digests.dependency_digest);
+
+    // The same doubles asked to serve another production package (another
+    // floor): the assembler builds its own package from the descriptors and
+    // gate settings it was handed, and the harness refuses the difference.
+    let refused = production_harness_service_for(
+        backend,
+        artifact_store(&dir),
+        &package,
+        &other_package,
+        doubles(),
+    )
+    .err()
+    .expect("a service serving another package is refused");
+    assert_eq!(
+        refused.to_string(),
+        HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL
+    );
 }
 
 /// Task 5: `bundle_qualification` fails closed on a package it cannot
