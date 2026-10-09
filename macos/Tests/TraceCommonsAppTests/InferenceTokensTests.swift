@@ -220,10 +220,12 @@ final class InferenceTokensTests: XCTestCase {
         XCTAssertEqual(store.ledgerFeed, true, "a read from before the write undid it")
     }
 
+    /// The recorded settings carry the daemon's default: on (owner decision
+    /// D3, settled 2026-10-09).
     func test_theSampleClientReadsTheSwitch() async {
         let store = InferenceStore(client: SampleDaemonClient(.normalDay))
         await store.load()
-        XCTAssertEqual(store.ledgerFeed, false)
+        XCTAssertEqual(store.ledgerFeed, true)
     }
 }
 
