@@ -64,7 +64,7 @@ public sealed class VerdictTests
     [Fact]
     public void TheCopyMatchesTheOtherShellsWordForWord()
     {
-        Assert.Equal("Did this session do what you asked?", VerdictCopy.Question);
+        Assert.Equal("Did this trace do what you asked?", VerdictCopy.Question);
         Assert.Equal("Worked", VerdictCopy.Worked);
         Assert.Equal("Partly", VerdictCopy.Partly);
         Assert.Equal("Failed", VerdictCopy.Failed);
@@ -73,7 +73,7 @@ public sealed class VerdictTests
             VerdictCopy.Caption);
         Assert.Equal("Submit all as...", VerdictCopy.SubmitAllAs);
         Assert.Equal(
-            "Record the same outcome for every session in this group.",
+            "Record the same outcome for every trace in this group.",
             VerdictCopy.SubmitAllAsTooltip);
     }
 }

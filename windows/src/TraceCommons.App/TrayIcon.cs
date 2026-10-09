@@ -436,7 +436,7 @@ public sealed class TrayIcon : IDisposable
 
             if (_menu.DecisionsOwed > 0 || _menu.Waiting.Count > 0)
             {
-                AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting sessions…");
+                AppendMenu(menu, MF_STRING, MenuIdReview, "Review waiting traces…");
             }
 
             if (_menu.ArmedProjects.Count > 0)

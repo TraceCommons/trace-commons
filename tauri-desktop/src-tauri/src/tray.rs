@@ -161,7 +161,7 @@ fn tray_menu<R: TauriRuntime, M: Manager<R>>(
         );
     }
     if snapshot.projects.len() > 8 {
-        builder = builder.text("project-more", "More waiting sessions in Trace Commons");
+        builder = builder.text("project-more", "More waiting traces in Trace Commons");
     };
 
     if let Some(state) = snapshot.private_inference_state.as_deref() {
@@ -335,7 +335,7 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
                     let _ = tray.set_menu(Some(menu));
                     let tooltip = match snapshot.decisions_owed {
                         Some(0) => "Trace Commons · nothing waiting",
-                        Some(_) => "Trace Commons · review waiting sessions",
+                        Some(_) => "Trace Commons · review waiting traces",
                         None => "Trace Commons · decisions unavailable",
                     };
                     let _ = tray.set_tooltip(Some(tooltip));

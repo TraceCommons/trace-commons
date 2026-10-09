@@ -1039,7 +1039,7 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     let connected = if status.logged_in {
         concat!("Connected to ", copy::app_name!(), ".")
     } else {
-        "Not connected. Sessions are still being queued; nothing can be sent yet, and nothing \
+        "Not connected. Traces are still being queued; nothing can be sent yet, and nothing \
          has been lost."
     };
     app.settings
@@ -1991,7 +1991,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     });
     let armed_line = gtk::Label::builder()
         .label(if armed.is_empty() {
-            "Every session is offered to you first.".to_string()
+            "Every trace is offered to you first.".to_string()
         } else {
             armed
                 .iter()
@@ -4250,7 +4250,7 @@ mod tests {
     /// The three modes are three different rows, and the `off` row does not
     /// say what the `unset` row says.
     ///
-    /// `off` and `unset` shared a sentence -- "sessions read from the usual
+    /// `off` and `unset` shared a sentence -- "traces read from the usual
     /// place" -- because the row branched on `*_root_configured`, which is
     /// `mode == "watch"`. Nothing is read from an `off` source, so that was
     /// a false statement on the one screen a contributor checks to confirm
@@ -4262,15 +4262,15 @@ mod tests {
         let unset = source_check_rows(&settings_with_modes("unset", "unset"));
         let off = source_check_rows(&settings_with_modes("off", "off"));
 
-        assert_eq!(watch[0].0, "Claude Code sessions folder set");
-        assert_eq!(unset[0].0, "Claude Code sessions read from the usual place");
+        assert_eq!(watch[0].0, "Claude Code traces folder set");
+        assert_eq!(unset[0].0, "Claude Code traces read from the usual place");
         assert_eq!(
             off[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         assert_eq!(
             off[1].0,
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
 
         for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
@@ -4298,9 +4298,9 @@ mod tests {
         let rows = source_check_rows(&settings_with_modes("off", "unset"));
         assert_eq!(
             rows[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
-        assert_eq!(rows[1].0, "Codex sessions read from the usual place");
+        assert_eq!(rows[1].0, "Codex traces read from the usual place");
         assert_eq!((rows[0].1, rows[1].1), (false, false));
     }
 

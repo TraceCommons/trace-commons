@@ -21,7 +21,7 @@ export function WitnessCapacityNotice({
       <div>
         <span role={copy.isError ? "alert" : undefined}>
           {copy.isError
-            ? "Some approved sessions are waiting and have not been sent, but this build could not read the notice that says why."
+            ? "Some approved traces are waiting and have not been sent, but this build could not read the notice that says why."
             : "Loading…"}
         </span>
       </div>

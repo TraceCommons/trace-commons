@@ -33,7 +33,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     /// sentence claims this window can see the send land, because it cannot.
     /// </summary>
     public const string UndoBody =
-        "Approved sessions will send automatically. You can undo until uploading starts.";
+        "Approved traces will send automatically. You can undo until uploading starts.";
 
     /// <summary>
     /// What is said when the daemon granted no hold. There is nothing to
@@ -1892,9 +1892,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     private static string DescribeQueue(int count) => count switch
     {
-        0 => "No sessions waiting for review.",
-        1 => "1 session waiting for review.",
-        _ => $"{count} sessions waiting for review.",
+        0 => "No traces waiting for review.",
+        1 => "1 trace waiting for review.",
+        _ => $"{count} traces waiting for review.",
     };
 
     /// <summary>
