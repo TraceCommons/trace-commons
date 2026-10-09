@@ -5096,18 +5096,16 @@ fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -
     let mut state = shared.state.lock().expect("state lock");
     let before = state.nudges.get(&key).cloned();
     let pending_before = state.verdicts_pending.clone();
-    let acked_before = state.verdicts_acked_through;
     let entry = state.nudges.entry(key.clone()).or_default();
     match stamp {
         NudgeStamp::Declined => entry.declined_at = Some(now),
         NudgeStamp::Opened => entry.opened_at = Some(now),
     }
-    // U2's own action acknowledges the news: through the newest poll that
-    // added to it, so a verdict found after that is still news.
+    // U2's own action acknowledges the news by clearing it. The verdict
+    // marks already hold every verdict it named, so only a verdict a later
+    // poll finds is news again.
     if matches!(stamp, NudgeStamp::Opened) && kind == super::nudge::NudgeKind::VerdictsLanded {
-        if let Some(news) = state.verdicts_pending.take() {
-            state.verdicts_acked_through = Some(news.newest_at);
-        }
+        state.verdicts_pending = None;
     }
     if state.save(&shared.store).is_err() {
         // Fail closed: a stamp that did not reach disk is not kept in
@@ -5121,7 +5119,6 @@ fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -
             }
         }
         state.verdicts_pending = pending_before;
-        state.verdicts_acked_through = acked_before;
         return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
     }
     drop(state);
@@ -17583,8 +17580,8 @@ mod tests {
             assert_eq!(nudge_of(&s)["state"], "unknown");
         }
 
-        /// `nudge_opened {verdicts_landed}` acknowledges through the news's
-        /// newest poll, clears it, persists, and publishes `status_changed`.
+        /// `nudge_opened {verdicts_landed}` clears the news, persists, and
+        /// publishes `status_changed`.
         #[test]
         fn opening_verdicts_acknowledges_and_clears_them() {
             let s = live();
@@ -17611,7 +17608,6 @@ mod tests {
             );
             let reloaded = DaemonState::load(&s.store).unwrap();
             assert_eq!(reloaded.verdicts_pending, None);
-            assert_eq!(reloaded.verdicts_acked_through, Some(at));
             assert!(
                 reloaded.nudges[&ledger_key(NudgeKind::VerdictsLanded, None)]
                     .opened_at

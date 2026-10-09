@@ -297,8 +297,8 @@ pub struct VerdictDelta {
     pub credit_final_delta: f32,
     /// The poll that first saw a verdict in this delta: `status.nudge.since`.
     pub since: DateTime<Utc>,
-    /// The poll that last added to this delta. `nudge_opened` acknowledges
-    /// through it, and the news mark ages out from it.
+    /// The poll that last added to this delta. The news mark ages out from
+    /// it.
     pub newest_at: DateTime<Utc>,
 }
 

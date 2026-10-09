@@ -1138,9 +1138,8 @@ card's Review, the panel row's tap), never because a card or row was shown.
 It records when. For `idle_sessions` and `review_backlog` it does not retire
 the suggestion: each retires by fact, `idle_sessions` when nothing is idle and
 `review_backlog` when the count falls below the threshold.
-For `verdicts_landed` it acknowledges the news: the waiting news is cleared
-and the daemon records that it was acknowledged through the latest poll that
-added to it, so a verdict found by a later poll is news again.
+For `verdicts_landed` it acknowledges the news: the waiting news is cleared,
+and only a verdict a later poll finds is news again.
 `nudge_decline {kind: "verdicts_landed"}` is refused with `bad_params` /
 `nudge-kind-not-declinable` and writes and publishes nothing.
 

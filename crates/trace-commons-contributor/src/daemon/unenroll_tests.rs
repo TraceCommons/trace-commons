@@ -182,7 +182,6 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
             since: at,
             newest_at: at,
         });
-        state.verdicts_acked_through = Some(at);
         // Nudge U4: the idle batching set names this account's queue.
         state.idle_announced.insert(uuid::Uuid::from_bytes([9; 16]));
         // Nudge A2: the notification budget belongs to this account too.
@@ -207,7 +206,6 @@ async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
             && state.verdict_marks.is_empty()
             && !state.verdict_marks_seeded
             && state.verdicts_pending.is_none()
-            && state.verdicts_acked_through.is_none()
             && state.idle_announced.is_empty()
             && state.attention_log.is_empty()
             && state.last_notified_at.is_none()
