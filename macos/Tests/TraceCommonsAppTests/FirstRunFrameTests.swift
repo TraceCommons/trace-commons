@@ -153,7 +153,10 @@ final class FirstRunFrameTests: XCTestCase {
         let scroll = try XCTUnwrap(rest.range(of: "ScrollView {"))
         let pinned = try XCTUnwrap(rest.range(of: "                pinned\n"))
         let bar = try XCTUnwrap(rest.range(
-            of: "GlassActionBar(notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer)) {\n"
+            of: "GlassActionBar(\n"
+                + "                    notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer),\n"
+                + "                    noteInset: FirstRunFrameLayout.contentInset\n"
+                + "                ) {\n"
                 + "                    footerRow\n"))
         XCTAssertLessThan(scroll.lowerBound, pinned.lowerBound)
         XCTAssertLessThan(pinned.lowerBound, bar.lowerBound)
@@ -371,13 +374,15 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
         // The Private AI switch is the settings style.
         XCTAssertTrue(uses.contains("GlassToggleStyle(.settings, showsLabel: false)"))
-        // Join's bold sentence is in the primary text colour, its own
-        // paragraph (owner, 2026-10-08).
+        // Join's second paragraph is regular weight now (owner, 2026-10-08),
+        // its own paragraph a line further down.
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
         let emphasis = try XCTUnwrap(join.range(of: "Text(copy.join.bodyEmphasis)"))
         let emphasisStyle = String(join[emphasis.upperBound...].prefix(200))
-        XCTAssertTrue(emphasisStyle.contains(".weight(.bold)"))
-        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
+        XCTAssertFalse(emphasisStyle.contains(".weight(.bold)"))
+        // The page content has its own side margin; the step progress and
+        // the button row do not.
+        XCTAssertEqual(FirstRunFrameLayout.contentInset, 20)
         // Never rows on Rules are dimmed by ink, never by an opacity that
         // takes their words under 4.5:1.
         let rules = try Self.appSource("Views/FirstRun/RulesScreen.swift")

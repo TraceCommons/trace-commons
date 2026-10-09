@@ -80,6 +80,11 @@ struct FirstRunTitle: View {
 /// The frame's decisions, apart from the view so they can be tested.
 enum FirstRunFrameLayout {
     /// The current step's index within its tier's steps.
+    /// The page content's extra side margin, inside the pane: the header,
+    /// the cards, the pinned row and the action notes, but not the step
+    /// progress above or the button row below (owner ruling, 2026-10-08).
+    static let contentInset: CGFloat = GlassTokens.Space.s9
+
     static func current(_ state: FirstRunState) -> Int {
         FirstRunNavigation.steps(for: state.tier).firstIndex(of: state.step) ?? 0
     }
@@ -174,6 +179,7 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                 GlassStepProgress(labels: copy.frame.steps(for: state.tier), current: FirstRunFrameLayout.current(state))
                     .frame(maxWidth: .infinity)
                 header
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         content
@@ -186,10 +192,15 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 pinned
-                GlassActionBar(notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer)) {
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
+                GlassActionBar(
+                    notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer),
+                    noteInset: FirstRunFrameLayout.contentInset
+                ) {
                     footerRow
                 }
             }

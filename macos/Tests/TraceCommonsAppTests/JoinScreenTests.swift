@@ -922,9 +922,13 @@ final class JoinScreenTests: XCTestCase {
         let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
         let emphasis = try XCTUnwrap(source.range(of: "Text(copy.join.bodyEmphasis)\n"))
         XCTAssertLessThan(body.lowerBound, emphasis.lowerBound)
-        let emphasisStyle = String(source[emphasis.upperBound...].prefix(200))
-        XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body.weight(.bold))"))
-        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textPrimary)"))
+        let emphasisStyle = String(source[emphasis.upperBound...].prefix(400))
+        // Regular weight, the body's ink, a line further down (owner
+        // ruling, 2026-10-08).
+        XCTAssertTrue(emphasisStyle.contains(".glassType(GlassTokens.TypeScale.body)\n"))
+        XCTAssertFalse(emphasisStyle.contains(".weight(.bold)"))
+        XCTAssertTrue(emphasisStyle.contains(".foregroundStyle(GlassColor.textSecondary)"))
+        XCTAssertTrue(emphasisStyle.contains(".padding(.top, JoinScreenLayout.laterLineGap)"))
 
         // The no-sharing line is the frame's action note, in no card and
         // not in the scrolling content (owner ruling, 2026-10-08).

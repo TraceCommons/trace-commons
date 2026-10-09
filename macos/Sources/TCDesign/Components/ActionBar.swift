@@ -17,17 +17,23 @@ import SwiftUI
 /// }
 /// ```
 public struct GlassActionBar<Bar: View>: View {
-    /// The gap between the notes and the bar under them.
-    public static var noteGap: CGFloat { GlassTokens.Space.s4 }
+    /// The gap between the notes and the bar under them: a line of text
+    /// (owner ruling, 2026-10-08), so a note reads as part of the page, not
+    /// a caption on a button.
+    public static var noteGap: CGFloat { GlassTokens.Space.s9 }
     /// The gap between two notes.
     public static var noteSpacing: CGFloat { GlassTokens.Space.s2 }
 
     private let notes: [String]
+    private let noteInset: CGFloat
     private let bar: Bar
 
     /// `notes` are drawn in order, top to bottom; empty strings are skipped.
-    public init(notes: [String] = [], @ViewBuilder bar: () -> Bar) {
+    /// `noteInset` indents the notes on both sides to match the page's
+    /// content margin, while the bar keeps the full width.
+    public init(notes: [String] = [], noteInset: CGFloat = 0, @ViewBuilder bar: () -> Bar) {
         self.notes = notes.filter { !$0.isEmpty }
+        self.noteInset = noteInset
         self.bar = bar()
     }
 
@@ -39,6 +45,7 @@ public struct GlassActionBar<Bar: View>: View {
                         GlassActionNote(note)
                     }
                 }
+                .padding(.horizontal, noteInset)
             }
             bar
         }

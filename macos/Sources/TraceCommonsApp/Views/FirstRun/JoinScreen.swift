@@ -32,6 +32,9 @@ enum JoinLookUpOutcome: Equatable {
 enum JoinScreenLayout {
     /// The extra space above the invite card (under the body), on top of the
     /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
+    /// The extra space above the body's second paragraph: one line of
+    /// body text (owner ruling, 2026-10-08).
+    static let laterLineGap: CGFloat = GlassTokens.Space.s8
     static let extraGap = GlassTokens.Space.s4
 
     /// Contributing needs an account; without one, setup is watching only.
@@ -461,8 +464,8 @@ struct JoinScreen: View {
         }
     }
 
-    /// The title, then the body in two paragraphs: the bold sentence on a
-    /// line of its own, in the primary ink (owner, 2026-10-08).
+    /// The title, then the body in two paragraphs, the second a line
+    /// further down (owner, 2026-10-08).
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
@@ -470,10 +473,13 @@ struct JoinScreen: View {
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // A line further down, in the body's regular weight and ink
+            // (owner ruling, 2026-10-08).
             Text(copy.join.bodyEmphasis)
-                .glassType(GlassTokens.TypeScale.body.weight(.bold))
-                .foregroundStyle(GlassColor.textPrimary)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, JoinScreenLayout.laterLineGap)
         }
     }
 

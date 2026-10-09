@@ -451,7 +451,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
             body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\".",
-            body_emphasis: "You'll be able to setup or connect your account later to receive credits and manage access to the near.ai ecosystem.",
+            // Approved 2026-10-08 (owner ruling): the clause about credits
+            // and the near.ai ecosystem is dropped.
+            body_emphasis: "You'll be able to setup or connect your account later.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
