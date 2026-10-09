@@ -140,6 +140,7 @@ struct GlassBackdrop: NSViewRepresentable {
 struct GlassPaneFill: View {
     let radius: CGFloat
     @Environment(\.glassPaneIsContent) private var content
+    @Environment(\.controlActiveState) private var activeState
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
@@ -147,7 +148,7 @@ struct GlassPaneFill: View {
         case .liquidGlass, .vibrancy:
             ZStack {
                 GlassBackdrop(material: GlassMaterial.current(content: content), cornerRadius: radius)
-                if !(GlassTheme.current == .flat && GlassTheme.flatMaterial.tintsGlass) {
+                if GlassTheme.paintsVeil(windowIsKey: activeState == .key) {
                     shape.fill(GlassTokens.Color.glassVeil.color)
                 }
                 shape.fill(GlassTokens.Gradient.paneFill.linear)

@@ -46,12 +46,12 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     /// panes, under a lighter map field (owner feedback, 2026-10-09).
     static var contentIsGlass: Bool { current == .flat }
 
-    /// The native material under a flat pane. `hud` is the default: it is
-    /// the one that looks the same whether or not the window is in focus.
-    /// Liquid Glass (`clearTint`, `regularTint`, `regular`) changes with the
-    /// window's key state -- clear glass frosts and drops its tint in a
-    /// background window -- and has no public way to hold one state; the
-    /// HUD vibrancy material is held active (owner comparison, 2026-10-09).
+    /// The native material under a flat pane. `clearTint` is the default:
+    /// Liquid Glass, for the system's refraction, tinted with the veil,
+    /// which of the five came closest to the mock (owner comparison,
+    /// 2026-10-09). Liquid Glass drops its tint in a window out of focus;
+    /// `paintsVeil` paints it back there, so the tint holds and only the
+    /// system's frost changes, as the HUD material's look holds.
     /// `TC_GLASS_MATERIAL` picks another, for comparison.
     enum FlatMaterial: String {
         /// Liquid Glass, frosted, with the veil as the glass's own tint.
@@ -77,8 +77,18 @@ public enum GlassTheme: String, Sendable, CaseIterable {
         current == .flat ? NSAppearance(named: .darkAqua) : nil
     }
 
+    /// Whether a pane paints the veil itself. Where the glass carries the
+    /// veil as its tint, it does not -- except that Liquid Glass drops its
+    /// tint and frosts lighter in a window that is not in focus, so there
+    /// the pane paints the veil in its place, and the tint holds in and out
+    /// of focus (owner comparison, 2026-10-09).
+    static func paintsVeil(windowIsKey: Bool) -> Bool {
+        guard current == .flat, flatMaterial.tintsGlass else { return true }
+        return !windowIsKey
+    }
+
     static let flatMaterial: FlatMaterial =
-        ProcessInfo.processInfo.environment["TC_GLASS_MATERIAL"].flatMap(FlatMaterial.init(rawValue:)) ?? .hud
+        ProcessInfo.processInfo.environment["TC_GLASS_MATERIAL"].flatMap(FlatMaterial.init(rawValue:)) ?? .clearTint
 }
 
 /// The person's appearance choice: Light, Dark, or the system's
