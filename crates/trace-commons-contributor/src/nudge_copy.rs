@@ -186,9 +186,9 @@ pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Sessions you send are now judg
 /// The one-time offer to existing installs on the Traces card (owner
 /// decision 7). "At most once a week" restates the N1 repeat interval of
 /// owner decisions 4 and 26 at the default queue TTL and changes with it.
-/// DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_IDLE_EXISTING: &str = "Sessions that have been idle for a few days can now be a notification. \
-     At most once a week.";
+/// Wording from Ron's #1303 design review. DRAFT, NEEDS APPROVAL.
+pub const OFFER_NOTIFY_IDLE_EXISTING: &str =
+    "We can tell you when traces sit idle for a few days. At most once a week.";
 /// Accepts an offer. "Enable", not "Turn on", per Ron's #1303 design
 /// review. DRAFT, NEEDS APPROVAL.
 pub const OFFER_ENABLE: &str = "Enable";
@@ -642,6 +642,15 @@ mod tests {
         assert_eq!(key("OFFER_ENABLE"), Some("Enable"));
         assert_eq!(key("OFFER_NO_THANKS"), Some("No thanks"));
         assert_eq!(key("OFFER_TURN_ON"), None);
+    }
+
+    /// Ron's #1303 design review, item 12: the idle offer's text.
+    #[test]
+    fn the_idle_offer_says_what_it_will_tell_you() {
+        assert_eq!(
+            OFFER_NOTIFY_IDLE_EXISTING,
+            "We can tell you when traces sit idle for a few days. At most once a week."
+        );
     }
 
     /// No path, folder label or title placeholder can reach a nudge.
