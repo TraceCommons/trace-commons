@@ -367,9 +367,10 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// Sections that read nothing from the daemon: the login item, the
-    /// system's notification permission and the update feed are all local.
-    static let localOnlySections: Set<SettingsSection> = [.startup, .notifications, .updates]
+    /// Sections that read nothing from the daemon: the appearance, the
+    /// login item, the system's notification permission and the update feed
+    /// are all local.
+    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .notifications, .updates]
 
     /// Each daemon-reading section's branch for "the daemon has not answered",
     /// and what that branch draws. Every branch is the absent case written
