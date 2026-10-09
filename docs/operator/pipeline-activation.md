@@ -1352,6 +1352,109 @@ report at each step:
 `tests::pipeline_activation_pg_tests::the_legacy_drain_report_counts_real_pending_work_and_reaches_zero`
 (see "Rehearse the switch").
 
+## The production assembly
+
+A build with the `near-ai-scorer` feature can assemble a production pipeline
+runtime. It is off unless selected:
+
+- `TRACE_COMMONS_PIPELINE_RUNTIME` unset or empty: no pipeline runtime, exactly
+  as before (`run_ingest(None)`). This is stage 1 on the pilot's build.
+- `TRACE_COMMONS_PIPELINE_RUNTIME=production`: the production assembly. It
+  needs the `near-ai-scorer` build
+  (`pipeline_runtime_production_requires_near_ai_scorer` otherwise) and
+  `TRACE_COMMONS_GATE_SERVICE=enclave_near_ai`
+  (`pipeline_runtime_production_requires_enclave_near_ai` otherwise), because
+  it reuses that gate's components.
+- Any other value refuses the start with `pipeline_runtime_selection_unknown`.
+
+`GET /v1/admin/config-status` reports the choice as
+`pipeline_runtime_selection` (`none` or `production`).
+
+Under the production selection, ingest builds the legacy `enclave_near_ai` gate
+first and hands its NEAR AI scorer and fastembed embedder to the pipeline, so
+the embedder model is loaded once. The pipeline gets:
+
+- the scorer as `near_ai_perplexity_scorer`, named in the package by a
+  descriptor of the model pin (`TRACE_COMMONS_NEAR_AI_MODEL`), the tail cutoff
+  and the logprobs top-k. The endpoint, key and timeout are not part of it.
+  Changing the model or the cutoff is a new package and needs a new
+  qualification;
+- the embedder as `fastembed_text_embedder`, named by its model id, output
+  dimension, token limit and matryoshka dimension. Index entries record a
+  lowercase identifier of the model id (`baai_bge-large-en-v1.5`);
+- its own usearch index at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`
+  (required: `pipeline_vector_index_root_missing`). The root must not be, or
+  nest with, the novelty root or the dedup root
+  (`pipeline_vector_index_root_shared`). Each namespace keeps an append-only
+  manifest log (`*.manifest.jsonl`) beside its usearch file. Every write saves
+  that namespace's usearch file (and no other) and appends one fsynced record,
+  so a rebuild of N entries writes O(N) manifest bytes; the log is compacted at
+  start and once it holds more than twice its live entries. A write that fails
+  is undone and answers `Failed`, so its retry writes it again. An
+  invalidation logs a remove intent before it deletes anything, so a start
+  after one that stopped part way completes it (and its retry then finds
+  nothing left to remove). Any other disagreement between a manifest and its
+  usearch file refuses the start (`pipeline_vector_index_manifest_mismatch`):
+  entries usearch lacks with no intent logged (a lost or replaced usearch
+  file) are never dropped, and entries no manifest names are never adopted.
+  Empty the root and rebuild each tenant's index with
+  `POST /v1/workers/pipeline/index-rebuild`;
+- the tenant policy exactly as `main`'s admission reads it, as its
+  authority: for a tenant on `TRACE_COMMONS_DB_TENANT_POLICY_READS` (globally
+  or by tenant rollout), its `trace_tenant_policies` row, read through
+  `main`'s DB mirror and decoded as `main` decodes it; otherwise
+  `TRACE_COMMONS_TENANT_POLICIES`. In both cases
+  `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` decides a tenant with no
+  policy. The policy is read at each receipt and again before each
+  `NoveltyUtility` credit check, so a policy changed by
+  `PUT /v1/admin/tenant-policy` applies to the next one, as it does in
+  `main`. A policy row that cannot be read or decoded refuses the receipt
+  with a 503 `pipeline_authority_read_failed`. At Settle the run waits in an
+  uncharged retry under that label, with no leg dispatched or settled, and
+  settles once a later read succeeds. It never falls back to the
+  environment map or to "no policy". A receipt with
+  no authority at all is answered 503 `authority_control_missing`. (The boot
+  refusal `pipeline_routed_tenant_db_policy_reads` is gone; `main` already
+  refuses database policy reads without a DB mirror.)
+- `main`'s privacy filter backend (`TRACE_PRIVACY_FILTER_BACKEND`) and
+  `TRACE_COMMONS_PII_CLASSIFY_POLICY`. With no backend the runtime is not
+  production-qualified;
+- the `trace_credit` adapter `internal_trace_credit_ledger`, which has no
+  effect outside the ledger row Settle writes, capped at `main`'s
+  `NoveltyUtility` delta.
+
+The assembly never enables NEAR payout, whatever
+`TRACE_COMMONS_NEAR_SETTLEMENT_MODE` says: a pipeline tenant cannot be paid out
+by this runtime. It binds the compatibility bundle with `main`'s gate
+configuration. A start whose descriptors would name values other than the ones
+the gate was built with refuses (`pipeline_scorer_descriptor_mismatch`,
+`pipeline_embedder_descriptor_mismatch`).
+
+### `pipeline_production_adapters`
+
+Only the deployed host can pass this check: its infrastructure profile must
+be production (GCS store, Cloud KMS key wrapper, managed EdDSA tokens, no
+static tokens). Set `TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR`,
+`TRACE_COMMONS_PIPELINE_CHECK_RUN_ID` and
+`TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH` on the service for one boot.
+After every startup refusal has passed (the scheduler validations, the
+`TRACE_COMMONS_BIND` address and the bind itself), just before it serves,
+ingest writes `pipeline_production_adapters.result.json` and `.evidence.json`
+there. A boot refused at any of those writes nothing:
+
+- the revision must be the build's (`pipeline_check_revision_mismatch` refuses
+  the start otherwise);
+- an existing result is left as it is, logged as
+  `pipeline_production_adapters_already_emitted`, and the start continues;
+- the result is `pass` only when the default bundle's dependencies, the
+  infrastructure, the privacy boundary's prose-PII classification and the
+  package's production markers have no blocker, and `fail` with those blockers
+  otherwise;
+- it names the default package, and its evidence holds labels, digests and
+  counts only. `runtime_identity_digest` is the value activation compares.
+
+Unset the three variables after that boot.
+
 ## Fail-closed dependency qualification
 
 `assemble_ingest_pipeline_runtime` refuses to start an injected pipeline
@@ -2679,24 +2782,29 @@ test`, `run`, `package`, `restore-drill`, `qualify`, `keygen`, and `revision`
 pipeline against a real PostgreSQL server, and the nine admin routes above
 qualify, activate, roll back, contain, and deactivate a tenant and suspend a
 policy. Production routing is off until an operator activates a tenant. The
-repository binary injects no runtime, so it serves no tenant on the pipeline
-and no route of it can write a `pipeline` row. With a database it reads the
-routing row: it refuses the uploads of a tenant whose row says `pipeline` or
-`contained`, and every other upload takes the legacy path.
+repository binary injects no runtime unless a `near-ai-scorer` build is started
+with `TRACE_COMMONS_PIPELINE_RUNTIME=production` (see "The production
+assembly"). Without one it serves no tenant on the pipeline and no route of it
+can write a `pipeline` row. With a database it reads the routing row: it
+refuses the uploads of a tenant whose row says `pipeline` or `contained`, and
+every other upload takes the legacy path.
 
 What remains for promotion:
 
-- An activation through the route needs a full set of 22 verified results: the
-  19 that `qualify` produces and the three promotion-only checks
-  (`pipeline_production_adapters`, `pipeline_remote_restore`,
-  `pipeline_hf_network_canary`). Those three need the production assembly, no
-  code in this repository emits them, and a local run's restore drill result
+- An activation through the route needs a full set of 22 verified results: 15
+  mechanics results from one `qualify` run, and seven package-bearing results
+  from one production run against the production package: the bundle
+  qualification, the compatibility and HF corpus runs, the restore drill, and
+  the three promotion-only checks (`pipeline_production_adapters`,
+  `pipeline_remote_restore`, `pipeline_hf_network_canary`). The deployed
+  production assembly emits `pipeline_production_adapters` at startup. Nothing
+  in this repository emits the other two yet, nor runs the four package checks
+  against the production assembly, and a local run's restore drill result
   carries the blocker `filesystem_restore_local_only`. So no tenant can be
   activated with the results of a local `qualify` run alone.
-- The production assembly (a production scorer, embedder, index, settlement
-  adapter, and payout), a remote object-store restore drill, and the Hugging
-  Face network canary are promotion work. So is the choice of who holds the
-  check-signing key.
+- A production NEAR payout adapter, the remote object-store restore drill, the
+  Hugging Face network canary and the operator `promote` run are promotion
+  work. So is the choice of who holds the check-signing key.
 - `terminate` of a policy is not supported. The specification that says what a
   terminated policy does to a run opens later, with promotion.
 - No legacy writer is retired. The drain report shows what the legacy path still

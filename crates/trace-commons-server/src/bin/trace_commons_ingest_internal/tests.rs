@@ -5508,7 +5508,7 @@ fn append_ranking_backfill_fixture_for_submissions(
     }
 }
 
-fn test_state_with_options(
+pub(crate) fn test_state_with_options(
     root: PathBuf,
     db_mirror: Option<Arc<dyn Database>>,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
@@ -6155,6 +6155,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -29062,6 +29063,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),

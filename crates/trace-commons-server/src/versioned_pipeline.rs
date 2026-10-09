@@ -50,8 +50,9 @@ use crate::trace_corpus_storage::{
 };
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
-    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
-    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
+    PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+    PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL, PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
+    PipelineAuthorityProvider, PipelinePrivacyBoundary,
 };
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
@@ -8200,6 +8201,19 @@ impl PipelineService {
         self.settle_evaluations.load(Ordering::SeqCst)
     }
 
+    /// The tenant's authority as the provider resolves it now: `None`
+    /// with no provider or no authority for the tenant, an error (its
+    /// label) when the provider's read fails.
+    async fn resolve_authority(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Option<crate::trace_authority::SubmissionAuthority>> {
+        match self.authority.as_ref() {
+            Some(provider) => provider.resolve_authority(tenant_id).await,
+            None => Ok(None),
+        }
+    }
+
     pub fn dependency_qualification(&self) -> PipelineDependencyQualification {
         PipelineDependencyQualification {
             scorer: self
@@ -9038,11 +9052,14 @@ impl PipelineService {
 
         // 1. The authority lookup and the privacy-boundary presence check
         // run before any database work, so a tenant with a missing control
-        // fails closed with no run and no staging row (Ruling T2-1).
+        // fails closed with no run and no staging row (Ruling T2-1). The
+        // authority is resolved now, as `main`'s admission resolves it: a
+        // policy read from the database is read here, on its own pooled
+        // connection, returned before anything else checks one out. A
+        // failed read refuses with its label.
         let authority = self
-            .authority
-            .as_ref()
-            .and_then(|provider| provider.authority_for_tenant(tenant_id))
+            .resolve_authority(tenant_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!(PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL))?;
         let privacy = self
             .privacy
@@ -10785,6 +10802,20 @@ impl PipelineService {
                 )
                 .await
             }
+            // The tenant authority could not be read (a tenant whose policy
+            // `main` reads from the database, and the read failed). It is
+            // not the trace's fault either: the same uncharged suspension,
+            // so an outage cannot spend the run's attempts and fail it, and
+            // the retry reads the policy again. No leg settles without it:
+            // the Settle reads run before the dispatch and before the
+            // ledger transaction.
+            Err(error) if error.to_string() == PIPELINE_AUTHORITY_READ_FAILED_LABEL => {
+                self.mark_transient_retry_or_record_lease_expired(
+                    &run,
+                    PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+                )
+                .await
+            }
             Err(error) => {
                 let label = error.to_string();
                 if label == PIPELINE_INDEX_CONFLICT_LABEL {
@@ -12248,11 +12279,20 @@ impl PipelineService {
                             .and_then(|award| award.trace_credit_microcredits())
                             .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
                     let withheld = {
+                        // Resolved before the transaction takes a pooled
+                        // connection: a policy read from the database uses
+                        // its own, as `main`'s credit check reads it.
+                        let authority = self.resolve_authority(&run.tenant_id).await?;
                         let mut client = self.backend.trace_pool().get().await?;
                         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id)
                             .await?;
                         let withheld = self
-                            .novelty_utility_withheld_reason(&tx, &run, amount.get())
+                            .novelty_utility_withheld_reason(
+                                &tx,
+                                &run,
+                                amount.get(),
+                                authority.as_ref(),
+                            )
                             .await?;
                         tx.commit().await?;
                         withheld
@@ -12971,6 +13011,16 @@ impl PipelineService {
         let witness_provenance_class = self
             .credit_witness_provenance_class(&run.tenant_id, run.submission_id)
             .await;
+        // The tenant authority the `NoveltyUtility` check below reads,
+        // resolved now, before the credit transaction takes a pooled
+        // connection: `main` reads the tenant policy, then credits in a
+        // separate transaction, and so does this.
+        let novelty_utility_authority =
+            if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
+                self.resolve_authority(&run.tenant_id).await?
+            } else {
+                None
+            };
         let mut client = self.backend.trace_pool().get().await?;
         let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
         ensure_current_lease(&tx, run, lease_token).await?;
@@ -13052,7 +13102,12 @@ impl PipelineService {
         // the Score decision stays as it was.
         if trace_credit_event == PipelineTraceCreditEvent::NoveltyUtility {
             if let Some(label) = self
-                .novelty_utility_withheld_reason(&tx, run, amount.get())
+                .novelty_utility_withheld_reason(
+                    &tx,
+                    run,
+                    amount.get(),
+                    novelty_utility_authority.as_ref(),
+                )
                 .await?
             {
                 update_settlement_on_tx(
@@ -13208,7 +13263,9 @@ impl PipelineService {
     ///   T15-9); the tenant authority's own allowlists were applied to this
     ///   submission at the receipt (`SubmissionAuthority::permits`).
     /// - The tenant policy comes from the authority provider, the source the
-    ///   receipt uses. No authority for the tenant, no policy while one is
+    ///   receipt uses, resolved by the caller just before its transaction
+    ///   (`resolve_authority`; a failed read is an error, retried, never a
+    ///   withheld leg). No authority for the tenant, no policy while one is
     ///   required, or a submission row whose scopes or uses do not decode is
     ///   `credit_check_error`, where `main` fails the call; a withheld leg is
     ///   never a charged Settle error.
@@ -13226,6 +13283,7 @@ impl PipelineService {
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
         amount_microcredits: u64,
+        authority: Option<&crate::trace_authority::SubmissionAuthority>,
     ) -> anyhow::Result<Option<&'static str>> {
         let checks = &self.novelty_utility_checks;
         if checks.require_production_gate {
@@ -13249,11 +13307,7 @@ impl PipelineService {
         if checks.issuer_principal_ref.is_none() {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         }
-        let Some(authority) = self
-            .authority
-            .as_ref()
-            .and_then(|provider| provider.authority_for_tenant(&run.tenant_id))
-        else {
+        let Some(authority) = authority else {
             return Ok(Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL));
         };
         if authority.policy.is_none() && authority.require_policy {
