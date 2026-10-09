@@ -867,6 +867,11 @@ pub struct DaemonShared {
     /// tick read them; `None` until the first tick. See
     /// [`Self::publish_time_driven_status`].
     time_driven_status: Mutex<Option<serde_json::Value>>,
+    /// The estimate table readers were last told is in force: the table and
+    /// its basis as [`EstimateTableSlot::in_force`] gave them. Starts as the
+    /// built-in table, which the slot starts as. A leaf lock. See
+    /// [`Self::publish_estimate_in_force_change`].
+    estimate_in_force: Mutex<EstimateInForce>,
     /// The daemon-wide bound on concurrent preview work.
     ///
     /// `Arc` rather than a plain field because the worker pool outlives any
@@ -1026,6 +1031,23 @@ impl Drop for PreviewBuildGuard<'_> {
 pub const ESTIMATE_BASIS_BUILT_IN: &str = "built_in";
 /// `credit_estimate.basis` while a fetched, accepted table is in force.
 pub const ESTIMATE_BASIS_PUBLISHED: &str = "published";
+
+/// What readers render with: the table in force and its basis, without the
+/// receipt time a re-fetch renews.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EstimateInForce {
+    table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+    basis: &'static str,
+}
+
+impl EstimateInForce {
+    pub(crate) fn of(slot: EstimateTableSlot) -> Self {
+        Self {
+            table: slot.table,
+            basis: slot.basis,
+        }
+    }
+}
 
 /// The calibration table in force and where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -1316,6 +1338,7 @@ impl DaemonShared {
             events,
             renderers,
             time_driven_status: Mutex::new(None),
+            estimate_in_force: Mutex::new(EstimateInForce::of(EstimateTableSlot::built_in())),
             previews: Arc::new(PreviewScheduler::default()),
             routing,
             private_inference_endpoint: Mutex::new(None),
@@ -2214,6 +2237,39 @@ impl DaemonShared {
             changed
         };
         if changed {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
+    /// Publish `queue_changed` and `status_changed` when the estimate table
+    /// in force at `now` is not the one readers were last told about, or
+    /// not `before` (what was in force just ahead of a fetch). Every
+    /// `credit_estimate` on `list_pending` and on `status` renders under the
+    /// table in force, so its change is a change to both.
+    ///
+    /// Called on every daemon tick with no `before`, which is what announces
+    /// a fetched table ageing past `ESTIMATE_TABLE_MAX_AGE`: nothing fetched,
+    /// the clock alone moved readers to the built-in table. Called after a
+    /// fetch with `before`, which announces a table re-fetched after it
+    /// expired, though the slot itself holds the same table as before.
+    pub(crate) fn publish_estimate_in_force_change(
+        &self,
+        now: chrono::DateTime<Utc>,
+        before: Option<EstimateInForce>,
+    ) {
+        let slot = self.estimate_table.lock().expect("estimate lock").clone();
+        let view = EstimateInForce::of(slot.in_force(now));
+        let changed = {
+            let mut last = self
+                .estimate_in_force
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = *last != view || before.is_some_and(|before| before != view);
+            *last = view;
+            changed
+        };
+        if changed {
+            self.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
             self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
         }
     }

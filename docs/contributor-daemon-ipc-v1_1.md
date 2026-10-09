@@ -2951,7 +2951,10 @@ it. What a fetch changes:
 - A 404, a network failure, or no config leaves the table in force as it is,
   so a daemon works against a server that publishes none.
 - A fetched table not re-fetched for 7 days is no longer in force: rows and
-  `status` render with the built-in table until a fetch succeeds.
+  `status` render with the built-in table until a fetch succeeds. The tick
+  that finds it lapsed publishes `queue_changed` and `status_changed`, with
+  no fetch, and a later fetch of the same table publishes them again as it
+  comes back into force.
 
 **Entries queued before the features existed** carry no estimate until the
 daemon re-reads them: at most 4 waiting entries per full watcher pass, oldest

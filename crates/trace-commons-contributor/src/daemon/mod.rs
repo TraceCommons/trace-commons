@@ -649,6 +649,9 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                     // ticks find it not due and return at once.
                     refresh_estimate_table(shared, now, &mut table_schedule).await;
                 }
+                // A fetched table ageing out is the clock alone: announced
+                // here, outside the `!dry_run` block, with no fetch.
+                shared.publish_estimate_in_force_change(now, None);
                 // Last, after every pass that announces its own changes: what
                 // the clock alone moved in `status` this tick. Outside the
                 // `!dry_run` block, since the clock moves in a dry run too.
@@ -1638,18 +1641,16 @@ async fn refresh_estimate_table(
         Ok(client) => client.fetch().await,
         Err(refused) => Err(refused),
     };
-    let changed = {
+    let before = {
         let mut slot = shared.estimate_table.lock().expect("estimate lock");
-        let before = slot.clone();
+        let before = ipc::EstimateInForce::of(slot.clone().in_force(now));
         slot.apply_fetch(outcome, now);
-        // A refetch of the same table only renews its age; shells see no
-        // change in what they render.
-        before.table != slot.table || before.basis != slot.basis
+        before
     };
-    if changed {
-        shared.publish(ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
-        shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
-    }
+    // Compared as readers render it, at `now`: a refetch of a table still
+    // in force only renews its age and changes nothing they see, but a
+    // refetch of one that had expired brings it back.
+    shared.publish_estimate_in_force_change(now, Some(before));
 }
 
 /// How long after an upload the server is asked for verdicts.
@@ -4372,6 +4373,97 @@ mod tests {
         refresh_estimate_table(&shared, next, &mut schedule).await;
         assert_eq!(hits.load(Ordering::SeqCst), 2);
         assert_eq!(*shared.estimate_table.lock().unwrap(), published);
+    }
+
+    /// An ingest that always serves the built-in table relabelled `t9`.
+    async fn serving_a_table() -> String {
+        use crate::credit_estimate_table::ESTIMATE_TABLE_PATH;
+        use axum::routing::get;
+        let router = Router::new().route(
+            ESTIMATE_TABLE_PATH,
+            get(|| async {
+                let mut table =
+                    trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+                table.version = "t9".to_string();
+                Json(table).into_response()
+            }),
+        );
+        TransientRetryHarness::spawn(router).await
+    }
+
+    /// The events published since `rx` subscribed, by name.
+    fn published(
+        rx: &mut tokio::sync::broadcast::Receiver<ipc::Event>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut seen = std::collections::BTreeSet::new();
+        while let Ok(event) = rx.try_recv() {
+            seen.insert(event.event);
+        }
+        seen
+    }
+
+    /// Kristi's #1285 review, finding 5: a fetched table ageing past
+    /// `ESTIMATE_TABLE_MAX_AGE` switches readers to the built-in table with
+    /// no fetch at all, and the tick says so: `queue_changed` and
+    /// `status_changed`, once, and nothing on the next tick.
+    #[tokio::test]
+    async fn an_expiring_table_publishes_on_the_tick_with_no_fetch() {
+        use crate::credit_estimate_table::{ESTIMATE_TABLE_MAX_AGE, EstimateTableSchedule};
+        let ingest = serving_a_table().await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+        assert_eq!(
+            shared.estimate_table.lock().unwrap().basis,
+            ipc::ESTIMATE_BASIS_PUBLISHED
+        );
+
+        let mut rx = shared.events.subscribe();
+        shared.publish_estimate_in_force_change(start + chrono::Duration::hours(1), None);
+        assert!(published(&mut rx).is_empty(), "nothing lapsed yet");
+
+        let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
+        shared.publish_estimate_in_force_change(lapsed, None);
+        let seen = published(&mut rx);
+        assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
+        assert!(seen.contains(ipc::EVENT_STATUS_CHANGED), "{seen:?}");
+
+        shared.publish_estimate_in_force_change(lapsed + chrono::Duration::minutes(1), None);
+        assert!(published(&mut rx).is_empty(), "announced once");
+    }
+
+    /// Re-fetching the same table after it expired brings it back into
+    /// force. The raw slot does not change, but what readers render does,
+    /// so the fetch publishes.
+    #[tokio::test]
+    async fn refetching_the_same_table_after_expiry_publishes() {
+        use crate::credit_estimate_table::{ESTIMATE_TABLE_MAX_AGE, EstimateTableSchedule};
+        let ingest = serving_a_table().await;
+        let dir = tempfile::tempdir().unwrap();
+        let shared = shared_with_ingest(dir.path(), &ingest);
+        let start = at("2026-10-08T12:00:00Z");
+        let mut schedule = EstimateTableSchedule::starting(start, 0.0);
+        refresh_estimate_table(&shared, start, &mut schedule).await;
+
+        let lapsed = start + ESTIMATE_TABLE_MAX_AGE + chrono::Duration::minutes(1);
+        let mut rx = shared.events.subscribe();
+        let mut schedule = EstimateTableSchedule::starting(lapsed, 0.0);
+        refresh_estimate_table(&shared, lapsed, &mut schedule).await;
+        let seen = published(&mut rx);
+        assert!(seen.contains(ipc::EVENT_QUEUE_CHANGED), "{seen:?}");
+        assert!(seen.contains(ipc::EVENT_STATUS_CHANGED), "{seen:?}");
+        assert_eq!(
+            shared
+                .estimate_table
+                .lock()
+                .unwrap()
+                .clone()
+                .in_force(lapsed)
+                .basis,
+            ipc::ESTIMATE_BASIS_PUBLISHED
+        );
     }
 
     /// Without a config there is no origin to ask: nothing is sent and the
