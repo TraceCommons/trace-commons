@@ -66,11 +66,13 @@ Every PR 4 pin, including this one, names the dataset
 the network pin. This runbook does not print `pin-local.json`'s digest
 fields; read the file itself if you need them.
 
-The real network pin -- the one an export actually downloads from Hugging
-Face -- is
+The network pin -- the one whose export downloads from Hugging Face -- is
 [`versioned-pipeline-comparison-hf-pin-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json),
 the 10,000-trace sample of `pipeline.py compare`; see
-[pipeline-comparison.md](pipeline-comparison.md#the-full-run).
+[pipeline-comparison.md](pipeline-comparison.md#the-full-run). It is for
+`compare` only. `pipeline.py run --corpus` cannot use it: the run fails at
+the corpus digest check (`hf_bootstrap_corpus_digest_mismatch`), because
+the corpus digests of that pin are those of the `--with-events` export.
 
 ## Build a package
 

@@ -1,7 +1,11 @@
 # Pipeline comparison design
 
 Date: 2026-10-02. Status: design, approved by the owner in sections. The
-implementation plan comes after the owner reviews this file.
+implementation plan comes after the owner reviews this file. The plan
+changes this design in eleven points
+(`docs/superpowers/plans/2026-10-02-pipeline-comparison-plan.md`,
+"Differences from the spec"), and the runbook
+`docs/operator/pipeline-comparison.md` describes the tool as built.
 
 This document specifies a tool that sends the same real traces through the
 old gate path of `main` and through the versioned pipeline, and compares the

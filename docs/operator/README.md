@@ -31,6 +31,7 @@ the link.
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
 | Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
+| Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Qualifying the signed native passkey entitlement and profile | [`./native-passkey-release-qualification.md`](./native-passkey-release-qualification.md) |
 | Preparing offline anonymized pilot response projections | [`./network-recording-projections.md`](./network-recording-projections.md) |
@@ -211,8 +212,10 @@ Every runbook in this directory, with a one-line description.
 - [`./pipeline-comparison.md`](./pipeline-comparison.md) — running
   `pipeline.py compare`: the same traces through the old gate path and the
   versioned pipeline, the pins, what is compared, the alignment, the
-  floors, the report, the limits, failure labels, and the full run on the
-  network pin.
+  floors, the report, the limits, how a failure shows, and the full run on
+  the network pin.
+- [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) —
+  each failure label of `pipeline.py compare` with its cause.
 - [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
   corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
   pin, report fields, isolation and privacy, and failure labels.
