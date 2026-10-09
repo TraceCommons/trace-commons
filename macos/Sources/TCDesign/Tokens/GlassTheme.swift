@@ -79,21 +79,17 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     /// The Liquid Glass tint: the veil at `glassTintShare` of its alpha,
     /// for the glass's own colour and refraction. Contrast does not rest on
     /// it -- measured on a bright desktop it darkens far less than its alpha
-    /// says -- so the veil is painted over it as well (`paintsVeil`).
+    /// says -- so the pane paints the veil over it as well (`GlassPaneFill`),
+    /// which holds text contrast, measured against the brightest desktop a
+    /// pane sits on (2026-10-09).
     static let glassTintShare = 0.25
 
-    static var focusedTint: GlassRGBA {
+    static var glassTint: GlassRGBA {
         let veil = GlassTokens.Color.glassVeil
         return GlassRGBA(
             veil.rgb, alpha: veil.alpha * glassTintShare,
             light: GlassRGBA(veil.lightRGB ?? veil.rgb, alpha: (veil.lightAlpha ?? veil.alpha) * glassTintShare))
     }
-
-    /// Whether a pane paints the veil itself: always. Text contrast is
-    /// held by the painted veil, measured against the brightest desktop a
-    /// pane sits on (2026-10-09); a window out of focus also takes
-    /// `inactiveDim` over it, so it reads darker than one in focus.
-    static func paintsVeil(windowIsKey: Bool) -> Bool { true }
 
     static let flatMaterial: FlatMaterial =
         ProcessInfo.processInfo.environment["TC_GLASS_MATERIAL"].flatMap(FlatMaterial.init(rawValue:)) ?? .clearTint
