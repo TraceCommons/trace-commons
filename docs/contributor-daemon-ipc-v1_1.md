@@ -3915,9 +3915,12 @@ feed T); a file that records none, or more than one, or cannot be read
 carries none. That digest is stored only: it never reaches an answer, and
 the week's overlap rule does not use it. No path, project key, message or
 session ID is stored in readable form. The store's schema is
-`trace_commons.insights_counter_rows.v2`; a v1 store still loads, each of its
-rows is read once more for its session digest even when its file is
-unchanged, and the next pass writes it back as v2. Any other schema reads as
+`trace_commons.insights_counter_rows.v2`; a v1 store still loads and the
+next pass writes it back as v2. Each of its rows whose session the watcher
+still finds is read once more for its session digest, even when its file is
+unchanged, within the same per-poll limits; a row whose session is no longer
+found keeps its counters and carries no session digest until it ages out.
+Any other schema reads as
 `store_unreadable` and the pass starts the store again. The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so

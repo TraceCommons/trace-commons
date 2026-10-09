@@ -88,8 +88,9 @@ pub const COUNTER_KEY_DIR: &str = "insights-counter-key";
 /// extended to feed T).
 pub const COUNTER_STORE_SCHEMA: &str = "trace_commons.insights_counter_rows.v2";
 /// The schema before it. A v1 store still loads and is upgraded in place:
-/// its rows keep their counters until each is read once more for its
-/// session digest, and the next pass writes the store back as v2.
+/// its rows keep their counters, each one whose session is still found is
+/// read once more for its session digest, a row whose session is gone keeps
+/// none until it ages out, and the next pass writes the store back as v2.
 const COUNTER_STORE_SCHEMA_V1: &str = "trace_commons.insights_counter_rows.v1";
 /// `iso_week` not a `YYYY-Www` string naming a real ISO week.
 pub const ERR_ISO_WEEK_INVALID: &str = "iso-week-invalid";
@@ -1577,6 +1578,16 @@ mod tests {
         let one = run_with(&restarted, &all, &[], false);
         assert_eq!(one.read, COUNTER_PASS_MAX_READS_PER_TICK);
         assert_eq!(one.deferred, 1);
+        // Upgraded in place, not started again: the deferred row keeps its
+        // v1 counters until its turn comes.
+        let kept = stored_rows(&restarted);
+        assert_eq!(kept.len(), all.len(), "no v1 row is dropped");
+        assert_eq!(
+            kept.iter()
+                .filter(|row| row.harness_session.is_none())
+                .count(),
+            1
+        );
         assert_eq!(run_with(&restarted, &all, &[], false).read, 1);
         assert_eq!(run_with(&restarted, &all, &[], false).read, 0);
         assert!(
@@ -1595,7 +1606,12 @@ mod tests {
         let restarted = f.rekeyed(3);
         assert_eq!(run_with(&restarted, &[], &[], false).read, 0);
         assert_eq!(stored_schema(&f), "trace_commons.insights_counter_rows.v2");
-        assert_eq!(stored_rows(&restarted).len(), 1, "the row is kept");
+        let kept = stored_rows(&restarted);
+        assert_eq!(kept.len(), 1, "the row is kept");
+        assert!(
+            kept[0].harness_session.is_none() && !kept[0].harness_session_read,
+            "a session no longer found carries no digest and stays unread"
+        );
     }
 
     #[test]
