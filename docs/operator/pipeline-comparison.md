@@ -206,7 +206,9 @@ on 2026-10-09 (decision PC-D22).
 | `medium_risk_privacy_review` | `admission` | ruling PC-D22 |
 
 The old path accepts a trace with a `medium` risk, because the harness
-sets `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true`. The pipeline
+sets the state field that has the same effect as
+`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true` (it sets the field in
+code and reads no environment variable). The pipeline
 quarantines the same trace for review. The owner ruled that this is
 intended.
 
@@ -328,7 +330,8 @@ name, no secret-shaped value. The report has no time field.
 | `trace_count` | the number of traces in the pin (`sample_count` of the manifest) |
 | `compared_count` | the number of traces that the run compared |
 | `equal_count` | the traces with the result `equal` |
-| `permitted_counts` | for each rule, the traces that it permitted. A key is the id of a rule in `permitted_rules`. |
+| `permitted_counts` | for each rule, the traces that it permitted. A key is the id of a rule in `permitted_rules`. A trace that two rules permit counts for each of them. |
+| `permitted_total` | the traces with the result `permitted`. A trace counts one time, also when several rules permit it. |
 | `unexplained_counts` | for each compared field, the traces in which it differs |
 | `unexplained_total` | the traces with the result `unexplained` |
 | `unexplained` | the first 1,000 unexplained traces in sample order, each with `position`, `trace_hash`, and `fields` |
@@ -341,8 +344,8 @@ name, no secret-shaped value. The report has no time field.
 | `records_digest` | the SHA-256 of the records file |
 | `report_digest` | the SHA-256 of the canonical report without this field |
 
-`equal_count`, the sum of `permitted_counts`, and `unexplained_total` add
-up to `compared_count`. A position counts through the two partitions, from
+`equal_count`, `permitted_total`, and `unexplained_total` add up to
+`compared_count`. A position counts through the two partitions, from
 0: the first holdout trace of the network pin has the position 1,000.
 
 `trace_hash` is the SHA-256 of the trace identifier. `trace_hash` and

@@ -5386,19 +5386,24 @@ _PERMITTED_RULE = "medium_risk_privacy_review"
 _PERMITTED_RULES = [{"rule": _PERMITTED_RULE, "source": "ruling.PC-D22", "fields": ["admission"]}]
 
 
-def _compared_fields(compared=10, unexplained=None, trace_count=10, permitted=None):
+def _compared_fields(compared=10, unexplained=None, trace_count=10, permitted=None, permitted_total=None):
     """The count fields of a report that compared `compared` of its
     `trace_count` traces. `unexplained` maps a compared field to its count;
     the pairs that differ are the last pairs. `permitted` maps a rule id to
-    its count; those pairs come before the unexplained pairs."""
+    its count; those pairs come before the unexplained pairs.
+    `permitted_total` is the number of permitted pairs (default: the sum of
+    the counts, which is right while one rule permits a pair)."""
     unexplained = dict(unexplained or {})
     permitted = dict(permitted or {})
+    if permitted_total is None:
+        permitted_total = sum(permitted.values())
     total = max(unexplained.values(), default=0)
     return {
         "compared_count": compared,
         "partial": compared < trace_count,
-        "equal_count": compared - total - sum(permitted.values()),
+        "equal_count": compared - total - permitted_total,
         "permitted_counts": permitted,
+        "permitted_total": permitted_total,
         "unexplained_counts": unexplained,
         "unexplained_total": total,
         "unexplained": [
@@ -5496,7 +5501,7 @@ def _write_compare_outputs(
     evidence = {
         "traces": report["compared_count"],
         "equal": report["equal_count"],
-        "permitted": sum(report["permitted_counts"].values()),
+        "permitted": report["permitted_total"],
         "unexplained": 0,
         "records_hash": _digest(records),
         "report_hash": _digest(report_bytes),
@@ -5624,7 +5629,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
         two = _compared_fields(10, {"admission": 2})
         cases = (
             ("comparison_count_mismatch", {"equal_count": 9}),
-            ("comparison_count_mismatch", {"permitted_counts": {_PERMITTED_RULE: 1}}),
+            ("comparison_count_mismatch", {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 1}),
             ("comparison_count_mismatch", {**two, "equal_count": 9}),
             # The list holds each unexplained trace, up to 1,000.
             ("comparison_count_mismatch", {**two, "unexplained": two["unexplained"][:1]}),
@@ -5642,12 +5647,38 @@ class ComparisonReportValidationTests(unittest.TestCase):
                 self._refused(_comparison_report(_COMPARE_LOCAL, **overrides), label)
         # A permitted pair is in the sum.
         comparison.validate_comparison_report(
-            _comparison_report(_COMPARE_LOCAL, equal_count=9, permitted_counts={_PERMITTED_RULE: 1})
+            _comparison_report(_COMPARE_LOCAL, equal_count=9, permitted_counts={_PERMITTED_RULE: 1}, permitted_total=1)
         )
+
+    def test_a_pair_that_two_rules_permit_is_one_pair(self):
+        second = {"rule": "second_rule", "source": "ruling.PC-D99", "fields": ["member"]}
+        with mock.patch.object(comparison, "PERMITTED_RULES", (*comparison.PERMITTED_RULES, second)):
+            both = {_PERMITTED_RULE: 1, "second_rule": 1}
+            fields = {"permitted_rules": [*_PERMITTED_RULES, second]}
+            # One pair, counted for each of its two rules.
+            report = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted=both, permitted_total=1)
+            )
+            comparison.validate_comparison_report(report)
+            self.assertIn("| Permitted | 1 |", comparison.markdown(report))
+            # The total does not agree with the equal and unexplained counts.
+            wrong = _comparison_report(
+                _COMPARE_LOCAL, **fields, **{**_compared_fields(10, permitted=both, permitted_total=1), "equal_count": 8}
+            )
+            self._refused(wrong, "comparison_count_mismatch")
+            # The sum of the rule counts is not the count of pairs.
+            summed = _comparison_report(
+                _COMPARE_LOCAL, **fields, **{**_compared_fields(10, permitted=both), "equal_count": 8}
+            )
+            comparison.validate_comparison_report(summed)
+            more = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted={_PERMITTED_RULE: 1}, permitted_total=2)
+            )
+            self._refused(more, "comparison_report_malformed")
 
     def test_the_digest_is_checked(self):
         report = _comparison_report(_COMPARE_LOCAL)
-        self._refused({**report, "equal_count": 9, "permitted_counts": {_PERMITTED_RULE: 1}}, "report_digest_mismatch")
+        self._refused({**report, "equal_count": 9, "permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 1}, "report_digest_mismatch")
         self._refused({**report, "report_digest": _fake_hash("another")}, "report_digest_mismatch")
 
     def test_the_blockers_and_the_scope_are_required(self):
@@ -5674,7 +5705,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
 
     def test_a_malformed_report_gives_a_label(self):
         base = _comparison_report(_COMPARE_LOCAL)
-        self.assertEqual(len(base), 29)
+        self.assertEqual(len(base), 30)
         for field in base:
             with self.subTest(missing=field):
                 report = {key: value for key, value in base.items() if key != field}
@@ -5713,6 +5744,13 @@ class ComparisonReportValidationTests(unittest.TestCase):
             {"permitted_rules": [{**_PERMITTED_RULES[0], "extra": 1}]},
             _compared_fields(10, permitted={"another_rule": 1}),
             _compared_fields(10, permitted={"deterministic_index_keys": 1}),
+            # The total counts pairs: it is zero exactly when no rule permitted
+            # a pair, and it is at most the sum of the rule counts.
+            {"permitted_total": 1},
+            {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 0},
+            {"permitted_counts": {_PERMITTED_RULE: 1}, "permitted_total": 2, "equal_count": 7},
+            {"permitted_total": -1},
+            {"permitted_total": "1"},
             {"skew": "another_skew"},
             {"partial": 0},
             {"trace_count": "10"},

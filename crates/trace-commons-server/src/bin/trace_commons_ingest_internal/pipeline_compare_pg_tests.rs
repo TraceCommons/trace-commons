@@ -2250,19 +2250,13 @@ async fn pipeline_compare_run() {
     if partial || config.skew.is_some() {
         return;
     }
-    let permitted: u64 = report["permitted_counts"]
-        .as_object()
-        .into_iter()
-        .flat_map(|counts| counts.values())
-        .filter_map(serde_json::Value::as_u64)
-        .sum();
     PipelineCheckEmitter::emit_pass_from_env(
         &config.check_id,
         Some(&package),
         serde_json::json!({
             "traces": report["compared_count"],
             "equal": report["equal_count"],
-            "permitted": permitted,
+            "permitted": report["permitted_total"],
             "unexplained": 0,
             "records_hash": records_digest,
             "report_hash": sha256_bytes(&report_bytes),
@@ -2504,6 +2498,9 @@ fn the_baseline_configuration_holds_mains_gate() {
     )
     .expect("the bundle accepts main's gate");
     assert!(bundle.matches_main_gate(&gate));
+    // PC-D23: the candidate bundle takes the same `top_k` as the baseline.
+    assert_eq!(bundle.top_k, 5);
+    assert_eq!(bundle.top_k as usize, config.top_k);
     assert_eq!(gate.novelty_utility_microcredits, 2_500_000);
 }
 

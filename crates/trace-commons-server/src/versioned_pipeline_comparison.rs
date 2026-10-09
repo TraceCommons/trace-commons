@@ -570,6 +570,9 @@ pub struct ComparisonSummary {
     compared: u64,
     equal: u64,
     permitted: BTreeMap<&'static str, u64>,
+    /// The pairs with the result `permitted`. A pair that several rules
+    /// permit adds 1 here and 1 to each rule.
+    permitted_total: u64,
     unexplained_fields: BTreeMap<&'static str, u64>,
     unexplained_total: u64,
     unexplained: Vec<UnexplainedEntry>,
@@ -591,6 +594,7 @@ impl ComparisonSummary {
         match result {
             TraceComparison::Equal => self.equal += 1,
             TraceComparison::Permitted { rules } => {
+                self.permitted_total += 1;
                 for rule in rules {
                     *self.permitted.entry(rule).or_default() += 1;
                 }
@@ -722,6 +726,7 @@ pub fn comparison_report(
         "compared_count": summary.compared,
         "equal_count": summary.equal,
         "permitted_counts": summary.permitted,
+        "permitted_total": summary.permitted_total,
         "unexplained_counts": summary.unexplained_fields,
         "unexplained_total": summary.unexplained_total,
         "unexplained": serde_json::to_value(&summary.unexplained).map_err(invalid)?,
@@ -1693,5 +1698,68 @@ mod tests {
                 "fields": ["admission"],
             }])
         );
+    }
+
+    #[test]
+    fn a_pair_with_two_rules_is_counted_one_time() {
+        let permit = |field: &'static str, _: &ComparisonRecord, _: &ComparisonRecord| match field {
+            "admission" => Some("rule_one"),
+            "member" => Some("rule_two"),
+            _ => None,
+        };
+        let mut summary = ComparisonSummary::default();
+        let (mut b, mut c) = pair_at(0);
+        c.admission = AdmissionLabel::Quarantine;
+        c.member = false;
+        let result = compare_records_with(&b, &c, &permit);
+        assert_eq!(
+            result,
+            TraceComparison::Permitted {
+                rules: vec!["rule_one", "rule_two"]
+            }
+        );
+        summary.observe(&b, &c, &result);
+        b.position = 1;
+        let (b, c) = pair_at(1);
+        summary.observe(&b, &c, &TraceComparison::Equal);
+        let (b, c) = pair_at(2);
+        summary.observe(&b, &c, &unexplained(&["member"]));
+        let report = build_report(&summary, false, None);
+        assert_eq!(report["permitted_total"], 1);
+        assert_eq!(
+            report["permitted_counts"],
+            serde_json::json!({"rule_one": 1, "rule_two": 1})
+        );
+        let count = |key: &str| report[key].as_u64().expect("a number");
+        assert_eq!(
+            count("equal_count") + count("permitted_total") + count("unexplained_total"),
+            count("compared_count")
+        );
+    }
+
+    #[test]
+    fn the_medium_risk_rule_needs_medium_on_each_side() {
+        let (b, mut c) = medium_pair(&["found_and_removed"]);
+        c.privacy_risk = Some("low".into());
+        let result = compare_records(&b, &c);
+        assert_ne!(result, permitted_medium());
+        let (mut b, c) = medium_pair(&["found_and_removed"]);
+        b.privacy_risk = Some("low".into());
+        assert_ne!(compare_records(&b, &c), permitted_medium());
+        for change in [
+            (|c: &mut ComparisonRecord| c.terminal = false) as fn(&mut ComparisonRecord),
+            |c| {
+                c.scored = false;
+                c.gate = None;
+            },
+            |c| c.receipt_code = 202,
+        ] {
+            let (b, mut c) = medium_pair(&["found_and_removed"]);
+            change(&mut c);
+            assert!(
+                !matches!(compare_records(&b, &c), TraceComparison::Permitted { .. }),
+                "a second difference must not be permitted"
+            );
+        }
     }
 }

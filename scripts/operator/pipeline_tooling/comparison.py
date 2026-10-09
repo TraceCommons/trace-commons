@@ -127,7 +127,7 @@ PERMITTED_RULES = (
     {"rule": "medium_risk_privacy_review", "source": "ruling.PC-D22", "fields": ["admission"]},
 )
 _REPORT_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "records_digest")
-_REPORT_COUNTS = ("trace_count", "compared_count", "equal_count", "unexplained_total")
+_REPORT_COUNTS = ("trace_count", "compared_count", "equal_count", "permitted_total", "unexplained_total")
 _SKEWS = (None, "baseline_quality_floor")
 # Exactly the fields `comparison_report` writes.
 _REPORT_KEYS = frozenset(
@@ -145,6 +145,7 @@ _REPORT_KEYS = frozenset(
         "floors",
         *_REPORT_COUNTS,
         "permitted_counts",
+        "permitted_total",
         "unexplained_counts",
         "unexplained",
         "first_unexplained_position",
@@ -324,6 +325,10 @@ def _validate_comparison_report(report):
     require(set(report["unexplained_counts"]) <= _COMPARED_FIELDS, malformed)
     require(set(report["permitted_counts"]) <= {rule["rule"] for rule in PERMITTED_RULES}, malformed)
     require(report["permitted_rules"] == list(PERMITTED_RULES), malformed)
+    # `permitted_total` counts pairs, and a pair that several rules permit
+    # is counted once for each rule in `permitted_counts`.
+    rule_sum = sum(report["permitted_counts"].values())
+    require(report["permitted_total"] <= rule_sum and (report["permitted_total"] == 0) == (rule_sum == 0), malformed)
     for field in ("first_unexplained_position", "alignment_lost_position"):
         require(report[field] is None or _is_count(report[field]), malformed)
     # The pair that lost the alignment is the last compared pair.
@@ -369,7 +374,7 @@ def _validate_comparison_report(report):
 
     compared = report["compared_count"]
     require(
-        report["equal_count"] + sum(report["permitted_counts"].values()) + report["unexplained_total"] == compared,
+        report["equal_count"] + report["permitted_total"] + report["unexplained_total"] == compared,
         "comparison_count_mismatch",
     )
     require(
@@ -414,7 +419,7 @@ def markdown(report):
         f"| In the pin | {report['trace_count']} |",
         f"| Compared | {report['compared_count']} |",
         f"| Equal | {report['equal_count']} |",
-        f"| Permitted | {sum(report['permitted_counts'].values())} |",
+        f"| Permitted | {report['permitted_total']} |",
         f"| Unexplained | {report['unexplained_total']} |",
         "",
         "## Permitted differences",

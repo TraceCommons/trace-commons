@@ -813,7 +813,7 @@ def _require_compare_result(run, results, check_id, report, report_bytes):
         == {
             "traces": report["compared_count"],
             "equal": report["equal_count"],
-            "permitted": sum(report["permitted_counts"].values()),
+            "permitted": report["permitted_total"],
             "unexplained": 0,
             "records_hash": records_hash,
             "report_hash": sha256_digest(report_bytes),
@@ -990,7 +990,7 @@ def run_compare(args, run):
     shown = _shown(_write_compare_report(check_id, report, report_bytes))
     print(
         f"PipelineCompareOK: traces={report['compared_count']} equal={report['equal_count']} "
-        f"permitted={sum(report['permitted_counts'].values())} unexplained=0 "
+        f"permitted={report['permitted_total']} unexplained=0 "
         f"partial={'true' if report['partial'] else 'false'} seconds={seconds} run={run.run_id} report={shown}"
     )
 

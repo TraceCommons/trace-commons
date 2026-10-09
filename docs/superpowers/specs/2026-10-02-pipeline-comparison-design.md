@@ -442,7 +442,10 @@ Fields:
 - Identity: the pin digests, `bundle_id`, `package_hash`,
   `configuration_digest`, `dependency_digest`, and the derived floors.
 - Counts: `trace_count`, `equal_count`, `permitted_counts` for each rule,
-  `unexplained_counts` for each field.
+  `permitted_total` (the number of permitted traces; a trace that several
+  rules permit counts one time here and one time for each rule),
+  `unexplained_counts` for each field. `equal_count`, `permitted_total`,
+  and `unexplained_total` add up to `compared_count`.
 - `excluded_rules` and `permitted_rules`: each rule with its `rule`,
   `source`, and `fields`. A report holds exactly the closed list of
   permitted rules.
