@@ -3856,6 +3856,9 @@ Otherwise:
   `null` is never zero.
 - `cache_share` is cache read over all input (uncached + cache read + cache
   write) for the known calls, as integers and as per mille rounded half up.
+  It is also `null` when those known calls read no input at all, while
+  `tokens` is still known (their output alone), so a shell shows the tokens
+  without a share rather than a share of zero.
 - `coverage.unknown` is calls today with any counter unknown, never counted
   as zero tokens. `unreadable_rows` is rows in the ledger's 24-hour window
   this build could not read at all, so a nonzero value means the day may be
