@@ -26,9 +26,49 @@ qualification. Both operate on actual stored trace submissions, excluding
 withdrawals, revocations, purges and elapsed retention. A unit is a distinct
 submission ID, not a claimed local session or a quality score. Received time
 chooses its UTC day; current authoritative status determines whether it still
-qualifies. No tool/category inference or vendor predicate is implemented:
-mission targets are contribution counts. Broader matching metadata can be added
-only with a source-backed, versioned predicate contract. Matching remains local.
+qualifies. No tool/category inference is implemented server-side: mission
+targets are contribution counts. Matching remains local.
+
+## Mission predicates
+
+A mission may carry an optional, versioned `predicate` block saying what local
+work it asks for. The server only validates and publishes it: it never
+evaluates a predicate, never infers one, and accepts no profile, matching
+result or completion assertion. Progress stays count-based and ignores it.
+
+Version 1:
+
+```json
+{"version":1,"tools":["claude-code"],"tool_families":["anthropic"],"languages":["rust"],"min_sessions":2}
+```
+
+- `tools` are session sources as the contributor client names them,
+  `tool_families` are protocol families (`anthropic`, `openai`, `google`),
+  `languages` are folder languages the client reads from marker files at a
+  folder's root. Each list is "any of"; an empty or absent list does not
+  restrict; the lists combine with AND per session. A mission fits when at
+  least `min_sessions` readable sessions satisfy every non-empty list.
+- Bounds, equal to what the client catalogue accepts: at most 32 values a
+  list, each 1-64 bytes of lowercase ASCII letters, digits, `-` or `_`, no
+  duplicates within a list; `min_sessions` 1-1000; at least one non-empty list,
+  so a predicate never fits everything; a mission carrying one has a title of
+  at most 200 characters. Unknown fields in a version-1 block are refused.
+- `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` accepts only version 1. A
+  malformed block, or any other version, fails startup like the rest of the
+  policy.
+- The block is digest-covered. Every predicate block serializes as key-sorted
+  JSON, and a mission without one serializes exactly as before the field
+  existed, so no predicate-free policy digest moved.
+- A reader that meets a later version keeps the block verbatim (key-sorted, so
+  the digest still verifies) and treats the mission as having no predicate; it
+  never half-reads one. A later version must therefore also be emitted
+  key-sorted. The block is the policy's one versioned extension point: every
+  other policy object stays strict.
+
+The contributor daemon fetches the catalogue on its own schedule, the same
+anonymous request for every contributor, and feeds only missions with a
+version-1 predicate to its local matcher. Missions without one are excluded
+from mission fit, so "fits a mission" never means "fits everything".
 
 Progress is a single-snapshot database aggregate of those submissions by day,
 scoped to auth-derived tenant and active principals. No new tables or migrations
