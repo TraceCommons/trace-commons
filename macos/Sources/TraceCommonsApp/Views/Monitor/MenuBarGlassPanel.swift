@@ -499,21 +499,28 @@ struct MenuBarStripLabel: View {
 
     var body: some View {
         let available = model.startup == .running && !store.stale
+        let condition = MenuPanelStatus.condition(
+            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+            paused: model.status.paused, available: model.startup == .running, stale: store.stale)
+        let badge = MenuPanelStatus.badge(model.decisionsOwed)
+        // The mark's words, only while the strip draws the mark: the badge
+        // and condition come from a different read than the nudge, and a
+        // ring or halo the strip hid is never spoken or shown as a tooltip.
+        let words = MenuPanelStatus.markWords(
+            store.status?.nudge, available: available, badge: badge, condition: condition)
         GlassMenuBarStrip(
             columns: store.columns,
-            condition: MenuPanelStatus.condition(
-                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running, stale: store.stale),
-            badge: MenuPanelStatus.badge(model.decisionsOwed),
+            condition: condition,
+            badge: badge,
             mark: MenuPanelStatus.mark(store.status?.nudge, available: available))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(MenuPanelStatus.markAccessibility(
                 base: MenuBarStatus.accessibilityLabel(
                     decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
                     paused: model.status.paused, available: model.startup == .running),
-                nudge: store.status?.nudge, available: available))
-            // The lit mark's tooltip clause, in the core's words.
-            .help(NudgeSurface.markText(store.status?.nudge, available: available)?.tooltip ?? "")
+                words: words))
+            // The drawn mark's tooltip clause, in the core's words.
+            .help(MenuPanelStatus.markTooltip(words))
             // The label is always alive, so it owns the subscription: the
             // app's live client, re-attached whenever the daemon restarts.
             .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -553,12 +560,27 @@ enum MenuPanelStatus {
         }
     }
 
-    /// The item's accessibility label: what it already says, then the lit
+    /// The core's words for the mark the strip draws, or nil while it draws
+    /// none: the daemon lit nothing, the strip cannot vouch for it, or the
+    /// badge or condition hides it (`GlassMenuBarStrip.shownMark`).
+    static func markWords(
+        _ nudge: DaemonData.Nudge?, available: Bool, badge: Int?, condition: GlassMenuBarStrip.Condition
+    ) -> DaemonData.NudgeMarkText? {
+        let lit = mark(nudge, available: available)
+        guard GlassMenuBarStrip.shownMark(lit, badge: badge, condition: condition) != .none else { return nil }
+        return NudgeSurface.markText(nudge, available: available)
+    }
+
+    /// The item's accessibility label: what it already says, then the drawn
     /// mark's sentence from the core, whole.
-    static func markAccessibility(base: String, nudge: DaemonData.Nudge?, available: Bool) -> String {
-        guard let sentence = NudgeSurface.markText(nudge, available: available)?.accessibility, !sentence.isEmpty
-        else { return base }
+    static func markAccessibility(base: String, words: DaemonData.NudgeMarkText?) -> String {
+        guard let sentence = words?.accessibility, !sentence.isEmpty else { return base }
         return base + " " + sentence
+    }
+
+    /// The drawn mark's tooltip clause; empty while no mark is drawn.
+    static func markTooltip(_ words: DaemonData.NudgeMarkText?) -> String {
+        words?.tooltip ?? ""
     }
 
     /// The Private AI pill's state.

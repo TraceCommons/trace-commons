@@ -49,14 +49,50 @@ final class NudgeMenuBarTests: XCTestCase {
         await store.load()
         XCTAssertEqual(MenuPanelStatus.mark(store.status?.nudge, available: true), .ready)
         XCTAssertEqual(MenuPanelStatus.mark(store.status?.nudge, available: false), GlassMenuBarStrip.Mark.none)
+        let drawn = MenuPanelStatus.markWords(store.status?.nudge, available: true, badge: 2, condition: .live)
         XCTAssertEqual(
-            MenuPanelStatus.markAccessibility(base: "Trace Commons. 2 sessions waiting for your decision.",
-                                              nudge: store.status?.nudge, available: true),
+            MenuPanelStatus.markAccessibility(base: "Trace Commons. 2 sessions waiting for your decision.", words: drawn),
             "Trace Commons. 2 sessions waiting for your decision. 2 of them have been idle for 3 days or more.")
-        XCTAssertEqual(
-            MenuPanelStatus.markAccessibility(base: "Base.", nudge: store.status?.nudge, available: false), "Base.")
+        let unavailable = MenuPanelStatus.markWords(store.status?.nudge, available: false, badge: 2, condition: .live)
+        XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: unavailable), "Base.")
         let quiet = MenuPanelStore(client: SampleDaemonClient(.empty))
         await quiet.load()
         XCTAssertEqual(MenuPanelStatus.mark(quiet.status?.nudge, available: true), GlassMenuBarStrip.Mark.none)
+    }
+
+    private static let newsStatus = #"""
+        {"nudge":{"state":"armed","lead":"verdicts_landed","count":3,"accepted":2,"held":1,"mark":"news",
+         "mark_kinds":["verdicts_landed"],
+         "mark_text":{"accessibility":"New: 2 accepted and 1 held for privacy review.","tooltip":"Verdicts are in."}}}
+        """#
+
+    /// The spoken label and the tooltip say what the strip draws: the
+    /// core's mark sentence only while the ring or halo is on screen, never
+    /// for a mark the badge or the condition hid.
+    func test_theMarksWordsFollowTheMarkTheStripDraws() throws {
+        let news = try DaemonDataDecoding.decoder().decode(DaemonData.Status.self, from: Data(Self.newsStatus.utf8)).nudge
+        // The ring, drawn: no badge, a live strip.
+        let ring = MenuPanelStatus.markWords(news, available: true, badge: nil, condition: .live)
+        XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: ring),
+                       "Base. New: 2 accepted and 1 held for privacy review.")
+        XCTAssertEqual(MenuPanelStatus.markTooltip(ring), "Verdicts are in.")
+        // A badge holds the ring's slot, so no ring is drawn and none is said.
+        for words in [
+            MenuPanelStatus.markWords(news, available: true, badge: 1, condition: .live),
+            MenuPanelStatus.markWords(news, available: true, badge: nil, condition: .attention),
+            MenuPanelStatus.markWords(news, available: true, badge: nil, condition: .paused),
+        ] {
+            XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: words), "Base.")
+            XCTAssertEqual(MenuPanelStatus.markTooltip(words), "")
+        }
+    }
+
+    /// The halo rings a drawn badge only; without one it is not said.
+    func test_aHaloWithoutABadgeIsNotSaid() async {
+        let store = MenuPanelStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let words = MenuPanelStatus.markWords(store.status?.nudge, available: true, badge: nil, condition: .live)
+        XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: words), "Base.")
+        XCTAssertEqual(MenuPanelStatus.markTooltip(words), "")
     }
 }

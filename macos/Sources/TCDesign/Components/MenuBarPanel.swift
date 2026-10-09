@@ -340,7 +340,7 @@ public struct GlassMenuBarStrip: View {
     /// The mark drawn: the ring only with no badge on a live strip (no
     /// attention mark, not paused, not unavailable), the halo only around
     /// a badge that is drawn.
-    static func shownMark(_ mark: Mark, badge: Int?, condition: Condition) -> Mark {
+    public static func shownMark(_ mark: Mark, badge: Int?, condition: Condition) -> Mark {
         let badgeShown = shownBadge(badge, condition: condition) != nil
         switch mark {
         case .news: return !badgeShown && condition == .live ? .news : .none
