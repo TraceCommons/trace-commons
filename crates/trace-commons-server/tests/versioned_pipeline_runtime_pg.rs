@@ -29572,6 +29572,14 @@ impl GcsObjectClient for ProbeGcsClient {
     fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
         self.inner.restore_deleted_object(key)
     }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.list_object_keys(prefix)
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        self.inner.bucket_versioning_enabled()
+    }
 }
 
 /// Zaki's approval of #1143, ZA-2 follow-up: on the Google Cloud Storage

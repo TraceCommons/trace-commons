@@ -285,6 +285,12 @@ fn a_missing_gcs_object_reads_as_an_integrity_failure_and_an_outage_does_not() {
         fn restore_deleted_object(&self, _key: &str) -> anyhow::Result<bool> {
             anyhow::bail!("GcsRestoreFailed: 503 backend unavailable")
         }
+        fn list_object_keys(&self, _prefix: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("GcsListFailed: 503 backend unavailable")
+        }
+        fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsBucketGetFailed: 503 backend unavailable")
+        }
     }
 
     let client = Arc::new(InMemoryGcsObjectClient::default());
