@@ -412,6 +412,12 @@ fn decimal_credit(credit: f32) -> f64 {
     credit.to_string().parse().unwrap_or(f64::from(credit))
 }
 
+/// Whether a final credit figure is above zero in whole millionths, the
+/// precision [`VerdictDelta::credit_final_tenths`] rounds through.
+fn carries_credit(credit: f32) -> bool {
+    (decimal_credit(credit) * 1e6).round() >= 1.0
+}
+
 /// The folders whose verdicts never count as news: every folder that now
 /// resolves to Never, or all of them while a Never override is in force.
 /// Opaque project ids only.
@@ -474,10 +480,14 @@ pub fn verdict_delta(
         // Silent for a record that was taken back or belongs to a Never
         // folder, but its mark still advances below.
         if counts_as_news(record, never) {
+            // A final with no credit is never news, and is not kept with
+            // the news: kept, it would be counted all at once when a later
+            // final's credit made the finals worth reporting.
+            let paid = record.credit_points_final.is_some_and(carries_credit);
             let news = PendingVerdict {
                 accepted: seen.accepted && !before.accepted,
                 held: seen.held && !before.held,
-                final_credit: seen.final_credit && !before.final_credit,
+                final_credit: seen.final_credit && !before.final_credit && paid,
                 credit_final: 0.0,
                 since: now,
                 newest_at: now,
@@ -753,7 +763,13 @@ pub fn lead(
             verdicts: Some(VerdictSummary {
                 accepted: news.newly_accepted,
                 held: news.newly_held,
-                final_credit: news.newly_final,
+                // `final` is part of `count` exactly when `total` counts
+                // it: never "count: 1, final: 2".
+                final_credit: if news.credit_final_tenths().is_some() {
+                    news.newly_final
+                } else {
+                    0
+                },
                 credit_final_tenths: news.credit_final_tenths(),
                 since: news.since,
             }),
@@ -1705,11 +1721,64 @@ mod tests {
 
         let with_accepted = delta(1, 0, 2, at);
         assert_eq!(with_accepted.total(), 1);
+        // On the wire too: `count: 1` goes out with `final: 0`, not 2.
+        let got = lead(&with_verdicts(with_accepted), &empty(), now());
+        assert_eq!(got.count, Some(1));
+        assert_eq!(got.verdicts.map(|v| v.final_credit), Some(0));
         let paid = VerdictDelta {
             credit_final_delta: 3.0,
             ..delta(0, 0, 2, at)
         };
         assert_eq!(paid.total(), 2, "finals with credit are news");
+    }
+
+    /// Zero-credit finals are not kept as news, so a later final whose
+    /// credit says something counts once, not once for every zero final
+    /// that waited beside it (poldsam's #1298 review, finding 4).
+    #[test]
+    fn a_later_final_does_not_count_the_zero_finals_before_it() {
+        let seed = [
+            rec(1, STATUS_ACCEPTED),
+            rec(2, STATUS_ACCEPTED),
+            rec(3, STATUS_ACCEPTED),
+        ];
+        let seeded = after_history_poll(false, &BTreeMap::new(), None, &seed, &no_never(), now());
+        let first = [
+            rec(1, STATUS_ACCEPTED),
+            final_rec(2, STATUS_ACCEPTED, 0.0),
+            final_rec(3, STATUS_ACCEPTED, 0.0),
+            rec(4, STATUS_ACCEPTED),
+        ];
+        let one = after_history_poll(
+            true,
+            &seeded.marks,
+            seeded.pending.as_ref(),
+            &first,
+            &no_never(),
+            now(),
+        );
+        let pending = one.pending.clone().expect("the accepted one is news");
+        assert_eq!(pending.total(), 1);
+        let second = [
+            final_rec(1, STATUS_ACCEPTED, 0.5),
+            final_rec(2, STATUS_ACCEPTED, 0.0),
+            final_rec(3, STATUS_ACCEPTED, 0.0),
+            rec(4, STATUS_ACCEPTED),
+        ];
+        let two = after_history_poll(
+            true,
+            &one.marks,
+            one.pending.as_ref(),
+            &second,
+            &no_never(),
+            now(),
+        );
+        let pending = two.pending.expect("news");
+        assert_eq!(pending.newly_final, 1);
+        assert_eq!(pending.total(), 2, "one accepted and one paid final");
+        let got = lead(&with_verdicts(pending), &empty(), now());
+        assert_eq!(got.count, Some(2));
+        assert_eq!(got.verdicts.map(|v| v.final_credit), Some(1));
     }
 
     /// A zero-credit final seen by the poll advances the marks but is not

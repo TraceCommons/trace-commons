@@ -1131,8 +1131,11 @@ folder label, an id or a title.
   decimal (half away from zero). It is present only beside the fields above
   and only when it rounds to at least 0.1: absent, never 0. Credit becoming
   final with nothing to say is not news at all: finals whose credit rounds
-  to zero add nothing to `count` and arm nothing on their own. It is never
-  logged.
+  to zero add nothing to `count` and arm nothing on their own, and `final`
+  is then 0, so `count` is always `accepted + held + final`. A submission
+  whose own final credit is zero is never news and is not kept to be counted
+  later, when another final's credit makes the sum worth reporting. It is
+  never logged.
 - `cooldown_until` is present only while an in-app "Not now" silences a kind
   that would otherwise lead and nothing else leads, and says when that
   lapses.
