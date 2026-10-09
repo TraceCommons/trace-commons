@@ -65,6 +65,8 @@ public enum GlassTokens {
         public static var paneOpaque: GlassRGBA { GlassTheme.pick(GlassRGBA(0x1C1E24, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1)), flat: GlassRGBA(0x0D1124, alpha: 1, light: GlassRGBA(0xF2F3F6, alpha: 1))) }
         /// Over native glass, the thin dark veil kept for text contrast.
         public static var glassVeil: GlassRGBA { GlassTheme.pick(GlassRGBA(0x0C0E14, alpha: 0.28, light: GlassRGBA(0xFFFFFF, alpha: 0.3)), flat: GlassRGBA(0x070A1A, alpha: 0.72, light: GlassRGBA(0xFFFFFF, alpha: 0.55))) }
+        /// The closed edge rail's handle, a 3 by 72 bar drawn straight on the desktop at the screen's right edge (Run 1 OS-level Explorations, 1b). Not text: it marks where to rest the pointer.
+        public static let edgeRailHandle: GlassRGBA = GlassRGBA(0xFFFFFF, alpha: 0.28, light: GlassRGBA(0x1D1D1F, alpha: 0.28))
         /// Painted over a pane's veil while its window is out of focus, so a background window reads darker. Classic paints nothing (alpha 0); the flat theme sets it.
         public static var inactiveDim: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0), flat: GlassRGBA(0x070A1A, alpha: 0.14, light: GlassRGBA(0x000000, alpha: 0.04))) }
         public static var wellFill: GlassRGBA { GlassTheme.pick(GlassRGBA(0x000000, alpha: 0.22, light: GlassRGBA(0x000000, alpha: 0.06)), flat: GlassRGBA(0x000000, alpha: 0.3, light: GlassRGBA(0xFFFFFF, alpha: 0.3))) }
@@ -193,6 +195,7 @@ public enum GlassTokens {
             "paneBase": paneBase,
             "paneOpaque": paneOpaque,
             "glassVeil": glassVeil,
+            "edgeRailHandle": edgeRailHandle,
             "inactiveDim": inactiveDim,
             "wellFill": wellFill,
             "controlHover": controlHover,
@@ -374,6 +377,8 @@ public enum GlassTokens {
         public static let inlineGap: CGFloat = 6
         public static let modalInsetTop: CGFloat = 52
         public static let modalInset: CGFloat = 28
+        public static let edgeRailInset: CGFloat = 12
+        public static let edgeRailGap: CGFloat = 16
 
         /// Every space token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -402,6 +407,8 @@ public enum GlassTokens {
             "inlineGap": inlineGap,
             "modalInsetTop": modalInsetTop,
             "modalInset": modalInset,
+            "edgeRailInset": edgeRailInset,
+            "edgeRailGap": edgeRailGap,
         ]
     }
 
@@ -449,6 +456,15 @@ public enum GlassTokens {
         public static let textAreaMinHeight: CGFloat = 56
         public static let radio: CGFloat = 15
         public static let radioDot: CGFloat = 5
+        public static let edgeRailWidth: CGFloat = 56
+        public static let edgeRailTile: CGFloat = 44
+        public static let edgeRailRuleWidth: CGFloat = 28
+        public static let edgeRailPeekWidth: CGFloat = 380
+        public static let edgeRailOpenHeight: CGFloat = 560
+        public static let edgeRailZoneWidth: CGFloat = 4
+        public static let edgeRailZoneHeight: CGFloat = 240
+        public static let edgeRailHandleWidth: CGFloat = 3
+        public static let edgeRailHandleHeight: CGFloat = 72
 
         /// Every size token by its JSON name.
         public static let all: [String: CGFloat] = [
@@ -495,6 +511,15 @@ public enum GlassTokens {
             "textAreaMinHeight": textAreaMinHeight,
             "radio": radio,
             "radioDot": radioDot,
+            "edgeRailWidth": edgeRailWidth,
+            "edgeRailTile": edgeRailTile,
+            "edgeRailRuleWidth": edgeRailRuleWidth,
+            "edgeRailPeekWidth": edgeRailPeekWidth,
+            "edgeRailOpenHeight": edgeRailOpenHeight,
+            "edgeRailZoneWidth": edgeRailZoneWidth,
+            "edgeRailZoneHeight": edgeRailZoneHeight,
+            "edgeRailHandleWidth": edgeRailHandleWidth,
+            "edgeRailHandleHeight": edgeRailHandleHeight,
         ]
     }
 

@@ -22,12 +22,12 @@ struct EdgeRailView: View {
     var body: some View {
         Group {
             if state.open {
-                HStack(alignment: .center, spacing: EdgeRailGeometry.peekGap) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.edgeRailGap) {
                     EdgeRailPeekCard(peek: state.peek, close: { setOpen(false) })
-                        .frame(width: EdgeRailGeometry.peekWidth)
+                        .frame(width: GlassTokens.Size.edgeRailPeekWidth)
                     icons
                 }
-                .padding(.trailing, EdgeRailGeometry.edgeInset)
+                .padding(.trailing, GlassTokens.Space.edgeRailInset)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                 .transition(reduceMotion ? .opacity : .move(edge: .trailing).combined(with: .opacity))
             } else {
@@ -61,11 +61,9 @@ struct EdgeRailView: View {
         if !open { onOpenChange(false) }
     }
 
-    /// The closed rail: a short bar on the edge, the design's 3 by 72.
+    /// The closed rail: its handle on the edge (`GlassRailHandle`).
     private var handle: some View {
-        RoundedRectangle(cornerRadius: 2)
-            .fill(GlassColor.ink(0.28))
-            .frame(width: 3, height: 72)
+        GlassRailHandle()
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
             .contentShape(Rectangle())
             .accessibilityElement()
@@ -74,9 +72,10 @@ struct EdgeRailView: View {
             .accessibilityAction { setOpen(true) }
     }
 
-    /// The icon rail: one tile per peek, a rule, then the app.
+    /// The icon rail, a pane on the desktop: one tile per peek, a rule,
+    /// then the app.
     private var icons: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: GlassTokens.Space.s1) {
             ForEach(EdgeRailPeek.allCases) { peek in
                 EdgeRailTile(
                     systemImage: peek.symbol,
@@ -84,30 +83,27 @@ struct EdgeRailView: View {
                     selected: state.peek == peek
                 ) { state.peek = peek }
             }
-            Rectangle().fill(GlassColor.ink(0.18)).frame(width: 28, height: 1)
-                .padding(.vertical, 4)
-                .accessibilityHidden(true)
-            Button {
+            GlassRailRule()
+            GlassRailTile(selected: false) {
                 setOpen(false)
                 OpenMonitor.request(nil)
             } label: {
                 Image(nsImage: NSApp.applicationIconImage)
                     .resizable()
-                    .frame(width: 30, height: 30)
-                    .frame(width: 44, height: 44)
-                    .contentShape(RoundedRectangle(cornerRadius: 12))
+                    .frame(width: GlassTokens.Size.edgeRailTile - GlassTokens.Space.s7,
+                           height: GlassTokens.Size.edgeRailTile - GlassTokens.Space.s7)
             }
-            .buttonStyle(.plain)
             .help(rail?.openApp ?? "")
             .accessibilityLabel(rail?.openApp ?? "")
         }
-        .padding(.vertical, 6)
-        .frame(width: EdgeRailGeometry.railWidth)
-        .glassSurface(.popover, radius: 18, floating: true)
+        .padding(.vertical, GlassTokens.Space.s3)
+        .frame(width: GlassTokens.Size.edgeRailWidth)
+        .glassTier(.pane)
     }
 }
 
-/// One icon on the rail. Hovering it shows its peek, as clicking does.
+/// One icon on the rail (`GlassRailTile`). Hovering it shows its peek, as
+/// clicking does.
 private struct EdgeRailTile: View {
     let systemImage: String
     let label: String
@@ -115,23 +111,12 @@ private struct EdgeRailTile: View {
     let select: () -> Void
 
     var body: some View {
-        Button(action: select) {
-            Image(systemName: systemImage)
-                .font(.system(size: 17, weight: .regular))
-                .foregroundStyle(GlassColor.textPrimary)
-                .frame(width: 44, height: 44)
-                .background {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(selected ? GlassColor.ink(0.08) : Color.clear)
-                }
-                .glassHover(GlassTokens.Color.rowHover, in: RoundedRectangle(cornerRadius: 12))
-                .contentShape(RoundedRectangle(cornerRadius: 12))
+        GlassRailTile(selected: selected, action: select) {
+            Image(systemName: systemImage).glassGlyph(17, weight: .regular)
         }
-        .buttonStyle(.plain)
         .onHover { if $0 { select() } }
         .help(label)
         .accessibilityLabel(label)
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -156,9 +141,9 @@ private struct EdgeRailPeekCard: View {
             content
             if !(peek == .waiting && model.awaitingDecision.count > 0) { link }
         }
-        .padding(GlassTokens.Space.s6)
+        .padding(GlassTokens.Space.s9)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassSurface(.popover, radius: GlassTokens.Radius.pane, floating: true)
+        .glassTier(.pane)
     }
 
     @ViewBuilder
@@ -271,7 +256,7 @@ private struct EdgeRailPeekCard: View {
     private func privacyRow(_ title: String, status: GlassStatus, line: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s4) {
             GlassStatusLabel(title, status: status)
-                .frame(width: 130, alignment: .leading)
+                .frame(width: GlassTokens.Size.edgeRailPeekWidth / 3, alignment: .leading)
             Text(line)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textPrimary)
@@ -291,7 +276,7 @@ private struct EdgeRailPeekCard: View {
         let words = rail?.open(section: section)
         return HStack {
             Button { open(peek.destination) } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: GlassTokens.Space.s2) {
                     Text(words?.text ?? "")
                     Image(systemName: "arrow.right").glassGlyph(10, weight: .semibold)
                 }

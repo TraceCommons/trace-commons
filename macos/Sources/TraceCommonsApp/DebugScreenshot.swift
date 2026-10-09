@@ -153,7 +153,7 @@ enum DebugScreenshot {
                         .environmentObject(model)
                         .environment(compute),
                     to: directory + "/macos-shell-edge-rail-\(peek).png",
-                    size: CGSize(width: EdgeRailGeometry.openWidth, height: EdgeRailGeometry.openHeight)
+                    size: CGSize(width: EdgeRailGeometry.openWidth, height: GlassTokens.Size.edgeRailOpenHeight)
                 )
             }
             if ProcessInfo.processInfo.environment["TRACE_COMMONS_QUIT_AFTER_SHOT"] == "1" {
