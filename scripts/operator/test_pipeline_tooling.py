@@ -1984,6 +1984,79 @@ class CorpusReportValidationTests(unittest.TestCase):
         self.assertIn("admission_decision", corpus.markdown(resign(failed)))
 
 
+class ProductionCorpusReportTests(unittest.TestCase):
+    """Spec section 2, O-B3 (plan B3): a production-mode corpus report
+    compares only the deterministic fields, says it is a production-mode
+    report, and carries the harness's own blockers."""
+
+    def _production(self, **fixture_overrides):
+        report = _corpus_report(
+            "pipeline_http_corpus_compatibility",
+            [("corpus", _fake_hash("corpus"), [_fixture_report("alpha_fixture", **fixture_overrides)])],
+        )
+        report.pop("report_digest")
+        report["harness_assembly"] = "production"
+        report["safe_blockers"] = list(corpus.PRODUCTION_HARNESS_BLOCKERS)
+        return _resigned(report)
+
+    def test_production_corpus_mode_compares_only_deterministic_fields(self):
+        moved = {
+            "phase_count": 3,
+            "scoring_state": "complete",
+            "settlement_state": "incomplete",
+            "instrument_count": 0,
+            "instruments": [],
+            "instrument_states": {},
+        }
+        item = _fixture_report("alpha_fixture", **moved)
+        self.assertEqual(
+            corpus.fixture_mismatches(item),
+            ["outcome_count", "settlement_state", "instrument_count", "instrument_states"],
+        )
+        self.assertEqual(corpus.fixture_mismatches(item, "production"), [])
+        corpus.validate_report(self._production(**moved))  # must not raise
+        for field, value in (
+            ("state", "awaiting_review"),
+            ("admission_decision", "quarantine"),
+            ("consent_state", "refused"),
+            ("privacy_state", "medium"),
+            ("replay_same_run", False),
+            ("changed_content_refused", False),
+            ("tenant_isolation", False),
+        ):
+            with self.subTest(field=field):
+                changed = _fixture_report("alpha_fixture", **{field: value})
+                self.assertEqual(len(corpus.fixture_mismatches(changed, "production")), 1)
+
+        # A production report that names a scoring mismatch it no longer
+        # compares does not match its own rule.
+        with self.assertRaises(errors.ToolingError) as ctx:
+            corpus.validate_report(self._production(**moved, mismatches=["settlement_state"]))
+        self.assertEqual(str(ctx.exception), "qualification_mismatch_not_failed")
+
+    def test_production_blockers_agree_with_the_harness(self):
+        source = (
+            environment.ROOT / "crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs"
+        ).read_text()
+        match = re.search(r"const PRODUCTION_HARNESS_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(re.findall(r'"([a-z0-9_]+)"', match.group(1))), corpus.PRODUCTION_HARNESS_BLOCKERS)
+
+    def test_production_report_carries_its_own_blockers_and_mode(self):
+        report = self._production()
+        corpus.validate_report(report)  # must not raise
+        cases = {
+            "missing_local_blockers": _resigned(dict(report, safe_blockers=["local_test_only"])),
+            "invalid_report_harness_assembly": _resigned(dict(report, harness_assembly="reference")),
+            "invalid_report_harness_assembly:other": _resigned(dict(report, harness_assembly="staging")),
+        }
+        for case, value in cases.items():
+            with self.subTest(case=case):
+                with self.assertRaises(errors.ToolingError) as ctx:
+                    corpus.validate_report(value)
+                self.assertEqual(str(ctx.exception), case.split(":")[0])
+
+
 class PackageCommandTests(_CorpusRunCase):
     def test_package_runs_the_package_writer_with_its_own_variables(self):
         output = self.tmp / "out" / "package.json"
