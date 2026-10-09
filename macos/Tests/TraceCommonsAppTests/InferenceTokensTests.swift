@@ -123,7 +123,11 @@ final class InferenceTokensTests: XCTestCase {
         XCTAssertTrue(views.contains(".onAppear { model.refreshAll() }"))
         let store = try MonitorNavigationTests.text("Views/Monitor/InferenceStore.swift")
         let start = try XCTUnwrap(store.range(of: "func appeared() async {"))
-        let body = store[start.upperBound...].prefix { $0 != "}" }
+        // To the function's own closing brace, not the guard's.
+        let end = try XCTUnwrap(store.range(of: "\n    }", range: start.upperBound ..< store.endIndex))
+        let body = store[start.upperBound ..< end.lowerBound]
+        XCTAssertTrue(body.contains("guard !awaiting else { return }"), "start-up read as the core down")
+        XCTAssertTrue(body.contains("await load()"), "the whole body was not read: \(body)")
         XCTAssertFalse(body.contains("set"), "the reload on appear writes: \(body)")
     }
 
