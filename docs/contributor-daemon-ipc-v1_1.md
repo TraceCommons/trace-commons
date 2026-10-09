@@ -3908,8 +3908,17 @@ or one that cannot be read, is stored as unknown, never as zero.
 131072 turns and 131072 tool calls (oldest last write first), and limited to
 sessions written in the last 13 weeks. Rows are keyed by a keyed digest of
 the harness and the session's address, and carry a keyed digest of the
-folder's project key (owner decision D7, open); no path, project key,
-message or session ID is stored in readable form. The digest key is the
+folder's project key (owner decision D7, open). Each row also carries a
+keyed digest of the one session ID the transcript records, under the same
+key, as the join key to the proxy ledger (owner decision D15, extended to
+feed T); a file that records none, or more than one, or cannot be read
+carries none. That digest is stored only: it never reaches an answer, and
+the week's overlap rule does not use it. No path, project key, message or
+session ID is stored in readable form. The store's schema is
+`trace_commons.insights_counter_rows.v2`; a v1 store still loads, each of its
+rows is read once more for its session digest even when its file is
+unchanged, and the next pass writes it back as v2. Any other schema reads as
+`store_unreadable` and the pass starts the store again. The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.

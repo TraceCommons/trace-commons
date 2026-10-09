@@ -84,7 +84,13 @@ pub const FEED_COUNTER_PASS: &str = "counter_pass";
 pub const COUNTER_ROWS_FILE: &str = "insights-counter-rows.json";
 /// Where the key lives under the key-file custody (owner decision D16).
 pub const COUNTER_KEY_DIR: &str = "insights-counter-key";
-pub const COUNTER_STORE_SCHEMA: &str = "trace_commons.insights_counter_rows.v1";
+/// v2 adds each row's keyed harness-session digest (owner decision D15,
+/// extended to feed T).
+pub const COUNTER_STORE_SCHEMA: &str = "trace_commons.insights_counter_rows.v2";
+/// The schema before it. A v1 store still loads and is upgraded in place:
+/// its rows keep their counters until each is read once more for its
+/// session digest, and the next pass writes the store back as v2.
+const COUNTER_STORE_SCHEMA_V1: &str = "trace_commons.insights_counter_rows.v1";
 /// `iso_week` not a `YYYY-Www` string naming a real ISO week.
 pub const ERR_ISO_WEEK_INVALID: &str = "iso-week-invalid";
 /// The digest key could not be read; nothing is shown in its place.
@@ -141,6 +147,12 @@ struct CounterRow {
     /// `SessionInput::harness_session`, so the overlap rule is unchanged.
     #[serde(default)]
     harness_session: Option<KeyedDigest>,
+    /// Whether `harness_session` was looked for when the row was read. A v1
+    /// row lacks it and is read once more, even when its file is unchanged;
+    /// a v2 row that found none is not, so an ambiguous file is not read on
+    /// every pass.
+    #[serde(default)]
+    harness_session_read: bool,
 }
 
 impl CounterRow {
@@ -371,7 +383,9 @@ impl CounterPass {
             }
             let session = session_key(&key, candidate.source, &candidate.path.to_string_lossy());
             let unchanged = current.rows.get(&session).is_some_and(|row| {
-                row.size_bytes == candidate.size_bytes && row.modified_at == candidate.modified_at
+                row.size_bytes == candidate.size_bytes
+                    && row.modified_at == candidate.modified_at
+                    && row.harness_session_read
             });
             if unchanged && !removals.contains(&session) {
                 continue;
@@ -409,15 +423,19 @@ impl CounterPass {
                     seq: 0,
                     body,
                     harness_session,
+                    harness_session_read: true,
                 },
             ));
         }
         summary.read = reads.len();
 
-        if reads.is_empty() && removals.is_empty() && !restart {
+        // A v1 store is written back as v2 even when nothing else changed.
+        let upgrade = current.schema != COUNTER_STORE_SCHEMA;
+        if reads.is_empty() && removals.is_empty() && !restart && !upgrade {
             return Ok(summary);
         }
         let mut store = (*current).clone();
+        store.schema = COUNTER_STORE_SCHEMA.to_string();
         for session in &removals {
             if store.rows.remove(session).is_some() {
                 summary.dropped += 1;
@@ -616,7 +634,7 @@ impl CounterPass {
             Err(_) => return Err(UNREADABLE_STORE),
         };
         let store: CounterStore = serde_json::from_slice(&bytes).map_err(|_| UNREADABLE_STORE)?;
-        if store.schema != COUNTER_STORE_SCHEMA {
+        if store.schema != COUNTER_STORE_SCHEMA && store.schema != COUNTER_STORE_SCHEMA_V1 {
             return Err(UNREADABLE_STORE);
         }
         let store = Arc::new(store);
@@ -1347,6 +1365,7 @@ mod tests {
                     seq: u64::from(i),
                     body: RowBody::Codex { observed: None },
                     harness_session: None,
+                    harness_session_read: true,
                 },
             );
         }
@@ -1450,6 +1469,154 @@ mod tests {
         let rows = stored_rows(&f.pass);
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.harness_session.is_none()));
+    }
+
+    /// Rewrite the store on disk as the v1 daemon wrote it: the v1 schema
+    /// name, and no per-row session digest or its read marker.
+    fn downgrade_to_v1(f: &Fixture) {
+        let mut value: serde_json::Value = serde_json::from_str(&f.rows_text()).unwrap();
+        value["schema"] = serde_json::json!("trace_commons.insights_counter_rows.v1");
+        for row in value["rows"].as_object_mut().unwrap().values_mut() {
+            let row = row.as_object_mut().unwrap();
+            assert!(row.remove("harness_session").is_some());
+            assert!(row.remove("harness_session_read").is_some());
+        }
+        f.write(COUNTER_ROWS_FILE, value.to_string().as_bytes());
+    }
+
+    fn stored_schema(f: &Fixture) -> String {
+        serde_json::from_str::<serde_json::Value>(&f.rows_text()).unwrap()["schema"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn the_store_is_schema_v2() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        assert_eq!(stored_schema(&f), "trace_commons.insights_counter_rows.v2");
+    }
+
+    #[test]
+    fn a_v1_store_loads_and_each_row_is_read_once_more() {
+        let f = Fixture::new();
+        let claude = f.write("c.jsonl", &claude_bytes());
+        let codex = f.write("x.jsonl", &codex_bytes());
+        let mut ambiguous = claude_bytes();
+        ambiguous.extend_from_slice(b"{\"type\":\"user\",\"sessionId\":\"ANOTHER-ID\"}\n");
+        let two = f.write("two.jsonl", &ambiguous);
+        let all = [
+            candidate(SOURCE_CLAUDE_CODE, &claude),
+            candidate(SOURCE_CODEX, &codex),
+            candidate(SOURCE_CLAUDE_CODE, &two),
+        ];
+        assert_eq!(f.run(&all).read, 3);
+        downgrade_to_v1(&f);
+
+        // A fresh pass over the same file and key, as after a restart. The
+        // in-memory key store holds no key until asked to make one; a kept
+        // key is what a restart finds.
+        let restarted = f.rekeyed(3);
+        restarted.keys.load_or_create().unwrap();
+        let value = restarted.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(value["readable"], true, "a v1 store is readable");
+        assert_eq!(value["sessions_stored"], 3, "its rows are kept");
+        assert!(
+            stored_rows(&restarted)
+                .iter()
+                .all(|row| row.harness_session.is_none())
+        );
+
+        assert_eq!(
+            run_with(&restarted, &all, &[], false).read,
+            3,
+            "unchanged v1 rows are read once more"
+        );
+        assert_eq!(stored_schema(&f), "trace_commons.insights_counter_rows.v2");
+        assert_eq!(
+            stored_rows(&restarted)
+                .iter()
+                .filter(|row| row.harness_session.is_some())
+                .count(),
+            2,
+            "the ambiguous file still has none"
+        );
+        assert_eq!(
+            run_with(&restarted, &all, &[], false).read,
+            0,
+            "read once only, the ambiguous file included"
+        );
+    }
+
+    #[test]
+    fn a_v1_row_deferred_by_the_budget_is_still_read_once_more_later() {
+        let f = Fixture::new();
+        let all: Vec<CounterCandidate> = (0..COUNTER_PASS_MAX_READS_PER_TICK + 1)
+            .map(|i| {
+                let path = f.write(&format!("s{i}.jsonl"), &codex_bytes());
+                let mut c = candidate(SOURCE_CODEX, &path);
+                c.modified_at = written() - Duration::minutes(i as i64);
+                c
+            })
+            .collect();
+        let mut first = 0;
+        while first < all.len() {
+            first += f.run(&all).read;
+        }
+        downgrade_to_v1(&f);
+        let restarted = f.rekeyed(3);
+        let one = run_with(&restarted, &all, &[], false);
+        assert_eq!(one.read, COUNTER_PASS_MAX_READS_PER_TICK);
+        assert_eq!(one.deferred, 1);
+        assert_eq!(run_with(&restarted, &all, &[], false).read, 1);
+        assert_eq!(run_with(&restarted, &all, &[], false).read, 0);
+        assert!(
+            stored_rows(&restarted)
+                .iter()
+                .all(|row| row.harness_session.is_some())
+        );
+    }
+
+    #[test]
+    fn a_v1_store_with_nothing_to_read_is_rewritten_as_v2() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        downgrade_to_v1(&f);
+        let restarted = f.rekeyed(3);
+        assert_eq!(run_with(&restarted, &[], &[], false).read, 0);
+        assert_eq!(stored_schema(&f), "trace_commons.insights_counter_rows.v2");
+        assert_eq!(stored_rows(&restarted).len(), 1, "the row is kept");
+    }
+
+    #[test]
+    fn an_unknown_store_schema_is_unreadable() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        let text = f
+            .rows_text()
+            .replace("insights_counter_rows.v2", "insights_counter_rows.v9");
+        f.write(COUNTER_ROWS_FILE, text.as_bytes());
+        let restarted = f.rekeyed(3);
+        let value = restarted.week_value(
+            true,
+            Some(monday()),
+            utc(),
+            now(),
+            &[],
+            WeekOptions::default(),
+        );
+        assert_eq!(value["reason"], "store_unreadable");
     }
 
     #[test]
