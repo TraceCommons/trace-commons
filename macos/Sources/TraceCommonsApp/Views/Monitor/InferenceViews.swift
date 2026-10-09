@@ -470,7 +470,8 @@ private struct InspectorFactRow: View {
 }
 
 /// The Insights ledger feed's switch (`insights_ledger_feed`, owner
-/// decision D3, open; off by default): whether the calls above carry their
+/// decision D3, settled 2026-10-09: on by default, this turns it off):
+/// whether the calls above carry their
 /// tokens, and whether the menu-bar glance has figures. It moves only on a
 /// write the daemon confirmed, and is not drawn for a daemon that does not
 /// report it.

@@ -42,7 +42,8 @@ final class InferenceStore {
     /// that write, and is dropped rather than drawn over its result.
     private var privateAIWrites = 0
     /// Whether Insights may read the proxy ledger (`insights_ledger_feed`,
-    /// owner decision D3, open; off by default), as the daemon's settings
+    /// owner decision D3, settled 2026-10-09: on by default, this switch
+    /// turns it off), as the daemon's settings
     /// echo it. Nil from a daemon that does not report it: the switch is
     /// then not drawn, never drawn as off. Only a read or a write the
     /// daemon's reply confirmed is kept here.

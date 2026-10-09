@@ -168,8 +168,8 @@ public protocol DaemonDataClient: Sendable {
     /// summary card's only switch (its "Turn off").
     func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings { insights_ledger_feed }`: whether Insights may read
-    /// the proxy ledger for the glance and per-call tokens (owner decision D3, open; off by
-    /// default). Draw only the confirmed value from the reply.
+    /// the proxy ledger for the glance and per-call tokens (owner decision D3, settled
+    /// 2026-10-09: on by default, this turns it off). Draw only the confirmed value from the reply.
     func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings` with `digest_schedule`.
     func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings
@@ -200,7 +200,7 @@ public protocol DaemonDataClient: Sendable {
     /// read, the window shows the saved-imports feed instead, never both.
     func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
     /// `insights_glance`: today's routed calls per tool from the proxy
-    /// ledger (owner decision D3, open). `tzSeconds` is the local UTC offset
+    /// ledger (on by default; owner decision D3, settled 2026-10-09). `tzSeconds` is the local UTC offset
     /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
     /// daemon's `unknown_method` and any failed read all mean no glance,
     /// never a zero and never a failed popover.
