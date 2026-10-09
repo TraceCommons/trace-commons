@@ -51,16 +51,17 @@ use crate::project_copy::folder_mode_ask_label;
 // The unpurposed backlog (U1): Traces and History card, panel row.
 // ---------------------------------------------------------------------
 
-/// Ron's card title (`native-app-design-data-audit.md:86`), ruled by
-/// decision 9.
-pub const NUDGE_BACKLOG_TITLE_RON: &str = "{n} unpurposed traces are waiting";
+/// Ron's card title, ruled by decision 9 and shortened by Ron on
+/// 2026-10-09 (`native-app-design-data-audit.md:86` had "{n} unpurposed
+/// traces are waiting").
+pub const NUDGE_BACKLOG_TITLE_RON: &str = "{n} traces to review";
 /// [`NUDGE_BACKLOG_TITLE_RON`] for one.
-pub const NUDGE_BACKLOG_TITLE_RON_ONE: &str = "1 unpurposed trace is waiting";
+pub const NUDGE_BACKLOG_TITLE_RON_ONE: &str = "1 trace to review";
 /// The plain-wording alternative to [`NUDGE_BACKLOG_TITLE_RON`].
 /// DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE_PLAIN: &str = "{n} previewed sessions are waiting for a decision";
+pub const NUDGE_BACKLOG_TITLE_PLAIN: &str = "{n} previewed traces are waiting for a decision";
 /// [`NUDGE_BACKLOG_TITLE_PLAIN`] for one. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE_PLAIN_ONE: &str = "1 previewed session is waiting for a decision";
+pub const NUDGE_BACKLOG_TITLE_PLAIN_ONE: &str = "1 previewed trace is waiting for a decision";
 /// The U1 card's title. Owner decision 9 picked between Ron's wording and
 /// plain wording, and was ruled for Ron's wording on 2026-10-09.
 pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_RON;
@@ -82,31 +83,26 @@ pub const NUDGE_BACKLOG_BODY_ONE: &str = concat!(
 );
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_REVIEW: &str = "Review";
-/// Ron's draft (`native-app-design-data-audit.md:182`). DRAFT, NEEDS
-/// APPROVAL.
-pub const NUDGE_BACKLOG_REVIEW_IN_TRACES: &str = "Review the {n} in Traces";
-/// [`NUDGE_BACKLOG_REVIEW_IN_TRACES`] for one. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE: &str = "Review it in Traces";
 /// Every card's dismissal. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_NOT_NOW: &str = "Not now";
 /// The panel row for U1. Carries no number: the badge already does.
 /// DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_BACKLOG: &str = "Previewed sessions are waiting for a decision";
+pub const NUDGE_PANEL_BACKLOG: &str = "Previewed traces are waiting for a decision";
 /// [`NUDGE_PANEL_BACKLOG`] when one is waiting. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed session is waiting for a decision";
+pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed trace is waiting for a decision";
 
 // ---------------------------------------------------------------------
 // Idle sessions (U4): the primary phase-1 trigger.
 // ---------------------------------------------------------------------
 
 /// The panel row for U4. No number. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_IDLE: &str = "Some sessions have been idle for {days} or more";
+pub const NUDGE_PANEL_IDLE: &str = "Some traces have been idle for {days} or more";
 /// [`NUDGE_PANEL_IDLE`] when one is idle. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_IDLE_ONE: &str = "A session has been idle for {days} or more";
+pub const NUDGE_PANEL_IDLE_ONE: &str = "A trace has been idle for {days} or more";
 /// The Traces card's title. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_IDLE_TITLE: &str = "{n} sessions from {tool} have been idle for {days} or more";
+pub const NUDGE_IDLE_TITLE: &str = "{n} traces from {tool} have been idle for {days} or more";
 /// [`NUDGE_IDLE_TITLE`] for one. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_IDLE_TITLE_ONE: &str = "1 session from {tool} has been idle for {days} or more";
+pub const NUDGE_IDLE_TITLE_ONE: &str = "1 trace from {tool} has been idle for {days} or more";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_BODY: &str = "They look finished. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer.";
@@ -117,25 +113,26 @@ pub const NUDGE_IDLE_BODY_ONE: &str = "It looks finished. Nothing is sent until 
 pub const NUDGE_IDLE_REVIEW: &str = "Review";
 /// The owner's draft of the N1 notification body, ruled by decision 28.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
-    "{n} sessions from {tool} have been idle for {days}. Contribute them?";
+    "{n} traces from {tool} have been idle for {days}. Contribute them?";
 /// [`NOTIFY_IDLE_BODY_OWNER_DRAFT`] for one.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE: &str =
-    "1 session from {tool} has been idle for {days}. Contribute it?";
+    "1 trace from {tool} has been idle for {days}. Contribute it?";
 /// The alternative to [`NOTIFY_IDLE_BODY_OWNER_DRAFT`]: a notification may
 /// only open Review, so it names what Review offers -- send or keep --
 /// instead of asking a question its one action cannot answer.
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
-    "{n} sessions from {tool} have been idle for {days} or more. Review them to send or keep.";
+    "{n} traces from {tool} have been idle for {days} or more. Review them to send or keep.";
 /// [`NOTIFY_IDLE_BODY_ALTERNATIVE`] for one. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
-    "1 session from {tool} has been idle for {days} or more. Review it to send or keep.";
+    "1 trace from {tool} has been idle for {days} or more. Review it to send or keep.";
 /// The N1 notification body. Owner decision 28 picked between the owner's
-/// draft and the alternative, and was ruled for the owner's draft on
-/// 2026-10-09.
-pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_OWNER_DRAFT;
+/// draft and the alternative: ruled for the owner's draft, then for the
+/// alternative by Ron on 2026-10-09, so the notification says what the
+/// card says -- keeping is as good an answer as sending.
+pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
 /// [`NOTIFY_IDLE_BODY`] for one, following the same pick.
-pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE;
+pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_ALTERNATIVE_ONE;
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
 /// Folded into a due digest after its first sentence, never a separate
@@ -181,18 +178,18 @@ pub const NUDGE_PANEL_VERDICTS_FINAL_ONLY: &str = "{x} credit is now final";
 /// The N2 notification body, followed by [`NUDGE_VERDICTS_FINAL_CLAUSE`]
 /// when the credit is non-zero. Never reports accepted sessions without
 /// the held count. DRAFT, NEEDS APPROVAL.
-pub const NOTIFY_VERDICTS_BODY: &str = "{a} sessions accepted and {h} held for privacy review.";
+pub const NOTIFY_VERDICTS_BODY: &str = "{a} traces accepted and {h} held for privacy review.";
 /// [`NOTIFY_VERDICTS_BODY`] when one was accepted. DRAFT, NEEDS APPROVAL.
-pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 session accepted and {h} held for privacy review.";
+pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 trace accepted and {h} held for privacy review.";
 /// The verdict sentence folded into a due digest: [`NOTIFY_VERDICTS_BODY`]
 /// and [`NUDGE_VERDICTS_FINAL_CLAUSE`]. Changes approved K9 digest copy
 /// (owner decision 6). DRAFT, NEEDS APPROVAL.
 pub const DIGEST_VERDICT_SENTENCE: &str =
-    "{a} sessions accepted and {h} held for privacy review. {x} credit is now final.";
+    "{a} traces accepted and {h} held for privacy review. {x} credit is now final.";
 /// [`DIGEST_VERDICT_SENTENCE`] when one was accepted. DRAFT, NEEDS
 /// APPROVAL.
 pub const DIGEST_VERDICT_SENTENCE_ONE: &str =
-    "1 session accepted and {h} held for privacy review. {x} credit is now final.";
+    "1 trace accepted and {h} held for privacy review. {x} credit is now final.";
 
 // ---------------------------------------------------------------------
 // The news mark.
@@ -241,21 +238,22 @@ pub const DIGEST_ACTION_NOT_NOW: &str = "Not now";
 
 /// The button beside `NOTIFICATION_PURPOSE` on the first U2 card.
 /// DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_VERDICTS: &str = "Tell me when sessions are judged";
+pub const OFFER_NOTIFY_VERDICTS: &str = "Tell me when traces are judged";
 /// The one-time offer to existing installs (owner decision 3). "At most
 /// twice a week" restates the N2 per-kind cap of owner decision 4 and
 /// changes with it. DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Sessions you send are now judged in the background. \
+pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Traces you send are now judged in the background. \
      Want a notification when that happens? At most twice a week.";
 /// The one-time offer to existing installs on the Traces card (owner
 /// decision 7). "At most once a week" restates the N1 repeat interval of
 /// owner decisions 4 and 26 at the default queue TTL and changes with it.
-/// DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_IDLE_EXISTING: &str = "Sessions that have been idle for a few days can now be a notification. \
-     At most once a week.";
-/// Accepts an offer. DRAFT, NEEDS APPROVAL.
-pub const OFFER_TURN_ON: &str = "Turn on";
-/// Declines an offer. DRAFT, NEEDS APPROVAL.
+/// Ron's wording, 2026-10-09.
+pub const OFFER_NOTIFY_IDLE_EXISTING: &str =
+    "We can tell you when traces sit idle for a few days. At most once a week.";
+/// Accepts an offer. Ron's wording, 2026-10-09: "Enable", as the arming
+/// offer and the witness confirmation say.
+pub const OFFER_TURN_ON: &str = "Enable";
+/// Declines an offer. Ron's wording, 2026-10-09.
 pub const OFFER_NO_THANKS: &str = "No thanks";
 
 // ---------------------------------------------------------------------
@@ -271,11 +269,11 @@ pub const SETTING_MARK: &str =
     "Show a small ring on the menu bar icon when there is something new to look at";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_MARK_HELP: &str =
-    "It never appears while sessions are waiting for your decision; the number does.";
+    "It never appears while traces are waiting for your decision; the number does.";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_MASTER: &str = concat!("Notifications from ", crate::app_name!());
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_DIGEST: &str = "Waiting and contributed sessions";
+pub const SETTING_DIGEST: &str = "Waiting and contributed traces";
 /// Under the Interval schedule. The same words, and the same `{hours}`
 /// placeholder, as the Settings line it replaces
 /// (`SettingsWords.at_most_one_notification`). DRAFT, NEEDS APPROVAL.
@@ -289,9 +287,9 @@ pub const SETTING_DIGEST_HELP_INTERVAL_ONE: &str =
 pub const SETTING_DIGEST_HELP_EVENING: &str =
     "At most one notification each evening, and none when nothing is waiting.";
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_VERDICTS: &str = "When sessions you sent are judged";
+pub const SETTING_NOTIFY_VERDICTS: &str = "When traces you sent are judged";
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_IDLE: &str = "When sessions have been idle for a few days";
+pub const SETTING_NOTIFY_IDLE: &str = "When traces have been idle for a few days";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_IDLE_HELP: &str = "When the regular notification is on, this is one extra sentence in it, \
      not a separate notification.";
@@ -327,14 +325,14 @@ pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
 /// The Traces sort control's own accessible name, so it is not read with
 /// the tree's. DRAFT, NEEDS APPROVAL.
-pub const LIST_ORDER_LABEL: &str = "Order of waiting sessions";
+pub const LIST_ORDER_LABEL: &str = "Order of waiting traces";
 /// A row tag, only when the entry's `mission_fit` is above zero. DRAFT,
 /// NEEDS APPROVAL.
 pub const ENTRY_MISSION_FIT: &str = "Fits a mission";
 /// The Traces list while the idle card's Review has narrowed it to the
 /// idle sessions (`list_pending {filter: "idle_sessions"}`). DRAFT, NEEDS
 /// APPROVAL.
-pub const LIST_FILTER_IDLE: &str = "Showing idle sessions only";
+pub const LIST_FILTER_IDLE: &str = "Showing idle traces only";
 /// Leaves that filter for every waiting session. DRAFT, NEEDS APPROVAL.
 pub const LIST_FILTER_CLEAR: &str = "Show all";
 
@@ -359,8 +357,8 @@ pub const ENTRY_ESTIMATE_TIER_MIDDLE: &str = "Typical estimate";
 /// A row tag, multi-tier tables only. DRAFT, NEEDS APPROVAL.
 pub const ENTRY_ESTIMATE_TIER_LOWER: &str = "Lower estimate";
 /// The estimate's info popover. DRAFT, NEEDS APPROVAL.
-pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the session's size and makeup. \
-     Nothing about the session is sent to make it. The credit a session gets is set when \
+pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the trace's size and makeup. \
+     Nothing about the trace is sent to make it. The credit a trace gets is set when \
      the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
@@ -372,10 +370,6 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE_RON", "NUDGE_BACKLOG_TITLE_RON_ONE"),
     ("NUDGE_BACKLOG_TITLE_PLAIN", "NUDGE_BACKLOG_TITLE_PLAIN_ONE"),
     ("NUDGE_BACKLOG_BODY", "NUDGE_BACKLOG_BODY_ONE"),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
-    ),
     ("NUDGE_PANEL_BACKLOG", "NUDGE_PANEL_BACKLOG_ONE"),
     ("NUDGE_PANEL_IDLE", "NUDGE_PANEL_IDLE_ONE"),
     ("NUDGE_IDLE_TITLE", "NUDGE_IDLE_TITLE_ONE"),
@@ -401,7 +395,7 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
 ];
 
 /// `one` when `count` is exactly 1, else `many`. Zero takes the plural:
-/// "0 sessions".
+/// "0 traces".
 #[must_use]
 pub fn pick(count: u64, many: &'static str, one: &'static str) -> &'static str {
     if count == 1 { one } else { many }
@@ -433,14 +427,6 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_BODY", NUDGE_BACKLOG_BODY),
     ("NUDGE_BACKLOG_BODY_ONE", NUDGE_BACKLOG_BODY_ONE),
     ("NUDGE_BACKLOG_REVIEW", NUDGE_BACKLOG_REVIEW),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
-        NUDGE_BACKLOG_REVIEW_IN_TRACES,
-    ),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
-        NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE,
-    ),
     ("NUDGE_NOT_NOW", NUDGE_NOT_NOW),
     ("NUDGE_PANEL_BACKLOG", NUDGE_PANEL_BACKLOG),
     ("NUDGE_PANEL_BACKLOG_ONE", NUDGE_PANEL_BACKLOG_ONE),
@@ -566,7 +552,6 @@ mod tests {
         "NUDGE_BACKLOG_TITLE",
         "NUDGE_BACKLOG_BODY",
         "NUDGE_BACKLOG_REVIEW",
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
         "NUDGE_NOT_NOW",
         "NUDGE_PANEL_BACKLOG",
         "NUDGE_PANEL_IDLE",
@@ -977,7 +962,7 @@ mod tests {
                 .iter()
                 .any(|p| text.contains(p))
                 || text.starts_with("Some ")
-                || text.starts_with("Previewed sessions");
+                || text.starts_with("Previewed traces");
             if !counted {
                 continue;
             }
@@ -1070,14 +1055,14 @@ mod tests {
         );
     }
 
-    /// Decisions 9 and 28 are ruled (2026-10-09): Ron's backlog title and
-    /// the owner's N1 body, each with its singular form.
+    /// Decisions 9 and 28 are ruled (Ron, 2026-10-09): Ron's backlog title
+    /// and the alternative N1 body, each with its singular form.
     #[test]
     fn ruled_copy_decisions_are_selected() {
         assert_eq!(NUDGE_BACKLOG_TITLE, NUDGE_BACKLOG_TITLE_RON);
         assert_eq!(NUDGE_BACKLOG_TITLE_ONE, NUDGE_BACKLOG_TITLE_RON_ONE);
-        assert_eq!(NOTIFY_IDLE_BODY, NOTIFY_IDLE_BODY_OWNER_DRAFT);
-        assert_eq!(NOTIFY_IDLE_BODY_ONE, NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE);
+        assert_eq!(NOTIFY_IDLE_BODY, NOTIFY_IDLE_BODY_ALTERNATIVE);
+        assert_eq!(NOTIFY_IDLE_BODY_ONE, NOTIFY_IDLE_BODY_ALTERNATIVE_ONE);
     }
 
     /// The threshold is a phrase, so "1 day" never reads "1 days", and no
