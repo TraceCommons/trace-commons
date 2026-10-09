@@ -201,11 +201,20 @@ pub(crate) fn route_category(tally: Option<&RouteTally>) -> (RouteCategory, Opti
     (category, reason)
 }
 
+/// Where the folds have reached in the proxy's ledger: the highest row id
+/// passed, and the latest `started_at` of any row taken. Both persist with
+/// the tallies, and move together.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FoldCursor {
+    pub through: Option<i64>,
+    pub started: Option<DateTime<Utc>>,
+}
+
 /// The rows a fold takes, oldest id first, and where its cursor ends.
 #[derive(Debug)]
 pub(crate) struct FoldPlan<'a> {
     pub rows: Vec<&'a RoutedExchange>,
-    pub through: Option<i64>,
+    pub next: FoldCursor,
 }
 
 impl FoldPlan<'_> {
@@ -227,30 +236,50 @@ pub(crate) struct FoldSummary {
 ///
 /// - A row without an id is never taken: nothing could say it was folded
 ///   once only.
-/// - The cursor is the highest id folded through. A window whose highest id
-///   is below it is a ledger that started over, the rule
-///   `IronWireLedger::take_added_rows` applies; unlike that pulse, which
-///   re-baselines and hands out nothing, a tally takes the new ledger's rows,
-///   since each is a call not counted before.
-/// - Known gap, shared with `take_added_rows`: a ledger that started over and
-///   climbed past the cursor between two folds cannot be told from one that
-///   only grew, so its rows at or below the cursor are never folded.
-/// - An empty window leaves the cursor where it is.
+/// - A row is taken when its id is above the cursor's, or when it started
+///   after every row taken so far. IronWire assigns ids in the order rows
+///   are recorded, at the end of a call, and `started_at` follows neither
+///   (`ironwire_ledger`'s `page` says so), so the two together are needed:
+///   - A long call can hold the highest id and still be the first to age
+///     out of the window. The window's highest id then falls below the
+///     cursor with no restart at all, and every row left in it was taken
+///     already, each starting no later than the latest start taken. None is
+///     taken again, so nothing counts twice.
+///   - A ledger that started over holds only calls made since, each
+///     starting after every row taken from the old one. They are taken
+///     whether their ids are below the cursor or have climbed past it, so
+///     no call is lost to the restart either. `take_added_rows` instead
+///     re-baselines and hands out nothing, which suits a pulse; for a tally
+///     a dropped `outside` call would read as a stronger claim than the
+///     calls support.
+/// - The cursor's id becomes the window's highest, so it falls with a
+///   restarted ledger. An empty window leaves the cursor where it is.
+/// - Residual edge: a proxy whose clock stepped back across a restart can
+///   start its first calls before the latest start taken; those rows are
+///   not taken. A store from before the start mark (an id and no start)
+///   takes by id only, so it cannot count a row twice.
 #[must_use]
-pub(crate) fn fold_plan(window: &[RoutedExchange], folded_through: Option<i64>) -> FoldPlan<'_> {
+pub(crate) fn fold_plan(window: &[RoutedExchange], cursor: FoldCursor) -> FoldPlan<'_> {
     let highest = window.iter().filter_map(|row| row.id).max();
-    let from = match (folded_through, highest) {
-        (Some(cursor), Some(highest)) if highest < cursor => None,
-        (cursor, _) => cursor,
-    };
     let mut rows: Vec<&RoutedExchange> = window
         .iter()
-        .filter(|row| row.id.is_some_and(|id| from.is_none_or(|from| id > from)))
+        .filter(|row| {
+            row.id.is_some_and(|id| {
+                cursor.through.is_none_or(|through| id > through)
+                    || cursor
+                        .started
+                        .is_some_and(|started| row.started_at > started)
+            })
+        })
         .collect();
     rows.sort_by_key(|row| row.id);
+    let started = rows.iter().map(|row| row.started_at).max();
     FoldPlan {
+        next: FoldCursor {
+            through: highest.or(cursor.through),
+            started: cursor.started.max(started),
+        },
         rows,
-        through: highest.or(folded_through),
     }
 }
 
@@ -377,12 +406,12 @@ mod tests {
 
     fn fold(
         routing: &mut BTreeMap<KeyedDigest, RouteTally>,
-        cursor: &mut Option<i64>,
+        cursor: &mut FoldCursor,
         window: &[RoutedExchange],
     ) -> FoldSummary {
         let plan = fold_plan(window, *cursor);
         let summary = fold_into(routing, &key(), &plan, &Vec::new());
-        *cursor = plan.through;
+        *cursor = plan.next;
         summary
     }
 
@@ -407,7 +436,7 @@ mod tests {
         ];
         for (proof, bucket) in cases {
             let mut routing = BTreeMap::new();
-            let summary = fold(&mut routing, &mut None, &[codex(1, proof)]);
+            let summary = fold(&mut routing, &mut FoldCursor::default(), &[codex(1, proof)]);
             assert_eq!(
                 summary,
                 FoldSummary {
@@ -439,7 +468,7 @@ mod tests {
             ..codex(1, Some(ProofStatus::Verified))
         };
         let mut routing = BTreeMap::new();
-        fold(&mut routing, &mut None, &[row]);
+        fold(&mut routing, &mut FoldCursor::default(), &[row]);
         let tally = routing
             .get(&harness_session_digest(&key(), SOURCE_CLAUDE_CODE, SESSION))
             .expect("Claude Code's digest");
@@ -453,7 +482,7 @@ mod tests {
         let mut routing = BTreeMap::new();
         fold(
             &mut routing,
-            &mut None,
+            &mut FoldCursor::default(),
             &[codex(1, Some(ProofStatus::Outside)), unknown],
         );
         let tally = only(&routing);
@@ -478,7 +507,7 @@ mod tests {
         let mut no_id = codex(5, Some(ProofStatus::Verified));
         no_id.id = None;
         let mut routing = BTreeMap::new();
-        let mut cursor = None;
+        let mut cursor = FoldCursor::default();
         let summary = fold(
             &mut routing,
             &mut cursor,
@@ -493,14 +522,14 @@ mod tests {
             }
         );
         assert!(routing.is_empty());
-        assert_eq!(cursor, Some(4));
+        assert_eq!(cursor.through, Some(4));
     }
 
     #[test]
     fn an_old_proxy_row_is_named_by_the_one_connected_speaker() {
         let mut row = codex(1, Some(ProofStatus::Verified));
         row.path = None;
-        let plan = fold_plan(std::slice::from_ref(&row), None);
+        let plan = fold_plan(std::slice::from_ref(&row), FoldCursor::default());
         let mut routing = BTreeMap::new();
         let summary = fold_into(&mut routing, &key(), &plan, &vec![(SOURCE_CODEX, "openai")]);
         assert_eq!(summary.folded, 1);
@@ -513,44 +542,106 @@ mod tests {
             .map(|id| codex(id, Some(ProofStatus::Verified)))
             .collect();
         let mut routing = BTreeMap::new();
-        let mut cursor = None;
+        let mut cursor = FoldCursor::default();
         assert_eq!(fold(&mut routing, &mut cursor, &window).folded, 3);
         assert_eq!(fold(&mut routing, &mut cursor, &window).folded, 0);
         assert_eq!(only(&routing).calls.verified, 3);
-        assert_eq!(cursor, Some(3));
+        assert_eq!(cursor.through, Some(3));
 
         // A later window that grew by one, and lost its oldest row to age.
         let mut grown = window[1..].to_vec();
         grown.push(codex(4, Some(ProofStatus::Verified)));
         assert_eq!(fold(&mut routing, &mut cursor, &grown).folded, 1);
         assert_eq!(only(&routing).calls.verified, 4);
-        assert_eq!(cursor, Some(4));
+        assert_eq!(cursor.through, Some(4));
 
         // An empty window keeps the cursor.
         assert_eq!(fold(&mut routing, &mut cursor, &[]).folded, 0);
-        assert_eq!(cursor, Some(4));
+        assert_eq!(cursor.through, Some(4));
+    }
+
+    /// A call on a ledger that started over, `minutes` after the old
+    /// ledger's last call began.
+    fn after_restart(id: i64, minutes: i64) -> RoutedExchange {
+        let mut row = codex(id, Some(ProofStatus::Outside));
+        row.started_at = at(5 + minutes);
+        row
     }
 
     #[test]
     fn a_ledger_that_started_over_is_folded_from_its_start() {
         let mut routing = BTreeMap::new();
-        let mut cursor = None;
+        let mut cursor = FoldCursor::default();
         let window: Vec<RoutedExchange> = (1..=5)
             .map(|id| codex(id, Some(ProofStatus::Verified)))
             .collect();
         fold(&mut routing, &mut cursor, &window);
-        assert_eq!(cursor, Some(5));
-        // The proxy's ledger started over: ids 1 and 2 again, new calls.
-        let restarted = [
-            codex(1, Some(ProofStatus::Outside)),
-            codex(2, Some(ProofStatus::Outside)),
-        ];
+        assert_eq!(cursor.through, Some(5));
+        // The proxy's ledger started over: ids 1 and 2 again, new calls,
+        // the old ledger's rows gone with it.
+        let restarted = [after_restart(1, 1), after_restart(2, 2)];
         assert_eq!(fold(&mut routing, &mut cursor, &restarted).folded, 2);
-        assert_eq!(cursor, Some(2));
+        assert_eq!(cursor.through, Some(2));
         let tally = only(&routing);
         assert_eq!((tally.calls.verified, tally.calls.outside), (5, 2));
         // And from there it grows as any ledger does.
         assert_eq!(fold(&mut routing, &mut cursor, &restarted).folded, 0);
+        let mut grown = restarted.to_vec();
+        grown.push(after_restart(3, 3));
+        assert_eq!(fold(&mut routing, &mut cursor, &grown).folded, 1);
+        assert_eq!(only(&routing).calls.outside, 3);
+    }
+
+    /// A ledger that started over and climbed past the cursor between two
+    /// folds: its rows at or below the old cursor are new calls too.
+    #[test]
+    fn a_ledger_that_started_over_and_climbed_past_the_cursor_loses_nothing() {
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        let window: Vec<RoutedExchange> = (1..=2)
+            .map(|id| codex(id, Some(ProofStatus::Verified)))
+            .collect();
+        fold(&mut routing, &mut cursor, &window);
+        let restarted: Vec<RoutedExchange> = (1..=4).map(|id| after_restart(id, id)).collect();
+        assert_eq!(fold(&mut routing, &mut cursor, &restarted).folded, 4);
+        assert_eq!(cursor.through, Some(4));
+        let tally = only(&routing);
+        assert_eq!((tally.calls.verified, tally.calls.outside), (2, 4));
+        assert_eq!(fold(&mut routing, &mut cursor, &restarted).folded, 0);
+    }
+
+    /// IronWire records a row when its body ends, so ids follow completion
+    /// and `started_at` does not (`ironwire_ledger::page`'s doc). A long
+    /// call that started first and ended last holds the highest id, and
+    /// ages out of the window first: the window's highest id then falls
+    /// below the cursor with no restart at all, and its rows were all
+    /// folded.
+    #[test]
+    fn a_window_whose_newest_id_aged_out_is_not_folded_again() {
+        let short = codex(10, Some(ProofStatus::Verified));
+        let mut long = codex(11, Some(ProofStatus::Verified));
+        long.started_at = at(0);
+        let mut routing = BTreeMap::new();
+        let mut cursor = FoldCursor::default();
+        assert_eq!(
+            fold(&mut routing, &mut cursor, &[long, short.clone()]).folded,
+            2
+        );
+        assert_eq!(cursor.through, Some(11));
+        // A day later the long call is out of the window, the short one in.
+        assert_eq!(fold(&mut routing, &mut cursor, &[short]).folded, 0);
+        assert_eq!(only(&routing).calls.verified, 2);
+        // A new call after that still folds once.
+        assert_eq!(
+            fold(
+                &mut routing,
+                &mut cursor,
+                &[codex(12, Some(ProofStatus::Verified))]
+            )
+            .folded,
+            1
+        );
+        assert_eq!(only(&routing).calls.verified, 3);
     }
 
     fn tally(calls: RouteBuckets) -> RouteTally {
@@ -601,7 +692,7 @@ mod tests {
         let mut routing = BTreeMap::new();
         fold(
             &mut routing,
-            &mut None,
+            &mut FoldCursor::default(),
             &[codex(1, Some(ProofStatus::GatewayOnly))],
         );
         assert_eq!(
@@ -635,7 +726,7 @@ mod tests {
         let mut routing = BTreeMap::new();
         fold(
             &mut routing,
-            &mut None,
+            &mut FoldCursor::default(),
             &[codex(1, Some(ProofStatus::Verified))],
         );
         let text = serde_json::to_string(only(&routing)).unwrap();

@@ -3936,8 +3936,15 @@ ledger's last 24 hours into it, each call once: calls per proof bucket
 reads, cache writes and output, normalized per facade as `insights_glance`
 reads them), calls whose tokens are unknown, and the latest call's time. A
 call is skipped when it has no ledger id, no or an empty session ID, or no
-single tool can be named for it; the tool is never guessed. A ledger that
-started over is folded from its start. `cost_usd`, backend and model names
+single tool can be named for it; the tool is never guessed. The store keeps
+the highest ledger id folded and the latest start time folded, and a call is
+taken when its id is above the first or it started after the second. The
+proxy numbers calls as they finish, not as they start, so a long call can
+hold the highest id and leave the window first; the start time keeps the
+calls left in that window from counting twice, and keeps the calls of a
+proxy ledger that started over from being lost, whether their ids are below
+the old highest or have climbed past it. Only Claude Code and Codex calls are
+folded, the two tools the counter pass counts. `cost_usd`, backend and model names
 are never read into it (owner decision D5, open), and no session ID is
 stored. Nothing is folded, and neither the ledger nor the store is read for
 it, unless both `insights_ledger_feed` (owner decision D3, open, default off)

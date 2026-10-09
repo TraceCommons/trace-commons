@@ -57,7 +57,9 @@ use trace_commons_protocol::insights_usage_series::{
 };
 
 use super::inference_map::Speakers;
-use super::insights_route_tally::{FoldSummary, RouteTally, fold_into, fold_plan, prune};
+use super::insights_route_tally::{
+    FoldCursor, FoldSummary, RouteTally, fold_into, fold_plan, prune,
+};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
 use crate::insights::SourceFormat;
@@ -222,9 +224,22 @@ struct CounterStore {
     /// The highest ledger row id folded into `routing`; `None` before any.
     #[serde(default)]
     ledger_folded_through: Option<i64>,
+    /// The latest `started_at` of any ledger row folded into `routing`;
+    /// `None` before any. With the id, it tells a window whose newest row
+    /// aged out from a ledger that started over (see
+    /// `insights_route_tally::fold_plan`).
+    #[serde(default)]
+    ledger_folded_started: Option<DateTime<Utc>>,
 }
 
 impl CounterStore {
+    fn fold_cursor(&self) -> FoldCursor {
+        FoldCursor {
+            through: self.ledger_folded_through,
+            started: self.ledger_folded_started,
+        }
+    }
+
     fn empty(key_fingerprint: KeyedDigest) -> Self {
         Self {
             schema: COUNTER_STORE_SCHEMA.to_string(),
@@ -233,6 +248,7 @@ impl CounterStore {
             rows: BTreeMap::new(),
             routing: BTreeMap::new(),
             ledger_folded_through: None,
+            ledger_folded_started: None,
         }
     }
 }
@@ -704,9 +720,11 @@ impl CounterPass {
     ///
     /// `enabled` is asked first: off, nothing is read, not the ledger, the
     /// store, the key or the tools (owner decision D3, open, and D4). The
-    /// window is the ledger's own 24 hours, and the store's cursor says which
-    /// rows were folded already, so a call counts once across ticks, reloads
-    /// and restarts of this process (see `insights_route_tally::fold_plan`).
+    /// window is the ledger's own 24 hours, and the store's cursor (the
+    /// highest id passed and the latest start taken) says which rows were
+    /// folded already, so a call counts once across ticks, reloads, restarts
+    /// of this process and restarts of the proxy's ledger (see
+    /// `insights_route_tally::fold_plan`).
     /// `speakers` is asked only when a new row carries a session id.
     ///
     /// Never makes a key: before the counter pass has made one there is no
@@ -763,9 +781,11 @@ impl CounterPass {
         // A first look, without the lock, to learn whether anything is new
         // and the tools need reading.
         let peek = self.load_cached()?;
-        let through = peek.as_ref().and_then(|store| store.ledger_folded_through);
-        let plan = fold_plan(&window, through);
-        if plan.rows.is_empty() && plan.through == through {
+        let cursor = peek
+            .as_ref()
+            .map_or_else(FoldCursor::default, |store| store.fold_cursor());
+        let plan = fold_plan(&window, cursor);
+        if plan.rows.is_empty() && plan.next == cursor {
             return Ok(FoldSummary::default());
         }
         let speakers = if plan.needs_speakers() {
@@ -790,12 +810,13 @@ impl CounterPass {
             None => CounterStore::empty(fingerprint),
         };
         // Planned again under the lock, from the cursor as it now stands.
-        let plan = fold_plan(&window, store.ledger_folded_through);
-        if plan.rows.is_empty() && plan.through == store.ledger_folded_through {
+        let plan = fold_plan(&window, store.fold_cursor());
+        if plan.rows.is_empty() && plan.next == store.fold_cursor() {
             return Ok(FoldSummary::default());
         }
         let summary = fold_into(&mut store.routing, &key, &plan, &speakers);
-        store.ledger_folded_through = plan.through;
+        store.ledger_folded_through = plan.next.through;
+        store.ledger_folded_started = plan.next.started;
         prune_routing(
             &mut store,
             &BTreeSet::new(),
@@ -1270,6 +1291,15 @@ mod tests {
                 self.dir.path().join(COUNTER_ROWS_FILE),
                 Box::new(InMemoryDigestKeyStore::with_seed([seed; 32])),
             )
+        }
+
+        /// A new process over the same store whose keychain already holds
+        /// the fixture's key. `rekeyed` holds no key until a pass makes one,
+        /// so a fold through it returns before reading the store at all.
+        fn reopened(&self) -> CounterPass {
+            let pass = self.rekeyed(3);
+            pass.keys.load_or_create().unwrap();
+            pass
         }
 
         fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
@@ -2227,7 +2257,7 @@ mod tests {
 
         // Persisted: cursor and tallies survive a reload, and folding the
         // same window again under a fresh process adds nothing.
-        let reloaded = f.rekeyed(3);
+        let reloaded = f.reopened();
         assert_eq!(tallies(&reloaded), routing);
         let again = fold_with(
             &reloaded,
@@ -2304,6 +2334,49 @@ mod tests {
         // The cached store still answers; nothing new means no write.
         fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
         assert!(!path.exists());
+    }
+
+    /// The cursor's start mark persists with its id: after a reload, a
+    /// ledger that started over is still told from one whose newest row
+    /// aged out, so the restarted ledger's calls are taken, once, and the
+    /// rows left in an aged window are not taken again.
+    #[test]
+    fn the_fold_cursor_survives_a_reload_on_both_sides_of_a_restart() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let session = "PRIVATE-CODEX-ID";
+        // A long call (id 2) began before a short one (id 1) and ended last.
+        let short = ledger_call(1, 50, session);
+        let long = ledger_call(2, 60, session);
+        assert_eq!(
+            fold_with(&f.pass, true, vec![long, short.clone()])
+                .unwrap()
+                .folded,
+            2
+        );
+
+        // A new process: the long call aged out, the short one did not.
+        let reloaded = f.reopened();
+        assert_eq!(fold_with(&reloaded, true, vec![short]).unwrap().folded, 0);
+
+        // Another process: the proxy's ledger started over, ids from 1.
+        let restarted = f.reopened();
+        let mut first = ledger_call(1, 10, session);
+        first.proof = Some(crate::routing::ProofStatus::Outside);
+        assert_eq!(
+            fold_with(&restarted, true, vec![first.clone()])
+                .unwrap()
+                .folded,
+            1
+        );
+        assert_eq!(
+            fold_with(&f.reopened(), true, vec![first]).unwrap().folded,
+            0
+        );
+        let row_digest = stored_rows(&f.pass)[0].harness_session.unwrap();
+        let tally = &tallies(&f.reopened())[&row_digest];
+        assert_eq!((tally.calls.verified, tally.calls.outside), (2, 1));
     }
 
     #[test]
