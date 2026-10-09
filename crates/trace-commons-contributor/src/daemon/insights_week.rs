@@ -2241,13 +2241,23 @@ mod tests {
         categories.sort();
         assert_eq!(categories, ["mixed", "unobserved"]);
         // The shells decode this answer from the committed fixture, so the
-        // fixture is this answer: a change to the wire fails here first.
+        // fixture is this answer: a change to the wire fails here first. The
+        // rows' order varies from run to run (seen in a full-suite run), so
+        // both sides are compared with the rows sorted by source.
+        let by_source = |answer: &serde_json::Value| {
+            let mut answer = answer.clone();
+            if let Some(rows) = answer["rollup"]["sessions"].as_array_mut() {
+                rows.sort_by_key(|row| row["source"].to_string());
+            }
+            answer
+        };
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/insights-analytics/insights_week_routed.json"
         ))
         .unwrap();
         assert_eq!(
-            value, fixture,
+            by_source(&value),
+            by_source(&fixture),
             "re-record tests/fixtures/insights-analytics/insights_week_routed.json \
              from this test's --nocapture output"
         );
