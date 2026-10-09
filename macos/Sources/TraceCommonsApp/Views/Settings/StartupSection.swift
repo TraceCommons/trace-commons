@@ -37,8 +37,9 @@ struct StartupSection: View {
                     Text(SettingsLegacyWords.turnOnInSystemSettings)
                         .glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
                 }
+                // A refused switch, under it, unboxed (Ron, 2026-10-09).
                 if let loginItemActionError = model.loginItemActionError {
-                    GlassNotice(tone: .outside) { Text(loginItemActionError) }
+                    GlassAlert(loginItemActionError)
                 }
             }
         }

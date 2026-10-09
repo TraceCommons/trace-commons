@@ -462,16 +462,21 @@ final class TracesParityTests: XCTestCase {
             "This covers sessions that reached the queue. Sessions that were never queued at all are not counted here.")
     }
 
-    /// Declining comes first and neither answer is the primary action, on
-    /// both offers (`QueueView.swift:1262-1268, 1321-1325`).
-    func test_neitherOfferLeadsTheEyeToYes() throws {
+    /// The accept comes first as a glass button and the decline after it as
+    /// a link, on both offers (Ron, 2026-10-09, which replaced the legacy
+    /// queue's decline-first order); neither answer is the primary action.
+    func test_bothOffersPutTheAcceptFirstAndTheDeclineAsALink() throws {
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
         let decline = try XCTUnwrap(offers.range(of: "copy.offerDecline"))
         let accept = try XCTUnwrap(offers.range(of: "copy.offerAccept"))
-        XCTAssertLessThan(decline.lowerBound, accept.lowerBound)
+        XCTAssertLessThan(accept.lowerBound, decline.lowerBound)
         let armDecline = try XCTUnwrap(offers.range(of: "Button(copy.decline"))
         let armConfirm = try XCTUnwrap(offers.range(of: "Button(copy.confirm"))
-        XCTAssertLessThan(armDecline.lowerBound, armConfirm.lowerBound)
+        XCTAssertLessThan(armConfirm.lowerBound, armDecline.lowerBound)
+        for declineCall in ["Button(copy.offerDecline, action: onDecline)\n                        .buttonStyle(GlassButtonStyle(.link))",
+                            "Button(copy.decline, action: onDecline)\n                            .buttonStyle(GlassButtonStyle(.link))"] {
+            XCTAssertTrue(offers.contains(declineCall), "the decline is not a link: \(declineCall)")
+        }
         let arming = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
         XCTAssertFalse(offers[arming.lowerBound...].prefix(1500).contains("GlassButtonStyle(.primary"))
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))

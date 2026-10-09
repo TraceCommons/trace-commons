@@ -199,20 +199,24 @@ final class HistoryParityTests: XCTestCase {
             "GlassCheckMark(checked: selected)",
             ".accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)",
             "GlassStatusLabel(problem, status: .outside)",
+            // The action first, the way back after it as a link (Ron,
+            // 2026-10-09).
             "Button(copy.reviewPage) { reviewDraft = makeDraft() } .buttonStyle(GlassButtonStyle(.primary)) "
-                + ".frame(minHeight: 44) .disabled(makeDraft() == nil)",
-            "Button(copy.cancelEdit) { editingPublished = false } .buttonStyle(GlassButtonStyle(.glass))",
-            "Button(copy.editDraft) { reviewDraft = nil } .buttonStyle(GlassButtonStyle(.glass))",
+                + ".frame(minHeight: 44) .disabled(makeDraft() == nil) if detail.publication != nil { "
+                + "Button(copy.cancelEdit) { editingPublished = false } .buttonStyle(GlassButtonStyle(.link))",
             "Button(working ? copy.publishing : detail.publication == nil ? copy.publishPage : copy.updatePage) "
                 + "{ model.publishPublicRun(record, draft: draft) } .buttonStyle(GlassButtonStyle(.primary)) "
-                + ".frame(minHeight: 44) .disabled(working)",
+                + ".frame(minHeight: 44) .disabled(working) "
+                + "Button(copy.editDraft) { reviewDraft = nil } .buttonStyle(GlassButtonStyle(.link))",
             // Fields carry their names for VoiceOver.
             "GlassTextField(copy.pageTitle, text: $title, prompt: copy.pageTitle, showsLabel: false)",
             "GlassTextArea(copy.publicOutcome, text: $outcomeSummary, showsLabel: false)",
             "GlassTextArea(copy.reusableInstructions, text: $workflow, showsLabel: false)",
             "GlassTextField(copy.sourcePlaceholder, text: $source, prompt: copy.sourcePlaceholder, showsLabel: false)",
-            // A publication error can be put away; the next attempt shows it again.
-            "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedError = message }",
+            // A publication error can be put away; the next attempt shows it
+            // again. It is the failed request's red line, its Dismiss a link.
+            "GlassAlert(message) Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) "
+                + "{ dismissedError = message } .buttonStyle(GlassButtonStyle(.link))",
         ] {
             XCTAssertTrue(flat.contains(needle), "SessionDetailView.swift lacks \(needle)")
         }
@@ -556,9 +560,16 @@ final class HistoryParityTests: XCTestCase {
         XCTAssertEqual(HistoryList.rowWithdraw(record: Self.record("accepted"), detail: nil,
                                                result: .noAccountSession, account: .signedOut), .signIn)
         let home = Self.flat(try Self.text("Views/Monitor/HomeViews.swift"))
+        // Through the rule both above the control and, for a failure,
+        // under it (Ron, 2026-10-09).
         XCTAssertTrue(home.contains(
-            "if let result { if HistoryList.showsOutcome(result) { WithdrawalOutcomeView(result: result) }"),
+            "let failed = WithdrawalOutcomeView.isFailure(result) "
+                + "if HistoryList.showsOutcome(result), !failed { WithdrawalOutcomeView(result: result) } "
+                + "withdrawControl(control, copy: copy) "
+                + "if HistoryList.showsOutcome(result), failed { WithdrawalOutcomeView(result: result) }"),
             "the row draws its outcome only through the rule")
+        XCTAssertEqual(home.components(separatedBy: "WithdrawalOutcomeView(result: result)").count - 1, 2,
+                       "the row draws its outcome outside the rule")
     }
 
     /// The refresh control (Ron's #1146 HistoryRefreshControl): asks the daemon's poller to check the
@@ -597,7 +608,7 @@ final class HistoryParityTests: XCTestCase {
             "submissionsHeader refreshOutcome list", "Spacer(minLength: 0) refresh }",
             "Button(model.historyRefresh == .requesting ? words.requesting : words.requestRefresh) "
                 + "{ Task { if await model.requestHistoryRefresh() { await store.load() } } }",
-            "case .requested: Text(words.refreshRequested)", "case .failed: GlassStatusLabel(words.refreshFailed, status: .outside)",
+            "case .requested: Text(words.refreshRequested)", "case .failed: GlassAlert(words.refreshFailed)",
             ".onAppear { model.clearHistoryRefresh() model.refreshHistory() model.refreshAccountSession() }",
         ] {
             XCTAssertTrue(home.contains(needle), "HomeViews.swift lacks \(needle)")

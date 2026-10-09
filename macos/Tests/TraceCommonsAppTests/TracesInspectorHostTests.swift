@@ -408,8 +408,9 @@ final class TracesInspectorHostTests: XCTestCase {
             XCTAssertTrue(prompts.contains(needle), "InspectorPrompts.swift lacks \(needle)")
         }
         // Ron's `UndoBar`: Undo a glass button, Dismiss a link, beside the
-        // words rather than under them.
-        XCTAssertEqual(prompts.components(separatedBy: ".buttonStyle(GlassButtonStyle(.link))").count - 1, 3)
+        // words rather than under them. The fourth link is a failed
+        // action's Dismiss, after its unboxed line (Ron, 2026-10-09).
+        XCTAssertEqual(prompts.components(separatedBy: ".buttonStyle(GlassButtonStyle(.link))").count - 1, 4)
         XCTAssertFalse(prompts.contains("GlassButtonStyle(.primary)"), "Undo is a glass button, as Ron's")
         XCTAssertTrue(prompts.contains("HStack(alignment: .center, spacing: GlassTokens.Space.s8) {"))
         for rel in ["Views/Monitor/TracesInspectorHost.swift", "Views/Monitor/InspectorPrompts.swift"] {

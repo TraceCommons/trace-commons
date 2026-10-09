@@ -427,7 +427,7 @@ struct JoinScreen: View {
             passkeyCard
             nearAICard
             if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
-                GlassNotice(tone: .outside) { Text(notice) }
+                GlassAlert(notice)
             }
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
@@ -483,7 +483,7 @@ struct JoinScreen: View {
         case .joined(let line):
             GlassStatusLabel(line, status: .on)
         case .error(let line):
-            GlassNotice(tone: .outside) { Text(line) }
+            GlassAlert(line)
         case .note(let line):
             Text(line)
                 .glassType(GlassTokens.TypeScale.label)
@@ -516,7 +516,7 @@ struct JoinScreen: View {
             .disabled(runner.isCommitting)
         }
         if let line = JoinScreenLayout.passkeyFailureLine(runner.failure, copy: copy.join) {
-            GlassNotice(tone: .outside) { Text(line) }
+            GlassAlert(line)
         }
     }
 

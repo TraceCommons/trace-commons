@@ -503,8 +503,7 @@ private struct HistoryPage: View {
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            case .failed: GlassStatusLabel(words.refreshFailed, status: .outside)
-                .fixedSize(horizontal: false, vertical: true)
+            case .failed: GlassAlert(words.refreshFailed)
             case .idle, .requesting: EmptyView()
             }
         }
@@ -908,10 +907,16 @@ private struct HistoryListRow: View {
         let control = control
         if record != nil {
             if let result {
-                if HistoryList.showsOutcome(result) {
+                // A failure is said under the retry it is about; any other
+                // outcome above the control (Ron, 2026-10-09).
+                let failed = WithdrawalOutcomeView.isFailure(result)
+                if HistoryList.showsOutcome(result), !failed {
                     WithdrawalOutcomeView(result: result)
                 }
                 withdrawControl(control, copy: copy)
+                if HistoryList.showsOutcome(result), failed {
+                    WithdrawalOutcomeView(result: result)
+                }
             }
         }
         if control == .signIn, let words = MonitorWords.table?.historyActions {
@@ -989,8 +994,7 @@ private struct HistorySignInStatus: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             if let failure = model.accountSignInFailure {
-                GlassStatusLabel(line(failure), status: .outside)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassAlert(line(failure))
             }
         }
     }
