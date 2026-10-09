@@ -2535,7 +2535,7 @@ _PRODUCTION_HARNESS_ENV = {
     "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY": "production",
     "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH": "/run/signed-package.json",
     "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH": "/run/trusted-package-key.json",
-    "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT": "/run/indexes",
+    "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": "/run/indexes",
     "TRACE_COMMONS_NEAR_AI_BASE_URL": "https://near-ai.invalid/v1",
     "TRACE_COMMONS_NEAR_AI_API_KEY": "near-ai-test-key",
 }
@@ -2568,10 +2568,19 @@ class ProductionHarnessRunnerTests(_RestoreDrillCase):
         self._restore(_PRODUCTION_HARNESS_ENV, evidence={"harness_assembly": "production"})
         cargo = self._cargo_calls()
         self.assertEqual([call[3] for call in cargo], [_RESTORE_SEED, _RESTORE_RESUME])
-        for call in cargo:
+        for call, step in zip(cargo, ("seed", "resume")):
             self.assertEqual(call[2], (*_INGEST_ARGS, *_PROMOTE_FEATURES))
             for key, value in _PRODUCTION_HARNESS_ENV.items():
+                if key == "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT":
+                    # The seed and the resume each open their own index.
+                    value = f"/run/indexes/{step}"
                 self.assertEqual(call[4][key], value, key)
+
+    def test_reference_restore_opens_no_production_index(self):
+        self._restore(None)
+        for call in self._cargo_calls():
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT", call[4])
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY", call[4])
 
     def test_production_restore_refuses_evidence_without_the_assembly(self):
         with self.assertRaises(errors.ToolingError) as ctx:
@@ -2684,7 +2693,7 @@ class ProductionHarnessRunnerTests(_RestoreDrillCase):
             )
 
         def index_root(check_id):
-            return {**_PRODUCTION_HARNESS_ENV, "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT": f"/run/indexes/{check_id}"}
+            return {**_PRODUCTION_HARNESS_ENV, "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT": f"/run/indexes/{check_id}"}
 
         cargo_args = (*_INGEST_ARGS, *_PROMOTE_FEATURES)
         # The HF export runs before any database starts.
@@ -4900,14 +4909,17 @@ class _PromoteCase(unittest.TestCase):
         self.downloaded = 2
         self.report = _remote_report()
         self.harness_calls = []
-        # The deployment's env file: the four variables `package-checks`
-        # reads, and two it must never pass on.
+        # The deployment's env file: variables `package-checks` reads, and
+        # three it must never pass on (the live index root among them).
         self.env_path = self.root / "inputs" / "ingest.env"
         self.env_path.write_text(
             "# the deployment's env file\n"
             "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n"
             'TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n'
+            "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n"
             "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS=90\n"
+            "TRACE_COMMONS_VECTOR_INDEX_DIM=1024\n"
+            "TRACE_COMMONS_VECTOR_INDEX_ROOT=/var/lib/trace-commons-vector-index\n"
             "TRACE_COMMONS_EMBEDDER_CACHE_DIR=/var/cache/trace-commons-embedder\n"
             "TRACE_COMMONS_DATABASE_URL=postgres://ingest@127.0.0.1/trace_commons\n"
             "TRACE_COMMONS_ARTIFACT_MASTER_KEY_HEX=00112233\n"
@@ -5226,7 +5238,7 @@ class PromotePackageChecksTests(_PromoteCase):
         self.hook_package = None
 
     def _fake_package_checks(self, run, *, harness_env, cargo_features, network_pin, postgres_admin_url):
-        index_root = Path(harness_env[promote.HARNESS_INDEX_ROOT_VAR])
+        index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
         self.hook_calls.append(
             {
                 "run_id": run.run_id,
@@ -5261,11 +5273,13 @@ class PromotePackageChecksTests(_PromoteCase):
                 "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY",
                 "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH",
                 "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH",
-                "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT",
+                "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT",
                 "TRACE_COMMONS_NEAR_AI_BASE_URL",
                 "TRACE_COMMONS_NEAR_AI_API_KEY",
+                "TRACE_COMMONS_NEAR_AI_MODEL",
                 "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS",
                 "TRACE_COMMONS_EMBEDDER_CACHE_DIR",
+                "TRACE_COMMONS_VECTOR_INDEX_DIM",
             },
             "only the allowlisted variables of the env file reach the harness",
         )
@@ -5275,7 +5289,7 @@ class PromotePackageChecksTests(_PromoteCase):
         self.assertEqual(
             Path(env["TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"]).resolve(), run_dir / promote.TRUSTED_KEY_FILE
         )
-        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT"]).resolve(), run_dir / promote.INDEX_DIR)
+        self.assertEqual(Path(env["TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT"]).resolve(), run_dir / promote.INDEX_DIR)
         self.assertEqual(call["cargo_features"], _PROMOTE_FEATURES)
         self.assertEqual(call["network_pin"].resolve(), self.pin_path.resolve())
         self.assertIsNone(call["postgres_admin_url"])
@@ -5302,6 +5316,9 @@ class PromotePackageChecksTests(_PromoteCase):
         cases = {
             "promote_env_file_incomplete:no key": complete.replace('TRACE_COMMONS_NEAR_AI_API_KEY="near-ai-test-key"\n', ""),
             "promote_env_file_incomplete:blank key": complete.replace('"near-ai-test-key"', '""'),
+            "promote_env_file_incomplete:no model": complete.replace(
+                "TRACE_COMMONS_NEAR_AI_MODEL=Qwen/Qwen3.6-35B-A3B-FP8\n", ""
+            ),
             "promote_env_file_incomplete:no endpoint": complete.replace(
                 "TRACE_COMMONS_NEAR_AI_BASE_URL=https://near-ai.invalid/v1\n", ""
             ),

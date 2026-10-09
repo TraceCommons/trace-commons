@@ -719,16 +719,23 @@ enum RestoreDependencies {
         index: Arc<IsolatedPipelineIndex>,
         adapters: RecordingAdapters,
     },
-    /// The production assembly over the dependencies the signed production
-    /// `package` names (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`).
+    /// The production assembly serving the signed production `package`
+    /// (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`), over
+    /// `PipelineGateComponents::from_env`'s components on the operator host.
     /// Its settlement adapter is the production one, which records nothing:
     /// the drill counts settlement from the ledger instead. `rebuilt` is a
     /// second, empty index the resume rebuilds into for its last comparison.
     Production {
         package: Box<BundlePackage>,
         dependencies: HarnessDependencies,
-        rebuilt: Option<HarnessDependencies>,
+        rebuilt: Option<RebuildIndex>,
     },
+}
+
+/// The resume's rebuild target: a second index, empty when the resume starts.
+struct RebuildIndex {
+    reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
+    writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
 }
 
 impl RestoreDependencies {
@@ -796,7 +803,7 @@ impl RestoreDependencies {
         match self {
             Self::Reference { index, .. } => index.entry_set_hash(tenant, MINIMAL_INDEX_ID),
             Self::Production { dependencies, .. } => {
-                index_snapshot_hash(dependencies.index_reader.as_ref(), tenant)
+                index_snapshot_hash(dependencies.index_reader().as_ref(), tenant)
             }
         }
     }
@@ -817,7 +824,7 @@ impl RestoreDependencies {
     fn index_writer(&self) -> Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter> {
         match self {
             Self::Reference { index, .. } => index.clone(),
-            Self::Production { dependencies, .. } => dependencies.index_writer.clone(),
+            Self::Production { dependencies, .. } => dependencies.index_writer(),
         }
     }
 
@@ -841,10 +848,8 @@ impl RestoreDependencies {
             Self::Production { rebuilt, .. } => {
                 let rebuilt = rebuilt.as_ref().expect("restore_rebuild_index_missing");
                 (
-                    rebuilt.index_writer.clone(),
-                    Box::new(move |tenant| {
-                        index_snapshot_hash(rebuilt.index_reader.as_ref(), tenant)
-                    }),
+                    rebuilt.writer.clone(),
+                    Box::new(move |tenant| index_snapshot_hash(rebuilt.reader.as_ref(), tenant)),
                 )
             }
         }
@@ -873,45 +878,33 @@ fn index_snapshot_hash(
 
 /// The dependencies the two ignored tests run on: the reference ones, or,
 /// under `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=production`, the signed
-/// production package's real ones, with each index in its own directory
-/// under `TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT` (`indexes` names them;
-/// the first is the live index, a second is the resume's rebuild target).
-async fn restore_dependencies_from_env(indexes: &[&str]) -> RestoreDependencies {
+/// production package served over `PipelineGateComponents::from_env`'s
+/// components, whose index opens at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`
+/// (`pipeline.py` gives the seed and the resume one each, inside the run).
+/// With `rebuild`, a second, empty usearch index beside it is the resume's
+/// rebuild target.
+async fn restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
     match HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}")) {
         HarnessAssembly::Reference => RestoreDependencies::reference(),
-        HarnessAssembly::Production => production_restore_dependencies_from_env(indexes).await,
+        HarnessAssembly::Production => production_restore_dependencies_from_env(rebuild).await,
     }
 }
 
 #[cfg(feature = "near-ai-scorer")]
-async fn production_restore_dependencies_from_env(indexes: &[&str]) -> RestoreDependencies {
+async fn production_restore_dependencies_from_env(rebuild: bool) -> RestoreDependencies {
     use trace_commons_server::versioned_pipeline_harness::{
-        HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL, TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT,
-        harness_dependencies_from_env, open_harness_index, production_package_pins,
-        verified_package_from_lookup,
+        harness_dependencies_from_env, open_harness_rebuild_index, verified_package_from_lookup,
     };
     let lookup = |var: &str| std::env::var(var).ok();
     let package = verified_package_from_lookup(&lookup).unwrap_or_else(|error| panic!("{error}"));
-    let pins = production_package_pins(&package).unwrap_or_else(|error| panic!("{error}"));
-    let root = PathBuf::from(
-        lookup(TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT)
-            .unwrap_or_else(|| panic!("{HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL}")),
-    );
-    let (live, rebuilt) = match indexes {
-        [live] => (*live, None),
-        [live, rebuilt] => (*live, Some(*rebuilt)),
-        _ => panic!("restore_index_names_invalid"),
-    };
-    let dependencies = harness_dependencies_from_env(&pins, &root.join(live), &lookup)
+    let dependencies = harness_dependencies_from_env()
         .await
         .unwrap_or_else(|error| panic!("{error}"));
-    let rebuilt = rebuilt.map(|name| {
-        let index = open_harness_index(&root.join(name), pins.embedder_descriptor.output_dim)
-            .unwrap_or_else(|error| panic!("{error}"));
-        HarnessDependencies {
-            index_reader: index.clone(),
-            index_writer: index,
-            ..dependencies.clone()
+    let rebuilt = rebuild.then(|| {
+        let index = open_harness_rebuild_index().unwrap_or_else(|error| panic!("{error}"));
+        RebuildIndex {
+            reader: index.clone(),
+            writer: index,
         }
     });
     RestoreDependencies::Production {
@@ -924,7 +917,7 @@ async fn production_restore_dependencies_from_env(indexes: &[&str]) -> RestoreDe
 /// Never reached: `HarnessAssembly::from_env` refuses production mode
 /// without `near-ai-scorer`.
 #[cfg(not(feature = "near-ai-scorer"))]
-async fn production_restore_dependencies_from_env(_indexes: &[&str]) -> RestoreDependencies {
+async fn production_restore_dependencies_from_env(_rebuild: bool) -> RestoreDependencies {
     panic!(
         "{}",
         trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
@@ -1385,7 +1378,7 @@ async fn pipeline_restore_seed() {
     let Some(config) = RestoreConfig::from_env() else {
         return;
     };
-    let dependencies = restore_dependencies_from_env(&["seed"]).await;
+    let dependencies = restore_dependencies_from_env(false).await;
     restore_seed(&config, &dependencies).await;
 }
 
@@ -1631,7 +1624,7 @@ async fn pipeline_restore_resume() {
     let url = restored_database_url()
         .await
         .expect("restore_database_url_missing");
-    let dependencies = restore_dependencies_from_env(&["resume", "resume-rebuilt"]).await;
+    let dependencies = restore_dependencies_from_env(true).await;
     restore_resume(&config, &url, &dependencies).await;
 }
 
@@ -2104,26 +2097,30 @@ impl trace_commons_gate_api::Embedder for DistinctTextEmbedder {
     }
 }
 
-/// Production restore dependencies over qualified doubles (the operator's
-/// run has NEAR AI, fastembed and two usearch indexes in their place):
+/// Production restore dependencies over doubles, never production-qualified
+/// (the operator's run has `from_env`'s NEAR AI, fastembed and usearch index,
+/// and a second usearch index, in their place):
 /// their service is the production assembly serving the production
 /// package, their index hash is the snapshot read through the trait, and
 /// they record no adapter requests, so the drill counts settlement from the
 /// ledger. Needs no database: assembly opens no connection.
 fn production_restore_doubles(package: BundlePackage) -> RestoreDependencies {
-    let doubles = || {
-        let index = IsolatedPipelineIndex::new();
-        HarnessDependencies {
-            scorer: Arc::new(trace_commons_gate_api::ReferencePerplexityScorer::new()),
-            embedder: Arc::new(DistinctTextEmbedder),
-            index_reader: index.clone(),
-            index_writer: index,
-        }
-    };
+    let index = IsolatedPipelineIndex::new();
+    let rebuilt = IsolatedPipelineIndex::new();
     RestoreDependencies::Production {
         package: Box::new(package),
-        dependencies: doubles(),
-        rebuilt: Some(doubles()),
+        dependencies: HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(trace_commons_gate_api::ReferencePerplexityScorer::new()),
+                embedder: Arc::new(DistinctTextEmbedder),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        ),
+        rebuilt: Some(RebuildIndex {
+            reader: rebuilt.clone(),
+            writer: rebuilt,
+        }),
     }
 }
 
@@ -2158,6 +2155,9 @@ async fn production_restore_dependencies_serve_the_production_package() {
         let qualification = service.bundle_qualification(&package).unwrap();
         assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
         assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
+        // Only `PipelineGateComponents::from_env` qualifies the adapters.
+        assert!(!qualification.scorer.production_qualified);
+        assert!(!qualification.embedder.production_qualified);
     }
     let tenant = pipeline_tenant_storage_ref(RESTORE_TENANT);
     assert_eq!(
@@ -2179,7 +2179,7 @@ async fn production_restore_dependencies_serve_the_production_package() {
     assert_eq!(reference.request_runs(), Some(Vec::new()));
 }
 
-/// The restore drill end to end in production mode over qualified doubles:
+/// The restore drill end to end in production mode over doubles:
 /// the seed, then the resume against the same database (no dump and
 /// restore between, which `pipeline.py restore-drill` adds), through the
 /// bodies the two ignored tests run. Ignored: it writes the drill's fixed

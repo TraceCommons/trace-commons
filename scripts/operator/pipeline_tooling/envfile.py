@@ -3,8 +3,8 @@
 
 `pipeline.py package --bundle production` builds the production package
 from the same variables the deployed ingest reads, and `promote
-package-checks` gives the harness the NEAR AI endpoint, key and embedder
-cache the real dependencies need. Neither passes the file through: each
+package-checks` gives the harness what `PipelineGateComponents::from_env`
+reads to build the real dependencies. Neither passes the file through: each
 takes only its own allowlisted variables (`PACKAGE_VARIABLES`,
 `PACKAGE_CHECK_VARIABLES`), so a database URL, a bucket, a master key, or
 anything else the file holds never reaches a child. No value, line or path
@@ -48,14 +48,29 @@ PACKAGE_VARIABLES = (
     "TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA",
 )
 
-# What a production-mode harness needs besides the package, which already
-# binds the model, the cutoff and the embedder (`harness_dependencies_from_env`
-# in `versioned_pipeline_harness.rs`).
+# What a production-mode harness reads: `PipelineGateComponents::from_env`
+# (`versioned_pipeline_production/gate_env.rs`), the constructor the deployed
+# ingest uses, reads the scorer and embedder descriptors, the NEAR AI
+# endpoint, key and timeout, the embedder cache, and the usearch settings.
+# The index roots are not among them: `promote package-checks` points
+# `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run, and the live
+# `TRACE_COMMONS_VECTOR_INDEX_ROOT` and dedup root never reach a child.
 PACKAGE_CHECK_VARIABLES = (
     "TRACE_COMMONS_NEAR_AI_BASE_URL",
     "TRACE_COMMONS_NEAR_AI_API_KEY",
+    "TRACE_COMMONS_NEAR_AI_MODEL",
     "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS",
+    "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF",
+    "TRACE_COMMONS_EMBEDDER_MODEL_ID",
     "TRACE_COMMONS_EMBEDDER_CACHE_DIR",
+    "TRACE_COMMONS_EMBEDDER_MAX_TOKENS",
+    "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM",
+    "TRACE_COMMONS_VECTOR_INDEX_DIM",
+    "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN",
+    "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY",
+    "TRACE_COMMONS_VECTOR_INDEX_HNSW_M",
+    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION",
+    "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH",
 )
 
 

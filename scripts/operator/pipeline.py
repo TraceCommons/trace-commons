@@ -720,6 +720,15 @@ def _read_restore_fingerprint(path):
     return value
 
 
+def _step_index_root(extra_env, step):
+    """The restore drill's seed and resume each open their own production
+    pipeline index, `<root>/<step>`, so the resume starts from an empty one
+    and rebuilds it (its rebuild target is `<root>/<step>-rebuilt`). Nothing
+    without a production index root."""
+    root = (extra_env or {}).get(promote.PIPELINE_INDEX_ROOT_VAR)
+    return {} if root is None else {promote.PIPELINE_INDEX_ROOT_VAR: str(Path(root) / step)}
+
+
 def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TEST_ARGS):
     """One restore drill in its own scenario of `environment`, in this order:
     the seed (on `<db>_pilot`), the dump of `<db>_pilot`, `<db>_restored`
@@ -749,6 +758,7 @@ def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TES
         **shared,
         "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
         "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(source_root),
+        **_step_index_root(extra_env, "seed"),
     }
     cargo_test(
         run, "restore_seed", cargo_args, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
@@ -779,6 +789,7 @@ def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TES
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+        **_step_index_root(extra_env, "resume"),
     }
     cargo_test(
         run, "restore_resume", cargo_args, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
@@ -900,10 +911,10 @@ def run_package_checks(run, *, harness_env, cargo_features, network_pin, postgre
     network pin first, so a refused download starts no database."""
     package_path = Path(harness_env[promote.HARNESS_PACKAGE_PATH_VAR])
     key_path = Path(harness_env[promote.HARNESS_TRUSTED_KEY_PATH_VAR])
-    index_root = Path(harness_env[promote.HARNESS_INDEX_ROOT_VAR])
+    index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
 
     def env_for(check_id):
-        return {**harness_env, promote.HARNESS_INDEX_ROOT_VAR: str(index_root / check_id)}
+        return {**harness_env, promote.PIPELINE_INDEX_ROOT_VAR: str(index_root / check_id)}
 
     [bundle_check] = [check for check in REQUIRED_DATABASE_CHECKS if check.digests]
     bundle_check = dataclasses.replace(bundle_check, cargo_args=(*bundle_check.cargo_args, *cargo_features))

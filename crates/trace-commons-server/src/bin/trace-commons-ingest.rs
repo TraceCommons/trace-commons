@@ -93,6 +93,10 @@ use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
+// The gate variables the production pipeline assembly shares with the
+// legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
+// scorer and fastembed embedder (PR #1295 review round 2, Major 1).
+use trace_commons_server::versioned_pipeline_production::gate_env::*;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -340,7 +344,6 @@ const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
     "TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY";
-const TRACE_COMMONS_GATE_SERVICE: &str = "TRACE_COMMONS_GATE_SERVICE";
 const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
     "TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT";
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
@@ -532,27 +535,14 @@ const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_
 #[cfg(feature = "local-gpu-models")]
 const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
 #[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
-    "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
-#[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B-Instruct";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
-#[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
 
-// NEAR AI Cloud-backed perplexity scorer (pilot deployment path). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_near_ai` AND the `near-ai-scorer` cargo
-// feature is compiled in. API key intentionally only read from env (never CLI)
-// so it never appears in process listings.
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_BASE_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// The NEAR AI scorer, fastembed embedder and vector index variables the
+// legacy `enclave_near_ai` gate shares with the production pipeline assembly
+// are defined in `trace_commons_server::versioned_pipeline_production::gate_env`
+// and imported above.
 // Where the per-model attestation registry is fetched from. OPTIONAL, and
 // deliberately a separate variable from TRACE_COMMONS_NEAR_AI_BASE_URL: that
 // one is the *direct-completions* endpoint (see `AppState::from_env`), e.g.
@@ -572,41 +562,6 @@ const TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL: &str =
 // fetch. Defaults to Intel's own service: the collateral is what a quote is
 // verified against, so the shorter the trust path to Intel the better.
 const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
-#[allow(dead_code)]
-// Chunked scoring sends one bounded request per chunk; perplexity needs
-// only the realized token's logprob, so k=1 cuts TEE backend memory and
-// response size ~5x vs the OpenAI-canonical 5 (large-trace OOM root cause).
-const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 1;
-// fastembed embedder (Phase A3). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MODEL_ID: &str = "TRACE_COMMONS_EMBEDDER_MODEL_ID";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_CACHE_DIR: &str = "TRACE_COMMONS_EMBEDDER_CACHE_DIR";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MAX_TOKENS: &str = "TRACE_COMMONS_EMBEDDER_MAX_TOKENS";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM: &str = "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID: &str = "BAAI/bge-large-en-v1.5";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR: &str = "/var/cache/trace-commons-embedder";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS: usize = 512;
-// usearch-backed vector index (Phase A4). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_VECTOR_INDEX_ROOT";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
 /// How long to let in-flight requests drain after SIGTERM before the shutdown
 /// flush runs anyway. Kept well under systemd's default `TimeoutStopSec=90s`
 /// so the flush always gets its turn before SIGKILL.
@@ -619,38 +574,9 @@ const TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS: usize = 20;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION: &str =
-    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH: &str = "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT: &str = "/var/lib/trace-commons-vector-index";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
 /// Matches the A4 design spec's "or on a periodic timer (every 60 s)".
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS: u64 = 60;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
-// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex` instance
-// from the novelty index above, so dedup lookups never pollute novelty's
-// nearest-neighbor results. Same dim/hnsw/ef params as the novelty index
-// (`TRACE_COMMONS_VECTOR_INDEX_*`); only the root path is independently
-// configurable. Read only under the `local-gpu-models`/`near-ai-scorer`
-// features (usearch is not compiled in otherwise).
-#[allow(dead_code)]
-const TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -4113,7 +4039,9 @@ impl AppState {
                 let (gate_service, components) =
                     production_assembly::build_near_ai_gate_service_with_pipeline_components(
                         production_assembly::PipelineComponentInputs {
-                            tenant_policies: Arc::new(tenant_policies.clone()),
+                            tenant_policies: production_assembly::tenant_policy_allowlists(
+                                &tenant_policies,
+                            ),
                             require_tenant_submission_policy,
                             db_policy_reads: Arc::new(move |tenant_id: &str| {
                                 rollout.enabled_for(
@@ -6335,17 +6263,19 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
 #[cfg(feature = "near-ai-scorer")]
 async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>>
 {
-    Ok(near_ai_gate_service_from_parts(
-        near_ai_gate_parts_from_env().await?,
-    ))
+    let wrapper = near_ai_gate_key_wrapper_from_env().await?;
+    let shared = NearAiGateSharedComponents::from_env().await?;
+    Ok(near_ai_gate_service_from_parts(near_ai_gate_parts(
+        wrapper, shared,
+    )?))
 }
 
 /// What `build_enclave_near_ai_gate_service_from_env` builds before the
-/// orchestrator: the NEAR AI scorer, the fastembed embedder and the novelty
-/// index, each built once and held as a shared trait object, so the
-/// production pipeline assembly can hold the same three (spec A-D3) instead
-/// of loading a second embedder. The pinned inputs the pipeline's
-/// descriptors must agree with ride along.
+/// orchestrator: the NEAR AI scorer and the fastembed embedder (built once,
+/// by the library's `NearAiGateSharedComponents::from_env`, and held as
+/// shared trait objects, so the production pipeline assembly holds the same
+/// two (spec A-D3) instead of loading a second embedder), the novelty
+/// index, the key wrapper and the orchestrator configuration.
 #[cfg(feature = "near-ai-scorer")]
 pub(crate) struct NearAiGateParts {
     pub(crate) scorer: Arc<dyn trace_commons_gate_api::PerplexityScorer>,
@@ -6353,14 +6283,6 @@ pub(crate) struct NearAiGateParts {
     pub(crate) vector_index: Arc<dyn trace_commons_gate_api::VectorIndex>,
     pub(crate) wrapper: Arc<dyn KmsKeyWrapper>,
     pub(crate) cfg: trace_commons_gate_enclave::EnclaveGateOrchestratorConfig,
-    pub(crate) model: String,
-    pub(crate) tail_logprob_cutoff: f32,
-    pub(crate) embedder_model_id: String,
-    pub(crate) embedder_output_dim: usize,
-    pub(crate) embedder_max_tokens: usize,
-    pub(crate) embedder_matryoshka_dim: Option<usize>,
-    pub(crate) vector_index_config:
-        trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig,
 }
 
 /// The legacy `enclave_near_ai` gate over `parts`: the orchestrator holds
@@ -6379,16 +6301,7 @@ pub(crate) fn near_ai_gate_service_from_parts(parts: NearAiGateParts) -> Arc<dyn
 }
 
 #[cfg(feature = "near-ai-scorer")]
-pub(crate) async fn near_ai_gate_parts_from_env() -> anyhow::Result<NearAiGateParts> {
-    use std::time::Duration as StdDuration;
-    use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::vector_index_usearch::{
-        UsearchVectorIndex, UsearchVectorIndexConfig,
-    };
-    use trace_commons_gate_enclave::{
-        EnclaveGateOrchestratorConfig, NearAiPerplexityScorer, NearAiScorerConfig,
-    };
-
+pub(crate) async fn near_ai_gate_key_wrapper_from_env() -> anyhow::Result<Arc<dyn KmsKeyWrapper>> {
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
         format!(
             "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
@@ -6403,150 +6316,30 @@ pub(crate) async fn near_ai_gate_parts_from_env() -> anyhow::Result<NearAiGatePa
     // "local_master_key"), keyed by the gate-service master key as before.
     let wrapper: Arc<dyn KmsKeyWrapper + Send + Sync> =
         Arc::from(build_selected_kek_wrapper_async(SecretString::from(master_key)).await?);
-    let wrapper: Arc<dyn KmsKeyWrapper> = wrapper;
+    Ok(wrapper)
+}
 
-    let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_BASE_URL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let model = std::env::var(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let api_key = std::env::var(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let timeout_seconds = match std::env::var(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS
-            } else {
-                trimmed.parse::<u64>().with_context(|| {
-                    format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
-                })?
-            }
-        }
-        Err(_) => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
-    };
-    anyhow::ensure!(
-        timeout_seconds > 0,
-        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
-    );
-    let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
-        Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
-            format!(
-                "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
-            )
-        })?,
-        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
-    };
-    anyhow::ensure!(
-        tail_cutoff.is_finite(),
-        "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
-    );
+/// The rest of the legacy gate over the shared scorer and embedder: the
+/// novelty index, the floors, the policy version and the chunking knobs.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) fn near_ai_gate_parts(
+    wrapper: Arc<dyn KmsKeyWrapper>,
+    shared: NearAiGateSharedComponents,
+) -> anyhow::Result<NearAiGateParts> {
+    use trace_commons_gate_enclave::EnclaveGateOrchestratorConfig;
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
-    let scorer_cfg = NearAiScorerConfig {
-        base_url,
-        model: model.clone(),
-        api_key,
-        tail_logprob_cutoff: tail_cutoff,
-        logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
-        timeout: StdDuration::from_secs(timeout_seconds),
-    };
-    // reqwest's blocking client owns an internal Tokio runtime and must not be
-    // constructed from this async startup task. Build it on the blocking pool,
-    // which is also where synchronous gate evaluation runs below.
-    let scorer = tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_cfg))
-        .await
-        .context("NearAiPerplexityScorerInitJoinFailed")?
-        .context("NearAiPerplexityScorerInitFailed")?;
-
-    // fastembed-rs embedder — same configuration surface as the local-GPU
-    // path. Runs locally on CPU; no GPU required.
-    let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
-    let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
-    let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
-        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
-            format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
-        })?,
-        Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
-    };
-    anyhow::ensure!(
-        embedder_max_tokens > 0,
-        "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
-    );
-    let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.parse::<usize>().with_context(|| {
-                    format!("{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer")
-                })?)
-            }
-        }
-        Err(_) => None,
-    };
-    if let Some(d) = embedder_matryoshka_dim {
-        anyhow::ensure!(
-            d > 0,
-            "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be greater than zero"
-        );
-    }
-    let embedder = FastEmbedTextEmbedder::try_new(
-        embedder_model_id.clone(),
-        &embedder_cache_dir,
-        embedder_matryoshka_dim,
-        embedder_max_tokens,
-    )
-    .await
-    .context("FastEmbedTextEmbedderInitFailed")?;
-
+    let NearAiGateSharedComponents {
+        scorer,
+        embedder,
+        pins,
+    } = shared;
     let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
         .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
-    let vector_index_dim = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_DIM,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
-    )?;
-    let vector_index_max_open = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
-    )?;
-    let vector_index_flush_every = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
-    )?;
-    let vector_index_hnsw_m = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
-    )?;
-    let vector_index_ef_construction = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
-    )?;
-    let vector_index_ef_search = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
-    )?;
-    let vector_index_flush_interval = vector_index_flush_interval_from_env()?;
-    let vector_index_config = UsearchVectorIndexConfig {
-        dim: vector_index_dim,
-        hnsw_m: vector_index_hnsw_m,
-        ef_construction: vector_index_ef_construction,
-        ef_search: vector_index_ef_search,
-        max_open: vector_index_max_open,
-        flush_every: vector_index_flush_every,
-        flush_interval: vector_index_flush_interval,
-    };
-    let vector_index = UsearchVectorIndex::try_new(&vector_index_root, vector_index_config.clone())
+    let mut vector_index_config = usearch_index_config_from_env()?;
+    vector_index_config.flush_interval = vector_index_flush_interval_from_env()?;
+    let vector_index_dim = vector_index_config.dim;
+    let vector_index = UsearchVectorIndex::try_new(&vector_index_root, vector_index_config)
         .with_context(|| {
             format!(
                 "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
@@ -6554,9 +6347,9 @@ pub(crate) async fn near_ai_gate_parts_from_env() -> anyhow::Result<NearAiGatePa
         })?;
 
     anyhow::ensure!(
-        embedder.output_dim() == vector_index_dim,
+        pins.embedder_output_dim == vector_index_dim,
         "embedder output_dim ({}) must equal {} ({})",
-        embedder.output_dim(),
+        pins.embedder_output_dim,
         TRACE_COMMONS_VECTOR_INDEX_DIM,
         vector_index_dim,
     );
@@ -6599,12 +6392,12 @@ pub(crate) async fn near_ai_gate_parts_from_env() -> anyhow::Result<NearAiGatePa
         tail_fraction_floor_micros,
         novelty_floor_micros,
         top_k,
-        &model,
+        &pins.model,
         0,
-        tail_cutoff,
-        &embedder_model_id,
-        embedder_max_tokens,
-        embedder_matryoshka_dim,
+        pins.tail_logprob_cutoff,
+        &pins.embedder_model_id,
+        pins.embedder_max_tokens,
+        pins.embedder_matryoshka_dim,
         vector_index_dim,
         chunking.chunk_target_tokens,
         chunking.chunk_max_tokens,
@@ -6629,20 +6422,12 @@ pub(crate) async fn near_ai_gate_parts_from_env() -> anyhow::Result<NearAiGatePa
             .qualifying_chunk_floor_micros
             .unwrap_or(perplexity_floor_micros),
     };
-    let embedder_output_dim = embedder.output_dim();
     Ok(NearAiGateParts {
-        scorer: Arc::new(scorer),
-        embedder: Arc::new(embedder),
+        scorer,
+        embedder,
         vector_index: Arc::new(vector_index),
         wrapper,
         cfg,
-        model,
-        tail_logprob_cutoff: tail_cutoff,
-        embedder_model_id,
-        embedder_output_dim,
-        embedder_max_tokens,
-        embedder_matryoshka_dim,
-        vector_index_config,
     })
 }
 
@@ -6947,29 +6732,6 @@ fn vector_index_flush_interval_from_env() -> anyhow::Result<Option<std::time::Du
     } else {
         Some(std::time::Duration::from_secs(seconds))
     })
-}
-
-/// Parse `T = usize` from an env var with a default fallback. Trim + strict
-/// integer parse; empty / unset → default; malformed → fail-closed.
-///
-/// Not feature-gated (unlike its sibling gate-config parsers): the chunk-knob
-/// parser that reuses this reads env unconditionally so its defaults are
-/// exercised by the plain `cargo test` CI path regardless of which optional
-/// gate-service feature (if any) is compiled in.
-fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
-    match std::env::var(var) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Ok(default)
-            } else {
-                trimmed
-                    .parse::<usize>()
-                    .with_context(|| format!("{var} must be a non-negative integer"))
-            }
-        }
-        Err(_) => Ok(default),
-    }
 }
 
 /// The NEAR credit outbox scheduler's tick interval: how often `main`

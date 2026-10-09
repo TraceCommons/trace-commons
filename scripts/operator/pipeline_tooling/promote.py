@@ -14,10 +14,11 @@ Subcommands, each re-runnable alone into the run `init` created:
   three digests (`promote-run.json`), and keeps a copy of the package.
 - `package-checks`: the four package checks re-run with the harness switched
   to the production assembly (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=
-  production`, B-2), over the run's package, the NEAR AI endpoint and
-  embedder cache from the deployment's env file (`--env-file`; only
-  `envfile.PACKAGE_CHECK_VARIABLES` is read), a fresh usearch index per check
-  inside the run, and the committed HF network pin. Each result must name the run's
+  production`, B-2), over the run's package and the components
+  `PipelineGateComponents::from_env` builds from the deployment's env file
+  (`--env-file`; only `envfile.PACKAGE_CHECK_VARIABLES` is read), with a
+  fresh usearch index per check inside the run, and the committed HF network
+  pin. Each result must name the run's
   package and its evidence must say `harness_assembly: production`.
 - `hf-canary`: `pipeline_hf_network_canary`, a fresh download of the network
   pin, every digest compared.
@@ -106,11 +107,16 @@ REMOTE_STORE_KINDS = frozenset({"gcs"})
 HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
 HARNESS_PACKAGE_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH"
 HARNESS_TRUSTED_KEY_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"
-HARNESS_INDEX_ROOT_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT"
+# Where `PipelineGateComponents::from_env` opens the pipeline index: always a
+# directory inside the run, never the deployment's.
+PIPELINE_INDEX_ROOT_VAR = "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT"
 # The env file variables without which the real scorer cannot start
-# (`harness_dependencies_from_env`); the timeout and the embedder cache have
-# defaults there.
-PACKAGE_CHECK_REQUIRED_VARIABLES = ("TRACE_COMMONS_NEAR_AI_BASE_URL", "TRACE_COMMONS_NEAR_AI_API_KEY")
+# (`NearAiGateSharedComponents::from_env`); the rest have defaults there.
+PACKAGE_CHECK_REQUIRED_VARIABLES = (
+    "TRACE_COMMONS_NEAR_AI_BASE_URL",
+    "TRACE_COMMONS_NEAR_AI_API_KEY",
+    "TRACE_COMMONS_NEAR_AI_MODEL",
+)
 # Where the run keeps the production harness's usearch indexes, one
 # directory per check, emptied at the start of every `package-checks`.
 INDEX_DIR = "indexes"
@@ -517,7 +523,7 @@ def make_package_checks(hooks):
             HARNESS_ASSEMBLY_VAR: "production",
             HARNESS_PACKAGE_PATH_VAR: str(run_dir / PACKAGE_FILE),
             HARNESS_TRUSTED_KEY_PATH_VAR: str(run_dir / TRUSTED_KEY_FILE),
-            HARNESS_INDEX_ROOT_VAR: str(index_root),
+            PIPELINE_INDEX_ROOT_VAR: str(index_root),
         }
         hooks.package_checks(
             production.run,

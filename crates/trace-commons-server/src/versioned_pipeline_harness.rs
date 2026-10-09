@@ -17,13 +17,16 @@
 //! A production harness serves a signed production package, never one of
 //! its own making: it reads the scorer and embedder descriptors and `main`'s
 //! gate configuration back out of the package
-//! ([`production_package_pins`]), builds the dependencies those descriptors
-//! name, assembles, and refuses (`harness_production_package_mismatch`) a
-//! service whose package is not the signed one byte for byte. Only
-//! [`harness_dependencies_from_env`] names the NEAR AI, fastembed and usearch
-//! types; a test hands [`assemble_harness_production`] qualified doubles
-//! through the same trait objects, and the package check makes a double
-//! that described itself as something else fail rather than pass.
+//! ([`production_package_pins`]), takes its components from
+//! `PipelineGateComponents::from_env` -- the constructor the deployed ingest
+//! uses, and the only one whose scorer and embedder adapters are
+//! production-qualified -- assembles, and refuses
+//! (`harness_production_package_mismatch`) a service whose package is not the
+//! signed one byte for byte, which is also what refuses an env file whose
+//! descriptors are not the package's. [`harness_dependencies_from_env`] is the
+//! only production source; a test hands [`assemble_harness_production`]
+//! doubles ([`HarnessDependencies::Doubles`]), which are never
+//! production-qualified, whatever they report.
 //!
 //! What the switch replaces is the scorer, the embedder, the index, the
 //! settlement adapter and its cap, and the package. Authority and the
@@ -44,8 +47,9 @@ use crate::versioned_pipeline_authority::{PipelineAuthorityProvider, PipelinePri
 use crate::versioned_pipeline_bundle::package_compatibility_config;
 use crate::versioned_pipeline_compat::{CompatibilityQualification, MainGateConfig};
 use crate::versioned_pipeline_production::{
-    FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponents, ProductionPipelineInputs,
-    production_compatibility_package, production_pipeline_builder,
+    FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponentParts,
+    PipelineGateComponents, ProductionPipelineInputs, production_compatibility_package,
+    production_pipeline_builder,
 };
 use crate::versioned_pipeline_qualification::{
     BundlePackageTrustStore, SignedBundlePackage, TrustedBundleKey,
@@ -59,11 +63,6 @@ pub const TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH: &str =
     "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH";
 pub const TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH: &str =
     "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH";
-/// Where a production harness opens its usearch pipeline index: a directory
-/// `pipeline.py` makes inside the run, never the deployment's
-/// `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`, which no harness reads.
-pub const TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT: &str =
-    "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT";
 
 pub const HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL: &str =
     "harness_production_assembly_unavailable";
@@ -71,8 +70,6 @@ pub const HARNESS_ASSEMBLY_UNKNOWN_LABEL: &str = "harness_assembly_unknown";
 pub const HARNESS_PRODUCTION_PACKAGE_INVALID_LABEL: &str = "harness_production_package_invalid";
 pub const HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL: &str = "harness_production_package_mismatch";
 pub const HARNESS_PRODUCTION_PACKAGE_MISSING_LABEL: &str = "harness_production_package_missing";
-pub const HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL: &str =
-    "harness_production_index_root_missing";
 
 /// What a qualification harness assembles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,38 +194,74 @@ pub fn verified_package_from_lookup(
     verified_package(Path::new(&package), Path::new(&key))
 }
 
-/// The scorer, embedder and index a production harness holds. The harness
-/// on the operator host fills it from [`harness_dependencies_from_env`]; a
-/// test fills it with qualified doubles.
+/// Test doubles for a production harness's scorer, embedder and index.
 #[derive(Clone)]
-pub struct HarnessDependencies {
+pub struct HarnessDoubles {
     pub scorer: Arc<dyn PerplexityScorer>,
     pub embedder: Arc<dyn Embedder>,
     pub index_reader: Arc<dyn IdentifiedIndexReader>,
     pub index_writer: Arc<dyn IdentifiedIndexWriter>,
 }
 
-/// The gate components of a production harness: `dependencies` under the
-/// package's own descriptors, with the harness's `authority` and `privacy`.
+/// What a production harness builds its gate components from.
+#[derive(Clone)]
+pub enum HarnessDependencies {
+    /// Doubles, wrapped under the package's descriptors by
+    /// `PipelineGateComponents::with_unqualified_adapters`: never
+    /// production-qualified. Tests only.
+    Doubles(HarnessDoubles),
+    /// The components `PipelineGateComponents::from_env` built
+    /// ([`harness_dependencies_from_env`]): the real NEAR AI scorer,
+    /// fastembed embedder and usearch index, production-qualified.
+    FromEnv(Arc<PipelineGateComponents>),
+}
+
+impl HarnessDependencies {
+    pub fn index_reader(&self) -> Arc<dyn IdentifiedIndexReader> {
+        match self {
+            Self::Doubles(doubles) => doubles.index_reader.clone(),
+            Self::FromEnv(components) => components.parts().index_reader.clone(),
+        }
+    }
+
+    pub fn index_writer(&self) -> Arc<dyn IdentifiedIndexWriter> {
+        match self {
+            Self::Doubles(doubles) => doubles.index_writer.clone(),
+            Self::FromEnv(components) => components.parts().index_writer.clone(),
+        }
+    }
+}
+
+/// The gate components of a production harness, with the harness's
+/// `authority` and `privacy`: doubles under the package's own descriptors
+/// (unqualified), or `from_env`'s components with only those two replaced
+/// (`PipelineGateComponents::with_boundaries`).
 pub fn harness_production_components(
     pins: &ProductionPackagePins,
     dependencies: HarnessDependencies,
     authority: Arc<dyn PipelineAuthorityProvider>,
     privacy: Arc<dyn PipelinePrivacyBoundary>,
 ) -> Arc<PipelineGateComponents> {
-    Arc::new(PipelineGateComponents {
-        scorer: dependencies.scorer,
-        scorer_descriptor: pins.scorer_descriptor.clone(),
-        embedder: dependencies.embedder,
-        embedder_descriptor: pins.embedder_descriptor.clone(),
-        index_reader: dependencies.index_reader,
-        index_writer: dependencies.index_writer,
-        index_root_shared_with_legacy: false,
-        authority,
-        tenant_policy_count: 0,
-        privacy: Some(privacy),
-        privacy_backend: None,
-    })
+    match dependencies {
+        HarnessDependencies::Doubles(doubles) => Arc::new(
+            PipelineGateComponents::with_unqualified_adapters(PipelineGateComponentParts {
+                scorer: doubles.scorer,
+                scorer_descriptor: pins.scorer_descriptor.clone(),
+                embedder: doubles.embedder,
+                embedder_descriptor: pins.embedder_descriptor.clone(),
+                index_reader: doubles.index_reader,
+                index_writer: doubles.index_writer,
+                index_root_shared_with_legacy: false,
+                authority,
+                tenant_policy_count: 0,
+                privacy: Some(privacy),
+                privacy_backend: None,
+            }),
+        ),
+        HarnessDependencies::FromEnv(components) => {
+            Arc::new(components.with_boundaries(authority, privacy))
+        }
+    }
 }
 
 /// [`crate::versioned_pipeline_production::assemble_production_pipeline`] over `inputs`, refused
@@ -263,100 +296,53 @@ pub fn assemble_harness_production_crashing_at(
     Ok(service)
 }
 
-/// The production dependencies `pins` name, built for a harness on the
-/// operator host (spec B-D1: real NEAR AI scoring, real bge embedding, a
-/// usearch index in the run directory). The model, cutoff, top-k and the
-/// embedder's settings come from the package; `lookup` supplies only what
-/// the package does not bind: the NEAR AI endpoint, key and timeout, and the
-/// embedder's model cache. The index opens at `index_root` with ingest's
-/// default HNSW settings, which no package binds.
+/// The production components for a harness on the operator host (spec
+/// B-D1): `PipelineGateComponents::from_env`, exactly as the deployed ingest
+/// calls it, with no tenant policy (the harness replaces the authority and
+/// the privacy boundary with its own). It reads the process environment:
+/// the descriptors, the NEAR AI endpoint, key and model, the embedder, and
+/// `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`, which `pipeline.py promote
+/// package-checks` points inside the run. Every missing or inconsistent
+/// setting refuses with `from_env`'s own label; nothing falls back to a
+/// reference component.
 #[cfg(feature = "near-ai-scorer")]
-pub async fn harness_dependencies_from_env(
-    pins: &ProductionPackagePins,
-    index_root: &Path,
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> anyhow::Result<HarnessDependencies> {
-    use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::{NearAiPerplexityScorer, NearAiScorerConfig};
+pub async fn harness_dependencies_from_env() -> anyhow::Result<HarnessDependencies> {
+    use std::collections::BTreeMap;
 
-    let value = |var: &str| {
-        lookup(var)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    };
-    let base_url = value("TRACE_COMMONS_NEAR_AI_BASE_URL")
-        .ok_or_else(|| anyhow::anyhow!("harness_near_ai_base_url_missing"))?;
-    let api_key = value("TRACE_COMMONS_NEAR_AI_API_KEY")
-        .ok_or_else(|| anyhow::anyhow!("harness_near_ai_api_key_missing"))?;
-    let timeout_seconds = match value("TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS") {
-        Some(raw) => raw
-            .parse::<u64>()
-            .ok()
-            .filter(|seconds| *seconds > 0)
-            .ok_or_else(|| anyhow::anyhow!("harness_near_ai_timeout_invalid"))?,
-        None => 60,
-    };
-    let scorer_config = NearAiScorerConfig {
-        base_url,
-        model: pins.scorer_descriptor.model.clone(),
-        api_key,
-        tail_logprob_cutoff: pins.scorer_descriptor.tail_logprob_cutoff,
-        logprobs_top_k: pins.scorer_descriptor.logprobs_top_k,
-        timeout: std::time::Duration::from_secs(timeout_seconds),
-    };
-    // reqwest's blocking client must not be built on an async task.
-    let scorer =
-        tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_config))
-            .await
-            .map_err(|_| anyhow::anyhow!("harness_near_ai_scorer_init_failed"))?
-            .map_err(|_| anyhow::anyhow!("harness_near_ai_scorer_init_failed"))?;
-    let embedder_descriptor = &pins.embedder_descriptor;
-    let cache_dir = value("TRACE_COMMONS_EMBEDDER_CACHE_DIR")
-        .unwrap_or_else(|| "/var/cache/trace-commons-embedder".to_string());
-    let embedder = FastEmbedTextEmbedder::try_new(
-        embedder_descriptor.model_id.clone(),
-        &cache_dir,
-        embedder_descriptor.matryoshka_dim,
-        embedder_descriptor.max_tokens,
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("harness_embedder_init_failed"))?;
-    anyhow::ensure!(
-        embedder.output_dim() == embedder_descriptor.output_dim,
-        "harness_embedder_dimension_mismatch"
-    );
-    let index = open_harness_index(index_root, embedder_descriptor.output_dim)?;
-    Ok(HarnessDependencies {
-        scorer: Arc::new(scorer),
-        embedder: Arc::new(embedder),
-        index_reader: index.clone(),
-        index_writer: index,
+    use crate::versioned_pipeline_production::PipelineComponentInputs;
+
+    let (components, _shared) = PipelineGateComponents::from_env(PipelineComponentInputs {
+        tenant_policies: Arc::new(BTreeMap::new()),
+        require_tenant_submission_policy: false,
+        db_policy_reads: Arc::new(|_: &str| false),
     })
+    .await?;
+    Ok(HarnessDependencies::FromEnv(components))
 }
 
-/// A usearch pipeline index of `dim` at `index_root`, created if absent,
-/// with ingest's default HNSW settings (no package binds them). The restore
-/// drill opens a fresh one for each index it rebuilds.
+/// A second usearch pipeline index for the restore drill's rebuild, beside
+/// the live one: `<TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT>-rebuilt`, with
+/// the settings `from_env` opens the live one with. A rebuild target only;
+/// nothing is scored against it.
 #[cfg(feature = "near-ai-scorer")]
-pub fn open_harness_index(
-    index_root: &Path,
-    dim: usize,
-) -> anyhow::Result<Arc<crate::versioned_pipeline_production::UsearchPipelineIndex>> {
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig;
-    std::fs::create_dir_all(index_root)
+pub fn open_harness_rebuild_index()
+-> anyhow::Result<Arc<crate::versioned_pipeline_production::UsearchPipelineIndex>> {
+    use crate::versioned_pipeline_production::{
+        pipeline_index_root_from, std_env_lookup, usearch_index_config_from_env,
+    };
+    let live = pipeline_index_root_from(&std_env_lookup)?;
+    let name = live
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("pipeline_vector_index_open_failed"))?
+        .to_string_lossy()
+        .into_owned();
+    let root = live.with_file_name(format!("{name}-rebuilt"));
+    std::fs::create_dir_all(&root)
         .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
     Ok(Arc::new(
         crate::versioned_pipeline_production::UsearchPipelineIndex::open(
-            index_root,
-            UsearchVectorIndexConfig {
-                dim,
-                hnsw_m: 16,
-                ef_construction: 200,
-                ef_search: 50,
-                max_open: 32,
-                flush_every: 32,
-                flush_interval: None,
-            },
+            &root,
+            usearch_index_config_from_env()?,
         )?,
     ))
 }

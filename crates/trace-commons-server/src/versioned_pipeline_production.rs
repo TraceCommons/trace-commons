@@ -7,12 +7,15 @@
 //! `pipeline_production_adapters` check.
 //!
 //! Library code, so an integration target can construct the production
-//! assembly ([`assemble_production_pipeline`]) over the components it holds
-//! (PR #1295 review, Major 1). Everything here takes its inputs as values
-//! and trait objects; only the ingest binary reads the environment and
-//! names the NEAR AI and fastembed types that fill [`PipelineGateComponents`].
-//! [`UsearchPipelineIndex`] needs `near-ai-scorer`, the feature that
-//! compiles usearch for the pipeline.
+//! assembly ([`assemble_production_pipeline`]) exactly as ingest does (PR
+//! #1295 review, Major 1). Under `near-ai-scorer`,
+//! [`PipelineGateComponents::from_env`] (in [`gate_env`]) is the one
+//! constructor of the real NEAR AI scorer, fastembed embedder and usearch
+//! pipeline index; the ingest binary and the integration targets both call
+//! it. Components built any other way
+//! ([`PipelineGateComponents::with_unqualified_adapters`]) hold doubles, and
+//! their scorer and embedder adapters are never production-qualified (PR
+//! #1295 review round 2, Major 1).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -226,14 +229,33 @@ pub fn production_compatibility_package(
 /// The NEAR AI scorer as the pipeline names it (spec A-D4). Holds the
 /// scorer as a trait object -- the legacy gate holds the same one -- and
 /// forwards both scoring methods, so the lossless `score_chunk` survives.
+///
+/// Production-qualified only when [`assemble_production_pipeline`] wraps
+/// the scorer [`PipelineGateComponents::from_env`] built: a trait object
+/// does not say what is behind it, so the qualification is carried from
+/// the one constructor that knows, never asserted by the wrapper.
 pub struct NearAiPipelineScorer {
     inner: Arc<dyn PerplexityScorer>,
     descriptor: NearAiScorerDescriptor,
+    production_qualified: bool,
 }
 
 impl NearAiPipelineScorer {
+    /// The adapter over any scorer. Never production-qualified.
     pub fn new(inner: Arc<dyn PerplexityScorer>, descriptor: NearAiScorerDescriptor) -> Self {
-        Self { inner, descriptor }
+        Self::with_qualification(inner, descriptor, false)
+    }
+
+    fn with_qualification(
+        inner: Arc<dyn PerplexityScorer>,
+        descriptor: NearAiScorerDescriptor,
+        production_qualified: bool,
+    ) -> Self {
+        Self {
+            inner,
+            descriptor,
+            production_qualified,
+        }
     }
 
     pub fn descriptor(&self) -> &NearAiScorerDescriptor {
@@ -261,15 +283,17 @@ impl IdentifiedPerplexityScorer for NearAiPipelineScorer {
     }
 
     fn production_qualified(&self) -> bool {
-        true
+        self.production_qualified
     }
 }
 
 /// The fastembed embedder as the pipeline names it (spec A-D5).
+/// Production-qualified on the same terms as [`NearAiPipelineScorer`].
 pub struct FastEmbedPipelineEmbedder {
     inner: Arc<dyn Embedder>,
     descriptor: FastEmbedDescriptor,
     index_model_id: String,
+    production_qualified: bool,
 }
 
 /// The identifier index entries and sealed index commands record for
@@ -298,12 +322,22 @@ fn index_model_identifier(model_id: &str) -> String {
 }
 
 impl FastEmbedPipelineEmbedder {
+    /// The adapter over any embedder. Never production-qualified.
     pub fn new(inner: Arc<dyn Embedder>, descriptor: FastEmbedDescriptor) -> Self {
+        Self::with_qualification(inner, descriptor, false)
+    }
+
+    fn with_qualification(
+        inner: Arc<dyn Embedder>,
+        descriptor: FastEmbedDescriptor,
+        production_qualified: bool,
+    ) -> Self {
         let index_model_id = index_model_identifier(&descriptor.model_id);
         Self {
             inner,
             descriptor,
             index_model_id,
+            production_qualified,
         }
     }
 
@@ -332,7 +366,7 @@ impl IdentifiedEmbedder for FastEmbedPipelineEmbedder {
     }
 
     fn production_qualified(&self) -> bool {
-        true
+        self.production_qualified
     }
 }
 
@@ -453,12 +487,8 @@ impl PipelineAuthorityProvider for TenantPolicyPipelineAuthorityProvider {
 pub const PIPELINE_PRODUCTION_COMPONENTS_MISSING_LABEL: &str =
     "pipeline_production_components_missing";
 
-/// The gate components the pipeline shares with the legacy gate (spec
-/// A-D3), built once at boot. Holds trait objects and descriptors only:
-/// the ingest binary's `near-ai-scorer` builder fills it from the NEAR AI
-/// scorer, the fastembed embedder and the usearch index, and a test fills
-/// it with qualified doubles.
-pub struct PipelineGateComponents {
+/// What [`PipelineGateComponents`] holds: trait objects and descriptors.
+pub struct PipelineGateComponentParts {
     pub scorer: Arc<dyn PerplexityScorer>,
     pub scorer_descriptor: NearAiScorerDescriptor,
     pub embedder: Arc<dyn Embedder>,
@@ -476,6 +506,100 @@ pub struct PipelineGateComponents {
     pub privacy: Option<Arc<dyn PipelinePrivacyBoundary>>,
     pub privacy_backend:
         Option<trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag>,
+}
+
+/// The gate components the pipeline shares with the legacy gate (spec
+/// A-D3), built once at boot. Under `near-ai-scorer`,
+/// [`PipelineGateComponents::from_env`] fills them from the NEAR AI scorer,
+/// the fastembed embedder and the usearch index; a test fills them with
+/// doubles through [`Self::with_unqualified_adapters`].
+///
+/// The parts are private and read-only once built, so a caller cannot
+/// swap a double into components `from_env` built and keep their status.
+pub struct PipelineGateComponents {
+    parts: PipelineGateComponentParts,
+    /// Whether the scorer and embedder adapters the assembly wraps around
+    /// `parts` are production-qualified: `true` only from `from_env`.
+    adapters_production_qualified: bool,
+}
+
+impl PipelineGateComponents {
+    /// Components over whatever `parts` holds. The scorer and embedder
+    /// adapters the assembly wraps around them are not production-qualified,
+    /// whatever the doubles inside report: a production boot refuses them
+    /// (`pipeline_runtime_dependencies_not_production_qualified`), and the
+    /// adapters check fails on them.
+    pub fn with_unqualified_adapters(parts: PipelineGateComponentParts) -> Self {
+        Self {
+            parts,
+            adapters_production_qualified: false,
+        }
+    }
+
+    /// The only path to production-qualified adapters, reached only from
+    /// [`Self::from_env`] over the components it built.
+    #[cfg(feature = "near-ai-scorer")]
+    fn production(parts: PipelineGateComponentParts) -> Self {
+        Self {
+            parts,
+            adapters_production_qualified: true,
+        }
+    }
+
+    pub fn parts(&self) -> &PipelineGateComponentParts {
+        &self.parts
+    }
+
+    /// These components with `authority` and the privacy boundary `privacy`
+    /// in place of their own, and nothing else changed: the scorer, the
+    /// embedder, their descriptors, the index, and whether the adapters are
+    /// production-qualified stay as they are, so this cannot qualify a
+    /// double. The qualification harness (spec B-D1) drives fixed test
+    /// tenants, which a deployment's tenant policies and classifier must not
+    /// decide.
+    pub fn with_boundaries(
+        &self,
+        authority: Arc<dyn PipelineAuthorityProvider>,
+        privacy: Arc<dyn PipelinePrivacyBoundary>,
+    ) -> Self {
+        let parts = &self.parts;
+        Self {
+            parts: PipelineGateComponentParts {
+                scorer: parts.scorer.clone(),
+                scorer_descriptor: parts.scorer_descriptor.clone(),
+                embedder: parts.embedder.clone(),
+                embedder_descriptor: parts.embedder_descriptor.clone(),
+                index_reader: parts.index_reader.clone(),
+                index_writer: parts.index_writer.clone(),
+                index_root_shared_with_legacy: parts.index_root_shared_with_legacy,
+                authority,
+                tenant_policy_count: 0,
+                privacy: Some(privacy),
+                privacy_backend: None,
+            },
+            adapters_production_qualified: self.adapters_production_qualified,
+        }
+    }
+
+    pub fn adapters_production_qualified(&self) -> bool {
+        self.adapters_production_qualified
+    }
+
+    /// The scorer and embedder adapters the assembly binds.
+    fn pipeline_adapters(&self) -> (Arc<NearAiPipelineScorer>, Arc<FastEmbedPipelineEmbedder>) {
+        (
+            Arc::new(NearAiPipelineScorer::with_qualification(
+                self.parts.scorer.clone(),
+                self.parts.scorer_descriptor.clone(),
+                self.adapters_production_qualified,
+            )),
+            Arc::new(FastEmbedPipelineEmbedder::with_qualification(
+                self.parts.embedder.clone(),
+                self.parts.embedder_descriptor.clone(),
+                self.adapters_production_qualified,
+            )),
+        )
+    }
 }
 
 /// The Settle caps of the production assembly: `trace_credit` at `main`'s
@@ -529,22 +653,20 @@ pub fn production_pipeline_builder(
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<crate::versioned_pipeline::PipelineServiceBuilder> {
     use crate::versioned_pipeline::PipelineServiceBuilder;
+    use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
+    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
     use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
-    let components = inputs.components;
-    let scorer = Arc::new(NearAiPipelineScorer::new(
-        components.scorer.clone(),
-        components.scorer_descriptor.clone(),
-    ));
-    let embedder = Arc::new(FastEmbedPipelineEmbedder::new(
-        components.embedder.clone(),
-        components.embedder_descriptor.clone(),
-    ));
-    let package = production_compatibility_package(
-        &components.scorer_descriptor,
-        &components.embedder_descriptor,
+    let (scorer, embedder) = inputs.components.pipeline_adapters();
+    let components = inputs.components.parts();
+    let config = CompatibilityBundleConfig::production_compatible(
+        components.scorer_descriptor.compatibility_scorer_model_id(),
+        PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+        PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
         &inputs.main_gate,
     )?;
+    let package =
+        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())?;
     let registry =
         SettlementAdapterRegistry::new(vec![
             Arc::new(InternalTraceCreditSettlementAdapter::new())
@@ -708,6 +830,7 @@ fn production_adapters_observation(
     if !classifies_prose_pii {
         blockers.push("pipeline_privacy_filter_required".to_string());
     }
+    let components = components.parts();
     if components.index_root_shared_with_legacy {
         blockers.push(PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL.to_string());
     }
@@ -846,6 +969,9 @@ pub fn validate_pipeline_index_root(
     Ok(())
 }
 
+pub mod gate_env;
+pub use gate_env::*;
+
 #[cfg(feature = "near-ai-scorer")]
 pub use usearch_pipeline_index::UsearchPipelineIndex;
 
@@ -855,6 +981,80 @@ mod usearch_pipeline_index;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn double_parts() -> PipelineGateComponentParts {
+        let index = crate::versioned_pipeline_index::IsolatedPipelineIndex::new();
+        PipelineGateComponentParts {
+            scorer: Arc::new(trace_commons_gate_api::ReferencePerplexityScorer::new()),
+            scorer_descriptor: NearAiScorerDescriptor {
+                model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+                tail_logprob_cutoff: -8.0,
+                logprobs_top_k: 1,
+            },
+            embedder: Arc::new(trace_commons_gate_api::ReferenceEmbedder::new()),
+            embedder_descriptor: FastEmbedDescriptor {
+                model_id: "BAAI/bge-large-en-v1.5".to_string(),
+                output_dim: 1024,
+                max_tokens: 512,
+                matryoshka_dim: None,
+            },
+            index_reader: index.clone(),
+            index_writer: index,
+            index_root_shared_with_legacy: false,
+            authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+                Arc::new(BTreeMap::new()),
+                false,
+                Arc::new(|_: &str| false),
+            )),
+            tenant_policy_count: 0,
+            privacy: None,
+            privacy_backend: None,
+        }
+    }
+
+    /// PR #1295 review round 2, Major 1: the scorer and embedder adapters
+    /// never call themselves production-qualified on their own say. Over a
+    /// double, through `new` or through components built from parts, they
+    /// are not; only `PipelineGateComponents::from_env` can make them so.
+    /// An adapter that answered `true` unconditionally again fails here.
+    #[test]
+    fn adapters_over_doubles_are_never_production_qualified() {
+        let parts = double_parts();
+        let scorer =
+            NearAiPipelineScorer::new(parts.scorer.clone(), parts.scorer_descriptor.clone());
+        let embedder = FastEmbedPipelineEmbedder::new(
+            parts.embedder.clone(),
+            parts.embedder_descriptor.clone(),
+        );
+        assert!(!IdentifiedPerplexityScorer::production_qualified(&scorer));
+        assert!(!IdentifiedEmbedder::production_qualified(&embedder));
+
+        let components = PipelineGateComponents::with_unqualified_adapters(parts);
+        assert!(!components.adapters_production_qualified());
+        let (scorer, embedder) = components.pipeline_adapters();
+        assert!(!scorer.production_qualified());
+        assert!(!embedder.production_qualified());
+        assert_eq!(
+            scorer.dependency_identity(),
+            NEAR_AI_PIPELINE_SCORER_IDENTITY
+        );
+        assert_eq!(
+            embedder.dependency_identity(),
+            FASTEMBED_PIPELINE_EMBEDDER_IDENTITY
+        );
+    }
+
+    /// The qualification the assembly binds is the components' own: the
+    /// private production path, and only it, yields qualified adapters.
+    #[cfg(feature = "near-ai-scorer")]
+    #[test]
+    fn only_the_production_path_qualifies_the_adapters() {
+        let components = PipelineGateComponents::production(double_parts());
+        assert!(components.adapters_production_qualified());
+        let (scorer, embedder) = components.pipeline_adapters();
+        assert!(scorer.production_qualified());
+        assert!(embedder.production_qualified());
+    }
 
     /// The overlap check compares the paths the filesystem resolves, not the
     /// text: a pipeline root reached through a symlink into the legacy root,

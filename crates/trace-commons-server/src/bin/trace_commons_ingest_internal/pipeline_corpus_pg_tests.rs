@@ -1855,24 +1855,17 @@ fn require_production_corpus_config(
         .map_err(|error| error.to_string())
 }
 
-/// The real production dependencies for a corpus run on the operator host:
-/// NEAR AI, fastembed, and a usearch index at
-/// `TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT`.
+/// The real production components for a corpus run on the operator host:
+/// `PipelineGateComponents::from_env` (NEAR AI, fastembed, and a usearch
+/// index at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run).
 #[cfg(feature = "near-ai-scorer")]
 async fn production_corpus_dependencies_from_env(
     config: &CorpusRunConfig,
     package: &BundlePackage,
 ) -> HarnessDependencies {
-    use trace_commons_server::versioned_pipeline_harness::{
-        HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL, TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT,
-        harness_dependencies_from_env,
-    };
+    use trace_commons_server::versioned_pipeline_harness::harness_dependencies_from_env;
     require_production_corpus_config(config, package).unwrap_or_else(|label| panic!("{label}"));
-    let lookup = |var: &str| std::env::var(var).ok();
-    let pins = production_package_pins(package).unwrap_or_else(|error| panic!("{error}"));
-    let index_root = lookup(TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT)
-        .unwrap_or_else(|| panic!("{HARNESS_PRODUCTION_INDEX_ROOT_MISSING_LABEL}"));
-    harness_dependencies_from_env(&pins, Path::new(&index_root), &lookup)
+    harness_dependencies_from_env()
         .await
         .unwrap_or_else(|error| panic!("{error}"))
 }
@@ -3397,8 +3390,9 @@ pub(super) fn write_signed_test_package(dir: &Path, package: &BundlePackage) -> 
 }
 
 /// Production mode end to end (spec B-D1, plan B3) through `run_corpus`, the
-/// body the operator's `promote package-checks` runs, over qualified
-/// doubles instead of NEAR AI, fastembed and usearch: the production
+/// body the operator's `promote package-checks` runs, over doubles (never
+/// production-qualified) instead of `from_env`'s NEAR AI, fastembed and
+/// usearch: the production
 /// assembler serves the signed production package over real HTTP, every
 /// deterministic field matches the corpus's expectations, and the report
 /// says it is a production-mode harness report. Production mode refuses a
@@ -3449,12 +3443,14 @@ async fn production_corpus_run_serves_the_signed_package_over_doubles() {
     run_corpus(
         &production,
         package.clone(),
-        CorpusDependencies::Production(HarnessDependencies {
-            scorer: Arc::new(ReferencePerplexityScorer::new()),
-            embedder: Arc::new(ReferenceEmbedder::new()),
-            index_reader: index.clone(),
-            index_writer: index,
-        }),
+        CorpusDependencies::Production(HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(ReferencePerplexityScorer::new()),
+                embedder: Arc::new(ReferenceEmbedder::new()),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        )),
     )
     .await;
     let report: serde_json::Value =

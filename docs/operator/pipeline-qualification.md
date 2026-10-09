@@ -489,23 +489,39 @@ results, and its restore drill carries the blocker
 `filesystem_restore_local_only`.
 
 The production run's four package-bearing results must come from the
-production assembly. The four harnesses that emit them (the bundle
+production assembly. `assemble_production_pipeline`
+(`trace_commons_server::versioned_pipeline_production`) is library code, and
+so is its one components constructor,
+`PipelineGateComponents::from_env(PipelineComponentInputs)` (`near-ai-scorer`),
+which builds the NEAR AI scorer, the fastembed embedder and the usearch
+pipeline index from the environment and refuses a start whose descriptors
+disagree with them. The ingest binary and the integration targets that emit
+these results call that same constructor. Its scorer and embedder adapters
+are the only ones that report themselves production-qualified: components
+built any other way (`PipelineGateComponents::with_unqualified_adapters`,
+which is how a test fills them with doubles) are never production-qualified,
+whatever the doubles report, so a double wrapped under the production
+descriptors cannot qualify
+(`production_assembly_is_constructible_from_the_library` pins that).
+
+The four harnesses that emit the package-bearing results (the bundle
 qualification test, the corpus harness, and the restore seed and resume)
 read `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY`: unset or `reference`, they
 build the reference assembly exactly as `qualify` always has; `production`,
-they build the service through the production builder
-(`trace_commons_server::versioned_pipeline_production`) over the signed
-production package, the real NEAR AI scorer, the fastembed embedder and a
-usearch index, and refuse unless the service serves exactly that package.
-Production mode exists only in a `near-ai-scorer` build; any other build
-refuses it with `harness_production_assembly_unavailable`. In production mode
-`pipeline_bundle_qualification`'s five reference assertions flip (scorer and
-embedder identities are `near_ai_perplexity_scorer` and
-`fastembed_text_embedder`, both production-qualified, configuration
-qualifiable), the corpus check compares only the fields real scoring cannot
-move, and every one of the four results' evidence says
-`"harness_assembly": "production"`. A reference result never carries that
-field. `promote package-checks` (below) runs the four in this mode.
+they build their components through `from_env` and the service through the
+production builder over the signed production package, and refuse unless the
+service serves exactly that package. Production mode exists only in a
+`near-ai-scorer` build; any other build refuses it with
+`harness_production_assembly_unavailable`, and a missing NEAR AI or embedder
+setting refuses with `from_env`'s own label, never falling back to reference
+components. In production mode `pipeline_bundle_qualification`'s five
+reference assertions flip (scorer and embedder identities are
+`near_ai_perplexity_scorer` and `fastembed_text_embedder`, both
+production-qualified, configuration qualifiable), the corpus check compares
+only the fields real scoring cannot move, and every one of the four results'
+evidence says `"harness_assembly": "production"`. A reference result never
+carries that field. `promote package-checks` (below) runs the four in this
+mode.
 
 ## The production run: `pipeline.py promote`
 
@@ -518,7 +534,7 @@ record` refuses to start when `CI` is set (`promote_refused_in_ci`).
 | Command | What it does |
 |---|---|
 | `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
-| `promote package-checks --run-id R --env-file ENV [--pin PATH]` | The four package checks (`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`) on the production assembly, on the pilot's feature set, over the run's package. From `ENV` (the deployment's env file) it passes on only the NEAR AI endpoint, key and timeout and the embedder cache directory, and refuses (`promote_env_file_incomplete`) without the endpoint and key. The HF corpus comes from the committed `pin-network.json` (`hf_network_pin_missing` until it is committed); a `--pin` whose bytes differ from it is refused (`hf_network_pin_not_committed`). Each check gets a fresh usearch index under the run's `indexes/`. Refuses any result that does not name the run's package or whose evidence does not say `harness_assembly: production` (`promote_harness_assembly_not_production:<id>`); `sign` refuses the same. |
+| `promote package-checks --run-id R --env-file ENV [--pin PATH]` | The four package checks (`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`) on the production assembly, on the pilot's feature set, over the run's package. Its components come from `PipelineGateComponents::from_env`. From `ENV` (the deployment's env file) it passes on only what that reads: the scorer and embedder descriptors, the NEAR AI endpoint, key and timeout, the embedder cache, and the usearch settings. It never passes the live index roots, and points `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run. It refuses (`promote_env_file_incomplete`) without the NEAR AI endpoint, key and model. The HF corpus comes from the committed `pin-network.json` (`hf_network_pin_missing` until it is committed); a `--pin` whose bytes differ from it is refused (`hf_network_pin_not_committed`). Each check gets a fresh usearch index under the run's `indexes/`. Refuses any result that does not name the run's package or whose evidence does not say `harness_assembly: production` (`promote_harness_assembly_not_production:<id>`); `sign` refuses the same. |
 | `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). |
 | `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
 | `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |

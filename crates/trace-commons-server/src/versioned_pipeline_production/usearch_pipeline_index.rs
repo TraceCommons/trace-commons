@@ -3,7 +3,7 @@
 
 //! The usearch-backed pipeline vector index (spec A-D6).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -62,6 +62,11 @@ enum ManifestRecord {
         content_digest: String,
         content_hash: String,
     },
+    /// Written before an entry is deleted from usearch: the removal the
+    /// next start may complete (see [`UsearchPipelineIndex::open`]).
+    RemoveIntent {
+        entry_id: Uuid,
+    },
     Remove {
         entry_id: Uuid,
     },
@@ -88,6 +93,9 @@ struct Namespace {
     log_len: u64,
     /// Records in the log, the header not counted.
     log_records: usize,
+    /// Entries whose `RemoveIntent` is logged and whose `Remove` is not:
+    /// usearch may or may not still hold them. They stay in `entries`.
+    pending_removals: BTreeSet<Uuid>,
     /// A failed write could not be undone, so memory, the usearch file and
     /// the manifest may disagree. Every later write answers `Uncertain`
     /// until a restart re-reads the disk, which refuses the start if they
@@ -113,10 +121,12 @@ struct Namespace {
 /// A failed write is undone (the vector taken back out of usearch, the
 /// namespace saved again, a partial log record cut off) and answers
 /// `Failed`, so a retry writes it again; one that cannot be undone answers
-/// `Uncertain` and poisons the namespace. A crash between the usearch save
-/// and the append leaves them disagreeing, and the next start refuses
-/// (`pipeline_vector_index_manifest_mismatch`); the operator then rebuilds
-/// the tenant's index into an emptied root.
+/// `Uncertain` and poisons the namespace. A removal logs its intent before
+/// it deletes anything, so the next start completes a removal that stopped
+/// part way. Any other disagreement -- a crash between an insert's usearch
+/// save and its append, or a usearch file lost or replaced -- refuses the
+/// next start (`pipeline_vector_index_manifest_mismatch`); the operator then
+/// rebuilds the tenant's index into an emptied root.
 ///
 /// Locking is per namespace: the map of namespaces is held only to find
 /// one, and a namespace's lock is held across its own writes and reads, so
@@ -130,6 +140,9 @@ pub struct UsearchPipelineIndex {
     pub(super) manifest_bytes_written: std::sync::atomic::AtomicU64,
     #[cfg(test)]
     pub(super) fail_next_append: std::sync::atomic::AtomicBool,
+    /// Fails the next append that carries a `Remove` record, the same way.
+    #[cfg(test)]
+    pub(super) fail_next_remove_append: std::sync::atomic::AtomicBool,
 }
 
 fn namespace_of(tenant_storage_ref: &TenantStorageRef, index_id: &str) -> String {
@@ -178,14 +191,15 @@ fn sync_dir(dir: &Path) -> std::io::Result<()> {
 struct ManifestLog {
     namespace: String,
     entries: BTreeMap<Uuid, ManifestEntry>,
+    pending_removals: BTreeSet<Uuid>,
     records: usize,
     len: u64,
 }
 
 /// Reads the log at `path`: the header, then each record applied in order.
 /// A line that does not parse, a record that does not apply (an insert of
-/// a present id, a remove of an absent one), and a last line without its
-/// newline (a torn append) are each a mismatch.
+/// a present id, a remove or remove intent of an absent one), and a last
+/// line without its newline (a torn append) are each a mismatch.
 fn read_log(path: &Path) -> anyhow::Result<ManifestLog> {
     let bytes = std::fs::read(path).map_err(|_| mismatch())?;
     let Some((b'\n', complete)) = bytes.split_last() else {
@@ -200,6 +214,7 @@ fn read_log(path: &Path) -> anyhow::Result<ManifestLog> {
         return Err(mismatch());
     }
     let mut entries = BTreeMap::new();
+    let mut pending_removals = BTreeSet::new();
     let mut records = 0_usize;
     for line in lines {
         match serde_json::from_slice(line).map_err(|_| mismatch())? {
@@ -218,10 +233,17 @@ fn read_log(path: &Path) -> anyhow::Result<ManifestLog> {
                     return Err(mismatch());
                 }
             }
+            ManifestRecord::RemoveIntent { entry_id } => {
+                if !entries.contains_key(&entry_id) {
+                    return Err(mismatch());
+                }
+                pending_removals.insert(entry_id);
+            }
             ManifestRecord::Remove { entry_id } => {
                 if entries.remove(&entry_id).is_none() {
                     return Err(mismatch());
                 }
+                pending_removals.remove(&entry_id);
             }
         }
         records += 1;
@@ -229,6 +251,7 @@ fn read_log(path: &Path) -> anyhow::Result<ManifestLog> {
     Ok(ManifestLog {
         namespace: header.namespace,
         entries,
+        pending_removals,
         records,
         len: bytes.len() as u64,
     })
@@ -239,6 +262,26 @@ impl UsearchPipelineIndex {
     /// `pipeline_vector_index_manifest_mismatch` when any manifest there is
     /// unreadable or does not hold exactly as many entries as its usearch
     /// file.
+    ///
+    /// Before that count is compared, each namespace's logged removals are
+    /// completed: an entry with a `RemoveIntent` and no `Remove` is deleted
+    /// from usearch (a no-op when the earlier delete reached the disk), the
+    /// namespace is saved, and the `Remove` records are appended and
+    /// fsynced. That heals a restart between a failed invalidation and its
+    /// retry (PR #1295 review round 2, Minor 2). Failing to complete them
+    /// refuses the start with `pipeline_vector_index_open_failed`.
+    ///
+    /// Which disagreement is healed, and which still refuses:
+    /// - The manifest names an entry usearch lacks. With a logged intent
+    ///   this is a removal the caller asked for that stopped part way, and
+    ///   completing it is what the retry would do. Without one it is not:
+    ///   it is a usearch file lost, replaced by an older copy or created
+    ///   empty, and dropping the entries would silently thin the tenant's
+    ///   novelty corpus, so a duplicate would score as novel. Absence alone
+    ///   never authorizes a removal; that case still refuses.
+    /// - usearch holds an entry the manifest does not name: an insert whose
+    ///   record never became durable. Its revision and content hash cannot
+    ///   be recovered, so it is never adopted; that case still refuses.
     ///
     /// usearch's own save every `flush_every` writes is turned off: every
     /// write here saves its namespace explicitly, and a save inside
@@ -254,7 +297,6 @@ impl UsearchPipelineIndex {
     /// [`Self::open`] over `index`, which must be the usearch index on
     /// `root`.
     pub(super) fn open_over(root: &Path, index: Arc<dyn VectorIndex>) -> anyhow::Result<Self> {
-        let mut namespaces = BTreeMap::new();
         let mut usearch_files = 0_usize;
         let listing = std::fs::read_dir(root)
             .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
@@ -277,13 +319,6 @@ impl UsearchPipelineIndex {
             if manifest_path(root, &log.namespace) != path {
                 return Err(mismatch());
             }
-            let stored = index
-                .snapshot(&log.namespace)
-                .ok_or_else(mismatch)?
-                .cardinality;
-            if stored != log.entries.len() as u64 {
-                return Err(mismatch());
-            }
             logs.push(log);
         }
         // Every usearch file this index writes has a manifest (the header
@@ -300,14 +335,32 @@ impl UsearchPipelineIndex {
             manifest_bytes_written: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             fail_next_append: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_remove_append: std::sync::atomic::AtomicBool::new(false),
         };
+        let mut namespaces = BTreeMap::new();
         for log in logs {
             let mut state = Namespace {
                 entries: log.entries,
                 log_len: log.len,
                 log_records: log.records,
+                pending_removals: log.pending_removals,
                 poisoned: false,
             };
+            let pending = state.pending_removals.iter().copied().collect::<Vec<_>>();
+            if !pending.is_empty() {
+                opened
+                    .remove_logged(&log.namespace, &mut state, &pending)
+                    .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
+            }
+            let stored = opened
+                .index
+                .snapshot(&log.namespace)
+                .ok_or_else(mismatch)?
+                .cardinality;
+            if stored != state.entries.len() as u64 {
+                return Err(mismatch());
+            }
             if state.log_records != state.entries.len() {
                 // Best effort: an uncompacted log is still a correct one.
                 if opened.compact(&log.namespace, &mut state).is_err() {
@@ -383,6 +436,12 @@ impl UsearchPipelineIndex {
             if self
                 .fail_next_append
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
+                || (records
+                    .iter()
+                    .any(|record| matches!(record, ManifestRecord::Remove { .. }))
+                    && self
+                        .fail_next_remove_append
+                        .swap(false, std::sync::atomic::Ordering::SeqCst))
             {
                 // A torn append: half the bytes reach the file.
                 let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
@@ -411,7 +470,9 @@ impl UsearchPipelineIndex {
         }
     }
 
-    /// Rewrites the log as a header and one insert per live entry.
+    /// Rewrites the log as a header, one insert per live entry, and one
+    /// remove intent per pending removal: an intent dropped here would leave
+    /// a removal that reached usearch unauthorized at the next start.
     fn compact(&self, namespace: &str, state: &mut Namespace) -> anyhow::Result<()> {
         let mut bytes = encode_line(&ManifestHeader {
             schema: MANIFEST_SCHEMA.to_string(),
@@ -420,9 +481,14 @@ impl UsearchPipelineIndex {
         for (entry_id, entry) in &state.entries {
             bytes.extend(encode_line(&ManifestRecord::insert(*entry_id, entry))?);
         }
+        for entry_id in &state.pending_removals {
+            bytes.extend(encode_line(&ManifestRecord::RemoveIntent {
+                entry_id: *entry_id,
+            })?);
+        }
         self.replace_log(namespace, &bytes)?;
         state.log_len = bytes.len() as u64;
-        state.log_records = state.entries.len();
+        state.log_records = state.entries.len() + state.pending_removals.len();
         Ok(())
     }
 
@@ -440,6 +506,48 @@ impl UsearchPipelineIndex {
     /// the namespace, so memory and disk again hold only what the manifest
     /// names: `Failed`. When that fails too, the namespace is poisoned:
     /// `Uncertain`.
+    /// Deletes `entry_ids`, whose remove intents are logged, from usearch,
+    /// saves the namespace, and appends their `Remove` records; the entries
+    /// leave memory only once those records are durable. A failure before
+    /// any delete is `Failed`; after one, `Uncertain`, and the intents let
+    /// the retry or the next start complete it.
+    fn remove_logged(
+        &self,
+        namespace: &str,
+        state: &mut Namespace,
+        entry_ids: &[Uuid],
+    ) -> Result<(), IndexWriteError> {
+        for (removed, entry_id) in entry_ids.iter().enumerate() {
+            if self.index.delete(namespace, *entry_id).is_err() {
+                return Err(if removed == 0 {
+                    IndexWriteError::Failed
+                } else {
+                    IndexWriteError::Uncertain
+                });
+            }
+        }
+        if self.index.flush_tenant(namespace).is_err() {
+            return Err(IndexWriteError::Uncertain);
+        }
+        let records = entry_ids
+            .iter()
+            .map(|entry_id| ManifestRecord::Remove {
+                entry_id: *entry_id,
+            })
+            .collect::<Vec<_>>();
+        if let Err(log_restored) = self.append(namespace, state, &records) {
+            if !log_restored {
+                state.poisoned = true;
+            }
+            return Err(IndexWriteError::Uncertain);
+        }
+        for entry_id in entry_ids {
+            state.entries.remove(entry_id);
+            state.pending_removals.remove(entry_id);
+        }
+        Ok(())
+    }
+
     fn undo_insert(
         &self,
         namespace: &str,
@@ -593,11 +701,14 @@ impl VectorIndexWriter for UsearchPipelineIndex {
         Ok(IndexUpsertResult::Inserted)
     }
 
-    /// Removes the revision's entries from usearch, saves the namespace,
-    /// then appends one remove record per entry; the in-memory entries go
-    /// only once the records are durable. A failure part way answers
-    /// `Uncertain` and leaves the entries listed, and the retry completes it:
-    /// removing an entry usearch no longer holds is a no-op.
+    /// Logs a remove intent for each of the revision's entries (fsynced),
+    /// then removes them from usearch, saves the namespace, and appends one
+    /// remove record per entry; the in-memory entries go only once those
+    /// records are durable. A failure part way answers `Uncertain` and
+    /// leaves the entries listed. The retry completes it (removing an entry
+    /// usearch no longer holds is a no-op), and so does the next start,
+    /// because the intent is on disk before any delete: a save by eviction
+    /// or `Drop` after the failure cannot leave a removal the start refuses.
     fn invalidate_revision(
         &self,
         tenant_storage_ref: &TenantStorageRef,
@@ -621,33 +732,26 @@ impl VectorIndexWriter for UsearchPipelineIndex {
         if doomed.is_empty() {
             return Ok(false);
         }
-        for (removed, entry_id) in doomed.iter().enumerate() {
-            if self.index.delete(&namespace, *entry_id).is_err() {
-                return Err(if removed == 0 {
-                    IndexWriteError::Failed
-                } else {
-                    IndexWriteError::Uncertain
-                });
-            }
-        }
-        if self.index.flush_tenant(&namespace).is_err() {
-            return Err(IndexWriteError::Uncertain);
-        }
-        let records = doomed
+        let intents = doomed
             .iter()
-            .map(|entry_id| ManifestRecord::Remove {
+            .filter(|entry_id| !state.pending_removals.contains(entry_id))
+            .map(|entry_id| ManifestRecord::RemoveIntent {
                 entry_id: *entry_id,
             })
             .collect::<Vec<_>>();
-        if let Err(log_restored) = self.append(&namespace, &mut state, &records) {
-            if !log_restored {
-                state.poisoned = true;
+        if !intents.is_empty() {
+            if let Err(log_restored) = self.append(&namespace, &mut state, &intents) {
+                // Nothing was deleted yet: with the log cut back, the call
+                // changed nothing.
+                if !log_restored {
+                    state.poisoned = true;
+                    return Err(IndexWriteError::Uncertain);
+                }
+                return Err(IndexWriteError::Failed);
             }
-            return Err(IndexWriteError::Uncertain);
+            state.pending_removals.extend(doomed.iter().copied());
         }
-        for entry_id in &doomed {
-            state.entries.remove(entry_id);
-        }
+        self.remove_logged(&namespace, &mut state, &doomed)?;
         self.compact_when_due(&namespace, &mut state);
         Ok(true)
     }
