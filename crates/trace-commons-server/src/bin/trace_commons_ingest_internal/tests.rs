@@ -70924,6 +70924,10 @@ struct PerplexityDriverTestDb {
     /// submission_ids)`, so a test can assert the contributor status lookup
     /// batched its ids rather than reading once per record.
     gate_credit_reads: std::sync::RwLock<Vec<(String, Vec<Uuid>)>>,
+    /// Submissions with a pipeline (`source = 'pipeline_settle'`) row, as
+    /// `(tenant_id, submission_id)`. The two re-score writers leave them
+    /// alone and report 0 rows, as the Postgres guard does.
+    pipeline_settled: std::sync::RwLock<std::collections::HashSet<(String, Uuid)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -70941,7 +70945,23 @@ impl PerplexityDriverTestDb {
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
             audit_events: std::sync::RwLock::new(Vec::new()),
             gate_credit_reads: std::sync::RwLock::new(Vec::new()),
+            pipeline_settled: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Marks `submission_id` as one the pipeline's Settle wrote a row for.
+    fn mark_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) {
+        self.pipeline_settled
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id));
+    }
+
+    fn is_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) -> bool {
+        self.pipeline_settled
+            .read()
+            .unwrap()
+            .contains(&(tenant_id.to_string(), submission_id))
     }
 
     /// Seed a `DuplicatePrecheck` derived record for `submission_id` with the
@@ -71986,7 +72006,9 @@ impl_ingest_test_corpus_store! {
         /// `find_gate_decision_by_canonical_hash` and the real Postgres SQL —
         /// otherwise a re-score would corrupt the audit trail on historical rows
         /// stamped with an older gate policy/version. This is what the re-score
-        /// unit + integration tests assert against.
+        /// unit + integration tests assert against. A pipeline-settled
+        /// submission is left alone, and every call reports the rows it
+        /// touched, as the Postgres guard does.
         async fn update_trace_gate_decision_perplexity(
             &self,
             tenant_id: &str,
@@ -71994,7 +72016,10 @@ impl_ingest_test_corpus_store! {
             perplexity_micros: i64,
             peak_perplexity_micros: Option<i64>,
             perplexity_passed: bool,
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -72007,20 +72032,24 @@ impl_ingest_test_corpus_store! {
                         row.perplexity_micros = perplexity_micros;
                         row.peak_perplexity_micros = peak_perplexity_micros;
                         row.perplexity_passed = perplexity_passed;
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres impl: the five V73 columns on the
-        /// latest decision row for the submission, nothing else.
+        /// latest decision row for the submission, nothing else; a
+        /// pipeline-settled submission is left alone (0 rows).
         async fn update_trace_gate_decision_author_perplexity(
             &self,
             tenant_id: &str,
             submission_id: Uuid,
             columns: [Option<i64>; 5],
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -72035,11 +72064,11 @@ impl_ingest_test_corpus_store! {
                         row.tool_result_perplexity_micros = columns[2];
                         row.tool_result_tokens = columns[3];
                         row.attributed_token_fraction_micros = columns[4];
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
         /// impl: record the three credit-quality values in a side table keyed by
@@ -76725,6 +76754,37 @@ async fn the_default_rescore_clears_author_columns_it_cannot_recompute() {
             .expect("decision still present");
         assert_eq!(after.perplexity_micros, RESCORED_PERPLEXITY_MICROS as i64);
         assert_eq!(author_columns_of(&after), [None; 5]);
+    }
+}
+
+/// Review of #1294: a submission the pipeline's Settle wrote a row for after
+/// the pass enumerated it is not rewritten (the writers' guard touches 0
+/// rows), and the pass counts it as `pipeline_row_skipped`, never as
+/// `rescored`, in both writing modes.
+#[tokio::test]
+async fn rescore_counts_a_pipeline_row_as_skipped_not_rescored() {
+    for mode in [RescoreMode::Full, RescoreMode::AuthorOnly] {
+        let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(Some(
+            MEASURED_AUTHOR,
+        )))))
+        .await;
+        let pipeline = fx.snapshot[0].submission_id;
+        fx.db.mark_pipeline_settled("tenant-a", pipeline);
+
+        let summary = run_rescore_perplexity_pass(fx.state.clone(), None, mode)
+            .await
+            .expect("the pass succeeds");
+        assert_eq!(summary.rescored, 2, "{mode:?} {summary:?}");
+        assert_eq!(summary.failed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.author_unattributed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.pipeline_row_skipped, 1, "{mode:?} {summary:?}");
+
+        let row = fx
+            .db
+            .gate_decision_for("tenant-a", pipeline)
+            .expect("decision still present");
+        assert_eq!(row.perplexity_micros, 0, "{mode:?}");
+        assert_eq!(author_columns_of(&row), AUTHOR_SENTINEL, "{mode:?}");
     }
 }
 
