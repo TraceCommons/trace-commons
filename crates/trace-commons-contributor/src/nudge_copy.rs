@@ -58,8 +58,8 @@ use crate::project_copy::folder_mode_ask_label;
 /// #1303 design review (2026-10-09, adopted by the owner) replaced both
 /// with this, so neither candidate is kept. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_TITLE: &str = "{n} traces to review";
-/// [`NUDGE_BACKLOG_TITLE`] for one.
-pub const NUDGE_BACKLOG_TITLE_ONE: &str = "1 unpurposed trace is waiting";
+/// [`NUDGE_BACKLOG_TITLE`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_TITLE_ONE: &str = "1 trace to review";
 /// DRAFT, NEEDS APPROVAL. The mode is named by its one spelling.
 pub const NUDGE_BACKLOG_BODY: &str = concat!(
     "They are in folders set to ",
@@ -1058,6 +1058,7 @@ mod tests {
     #[test]
     fn the_backlog_title_is_traces_to_review() {
         assert_eq!(NUDGE_BACKLOG_TITLE, "{n} traces to review");
+        assert_eq!(NUDGE_BACKLOG_TITLE_ONE, "1 trace to review");
         for (key, text) in NUDGE_COPY {
             assert!(!text.to_lowercase().contains("unpurposed"), "{key}: {text}");
         }
