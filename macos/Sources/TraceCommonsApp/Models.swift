@@ -846,6 +846,9 @@ enum DaemonEvent: Equatable {
         creditPending: Double,
         text: String
     )
+    /// One standalone re-engagement notification, in the daemon's words.
+    /// Delivered only because this app subscribes declaring it accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.

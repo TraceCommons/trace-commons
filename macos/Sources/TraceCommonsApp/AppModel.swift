@@ -1232,7 +1232,11 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        subscription = daemon.subscribe { [weak self] json in
+        // Declares `reengage_due`: this app renders the re-engagement
+        // notifications itself (`Notifier.postReengage`), so the daemon may
+        // send them, and counts this subscription as a renderer while it
+        // stands.
+        subscription = daemon.subscribe(accepts: Notifier.acceptedEvents) { [weak self] json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1289,7 +1293,9 @@ final class AppModel: ObservableObject {
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()
-        case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
+        case .reengageDue(let due):
+            Notifier.shared.postReengage(due)
+        case .digestDue(let count, let contributed, let contributedProjects, let credit, let text):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
             // waiting at all -- so this also refreshes history, which is the
@@ -1299,6 +1305,7 @@ final class AppModel: ObservableObject {
                 refreshHistory()
             }
             Notifier.shared.postDigest(
+                text: text,
                 pendingCount: count,
                 projects: waitingByProject.map(\.label),
                 contributedCount: contributed,

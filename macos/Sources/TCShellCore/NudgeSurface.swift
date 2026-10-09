@@ -212,6 +212,17 @@ public enum NudgeSurface {
     }
 }
 
+extension NudgeSurface.Intent {
+    /// The wire id of the button that means this intent.
+    public var actionId: String {
+        switch self {
+        case .review: "review"
+        case .seeHistory: "see_history"
+        case .notNow: "not_now"
+        }
+    }
+}
+
 extension NudgeSurface.Action {
     var isNotNow: Bool {
         if case .notNow = intent { return true }

@@ -29,6 +29,7 @@ public struct NudgeCopy: Equatable, Sendable {
         case offerNotifyIdleExisting = "OFFER_NOTIFY_IDLE_EXISTING"
         case offerTurnOn = "OFFER_TURN_ON"
         case offerNoThanks = "OFFER_NO_THANKS"
+        case digestTitle = "DIGEST_TITLE"
         case digestActionReview = "DIGEST_ACTION_REVIEW"
         case digestActionNotNow = "DIGEST_ACTION_NOT_NOW"
     }
