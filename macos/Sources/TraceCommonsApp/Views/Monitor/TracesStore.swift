@@ -25,10 +25,91 @@ final class TracesStore {
     var showsIgnored = true {
         didSet {
             guard showsIgnored != oldValue, let read = lastRead else { return }
-            tree = TracesTree.build(
-                entries: read.entries, projects: read.projects, settings: read.settings,
-                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            tree = build(read)
         }
+    }
+
+    // MARK: The nudge (re-engagement)
+
+    /// The order chosen with the order control (`list_pending {order}`);
+    /// nil until one is chosen, and the tree is then drawn newest first as
+    /// it always was.
+    private(set) var order: DaemonData.PendingOrder?
+    /// Narrowed to the idle sessions the idle card named
+    /// (`list_pending {filter: "idle_sessions"}`), by its Review.
+    private(set) var idleOnly = false
+    /// A row's tags in the core's words (`tc_nudge_entry_tags_json`), by
+    /// entry id; rows with nothing to draw are absent.
+    private(set) var rowTags: [String: NudgeEntryTags] = [:]
+    /// A nudge request in flight.
+    private(set) var nudgeBusy = false
+    /// The last nudge request the core refused, until the next one.
+    private(set) var nudgeError: DaemonDataError?
+    /// The core's fixed nudge words, decoded once.
+    let nudgeCopy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+
+    /// Whether the tree keeps the core's order: once an order is chosen.
+    var keepsOrder: Bool { order != nil }
+
+    /// The idle or backlog card, in the daemon's words; nil when it has
+    /// none to show here.
+    var nudgeCard: NudgeSurface.Card? { NudgeSurface.card(status?.nudge, on: .traces) }
+
+    private func build(
+        _ read: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)
+    ) -> TracesTree {
+        TracesTree.build(
+            entries: read.entries, projects: read.projects, settings: read.settings,
+            scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored,
+            keepsOrder: keepsOrder, onlyWithSessions: idleOnly)
+    }
+
+    /// Asks the core for the list in `order`.
+    func setOrder(_ order: DaemonData.PendingOrder) async {
+        self.order = order
+        await load()
+    }
+
+    /// Narrows the list to the idle sessions, or leaves the filter.
+    func showIdleOnly(_ on: Bool) async {
+        idleOnly = on
+        await load()
+    }
+
+    /// A card button: its request, then its place. Review narrows (or, on
+    /// the backlog card, widens) the list here; Not now goes nowhere. A
+    /// refusal is kept and said by the card; a Review still opens its list,
+    /// since looking changes nothing.
+    func perform(_ intent: NudgeSurface.Intent) async {
+        guard !nudgeBusy else { return }
+        let effect = NudgeSurface.effect(intent)
+        let mine = attachment
+        nudgeBusy = true
+        defer { if mine == attachment { nudgeBusy = false } }
+        nudgeError = nil
+        do {
+            try await NudgeSurface.send(effect, through: try attached())
+        } catch {
+            guard mine == attachment else { return }
+            nudgeError = error as? DaemonDataError ?? .undecodable(method: "nudge")
+            guard case .traces? = effect.destination else { return }
+        }
+        guard mine == attachment else { return }
+        if case .traces(let idle)? = effect.destination { idleOnly = idle }
+        await load()
+    }
+
+    /// Each row's tags, in the core's words, by entry id.
+    static func rowTags(_ entries: [DaemonData.QueueEntry]) -> [String: NudgeEntryTags] {
+        var tags: [String: NudgeEntryTags] = [:]
+        for entry in entries {
+            guard let input = NudgeEntryTags.input(for: entry),
+                  let decoded = NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: input)),
+                  !decoded.isEmpty
+            else { continue }
+            tags[entry.entryId] = decoded
+        }
+        return tags
     }
     /// The last successful read the tree was built from.
     @ObservationIgnored private var lastRead: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)?
@@ -173,6 +254,10 @@ final class TracesStore {
         actionError = nil
         writeErrors = [:]
         folderNotice = nil
+        idleOnly = false
+        rowTags = [:]
+        nudgeBusy = false
+        nudgeError = nil
         // A new client is a new daemon: no undo, toast or refusal from the
         // old one survives into it.
         lastKept = nil
@@ -358,7 +443,8 @@ final class TracesStore {
         let mine = generation
         do {
             let client = try attached()
-            async let entries = client.listPending(projectId: nil)
+            async let entries = client.listPending(
+                projectId: nil, filter: idleOnly ? .idleSessions : nil, order: order)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
             // are unknown: no switch, never off, and the row says so.
@@ -366,13 +452,13 @@ final class TracesStore {
             async let status = try? client.status()
             async let destinations = try? client.toolDestinations()
             let read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
-            let built = TracesTree.build(
-                entries: read.entries, projects: read.projects, settings: read.settings,
-                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            let built = build(read)
+            let tags = Self.rowTags(read.entries)
             let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
             tree = built
+            rowTags = tags
             lastRead = read
             self.status = statusRead
             self.destinations = routes

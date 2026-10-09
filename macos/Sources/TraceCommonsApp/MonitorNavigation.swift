@@ -14,6 +14,9 @@ enum MonitorDestination: Equatable, Sendable {
     case home(HomePage)
     case inference
     case traces(entryId: String?)
+    /// Traces narrowed to the idle sessions a nudge named
+    /// (`list_pending {filter: "idle_sessions"}`).
+    case idleSessions
     case settings(SettingsSection)
 
     /// The Settings section this destination opens, nil for a Monitor tab.

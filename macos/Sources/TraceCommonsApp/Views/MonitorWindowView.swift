@@ -380,6 +380,9 @@ struct MonitorWindowView: View {
         Self.land(destination, tab: &tab, homePage: &homePage,
                   selection: &selection, showsInspector: &showsInspector)
         navigation.pending = nil
+        if destination == .idleSessions {
+            Task { await traces.showIdleOnly(true) }
+        }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -502,6 +505,9 @@ struct MonitorWindowView: View {
         case .traces(let entryId):
             tab = .traces
             if let entryId { select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector) }
+        case .idleSessions:
+            // The store narrows the list (`consumePending`).
+            tab = .traces
         case .settings:
             break
         }
