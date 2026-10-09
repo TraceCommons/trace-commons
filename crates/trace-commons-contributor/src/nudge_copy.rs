@@ -329,6 +329,12 @@ pub const LIST_ORDER_QUEUE: &str = "Oldest first";
 /// A row tag, only when the entry's `mission_fit` is above zero. DRAFT,
 /// NEEDS APPROVAL.
 pub const ENTRY_MISSION_FIT: &str = "Fits a mission";
+/// The Traces list while the idle card's Review has narrowed it to the
+/// idle sessions (`list_pending {filter: "idle_sessions"}`). DRAFT, NEEDS
+/// APPROVAL.
+pub const LIST_FILTER_IDLE: &str = "Showing idle sessions only";
+/// Leaves that filter for every waiting session. DRAFT, NEEDS APPROVAL.
+pub const LIST_FILTER_CLEAR: &str = "Show all";
 
 // ---------------------------------------------------------------------
 // The local credit estimate (nudge value addendum, revision 2).
@@ -519,6 +525,8 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
     ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
     ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
+    ("LIST_FILTER_IDLE", LIST_FILTER_IDLE),
+    ("LIST_FILTER_CLEAR", LIST_FILTER_CLEAR),
     ("NUDGE_ESTIMATE_CLAUSE", NUDGE_ESTIMATE_CLAUSE),
     (
         "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
@@ -672,6 +680,22 @@ mod tests {
                 "missing key {key}"
             );
         }
+    }
+
+    /// The Traces filter a card's Review applies says what it shows and
+    /// how to leave it, so a filtered list is never mistaken for the whole
+    /// queue and is never a dead end.
+    #[test]
+    fn the_idle_filter_has_a_label_and_a_way_out() {
+        for key in ["LIST_FILTER_IDLE", "LIST_FILTER_CLEAR"] {
+            let text = NUDGE_COPY
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, t)| *t)
+                .unwrap_or_else(|| panic!("missing key {key}"));
+            assert!(!text.contains('{'), "{key} takes no placeholder: {text}");
+        }
+        assert_ne!(LIST_FILTER_IDLE, LIST_FILTER_CLEAR);
     }
 
     #[test]
