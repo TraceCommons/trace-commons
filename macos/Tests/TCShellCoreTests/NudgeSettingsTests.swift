@@ -23,7 +23,7 @@ final class NudgeSettingsTests: XCTestCase {
         "SETTING_NOTIFY_BUDGET_HELP": "At most one a day.",
         "OFFER_NOTIFY_VERDICTS_EXISTING": "Sessions are now judged.",
         "OFFER_NOTIFY_IDLE_EXISTING": "Idle sessions can be a notification.",
-        "OFFER_TURN_ON": "Turn on",
+        "OFFER_TURN_ON": "Enable",
         "OFFER_NO_THANKS": "No thanks",
         "LIST_ORDER_SUGGESTED": "Suggested first",
         "LIST_ORDER_QUEUE": "Oldest first",

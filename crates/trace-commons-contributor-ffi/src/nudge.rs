@@ -169,7 +169,7 @@ mod tests {
         }
         assert_eq!(
             copy["NUDGE_BACKLOG_TITLE"],
-            "{n} unpurposed traces are waiting"
+            "{n} traces to review"
         );
         unsafe { tc_string_free(result) };
     }
