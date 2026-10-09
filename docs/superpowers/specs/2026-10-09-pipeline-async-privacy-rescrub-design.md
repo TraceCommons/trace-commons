@@ -152,9 +152,16 @@ Admission's decision is committed and is not rewritten, and the bundle's
 Review policy only knows to wait for a human when Admission said
 Quarantine. So the escalation is the server's, not the policy's.
 
-The pass escalates when its merged risk is above the risk the receipt
-stored: Medium or High for a run Admission admitted, High for a run
-Admission quarantined at Medium. When it escalates, the server holds the run
+The pass escalates when its merged risk is above the risk Admission saw:
+Medium or High for a run Admission admitted, High for a run Admission
+quarantined at Medium. Both sides are on Admission's scale. The submission
+row stores the envelope's raw residual risk, and a Medium whose only basis
+is the consent content flag is Low to Admission; so the receipt-time side
+is that raw value mapped through the same rule, with the stored basis, and
+the pass side is its own raw risk mapped with the merged basis. A
+consent-flag-only trace admitted at Low whose classifier then finds prose
+PII escalates. The pass writes the raw post-classifier risk back to the
+submission row, the scale the row holds everywhere else. When it escalates, the server holds the run
 itself before it calls the Review policy:
 - **No human assessment recorded after the pass** (`load_review_assessment`,
   compared with the pass's `privacy_pass_recorded_at`): the server parks the
@@ -243,7 +250,16 @@ by default from then on, and a CHECK that refuses an approved object on a
 run that requires the pass and has none. `commit_review` refuses the same
 approval with a safe label first. A binary that predates this change,
 rolled back onto a V117 database, therefore cannot approve unclassified
-content.
+content. It does not hold such a run, though: the old binary sees the
+CHECK violation as a raw, non-transient database error, charges it as
+`minimal_policy_failed` on its 50 ms doubling backoff, and the run uses up
+its five attempts in about a second and ends `failed` with
+`attempts_exhausted`, which is terminal. Every run received after V117 that
+reaches an approval at Review under the old binary is lost that way. A
+rollback below this revision must first suspend the Review policy of the
+affected bundles (an uncharged wait, `bundle_policy_not_runnable`) or stop
+the pipeline workers; the plan's Task 10 gives the count query and the
+runbook steps.
 
 The submission row's `redaction_counts` and `redaction_pipeline_version`
 are updated from the pass. Its `redaction_hash` stays the deterministic
@@ -283,7 +299,8 @@ deliberate difference.
   classifier again. A lease lost mid-pass records one result.
 - **Escalation.** A run that Admission admitted at Low and the pass finds
   Medium or High parks `AwaitingReview` with `privacy_pass_review_required`,
-  and the Review policy is not called. After an approving assessment the
+  and the Review policy is not called. So does a consent-flag-only Medium
+  that Admission admitted at Low, once the classifier finds prose PII. After an approving assessment the
   next dispatch calls the policy once, with the pass's output and no second
   classifier call, and the run records the assessment's hash. After a
   rejecting assessment the run ends rejected. A quarantined run is not
@@ -342,4 +359,8 @@ or impossible as first written: a content-addressed object (now per-attempt
 keys with staging and sweep), the review queue's predicate (widened), the
 policy's handling of an assessment on an Admit run (server-committed
 rejection), the terminal label on retry exhaustion (new code), and storage
-option (b) (impossible). The text above has been updated to match.
+option (b) (impossible). A recheck of the plan corrected two more: the
+escalation comparison must put the stored raw risk on Admission's scale
+before comparing, and a rollback onto V117 fails post-V117 runs terminally
+at Review rather than holding them. The text above has been updated to
+match.
