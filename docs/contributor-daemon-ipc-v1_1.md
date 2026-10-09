@@ -2919,7 +2919,9 @@ never means fitting everything. The outcomes:
 
 When the slot's live catalogue changes, the daemon publishes `queue_changed`
 and `status_changed`. `unenroll` empties the slot, and with no config left the
-fetch sends nothing until the next enrollment.
+fetch sends nothing until the next enrollment. The 6-hour schedule belongs to
+one enrollment: the first tick under a new one (a new ingest URL or device
+key) fetches, even inside the previous enrollment's interval.
 
 **What fits.** An entry is read through the same M1/M2 rule
 `mission_matches` applies: adapter on, folder not Never, session neither kept

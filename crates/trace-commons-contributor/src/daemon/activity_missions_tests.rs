@@ -585,7 +585,10 @@ fn the_mission_slot_schedule_runs_at_start_and_every_interval() {
     schedule.attempted(start);
     assert!(!schedule.due(start + interval - chrono::TimeDelta::seconds(1)));
     assert!(schedule.due(start + interval));
-    assert!(schedule.due(start - chrono::TimeDelta::seconds(1)), "clock moved back");
+    assert!(
+        schedule.due(start - chrono::TimeDelta::seconds(1)),
+        "clock moved back"
+    );
     schedule.unconfigured();
     assert!(schedule.due(start), "a later enrollment fetches at once");
 }
@@ -598,19 +601,21 @@ pub(super) async fn activity_server(
 ) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new().route(
         "/v1/activity-missions",
-        get(move |headers: HeaderMap, Query(query): Query<BTreeMap<String, String>>| {
-            let answer = answer.clone();
-            let calls = calls.clone();
-            async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                assert!(query.is_empty());
-                for name in ["authorization", "cookie", "x-tenant-id", "x-profile"] {
-                    assert!(!headers.contains_key(name));
+        get(
+            move |headers: HeaderMap, Query(query): Query<BTreeMap<String, String>>| {
+                let answer = answer.clone();
+                let calls = calls.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    assert!(query.is_empty());
+                    for name in ["authorization", "cookie", "x-tenant-id", "x-profile"] {
+                        assert!(!headers.contains_key(name));
+                    }
+                    let (status, body) = answer.lock().unwrap().clone();
+                    (status, Json(body))
                 }
-                let (status, body) = answer.lock().unwrap().clone();
-                (status, Json(body))
-            }
-        }),
+            },
+        ),
     );
     mission_server(app).await
 }
@@ -646,7 +651,12 @@ async fn the_mission_slot_refresh_fills_keeps_and_clears() {
     assert_eq!(slot_missions(&s), Some(vec!["m-0".to_string()]));
 
     // Not due again until the interval has passed.
-    refresh_mission_slot(&s, now + step - chrono::TimeDelta::seconds(1), &mut schedule).await;
+    refresh_mission_slot(
+        &s,
+        now + step - chrono::TimeDelta::seconds(1),
+        &mut schedule,
+    )
+    .await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 
     // A failed fetch, or a catalogue whose digest does not verify, keeps
@@ -723,5 +733,51 @@ async fn the_mission_slot_refresh_waits_for_enrollment() {
     refresh_mission_slot(&s, now + chrono::TimeDelta::days(1), &mut schedule).await;
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(s.mission_catalogue.lock().unwrap().is_none());
+    server.abort();
+}
+
+/// Enrolling again well inside the refresh interval still fetches on the
+/// next tick: the earlier enrollment's schedule does not carry over, whether
+/// a tick saw no config in between or the new enrollment (a new device key)
+/// replaced the old one between two ticks.
+#[tokio::test]
+async fn the_mission_slot_refills_on_the_first_tick_after_enrolling_again() {
+    use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust()]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer, calls.clone()).await;
+    let s = shared();
+    let mut schedule = MissionSlotSchedule::default();
+    let now = Utc::now();
+    configure_catalogue(&s, &base);
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A tick sees no config, then the next one sees the new enrollment.
+    crate::daemon::unenroll::unenroll(&s).unwrap();
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(10), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    configure_catalogue(&s, &base);
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(15), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+
+    // Unenrolled and enrolled again between two ticks: no tick ever sees
+    // the gap, but the enrollment's device key is new.
+    crate::daemon::unenroll::unenroll(&s).unwrap();
+    configure_catalogue(&s, &base);
+    let mut cfg = s.store.load_config().unwrap().unwrap();
+    cfg.device_key_id = "sha256:another-device-key".into();
+    s.store.save_config(&cfg).unwrap();
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(20), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+
+    // The same enrollment inside the interval is not asked again.
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(25), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     server.abort();
 }

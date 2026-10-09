@@ -319,11 +319,16 @@ pub(crate) const MISSION_SLOT_REFRESH: Duration = Duration::from_secs(6 * 60 * 6
 /// queue or local activity, so when it runs says nothing about this Mac's
 /// work. Due at once on start; after an attempt, whatever its outcome, not
 /// again for [`MISSION_SLOT_REFRESH`], so an unreachable server is not asked
-/// on every tick. Without a config it stays due, so the first tick after
+/// on every tick. Without a config it stays due, and a schedule kept for one
+/// enrollment does not carry over to the next, so the first tick after
 /// enrollment fetches.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MissionSlotSchedule {
     next_at: Option<DateTime<Utc>>,
+    /// The enrollment `next_at` was set for: its ingest URL and device key
+    /// id. Memory only, never logged. A new enrollment mints a new device
+    /// key, so enrolling again between two ticks still reads as a change.
+    enrollment: Option<(String, String)>,
 }
 
 impl MissionSlotSchedule {
@@ -345,6 +350,17 @@ impl MissionSlotSchedule {
 
     pub(crate) fn unconfigured(&mut self) {
         self.next_at = None;
+        self.enrollment = None;
+    }
+
+    /// Note the enrollment this tick runs under. One that differs from the
+    /// enrollment the schedule was kept for makes it due at once.
+    pub(crate) fn enrolled(&mut self, config: &ContributorConfig) {
+        let current = (config.ingest_url.clone(), config.device_key_id.clone());
+        if self.enrollment.as_ref() != Some(&current) {
+            self.next_at = None;
+            self.enrollment = Some(current);
+        }
     }
 }
 
@@ -414,13 +430,17 @@ pub(crate) async fn refresh_mission_slot(
     schedule: &mut MissionSlotSchedule,
 ) {
     use super::mission_matching::{clear_catalogue, live_catalogue, receive_catalogue};
-    if !schedule.due(now) {
-        return;
-    }
+    // The config is read before the schedule is consulted: an unenroll
+    // between two due attempts must still reset it, or enrolling again
+    // inside the interval would wait out the old enrollment's schedule.
     let Ok(Some(config)) = shared.store.load_config() else {
         schedule.unconfigured();
         return;
     };
+    schedule.enrolled(&config);
+    if !schedule.due(now) {
+        return;
+    }
     schedule.attempted(now);
     let call = fetch::<ActivityCatalogue>(&config, "/v1/activity-missions", None).await;
     let Ok(catalogue) = call.result else {
