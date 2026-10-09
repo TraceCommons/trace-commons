@@ -13,6 +13,9 @@
 //! and the pins in the shells' copy-surface tests arrive with the approved
 //! text, in a later slice.
 //!
+//! Every string says "trace", never "session" (Ron's #1303 design
+//! review; the rest of the app's copy is renamed separately).
+//!
 //! Placeholders are `{name}`, filled by the daemon:
 //!
 //! - `{n}`, `{a}`, `{h}`, `{c}`, `{k}`: counts.
@@ -63,16 +66,16 @@ pub const NUDGE_BACKLOG_REVIEW_IN_TRACES: &str = "Review the {n} in Traces";
 pub const NUDGE_NOT_NOW: &str = "Not now";
 /// The panel row for U1. Carries no number: the badge already does.
 /// DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_BACKLOG: &str = "Previewed sessions are waiting for a decision";
+pub const NUDGE_PANEL_BACKLOG: &str = "Previewed traces are waiting for a decision";
 
 // ---------------------------------------------------------------------
 // Idle sessions (U4): the primary phase-1 trigger.
 // ---------------------------------------------------------------------
 
 /// The panel row for U4. No number. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_IDLE: &str = "Some sessions have been idle for {x} days or more";
+pub const NUDGE_PANEL_IDLE: &str = "Some traces have been idle for {x} days or more";
 /// The Traces card's title. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_IDLE_TITLE: &str = "{n} sessions from {tool} have been idle for {x} days or more";
+pub const NUDGE_IDLE_TITLE: &str = "{n} traces from {tool} have been idle for {x} days or more";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_BODY: &str = "They look finished. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer.";
@@ -81,13 +84,13 @@ pub const NUDGE_IDLE_REVIEW: &str = "Review";
 /// The owner's draft of the N1 notification body (decision 28).
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
-    "{n} sessions from {tool} have been idle for {x} days. Contribute them?";
+    "{n} traces from {tool} have been idle for {x} days. Contribute them?";
 /// The alternative to [`NOTIFY_IDLE_BODY_OWNER_DRAFT`]: a notification may
 /// only open Review, so it names what Review offers -- send or keep --
 /// instead of asking a question its one action cannot answer.
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
-    "{n} sessions from {tool} have been idle for {x} days or more. Review them to send or keep.";
+    "{n} traces from {tool} have been idle for {x} days or more. Review them to send or keep.";
 /// The N1 notification body. Owner decision 28 picks between the owner's
 /// draft and the alternative; this selects the alternative the spec
 /// recommends until it is ruled, and changing the pick is this one line.
@@ -126,12 +129,12 @@ pub const NUDGE_PANEL_VERDICTS: &str = "{a} accepted, {h} held since {date}";
 /// The N2 notification body, followed by [`NUDGE_VERDICTS_FINAL_CLAUSE`]
 /// when the credit is non-zero. Never reports accepted sessions without
 /// the held count. DRAFT, NEEDS APPROVAL.
-pub const NOTIFY_VERDICTS_BODY: &str = "{a} sessions accepted and {h} held for privacy review.";
+pub const NOTIFY_VERDICTS_BODY: &str = "{a} traces accepted and {h} held for privacy review.";
 /// The verdict sentence folded into a due digest: [`NOTIFY_VERDICTS_BODY`]
 /// and [`NUDGE_VERDICTS_FINAL_CLAUSE`]. Changes approved K9 digest copy
 /// (owner decision 6). DRAFT, NEEDS APPROVAL.
 pub const DIGEST_VERDICT_SENTENCE: &str =
-    "{a} sessions accepted and {h} held for privacy review. {x} credit is now final.";
+    "{a} traces accepted and {h} held for privacy review. {x} credit is now final.";
 
 // ---------------------------------------------------------------------
 // The news mark.
@@ -177,11 +180,11 @@ pub const DIGEST_ACTION_NOT_NOW: &str = "Not now";
 
 /// The button beside `NOTIFICATION_PURPOSE` on the first U2 card.
 /// DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_VERDICTS: &str = "Tell me when sessions are judged";
+pub const OFFER_NOTIFY_VERDICTS: &str = "Tell me when traces are judged";
 /// The one-time offer to existing installs (owner decision 3). "At most
 /// twice a week" restates the N2 per-kind cap of owner decision 4 and
 /// changes with it. DRAFT, NEEDS APPROVAL.
-pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Sessions you send are now judged in the background. \
+pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Traces you send are now judged in the background. \
      Want a notification when that happens? At most twice a week.";
 /// The one-time offer to existing installs on the Traces card (owner
 /// decision 7). "At most once a week" restates the N1 repeat interval of
@@ -208,11 +211,11 @@ pub const SETTING_MARK: &str =
     "Show a small ring on the menu bar icon when there is something new to look at";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_MARK_HELP: &str =
-    "It never appears while sessions are waiting for your decision; the number does.";
+    "It never appears while traces are waiting for your decision; the number does.";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_MASTER: &str = concat!("Notifications from ", crate::app_name!());
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_DIGEST: &str = "Waiting and contributed sessions";
+pub const SETTING_DIGEST: &str = "Waiting and contributed traces";
 /// Under the Interval schedule. The same words, and the same `{hours}`
 /// placeholder, as the Settings line it replaces
 /// (`SettingsWords.at_most_one_notification`). DRAFT, NEEDS APPROVAL.
@@ -222,9 +225,9 @@ pub const SETTING_DIGEST_HELP_INTERVAL: &str =
 pub const SETTING_DIGEST_HELP_EVENING: &str =
     "At most one notification each evening, and none when nothing is waiting.";
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_VERDICTS: &str = "When sessions you sent are judged";
+pub const SETTING_NOTIFY_VERDICTS: &str = "When traces you sent are judged";
 /// DRAFT, NEEDS APPROVAL.
-pub const SETTING_NOTIFY_IDLE: &str = "When sessions have been idle for a few days";
+pub const SETTING_NOTIFY_IDLE: &str = "When traces have been idle for a few days";
 /// DRAFT, NEEDS APPROVAL.
 pub const SETTING_NOTIFY_IDLE_HELP: &str = "When the regular notification is on, this is one extra sentence in it, \
      not a separate notification.";
@@ -650,6 +653,25 @@ mod tests {
         assert_eq!(
             OFFER_NOTIFY_IDLE_EXISTING,
             "We can tell you when traces sit idle for a few days. At most once a week."
+        );
+    }
+
+    /// Ron's #1303 design review, item 13: a nudge says "trace", never
+    /// "session". The rest of the app's copy is renamed separately.
+    #[test]
+    fn no_nudge_string_says_session() {
+        for (key, text) in NUDGE_COPY {
+            assert!(
+                !text.to_lowercase().contains("session"),
+                "{key} says session: {text}"
+            );
+        }
+        assert_eq!(
+            NUDGE_IDLE_TITLE
+                .replace("{n}", "2")
+                .replace("{tool}", "Claude Code")
+                .replace("{x}", "3"),
+            "2 traces from Claude Code have been idle for 3 days or more"
         );
     }
 
