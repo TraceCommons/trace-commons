@@ -167,6 +167,10 @@ public protocol DaemonDataClient: Sendable {
     /// `set_settings { insights_recap_card_enabled }`: the Insights weekly
     /// summary card's only switch (its "Turn off").
     func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
+    /// `set_settings { insights_ledger_feed }`: whether Insights may read
+    /// the proxy ledger for the glance and per-call tokens (owner decision D3, open; off by
+    /// default). Draw only the confirmed value from the reply.
+    func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings` with `digest_schedule`.
     func setDigestSchedule(_ schedule: DaemonData.DigestSchedule) async throws -> DaemonData.Settings
 
@@ -195,6 +199,12 @@ public protocol DaemonDataClient: Sendable {
     /// daemon refuses it as `unknown_method`. Either way, and on any failed
     /// read, the window shows the saved-imports feed instead, never both.
     func insightsWeek(isoWeek: String?) async throws -> DaemonData.InsightsWeek
+    /// `insights_glance`: today's routed calls per tool from the proxy
+    /// ledger (owner decision D3, open). `tzSeconds` is the local UTC offset
+    /// (`TimeZone.current.secondsFromGMT()`). `enabled: false`, an older
+    /// daemon's `unknown_method` and any failed read all mean no glance,
+    /// never a zero and never a failed popover.
+    func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance
 
     // MARK: Network methods (C3, #1187)
 
@@ -291,6 +301,10 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// `inference_call_added`, so the map pulses per real call.
     // PROVISIONAL: event not on main yet; shape follows #1203's `call_added`.
     case inferenceCallAdded(DaemonData.InferenceCallAdded)
+    /// `usage_changed`: the ledger read added a call this tick, while the
+    /// Insights ledger feed is on. A pulse with no payload: re-read
+    /// `insights_glance`.
+    case usageChanged
     case unknown(String)
 }
 
@@ -334,6 +348,7 @@ public enum DaemonDataEventParser {
                 return .unknown(name)
             }
             return .inferenceCallAdded(call)
+        case "usage_changed": return .usageChanged
         default: return .unknown(name)
         }
     }

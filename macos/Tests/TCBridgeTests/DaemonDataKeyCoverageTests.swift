@@ -227,6 +227,21 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             DaemonData.InferenceCallPage.self, try result(daemon, "inference_calls", ["limit": 25]),
             method: "inference_calls")
 
+        // The Insights glance: off by default, then the ledger feed switched
+        // on, which a temp store with no IronWire proxy answers as
+        // unreadable. The readable shape and per-call `tokens` need a live
+        // ledger; `DaemonDataContractWireTests` pins those from the
+        // daemon's own recorded replies.
+        let off = try result(daemon, "insights_glance", ["tz": 0])
+        XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
+        assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
+        assertDeclared(
+            DaemonData.Settings.self, try result(daemon, "set_settings", ["insights_ledger_feed": true]),
+            method: "set_settings")
+        let unreadable = try result(daemon, "insights_glance", ["tz": 0])
+        XCTAssertEqual((unreadable as? [String: Any])?["readable"] as? Bool, false)
+        assertDeclared(DaemonData.InsightsGlance.self, unreadable, method: "insights_glance")
+
         // Approve last: it moves the entry out of the queue when it acts.
         assertDeclared(ApproveResponse.self, try result(daemon, "approve", ["entry_id": entryId]), method: "approve")
 
@@ -252,7 +267,7 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
                 assertDeclared(DaemonData.PreviewRequestOutcome.self, data, method: "event preview_ready")
             case "digest_due":
                 assertDeclared(DaemonData.DigestDue.self, data, method: "event digest_due")
-            case "queue_changed", "status_changed":
+            case "queue_changed", "status_changed", "usage_changed":
                 XCTAssertEqual(KeyRecorder.keyPaths(in: data), [], "\(name) carries no payload the contract reads")
             default:
                 break

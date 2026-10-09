@@ -518,4 +518,119 @@ final class DaemonDataContractWireTests: XCTestCase {
         let approved = try await client.approve(entryId: entry.entryId, verdict: .failed, correction: "note")
         XCTAssertEqual(approved.approved, 1)
     }
+
+    // MARK: - insights_glance and per-call tokens, as the daemon prints them
+
+    // Printed verbatim by `RUSTFLAGS="-D warnings" cargo test -p
+    // trace-commons-contributor --lib a_recorded_ -- --nocapture`
+    // (`insights_glance.rs` `a_recorded_glance_for_the_shells` and
+    // `inference_map.rs` `a_recorded_tokened_call_for_the_shells`); the off
+    // and unreadable shapes are `handle_glance`'s own. Never edit these by
+    // hand: re-run the recorder and paste.
+    private static let glanceOff = #"{"enabled":false,"feed":"ledger"}"#
+    private static let glanceUnreadable = #"{"enabled":true,"feed":"ledger","readable":false}"#
+    private static let glanceData = #"{"enabled":true,"feed":"ledger","readable":true,"updated_at":"2026-10-08T10:00:00+00:00","stale":false,"date":"2026-10-08","tools":[{"tool":"claude-code","calls":2,"known_calls":1,"tokens":1050,"cache_share":{"numerator":800,"denominator":1000,"permille":800}},{"tool":"codex","calls":1,"known_calls":1,"tokens":1025,"cache_share":{"numerator":600,"denominator":1000,"permille":600}},{"tool":"unknown","calls":1,"known_calls":0,"tokens":null,"cache_share":null}],"coverage":{"calls":4,"known":2,"unknown":2,"unreadable_rows":0},"context_tip":{"state":"held"}}"#
+    private static let glanceStale = #"{"enabled":true,"feed":"ledger","readable":true,"updated_at":"2026-10-08T09:49:59+00:00","stale":true,"date":"2026-10-08","tools":[{"tool":"claude-code","calls":1,"known_calls":1,"tokens":40,"cache_share":null}],"coverage":{"calls":1,"known":1,"unknown":0,"unreadable_rows":2},"context_tip":{"state":"held"}}"#
+    private static let tipLit = #"{"state":"lit","context":180000,"threshold":200000}"#
+    private static let callId2 = #"{"id":2,"at":"2027-01-15T08:00:01+00:00","tool":"unknown","family":"openai","model":"Qwen/Qwen3.6-27B-FP8","route":"unknown","cost":{"known":true,"priced_micros":12300},"proof":"unrecorded","tokens":{"input":null,"cache_read":null,"cache_write":null,"output":3}}"#
+    private static let callId1 = #"{"id":1,"at":"2027-01-15T08:00:00+00:00","tool":"unknown","family":"openai","model":"Qwen/Qwen3.6-27B-FP8","route":"unknown","cost":{"known":true,"priced_micros":12300},"proof":"unrecorded","tokens":{"input":1000,"cache_read":600,"cache_write":0,"output":25}}"#
+
+    func testInsightsGlanceDecodesTheRecordedAnswer() async throws {
+        let transport = FakeTransport(response: frame(Self.glanceData))
+        let glance = try await LiveDaemonClient(transport: transport).insightsGlance(tzSeconds: 0)
+        XCTAssertTrue(glance.enabled)
+        XCTAssertEqual(glance.feed, "ledger")
+        XCTAssertEqual(glance.readable, true)
+        XCTAssertEqual(glance.stale, false)
+        XCTAssertEqual(glance.updatedAt, "2026-10-08T10:00:00+00:00")
+        XCTAssertEqual(glance.date, "2026-10-08")
+        let tools = try XCTUnwrap(glance.tools)
+        XCTAssertEqual(tools.map(\.tool), ["claude-code", "codex", "unknown"], "the daemon's order is kept")
+        XCTAssertEqual(tools[0].calls, 2)
+        XCTAssertEqual(tools[0].knownCalls, 1, "a partial day: fewer known calls than calls")
+        XCTAssertEqual(tools[0].tokens, 1050)
+        XCTAssertEqual(
+            tools[0].cacheShare, DaemonData.InsightsGlanceShare(numerator: 800, denominator: 1000, permille: 800))
+        XCTAssertEqual(tools[1].knownCalls, tools[1].calls)
+        XCTAssertEqual(tools[1].cacheShare?.permille, 600)
+        XCTAssertEqual(tools[2].knownCalls, 0)
+        XCTAssertNil(tools[2].tokens, "null tokens stay unknown, never 0")
+        XCTAssertNil(tools[2].cacheShare, "a null share stays unknown, never 0")
+        XCTAssertEqual(
+            glance.coverage, DaemonData.InsightsGlanceCoverage(calls: 4, known: 2, unknown: 2, unreadableRows: 0))
+        XCTAssertEqual(glance.contextTip?.state, "held")
+        XCTAssertNil(glance.contextTip?.lit, "a held tip is no tip")
+    }
+
+    func testInsightsGlanceStaleAndLitDecode() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let stale = try decoder.decode(DaemonData.InsightsGlance.self, from: Data(Self.glanceStale.utf8))
+        XCTAssertEqual(stale.stale, true)
+        XCTAssertEqual(stale.coverage?.unreadableRows, 2)
+        let tool = try XCTUnwrap(stale.tools?.first)
+        XCTAssertEqual(tool.tokens, 40, "tokens are known")
+        XCTAssertNil(tool.cacheShare, "while the share is null: drawn without a share, never as 0%")
+
+        let tip = try decoder.decode(DaemonData.InsightsContextTip.self, from: Data(Self.tipLit.utf8))
+        XCTAssertEqual(tip.state, "lit")
+        let lit = try XCTUnwrap(tip.lit)
+        XCTAssertEqual(lit.context, 180_000)
+        XCTAssertEqual(lit.threshold, 200_000)
+        // The same tip inside a glance, in the place the daemon puts it.
+        let litGlance = Self.glanceStale.replacingOccurrences(of: #"{"state":"held"}"#, with: Self.tipLit)
+        XCTAssertNotEqual(litGlance, Self.glanceStale)
+        let glance = try decoder.decode(DaemonData.InsightsGlance.self, from: Data(litGlance.utf8))
+        XCTAssertEqual(glance.contextTip, tip)
+        // A state this build does not know is no tip, as is a lit tip
+        // missing a figure.
+        for other in [#"{"state":"quiet"}"#, #"{"state":"something-new"}"#, #"{"state":"lit","context":180000}"#] {
+            let decoded = try decoder.decode(DaemonData.InsightsContextTip.self, from: Data(other.utf8))
+            XCTAssertNil(decoded.lit, other)
+        }
+    }
+
+    func testInsightsGlanceOffAndUnreadableShapesDecode() throws {
+        let decoder = DaemonDataDecoding.decoder()
+        let off = try decoder.decode(DaemonData.InsightsGlance.self, from: Data(Self.glanceOff.utf8))
+        XCTAssertFalse(off.enabled)
+        XCTAssertEqual(off.feed, "ledger")
+        XCTAssertNil(off.readable)
+        XCTAssertNil(off.stale)
+        XCTAssertNil(off.tools)
+        XCTAssertNil(off.coverage)
+        let unreadable = try decoder.decode(DaemonData.InsightsGlance.self, from: Data(Self.glanceUnreadable.utf8))
+        XCTAssertTrue(unreadable.enabled)
+        XCTAssertEqual(unreadable.readable, false)
+        XCTAssertNil(unreadable.tools, "an unreadable ledger has no rows to draw, not empty ones")
+        XCTAssertNil(unreadable.coverage)
+    }
+
+    func testInferenceCallTokensDecodeAndAbsentStaysNil() async throws {
+        let transport = FakeTransport(
+            response: frame(#"{"readable":true,"calls":[\#(Self.callId2),\#(Self.callId1)],"next_cursor":null}"#))
+        let calls = try await LiveDaemonClient(transport: transport).inferenceCalls(limit: 25, cursor: nil).calls
+        XCTAssertEqual(calls.map(\.id), [2, 1])
+        XCTAssertEqual(
+            calls[0].tokens, DaemonData.InferenceCallTokens(input: nil, cacheRead: nil, cacheWrite: nil, output: 3),
+            "each counter the proxy did not report stays unknown")
+        XCTAssertEqual(
+            calls[1].tokens, DaemonData.InferenceCallTokens(input: 1000, cacheRead: 600, cacheWrite: 0, output: 25),
+            "a measured 0 stays 0")
+
+        // With the feed off, or from an older daemon, the key is absent.
+        let untokened = Self.callId1.replacingOccurrences(
+            of: #","tokens":{"input":1000,"cache_read":600,"cache_write":0,"output":25}"#, with: "")
+        XCTAssertFalse(untokened.contains("tokens"))
+        let absent = try DaemonDataDecoding.decoder().decode(DaemonData.InferenceCall.self, from: Data(untokened.utf8))
+        XCTAssertNil(absent.tokens)
+        let sample = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
+        XCTAssertFalse(sample.isEmpty)
+        XCTAssertTrue(sample.allSatisfy { $0.tokens == nil }, "the recorded sample has no tokens and none appear")
+    }
+
+    func testUsageChangedParses() {
+        XCTAssertEqual(DaemonDataEventParser.parse(#"{"event":"usage_changed","data":{}}"#), .usageChanged)
+        // The payload is always `{}`; anything else in it is ignored.
+        XCTAssertEqual(DaemonDataEventParser.parse(#"{"event":"usage_changed"}"#), .usageChanged)
+    }
 }

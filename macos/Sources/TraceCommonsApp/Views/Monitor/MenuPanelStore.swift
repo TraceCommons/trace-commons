@@ -165,6 +165,9 @@ final class MenuPanelStore {
                 await load()
             case .digestDue, .previewReady, .unknown:
                 break
+            case .usageChanged:
+                // Re-reads the glance once the panel holds one.
+                break
             }
         }
         // The stream ended: the daemon went away.

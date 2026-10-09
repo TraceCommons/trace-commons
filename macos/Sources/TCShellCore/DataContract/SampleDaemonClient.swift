@@ -359,6 +359,10 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("get_settings", as: DaemonData.Settings.self)
     }
 
+    public func setInsightsLedgerFeed(_ on: Bool) async throws -> DaemonData.Settings {
+        try serve("get_settings", as: DaemonData.Settings.self)
+    }
+
     // MARK: History and credit
 
     public func listHistory(limit: Int) async throws -> [DaemonData.HistoryRow] {
@@ -390,6 +394,13 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         // SAMPLE: no counter pass is recorded, so the window shows the
         // saved-imports feed, as it would against a daemon that predates it.
         throw DaemonDataError.notAvailableYet(method: "insights_week")
+    }
+
+    public func insightsGlance(tzSeconds: Int) async throws -> DaemonData.InsightsGlance {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        // SAMPLE: no glance is recorded (it needs a live IronWire ledger), so
+        // the popover draws none, as against a daemon that predates it.
+        throw DaemonDataError.notAvailableYet(method: "insights_glance")
     }
 
     // MARK: Network methods (C3, #1187): hand-written samples

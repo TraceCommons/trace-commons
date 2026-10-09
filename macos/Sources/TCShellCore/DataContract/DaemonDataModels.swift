@@ -687,8 +687,10 @@ extension DaemonData {
         public let opencodeSourceMode: String?
         /// The declared trajectory folder's mode; the path is never sent.
         public let trajectorySourceMode: String?
-        /// Decode-only until the Insights glance draws it: whether Insights
-        /// may read the proxy ledger (owner decision D3, open; off by default).
+        /// Whether Insights may read the proxy ledger (owner decision D3,
+        /// open; off by default): the menu-bar glance (`insights_glance`) and
+        /// the per-call `tokens` on `inference_calls` follow it. `nil` from a
+        /// daemon that predates it, never drawn as off.
         public let insightsLedgerFeed: Bool?
         /// Decode-only until the Insights settings draw it: the user's own
         /// context-tip threshold in tokens; `nil` is unset, never a default.
@@ -1207,8 +1209,29 @@ extension DaemonData {
         public let cost: PricedCost?
         /// IronWire's proof label, passed through. See `proofLabel`.
         public let proof: String
+        /// The ledger's own counters for this call, only while the Insights
+        /// ledger feed is on. Absent with the feed off or from an older
+        /// daemon: unknown, never zero.
+        public let tokens: InferenceCallTokens?
 
         public var proofLabel: ProofLabel { ProofLabel(rawValue: proof) ?? .unrecorded }
+    }
+
+    /// One call's token counters as the proxy reported them. Each is `nil`
+    /// when the proxy did not report it, which is not zero; a measured 0
+    /// stays 0. Raw, never summed: on `family: "openai"`, `input` already
+    /// includes `cache_read`.
+    public struct InferenceCallTokens: Codable, Equatable, Sendable {
+        public let input: UInt32?
+        public let cacheRead: UInt32?
+        public let cacheWrite: UInt32?
+        public let output: UInt32?
+
+        public enum CodingKeys: String, CodingKey {
+            case input, output
+            case cacheRead = "cache_read"
+            case cacheWrite = "cache_write"
+        }
     }
 
     /// An `inference_call_added` event (`inference_map::call_added`). A
@@ -1745,6 +1768,89 @@ extension DaemonData {
             case isoWeek = "iso_week"
             case weekStart = "week_start"
             case changeVsLastWeek = "change_vs_last_week"
+        }
+    }
+
+    /// `insights_glance`: today's routed calls per tool from the proxy ledger
+    /// (owner decision D3, open; off by default). Three shapes: off
+    /// (`enabled: false`), unreadable (`readable: false`), and the day's
+    /// figures. Every field a shape can omit is optional, so no shape is
+    /// undecodable. Only an enabled, readable, fresh answer with rows is
+    /// drawn; the others show no glance, never a zero.
+    public struct InsightsGlance: Codable, Equatable, Sendable {
+        public let enabled: Bool
+        public let feed: String
+        /// `nil` while disabled; `false` when no ledger answered.
+        public let readable: Bool?
+        public let updatedAt: String?
+        /// `nil` is treated as stale: fail closed.
+        public let stale: Bool?
+        /// The local day the figures cover, `YYYY-MM-DD`.
+        public let date: String?
+        /// One row per tool, in the daemon's order; never summed together.
+        public let tools: [InsightsGlanceTool]?
+        public let coverage: InsightsGlanceCoverage?
+        public let contextTip: InsightsContextTip?
+
+        public enum CodingKeys: String, CodingKey {
+            case enabled, feed, readable, stale, date, tools, coverage
+            case updatedAt = "updated_at"
+            case contextTip = "context_tip"
+        }
+    }
+
+    /// One tool's day. `tokens` sums only the known calls, so it is partial
+    /// when `0 < knownCalls < calls`; `nil` when no call is known. A `nil`
+    /// `cacheShare` with known `tokens` means the known calls read no input:
+    /// the tokens are drawn without a share, never a share of zero.
+    public struct InsightsGlanceTool: Codable, Equatable, Sendable {
+        public let tool: String
+        public let calls: Int
+        public let knownCalls: Int
+        public let tokens: UInt64?
+        public let cacheShare: InsightsGlanceShare?
+
+        public enum CodingKeys: String, CodingKey {
+            case tool, calls, tokens
+            case knownCalls = "known_calls"
+            case cacheShare = "cache_share"
+        }
+    }
+
+    /// The share of input read from cache, as the daemon's exact fraction
+    /// and its rounded permille. `TCShellCore` cannot see `TCBridge`'s
+    /// `InsightsShareFigure`, so the glance has its own.
+    public struct InsightsGlanceShare: Codable, Equatable, Sendable {
+        public let numerator: UInt64
+        public let denominator: UInt64
+        public let permille: UInt64
+    }
+
+    public struct InsightsGlanceCoverage: Codable, Equatable, Sendable {
+        public let calls: Int
+        public let known: Int
+        public let unknown: Int
+        /// Ledger rows that could not be read; the day may be incomplete.
+        public let unreadableRows: Int
+
+        public enum CodingKeys: String, CodingKey {
+            case calls, known, unknown
+            case unreadableRows = "unreadable_rows"
+        }
+    }
+
+    /// The context tip. `state` is `held`, `threshold_unset`, `no_session`,
+    /// `no_figure`, `quiet` or `lit`; anything else is no tip. Only `lit`
+    /// carries figures.
+    public struct InsightsContextTip: Codable, Equatable, Sendable {
+        public let state: String
+        public let context: UInt64?
+        public let threshold: Int?
+
+        /// The figures to draw, only for a `lit` tip that carries both.
+        public var lit: (context: UInt64, threshold: Int)? {
+            guard state == "lit", let context, let threshold else { return nil }
+            return (context, threshold)
         }
     }
 
