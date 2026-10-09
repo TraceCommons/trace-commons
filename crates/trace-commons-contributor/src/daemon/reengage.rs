@@ -512,6 +512,7 @@ mod tests {
             credit_final_delta: 2.5,
             since: landed,
             newest_at: landed,
+            submissions: Default::default(),
         });
         let mut rx = s.events.subscribe();
         let got = tick(&s, noon(), &Utc, digest(false, 0));
@@ -558,6 +559,7 @@ mod tests {
             credit_final_delta: 0.0,
             since: landed,
             newest_at: landed,
+            submissions: Default::default(),
         });
         assert_eq!(
             tick(&s, noon(), &Utc, digest(false, 0)).standalone,

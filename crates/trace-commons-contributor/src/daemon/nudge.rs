@@ -275,9 +275,14 @@ pub struct VerdictMark {
     pub final_credit: bool,
 }
 
-/// Verdicts that landed and have not been acknowledged: counts and times
-/// only. What `status.nudge` reports for U2 and what a later slice folds into
-/// a digest or a notification.
+/// Verdicts that landed and have not been acknowledged: counts and times,
+/// and the opaque submission ids behind them. What `status.nudge` reports for
+/// U2 (counts and `since` only) and what a later slice folds into a digest or
+/// a notification.
+///
+/// The counts and times are a summary of [`Self::submissions`], kept in the
+/// state file beside it, so that a poll can re-check each submission against
+/// the cache it read (see [`after_history_poll`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VerdictDelta {
     /// Submissions that newly reached `accepted`.
@@ -297,9 +302,54 @@ pub struct VerdictDelta {
     pub credit_final_delta: f32,
     /// The poll that first saw a verdict in this delta: `status.nudge.since`.
     pub since: DateTime<Utc>,
-    /// The poll that last added to this delta. `nudge_opened` acknowledges
-    /// through it, and the news mark ages out from it.
+    /// The poll that last added to this delta. The news mark ages out from
+    /// it.
     pub newest_at: DateTime<Utc>,
+    /// Each submission behind the counts, by submission id (opaque), with
+    /// what it contributed. Never on the wire.
+    ///
+    /// A delta saved by a build that kept only the counts loads with this
+    /// empty. Nothing can re-check such counts against the cache, so the
+    /// next poll drops them rather than keep news lit that may have been
+    /// taken back since; that build never shipped (only this change's own
+    /// pre-release builds wrote one), so at most a pre-release tester's
+    /// waiting news goes dark once.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub submissions: BTreeMap<String, PendingVerdict>,
+}
+
+/// One submission's part in a [`VerdictDelta`]: which of its verdicts are
+/// news, and the polls that found them. Flags, a credit figure and times
+/// only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingVerdict {
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub held: bool,
+    #[serde(default)]
+    pub final_credit: bool,
+    /// The final credit, when `final_credit`. Never on the wire.
+    #[serde(default)]
+    pub credit_final: f32,
+    /// The poll that first found news for this submission.
+    pub since: DateTime<Utc>,
+    /// The poll that last found news for it.
+    pub newest_at: DateTime<Utc>,
+}
+
+impl PendingVerdict {
+    /// Fold a later poll's news for the same submission into this one.
+    fn absorb(&mut self, later: &PendingVerdict) {
+        self.accepted |= later.accepted;
+        self.held |= later.held;
+        if later.final_credit && !self.final_credit {
+            self.final_credit = true;
+            self.credit_final = later.credit_final;
+        }
+        self.since = self.since.min(later.since);
+        self.newest_at = self.newest_at.max(later.newest_at);
+    }
 }
 
 impl VerdictDelta {
@@ -326,15 +376,23 @@ impl VerdictDelta {
         (tenths >= 1.0).then_some(tenths as u64)
     }
 
-    /// Add a later delta to this one: counts add, `since` keeps the
-    /// earlier, `newest_at` takes the later.
-    pub fn absorb(&mut self, later: &VerdictDelta) {
-        self.newly_accepted = self.newly_accepted.saturating_add(later.newly_accepted);
-        self.newly_held = self.newly_held.saturating_add(later.newly_held);
-        self.newly_final = self.newly_final.saturating_add(later.newly_final);
-        self.credit_final_delta += later.credit_final_delta;
-        self.since = self.since.min(later.since);
-        self.newest_at = self.newest_at.max(later.newest_at);
+    /// The summary of `submissions`, or `None` when no submission carries
+    /// news.
+    #[must_use]
+    pub fn from_submissions(submissions: BTreeMap<String, PendingVerdict>) -> Option<Self> {
+        let count = |flag: fn(&PendingVerdict) -> bool| {
+            u32::try_from(submissions.values().filter(|v| flag(v)).count()).unwrap_or(u32::MAX)
+        };
+        let delta = Self {
+            newly_accepted: count(|v| v.accepted),
+            newly_held: count(|v| v.held),
+            newly_final: count(|v| v.final_credit),
+            credit_final_delta: submissions.values().map(|v| v.credit_final).sum(),
+            since: submissions.values().map(|v| v.since).min()?,
+            newest_at: submissions.values().map(|v| v.newest_at).max()?,
+            submissions,
+        };
+        (delta.total() > 0).then_some(delta)
     }
 }
 
@@ -387,14 +445,7 @@ pub fn verdict_delta(
     never: &NeverProjects,
     now: DateTime<Utc>,
 ) -> (Option<VerdictDelta>, BTreeMap<String, VerdictMark>) {
-    let mut found = VerdictDelta {
-        newly_accepted: 0,
-        newly_held: 0,
-        newly_final: 0,
-        credit_final_delta: 0.0,
-        since: now,
-        newest_at: now,
-    };
+    let mut found = BTreeMap::new();
     let mut next_marks = BTreeMap::new();
     for record in next {
         let key = record.submission_id.to_string();
@@ -406,16 +457,28 @@ pub fn verdict_delta(
         };
         // Silent for a record that was taken back or belongs to a Never
         // folder, but its mark still advances below.
-        if !is_taken_back(record) && !never.contains(&record.project_id) {
-            if seen.accepted && !before.accepted {
-                found.newly_accepted += 1;
-            }
-            if seen.held && !before.held {
-                found.newly_held += 1;
-            }
-            if seen.final_credit && !before.final_credit {
-                found.newly_final += 1;
-                found.credit_final_delta += record.credit_points_final.unwrap_or(0.0);
+        if counts_as_news(record, never) {
+            let news = PendingVerdict {
+                accepted: seen.accepted && !before.accepted,
+                held: seen.held && !before.held,
+                final_credit: seen.final_credit && !before.final_credit,
+                credit_final: 0.0,
+                since: now,
+                newest_at: now,
+            };
+            if news.accepted || news.held || news.final_credit {
+                let credit_final = if news.final_credit {
+                    record.credit_points_final.unwrap_or(0.0)
+                } else {
+                    0.0
+                };
+                found.insert(
+                    key.clone(),
+                    PendingVerdict {
+                        credit_final,
+                        ..news
+                    },
+                );
             }
         }
         next_marks.insert(
@@ -427,7 +490,13 @@ pub fn verdict_delta(
             },
         );
     }
-    ((found.total() > 0).then_some(found), next_marks)
+    (VerdictDelta::from_submissions(found), next_marks)
+}
+
+/// Whether a record's verdicts can be news: not taken back, and not in a
+/// Never folder.
+fn counts_as_news(record: &HistoryRecord, never: &NeverProjects) -> bool {
+    !is_taken_back(record) && !never.contains(&record.project_id)
 }
 
 /// What one successful history poll does to the verdict bookkeeping.
@@ -443,9 +512,15 @@ pub struct VerdictPoll {
 }
 
 /// Apply one successful history poll. While `seeded` is false (the first
-/// poll after an upgrade or after `unenroll`) the marks are seeded silently:
-/// nothing lands and `pending` is left as it is. Afterwards what lands is
-/// added to `pending`.
+/// poll after an upgrade or after `unenroll`) the marks are seeded silently
+/// and nothing lands. Afterwards what lands is added to `pending`.
+///
+/// Either way, what was already pending is re-checked against this poll's
+/// cache first: a submission since withdrawn or revoked, in a folder now set
+/// to Never, or gone from the cache drops out, so news that is no longer
+/// news stops counting (and the mark goes dark when nothing is left). A
+/// pending delta that names no submissions cannot be re-checked and is
+/// dropped; see [`VerdictDelta::submissions`].
 #[must_use]
 pub fn after_history_poll(
     seeded: bool,
@@ -457,14 +532,21 @@ pub fn after_history_poll(
 ) -> VerdictPoll {
     let (found, marks) = verdict_delta(marks, next, never, now);
     let landed = if seeded { found } else { None };
-    let pending = match (pending, &landed) {
-        (Some(before), Some(new)) => {
-            let mut sum = before.clone();
-            sum.absorb(new);
-            Some(sum)
+    let live: BTreeMap<String, &HistoryRecord> = next
+        .iter()
+        .map(|r| (r.submission_id.to_string(), r))
+        .collect();
+    let mut submissions = pending.map(|p| p.submissions.clone()).unwrap_or_default();
+    submissions.retain(|id, _| live.get(id).is_some_and(|r| counts_as_news(r, never)));
+    for (id, news) in landed.iter().flat_map(|d| &d.submissions) {
+        match submissions.get_mut(id) {
+            Some(earlier) => earlier.absorb(news),
+            None => {
+                submissions.insert(id.clone(), news.clone());
+            }
         }
-        (before, new) => before.cloned().or_else(|| new.clone()),
-    };
+    }
+    let pending = VerdictDelta::from_submissions(submissions);
     VerdictPoll {
         marks,
         pending,
@@ -1146,6 +1228,8 @@ mod tests {
         NeverProjects::default()
     }
 
+    /// A delta with counts only, as `lead` and `mark` read it; it names no
+    /// submissions, so a poll would drop it.
     fn delta(a: u32, h: u32, f: u32, at: DateTime<Utc>) -> VerdictDelta {
         VerdictDelta {
             newly_accepted: a,
@@ -1154,6 +1238,7 @@ mod tests {
             credit_final_delta: 0.0,
             since: at,
             newest_at: at,
+            submissions: BTreeMap::new(),
         }
     }
 
@@ -1335,12 +1420,19 @@ mod tests {
     #[test]
     fn unacknowledged_news_accumulates() {
         let earlier = now() - Duration::hours(2);
-        let pending = delta(1, 0, 0, earlier);
-        let poll = after_history_poll(
+        let first = after_history_poll(
             true,
             &BTreeMap::new(),
-            Some(&pending),
-            &[rec(1, STATUS_QUARANTINED)],
+            None,
+            &[rec(1, STATUS_ACCEPTED)],
+            &no_never(),
+            earlier,
+        );
+        let poll = after_history_poll(
+            true,
+            &first.marks,
+            first.pending.as_ref(),
+            &[rec(1, STATUS_ACCEPTED), rec(2, STATUS_QUARANTINED)],
             &no_never(),
             now(),
         );
@@ -1349,6 +1441,120 @@ mod tests {
         assert_eq!(got.since, earlier);
         assert_eq!(got.newest_at, now());
         assert_eq!(poll.landed.map(|d| d.newly_held), Some(1));
+    }
+
+    /// News pending from earlier polls is re-checked against every poll's
+    /// cache: a submission since withdrawn, revoked, or in a folder now set
+    /// to Never drops out, whichever way it was taken back.
+    #[test]
+    fn pending_news_drops_submissions_taken_back_or_set_to_never() {
+        let earlier = now() - Duration::hours(1);
+        let landed = after_history_poll(
+            true,
+            &BTreeMap::new(),
+            None,
+            &[rec(1, STATUS_ACCEPTED), rec(2, STATUS_QUARANTINED)],
+            &no_never(),
+            earlier,
+        );
+        let pending = landed.pending.clone().expect("two landed");
+        assert_eq!(pending.total(), 2);
+        let never_p_ask = NeverProjects {
+            all: false,
+            ids: BTreeSet::from(["p_ask".to_string()]),
+        };
+        let withdrawn = HistoryRecord {
+            withdrawn_at: Some(now()),
+            ..rec(1, STATUS_ACCEPTED)
+        };
+        let never_other = NeverProjects {
+            all: false,
+            ids: BTreeSet::from(["p_other".to_string()]),
+        };
+        let moved = HistoryRecord {
+            project_id: "p_other".to_string(),
+            ..rec(1, STATUS_ACCEPTED)
+        };
+        for (case, cache, never) in [
+            (
+                "withdrawn",
+                vec![withdrawn, rec(2, STATUS_QUARANTINED)],
+                no_never(),
+            ),
+            (
+                "revoked",
+                vec![rec(1, STATUS_REVOKED), rec(2, STATUS_QUARANTINED)],
+                no_never(),
+            ),
+            (
+                "never",
+                vec![moved, rec(2, STATUS_QUARANTINED)],
+                never_other,
+            ),
+        ] {
+            let poll =
+                after_history_poll(true, &landed.marks, Some(&pending), &cache, &never, now());
+            let left = poll.pending.expect(case);
+            assert_eq!(
+                (left.newly_accepted, left.newly_held, left.total()),
+                (0, 1, 1),
+                "{case}"
+            );
+            assert_eq!(left.since, earlier, "{case}");
+            assert_eq!(poll.landed, None, "{case}: nothing new landed");
+        }
+        // Everything taken back: nothing is pending, and the mark goes dark.
+        let gone = after_history_poll(
+            true,
+            &landed.marks,
+            Some(&pending),
+            &[rec(1, STATUS_ACCEPTED), rec(2, STATUS_QUARANTINED)],
+            &never_p_ask,
+            now(),
+        );
+        assert_eq!(gone.pending, None);
+        let before = mark(&mark_open(with_verdicts(pending)), &empty(), now());
+        assert_eq!(before.state, MarkState::News);
+        let after = mark(
+            &mark_open(LeadInputs {
+                unpurposed_traces: Some(0),
+                verdicts_pending: gone.pending,
+                ..open()
+            }),
+            &empty(),
+            now(),
+        );
+        assert_eq!(after, quiet_mark(MarkState::None));
+    }
+
+    /// A pending delta from a build that kept only counts names no
+    /// submission, so no poll can re-check it: the next poll drops it
+    /// rather than keep the mark lit on counts nothing can verify.
+    #[test]
+    fn a_pending_delta_naming_no_submissions_is_dropped_by_the_next_poll() {
+        let legacy = delta(2, 0, 0, now() - Duration::hours(1));
+        let state: crate::daemon::state::DaemonState = serde_json::from_value(serde_json::json!({
+            "schema_version": crate::daemon::state::DAEMON_STATE_SCHEMA,
+            "cwd_cache": {}, "prior_uploads": {}, "last_observation": {},
+            "last_digest_at": null, "day_bucket": null,
+            "uploads_today": 0, "bytes_today": 0,
+            "verdicts_pending": serde_json::to_value(&legacy).unwrap(),
+        }))
+        .expect("an older state file still loads");
+        assert_eq!(
+            state.verdicts_pending.as_ref().map(VerdictDelta::total),
+            Some(2)
+        );
+        let poll = after_history_poll(
+            true,
+            &BTreeMap::new(),
+            state.verdicts_pending.as_ref(),
+            &[rec(1, STATUS_ACCEPTED)],
+            &no_never(),
+            now(),
+        );
+        // Rec 1 is new news on its own account; the two legacy counts are gone.
+        assert_eq!(poll.pending.map(|d| d.total()), Some(1));
     }
 
     #[test]
@@ -2050,8 +2256,24 @@ mod tests {
             MarkState::News
         );
 
-        let mut pending = delta(1, 0, 0, at);
-        pending.absorb(&delta(0, 1, 0, now() - Duration::minutes(5)));
+        let first = after_history_poll(
+            true,
+            &BTreeMap::new(),
+            None,
+            &[rec(1, STATUS_ACCEPTED)],
+            &no_never(),
+            at,
+        );
+        let pending = after_history_poll(
+            true,
+            &first.marks,
+            first.pending.as_ref(),
+            &[rec(1, STATUS_ACCEPTED), rec(2, STATUS_QUARANTINED)],
+            &no_never(),
+            now() - Duration::minutes(5),
+        )
+        .pending
+        .expect("both pending");
         let rearmed = mark_open(with_verdicts(pending));
         assert_eq!(mark(&rearmed, &empty(), now()).state, MarkState::News);
     }
