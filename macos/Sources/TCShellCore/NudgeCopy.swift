@@ -11,6 +11,7 @@ public struct NudgeCopy: Equatable, Sendable {
     public enum Key: String, CaseIterable, Sendable {
         case listOrderSuggested = "LIST_ORDER_SUGGESTED"
         case listOrderQueue = "LIST_ORDER_QUEUE"
+        case listOrderLabel = "LIST_ORDER_LABEL"
         case listFilterIdle = "LIST_FILTER_IDLE"
         case listFilterClear = "LIST_FILTER_CLEAR"
         case settingSuggestions = "SETTING_SUGGESTIONS"

@@ -73,9 +73,11 @@ struct TracesListControls: View {
                     .fixedSize()
             }
             Spacer(minLength: 0)
-            if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue] {
+            if let suggested = copy?[.listOrderSuggested], let queue = copy?[.listOrderQueue],
+               let label = Self.orderLabel(copy)
+            {
                 GlassSegmentedTabs(
-                    store.words?.tree.treeLabel ?? "",
+                    label,
                     selection: Binding(
                         get: { store.order },
                         set: { chosen in
@@ -89,6 +91,12 @@ struct TracesListControls: View {
                     .fixedSize()
             }
         }
+    }
+
+    /// The order control's accessible name, the core's; nil without it,
+    /// and the control is then not drawn.
+    static func orderLabel(_ copy: NudgeCopy?) -> String? {
+        copy?[.listOrderLabel]
     }
 }
 

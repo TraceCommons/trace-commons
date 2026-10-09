@@ -220,5 +220,11 @@ final class NudgeTracesTests: XCTestCase {
         XCTAssertEqual(copy[.listOrderQueue], "Oldest first")
         XCTAssertNotNil(copy[.listFilterIdle])
         XCTAssertNotNil(copy[.listFilterClear])
+        // The order control has a name of its own, never the tree's: a
+        // VoiceOver user would otherwise hear two controls by one name.
+        let label = try XCTUnwrap(TracesListControls.orderLabel(copy))
+        XCTAssertEqual(label, copy[.listOrderLabel])
+        XCTAssertNotEqual(label, TracesStore(client: nil).words?.tree.treeLabel)
+        XCTAssertNil(TracesListControls.orderLabel(NudgeCopy(table: [:])))
     }
 }

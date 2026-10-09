@@ -326,6 +326,9 @@ pub const NUDGE_MISSION_FIT_CLAUSE_ONE: &str = "1 of them fits a mission.";
 pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 /// The Traces sort control, queue order. DRAFT, NEEDS APPROVAL.
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
+/// The Traces sort control's own accessible name, so it is not read with
+/// the tree's. DRAFT, NEEDS APPROVAL.
+pub const LIST_ORDER_LABEL: &str = "Order of waiting sessions";
 /// A row tag, only when the entry's `mission_fit` is above zero. DRAFT,
 /// NEEDS APPROVAL.
 pub const ENTRY_MISSION_FIT: &str = "Fits a mission";
@@ -524,6 +527,7 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_MISSION_FIT_CLAUSE_ONE", NUDGE_MISSION_FIT_CLAUSE_ONE),
     ("LIST_ORDER_SUGGESTED", LIST_ORDER_SUGGESTED),
     ("LIST_ORDER_QUEUE", LIST_ORDER_QUEUE),
+    ("LIST_ORDER_LABEL", LIST_ORDER_LABEL),
     ("ENTRY_MISSION_FIT", ENTRY_MISSION_FIT),
     ("LIST_FILTER_IDLE", LIST_FILTER_IDLE),
     ("LIST_FILTER_CLEAR", LIST_FILTER_CLEAR),
