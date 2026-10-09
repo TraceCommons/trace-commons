@@ -7,7 +7,10 @@ import XCTest
 /// A flat pane is see-through, so what sits behind its text is whatever
 /// desktop is behind the window. The worst case is a desktop the glass
 /// passes unchanged that is the opposite of the text: pure white under
-/// Dark's white text, pure black under Light's dark text. These tests put
+/// Dark's white text, and under Light's dark text a near-black #333333 --
+/// light Liquid Glass frosts what is behind it, so a dark desktop reaches
+/// the pane lighter than black (an assumption, chosen so Light's veil can
+/// be 55% and show the desktop; owner feedback, 2026-10-09). These tests put
 /// the pane's layers over it -- the veil, then the pane's white fill -- and
 /// a card's or a field's fill over that, and require every text colour to
 /// clear WCAG's 4.5:1 on each ground. A real desktop is less extreme and the
@@ -24,7 +27,7 @@ final class FlatThemeContrastTests: XCTestCase {
     ]
     static let floor = 4.5
 
-    func test_flatLightTextClearsTheFloorOverABlackDesktop() throws {
+    func test_flatLightTextClearsTheFloorOverADarkDesktop() throws {
         try assertTextClearsTheFloor(in: "flatLight")
     }
 
@@ -67,7 +70,7 @@ final class FlatThemeContrastTests: XCTestCase {
     /// quiet card and a field on it. A gradient fill is taken at its most
     /// opaque stop.
     static func grounds(_ theme: String) throws -> [(String, RGB)] {
-        let desktop = theme == "flatLight" ? RGB(r: 0, g: 0, b: 0) : RGB(r: 1, g: 1, b: 1)
+        let desktop = theme == "flatLight" ? RGB(r: 0.2, g: 0.2, b: 0.2) : RGB(r: 1, g: 1, b: 1)
         var pane = over(desktop, try colour("glassVeil", theme: theme))
         pane = over(pane, try gradientMax("paneFill", theme: theme))
         return [
