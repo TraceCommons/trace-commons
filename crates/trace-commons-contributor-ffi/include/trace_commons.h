@@ -2167,6 +2167,13 @@ char*       tc_insights_call(const uint8_t* request, size_t request_len, char** 
 /* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
  * free with tc_string_free. Returns NULL only after a caught panic. */
 char*       tc_insights_copy_json(void);
+/* Every re-engagement nudge string as one JSON object of key to text,
+ * including both candidates of each pending wording choice and every
+ * singular form. Opens no store. Sentences with counts arrive composed on
+ * status.nudge.text / mark_text, reengage_due and digest_due; this table is
+ * for the fixed strings. Owned JSON string; free with tc_string_free.
+ * Returns NULL only after a caught panic. DRAFT, NEEDS APPROVAL. */
+char*       tc_nudge_copy_json(void);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
@@ -2201,6 +2208,20 @@ char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, c
  * "daemon-not-running".
  */
 uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
+
+/* tc_subscribe, declaring which opt-in events this subscriber can render
+ * (subscribe's `accepts`), so it receives them. accepts_json is a borrowed
+ * UTF-8 JSON array of event names, such as ["reengage_due"]; names this
+ * build does not know are ignored. NULL declares none and is exactly
+ * tc_subscribe. On the in-process path the subscription counts as a renderer
+ * until tc_unsubscribe returns, so the daemon posts a standalone
+ * re-engagement notification only while some subscriber can draw it.
+ *
+ * Returns 0 on failure with every tc_last_error label tc_subscribe records,
+ * plus "subscribe-accepts-invalid" when accepts_json is not a JSON array of
+ * strings. Lifetime rules for cb and ctx are tc_subscribe's.
+ */
+uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void (*cb)(const char* event_json, void* ctx), void* ctx);
 
 /* Cancel a subscription returned by tc_subscribe. Blocks until that
  * subscription's callback is guaranteed to no longer fire before

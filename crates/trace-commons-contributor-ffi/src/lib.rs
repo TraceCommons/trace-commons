@@ -94,6 +94,8 @@ mod insights;
 pub use insights::{tc_insights_call, tc_insights_copy_json};
 mod mission_drafts;
 pub use mission_drafts::tc_mission_drafts_call;
+mod nudge;
+pub use nudge::tc_nudge_copy_json;
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -1431,6 +1433,60 @@ pub unsafe extern "C" fn tc_subscribe(
     cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
     ctx: *mut c_void,
 ) -> u64 {
+    unsafe { subscribe_inner(handle, None, cb, ctx) }
+}
+
+/// `tc_subscribe`, declaring which opt-in events this subscriber can render
+/// (`subscribe`'s `accepts`), so it receives them. `accepts_json` is a
+/// borrowed UTF-8 JSON array of event names, such as `["reengage_due"]`;
+/// names this build does not know are ignored. NULL declares none and is
+/// exactly `tc_subscribe`.
+///
+/// On the in-process path the subscription counts as a renderer until
+/// `tc_unsubscribe` returns, so the daemon posts a standalone re-engagement
+/// notification only while some subscriber can draw it. On the attached
+/// path the declaration travels in the `subscribe` request.
+///
+/// Returns 0 on failure, recording a fixed `tc_last_error` label: every
+/// label `tc_subscribe` records, plus `"subscribe-accepts-invalid"` when
+/// `accepts_json` is not valid UTF-8 JSON holding an array of strings.
+///
+/// # Safety
+/// As `tc_subscribe`. `accepts_json`, if non-null, must point to a
+/// NUL-terminated string valid for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_subscribe_with_accepts(
+    handle: *mut tc_handle,
+    accepts_json: *const c_char,
+    cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
+    ctx: *mut c_void,
+) -> u64 {
+    let accepts = if accepts_json.is_null() {
+        None
+    } else {
+        let parsed = unsafe { CStr::from_ptr(accepts_json) }
+            .to_str()
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        match parsed {
+            Some(value @ serde_json::Value::Array(_)) => Some(value),
+            _ => {
+                set_last_error(ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID);
+                return 0;
+            }
+        }
+    };
+    unsafe { subscribe_inner(handle, accepts, cb, ctx) }
+}
+
+/// The body both subscribe entry points share. `accepts` is `None` for
+/// `tc_subscribe`: a subscriber that declares nothing.
+unsafe fn subscribe_inner(
+    handle: *mut tc_handle,
+    accepts: Option<serde_json::Value>,
+    cb: Option<extern "C" fn(event_json: *const c_char, ctx: *mut c_void)>,
+    ctx: *mut c_void,
+) -> u64 {
     let outcome = guard(|| {
         if handle.is_null() {
             set_last_error(ERR_NULL_HANDLE);
@@ -1458,14 +1514,18 @@ pub unsafe extern "C" fn tc_subscribe(
         if let Some(attached) = attached_of(handle_ref) {
             let ctx = SendPtr(ctx);
             let token = handle_ref.next_subscription.fetch_add(1, Ordering::Relaxed);
+            let declared = accepts.clone().unwrap_or(serde_json::Value::Null);
             if attached
-                .subscribe(move |event| {
-                    let ctx = &ctx;
-                    let json = serde_json::to_string(&event).unwrap_or_default();
-                    if let Ok(c) = CString::new(json) {
-                        cb(c.as_ptr(), ctx.0);
-                    }
-                })
+                .subscribe_with_accepts(
+                    move |event| {
+                        let ctx = &ctx;
+                        let json = serde_json::to_string(&event).unwrap_or_default();
+                        if let Ok(c) = CString::new(json) {
+                            cb(c.as_ptr(), ctx.0);
+                        }
+                    },
+                    &declared,
+                )
                 .is_err()
             {
                 set_last_error(ERR_DAEMON_NOT_RUNNING);
@@ -1479,6 +1539,17 @@ pub unsafe extern "C" fn tc_subscribe(
             return Ok(0u64);
         };
         let ctx = SendPtr(ctx);
+        // The in-process subscriber's `accepts`, counted as a renderer for as
+        // long as the task below delivers events. With none declared it
+        // withholds every opt-in event, exactly as the socket does.
+        let declaration = match accepts.as_ref().map(|a| shared.declare_renderer(a)) {
+            None => None,
+            Some(Ok(declaration)) => Some(declaration),
+            Some(Err(label)) => {
+                set_last_error(label);
+                return Ok(0u64);
+            }
+        };
 
         // Subscribed here, synchronously, rather than inside the spawned
         // task: `broadcast::Receiver::subscribe` starts buffering from this
@@ -1496,12 +1567,18 @@ pub unsafe extern "C" fn tc_subscribe(
                     break;
                 }
                 match tokio::time::timeout(std::time::Duration::from_millis(250), rx.recv()).await {
-                    // This path has no `subscribe` request to carry
-                    // `accepts`, so it is a subscriber that accepted
-                    // nothing: an opt-in event is never delivered here,
-                    // exactly as the socket withholds it from such a
-                    // subscriber. See `ipc::OPT_IN_EVENTS`.
-                    Ok(Ok(event)) if ipc::event_is_opt_in(&event.event) => continue,
+                    // An opt-in event reaches only a subscriber that declared
+                    // it, exactly as the socket withholds it from one that
+                    // did not. `tc_subscribe` declares nothing. See
+                    // `ipc::OPT_IN_EVENTS`.
+                    Ok(Ok(event))
+                        if ipc::event_is_opt_in(&event.event)
+                            && !declaration
+                                .as_ref()
+                                .is_some_and(|d| d.accepts(&event.event)) =>
+                    {
+                        continue;
+                    }
                     Ok(Ok(event)) => {
                         let json = serde_json::to_string(&event).unwrap_or_default();
                         if let Ok(c) = CString::new(json) {
@@ -6583,6 +6660,105 @@ mod in_process_subscribe_tests {
         assert!(
             !seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
             "an in-process subscriber received an opt-in event: {seen:?}"
+        );
+    }
+    static SEEN_ACCEPTING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+    extern "C" fn record_accepting_cb(event_json: *const c_char, _ctx: *mut c_void) {
+        let text = unsafe { CStr::from_ptr(event_json) }.to_string_lossy();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let name = v["event"].as_str().unwrap_or_default().to_string();
+        SEEN_ACCEPTING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(name);
+    }
+
+    /// `tc_subscribe_with_accepts` on the in-process path: a subscriber
+    /// that declares `reengage_due` receives it and counts as a renderer
+    /// exactly until `tc_unsubscribe` returns. A malformed declaration is
+    /// refused with a fixed label and counts nothing.
+    #[test]
+    fn an_in_process_subscriber_that_accepts_receives_and_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ConfigStore::open(dir.path().to_path_buf()).unwrap();
+        for root in ["claude-root", "codex-root"] {
+            std::fs::create_dir_all(dir.path().join(root)).unwrap();
+        }
+        let settings = trace_commons_contributor::daemon::settings::DaemonSettings {
+            claude_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("claude-root"),
+                },
+            ),
+            codex_source: Some(
+                trace_commons_contributor::daemon::settings::SourceDeclaration::Watch {
+                    path: dir.path().join("codex-root"),
+                },
+            ),
+            ..Default::default()
+        };
+        settings.save(&store).unwrap();
+        let path = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let h = unsafe { tc_daemon_start(path.as_ptr(), &mut err) };
+        assert!(!h.is_null(), "tc_daemon_start failed");
+        let shared = shared_of(unsafe { &*h }).expect("an in-process daemon");
+
+        let bad = CString::new("\"reengage_due\"").unwrap();
+        let refused = unsafe {
+            tc_subscribe_with_accepts(
+                h,
+                bad.as_ptr(),
+                Some(record_accepting_cb),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(refused, 0);
+        assert_eq!(
+            unsafe { CStr::from_ptr(tc_last_error()) }.to_str().unwrap(),
+            ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID
+        );
+        assert!(!shared.has_renderer(ipc::EVENT_REENGAGE_DUE));
+
+        let accepts = CString::new("[\"reengage_due\", \"some_future_event\"]").unwrap();
+        let token = unsafe {
+            tc_subscribe_with_accepts(
+                h,
+                accepts.as_ptr(),
+                Some(record_accepting_cb),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(token, 0);
+        assert!(shared.has_renderer(ipc::EVENT_REENGAGE_DUE));
+        shared.publish(ipc::EVENT_REENGAGE_DUE, serde_json::json!({}));
+        for _ in 0..200 {
+            if SEEN_ACCEPTING
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .any(|e| e == ipc::EVENT_REENGAGE_DUE)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        unsafe { tc_unsubscribe(h, token) };
+        assert!(
+            !shared.has_renderer(ipc::EVENT_REENGAGE_DUE),
+            "the declaration outlived its subscription"
+        );
+        drop(shared);
+        unsafe { tc_daemon_stop(h) };
+        unsafe { tc_handle_free(h) };
+        let seen = SEEN_ACCEPTING
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        assert!(
+            seen.iter().any(|e| e == ipc::EVENT_REENGAGE_DUE),
+            "an accepting subscriber missed reengage_due: {seen:?}"
         );
     }
 }
