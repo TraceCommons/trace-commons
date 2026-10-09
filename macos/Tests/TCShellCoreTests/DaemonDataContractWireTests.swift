@@ -628,9 +628,17 @@ final class DaemonDataContractWireTests: XCTestCase {
         XCTAssertFalse(untokened.contains("tokens"))
         let absent = try DaemonDataDecoding.decoder().decode(DaemonData.InferenceCall.self, from: Data(untokened.utf8))
         XCTAssertNil(absent.tokens)
-        let sample = try await SampleDaemonClient(.normalDay).inferenceCalls(limit: 50, cursor: nil).calls
-        XCTAssertFalse(sample.isEmpty)
-        XCTAssertTrue(sample.allSatisfy { $0.tokens == nil }, "the recorded sample has no tokens and none appear")
+        // The ledger feed is on by default (owner ruling, 2026-10-09), and
+        // the sample sets' `get_settings` says so, so their calls carry the
+        // tokens a default daemon sends: every row, a measured 0 kept and an
+        // unknown counter null.
+        for set in [SampleDaemonClient.SampleSet.normalDay, .busyQueue] {
+            let sample = try await SampleDaemonClient(set).inferenceCalls(limit: 50, cursor: nil).calls
+            XCTAssertFalse(sample.isEmpty, "\(set)")
+            XCTAssertTrue(sample.allSatisfy { $0.tokens != nil }, "\(set): a call without the default feed's tokens")
+            XCTAssertTrue(sample.contains { $0.tokens?.cacheWrite == 0 }, "\(set): no measured zero")
+            XCTAssertTrue(sample.contains { $0.tokens?.input == nil }, "\(set): no unknown counter")
+        }
     }
 
     func testUsageChangedParses() {

@@ -688,7 +688,7 @@ extension DaemonData {
         /// The declared trajectory folder's mode; the path is never sent.
         public let trajectorySourceMode: String?
         /// Whether Insights may read the proxy ledger (owner decision D3,
-        /// open; off by default): the menu-bar glance (`insights_glance`) and
+        /// settled 2026-10-09: on by default): the menu-bar glance (`insights_glance`) and
         /// the per-call `tokens` on `inference_calls` follow it. `nil` from a
         /// daemon that predates it, never drawn as off.
         public let insightsLedgerFeed: Bool?
@@ -1772,7 +1772,7 @@ extension DaemonData {
     }
 
     /// `insights_glance`: today's routed calls per tool from the proxy ledger
-    /// (owner decision D3, open; off by default). Three shapes: off
+    /// (owner decision D3, settled 2026-10-09: on by default). Three shapes: off
     /// (`enabled: false`), unreadable (`readable: false`), and the day's
     /// figures. Every field a shape can omit is optional, so no shape is
     /// undecodable. Only an enabled, readable, fresh answer with rows is

@@ -392,8 +392,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Show the weekly summary card",
     ),
     ("analytics_setting_lever", "Lever suggestions"),
-    // The `insights_ledger_feed` switch (owner decision D3, open: off by
-    // default).
+    // The `insights_ledger_feed` switch (owner decision D3, settled
+    // 2026-10-09: on by default, the switch turns it off).
     (
         "analytics_setting_ledger_feed",
         "Count tokens in routed calls",

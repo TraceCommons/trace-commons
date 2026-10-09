@@ -32,7 +32,7 @@
   "private_inference_offer_seen": false,
   "scrub_check": "automatic",
   "scrub_check_defaulted_on_upgrade": false,
-  "insights_ledger_feed": false,
+  "insights_ledger_feed": true,
   "insights_context_threshold": null,
   "insights_counter_pass": false,
   "near_ai_configured": false,
