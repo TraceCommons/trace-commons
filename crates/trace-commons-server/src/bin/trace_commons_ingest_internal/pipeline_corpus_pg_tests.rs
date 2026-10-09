@@ -59,7 +59,7 @@ use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
 use trace_commons_server::versioned_pipeline_harness::{
-    HarnessAssembly, HarnessDependencies, assemble_harness_production,
+    HarnessAssembly, HarnessDependencies, assemble_harness_production_crashing_at,
     harness_production_components, production_package_pins,
 };
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
@@ -599,7 +599,12 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
         let index = match &self.dependencies {
             CorpusDependencies::Reference(index) => index.clone(),
             CorpusDependencies::Production(dependencies) => {
-                return production_corpus_service(&self.package, dependencies.clone(), context);
+                return production_harness_runtime(
+                    &self.package,
+                    dependencies.clone(),
+                    None,
+                    context,
+                );
             }
         };
         let adapters = self
@@ -650,14 +655,16 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
     }
 }
 
-/// The production corpus service: the production assembler, through the
-/// ingest seam's context, over `dependencies` under `package`'s own pins,
-/// with the harness's allow-all authority and pass-through privacy boundary
-/// (the corpus tenants are the harness's, not the deployment's). Refused
-/// unless it serves exactly `package`.
-fn production_corpus_service(
+/// A production harness's service (spec B-D1): the production assembler,
+/// through the ingest seam's context, over `dependencies` under `package`'s
+/// own pins, with the harness's allow-all authority and pass-through
+/// privacy boundary (the corpus and restore tenants are the harness's, not
+/// the deployment's), and `crash_point` when the restore seed needs one.
+/// Refused unless it serves exactly `package`.
+pub(super) fn production_harness_runtime(
     package: &BundlePackage,
     dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
     context: pipeline_runtime::IngestPipelineRuntimeContext,
 ) -> anyhow::Result<Arc<PipelineService>> {
     let pins = production_package_pins(package)?;
@@ -667,7 +674,7 @@ fn production_corpus_service(
         allow_all_test_authority(),
         Arc::new(PassThroughPipelinePrivacyBoundary),
     );
-    Ok(Arc::new(assemble_harness_production(
+    Ok(Arc::new(assemble_harness_production_crashing_at(
         package,
         trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs {
             backend: context.backend,
@@ -679,7 +686,75 @@ fn production_corpus_service(
             main_gate: context.main_gate,
             components,
         },
+        crash_point,
     )?))
+}
+
+/// [`production_harness_runtime`] behind ingest's assembler seam.
+struct ProductionHarnessAssembler {
+    package: BundlePackage,
+    dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
+}
+
+impl IngestPipelineRuntimeAssembler for ProductionHarnessAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        production_harness_runtime(
+            &self.package,
+            self.dependencies.clone(),
+            self.crash_point,
+            context,
+        )
+    }
+}
+
+/// The production harness's service for the restore drill, through
+/// `assemble_ingest_pipeline_runtime` with the arguments the compatibility
+/// drill passes (`assemble_compatibility_pipeline_service_with`): the
+/// pipeline's credit issuer configured, and `main`'s gate configuration the
+/// one `package` holds. Panics with the refusal's label.
+pub(super) fn assemble_production_harness_service(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    package: &BundlePackage,
+    dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    let main_gate = package_compatibility_config(package)
+        .map(|config| config.main_gate())
+        .unwrap_or_else(|| panic!("harness_production_package_invalid"));
+    let assembler = ProductionHarnessAssembler {
+        package: package.clone(),
+        dependencies,
+        crash_point,
+    };
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    assemble_ingest_pipeline_runtime(
+        Some(&assembler),
+        Some(&connections),
+        Some(configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        true,
+        true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+        main_gate,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+    .expect("an assembler was given, so a service is returned")
 }
 
 /// The service comes out of `assemble_ingest_pipeline_runtime`, the seam

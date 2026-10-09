@@ -517,6 +517,17 @@ pub struct ProductionPipelineInputs {
 pub fn assemble_production_pipeline(
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<PipelineService> {
+    production_pipeline_builder(inputs)?.build()
+}
+
+/// The builder [`assemble_production_pipeline`] builds: every production
+/// dependency set, nothing else. The qualification harness's restore drill
+/// adds only a crash point to it before building (spec B-D1), so the drill
+/// crashes the production assembly rather than a copy of it.
+#[doc(hidden)]
+pub fn production_pipeline_builder(
+    inputs: ProductionPipelineInputs,
+) -> anyhow::Result<crate::versioned_pipeline::PipelineServiceBuilder> {
     use crate::versioned_pipeline::PipelineServiceBuilder;
     use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
@@ -558,7 +569,7 @@ pub fn assemble_production_pipeline(
     if let Some(privacy) = components.privacy.clone() {
         builder = builder.with_privacy(privacy);
     }
-    builder.build()
+    Ok(builder)
 }
 
 /// The check the production assembly's startup emits (spec A-D11).

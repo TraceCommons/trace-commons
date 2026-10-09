@@ -10,7 +10,7 @@
 //! service themselves. `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY` chooses what
 //! they build: unset, blank or `reference` keeps the reference assembly
 //! exactly as before; `production` builds the service through
-//! [`assemble_production_pipeline`], the constructor the deployed ingest
+//! `assemble_production_pipeline`, the constructor the deployed ingest
 //! uses, and only in a `near-ai-scorer` build
 //! (`harness_production_assembly_unavailable` otherwise).
 //!
@@ -39,13 +39,13 @@ use trace_commons_gate_api::{
     Embedder, IdentifiedIndexReader, IdentifiedIndexWriter, PerplexityScorer,
 };
 
-use crate::versioned_pipeline::PipelineService;
+use crate::versioned_pipeline::{PipelineCrashPoint, PipelineService};
 use crate::versioned_pipeline_authority::{PipelineAuthorityProvider, PipelinePrivacyBoundary};
 use crate::versioned_pipeline_bundle::package_compatibility_config;
 use crate::versioned_pipeline_compat::{CompatibilityQualification, MainGateConfig};
 use crate::versioned_pipeline_production::{
     FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponents, ProductionPipelineInputs,
-    assemble_production_pipeline, production_compatibility_package,
+    production_compatibility_package, production_pipeline_builder,
 };
 use crate::versioned_pipeline_qualification::{
     BundlePackageTrustStore, SignedBundlePackage, TrustedBundleKey,
@@ -80,7 +80,7 @@ pub enum HarnessAssembly {
     /// The reference scorer, embedder, index and recording adapters: every
     /// harness exactly as before the switch existed.
     Reference,
-    /// [`assemble_production_pipeline`] over the dependencies a signed
+    /// `assemble_production_pipeline` over the dependencies a signed
     /// production package names.
     Production,
 }
@@ -231,7 +231,7 @@ pub fn harness_production_components(
     })
 }
 
-/// [`assemble_production_pipeline`] over `inputs`, refused
+/// [`crate::versioned_pipeline_production::assemble_production_pipeline`] over `inputs`, refused
 /// (`harness_production_package_mismatch`) unless the service it built
 /// serves exactly `expected`: the check a production harness's result
 /// rests on, since that result names `expected`.
@@ -239,7 +239,23 @@ pub fn assemble_harness_production(
     expected: &BundlePackage,
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<PipelineService> {
-    let service = assemble_production_pipeline(inputs)?;
+    assemble_harness_production_crashing_at(expected, inputs, None)
+}
+
+/// [`assemble_harness_production`] with `crash_point` set on the
+/// production builder: the restore drill's seed stops its second lifetime
+/// at a durable Settle selection. Nothing else differs from the deployed
+/// assembly.
+pub fn assemble_harness_production_crashing_at(
+    expected: &BundlePackage,
+    inputs: ProductionPipelineInputs,
+    crash_point: Option<PipelineCrashPoint>,
+) -> anyhow::Result<PipelineService> {
+    let mut builder = production_pipeline_builder(inputs)?;
+    if let Some(point) = crash_point {
+        builder = builder.with_crash_point(point);
+    }
+    let service = builder.build()?;
     anyhow::ensure!(
         service.default_package() == expected,
         HARNESS_PRODUCTION_PACKAGE_MISMATCH_LABEL
@@ -261,10 +277,7 @@ pub async fn harness_dependencies_from_env(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> anyhow::Result<HarnessDependencies> {
     use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig;
     use trace_commons_gate_enclave::{NearAiPerplexityScorer, NearAiScorerConfig};
-
-    use crate::versioned_pipeline_production::UsearchPipelineIndex;
 
     let value = |var: &str| {
         lookup(var)
@@ -312,26 +325,40 @@ pub async fn harness_dependencies_from_env(
         embedder.output_dim() == embedder_descriptor.output_dim,
         "harness_embedder_dimension_mismatch"
     );
-    std::fs::create_dir_all(index_root)
-        .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
-    let index = Arc::new(UsearchPipelineIndex::open(
-        index_root,
-        UsearchVectorIndexConfig {
-            dim: embedder_descriptor.output_dim,
-            hnsw_m: 16,
-            ef_construction: 200,
-            ef_search: 50,
-            max_open: 32,
-            flush_every: 32,
-            flush_interval: None,
-        },
-    )?);
+    let index = open_harness_index(index_root, embedder_descriptor.output_dim)?;
     Ok(HarnessDependencies {
         scorer: Arc::new(scorer),
         embedder: Arc::new(embedder),
         index_reader: index.clone(),
         index_writer: index,
     })
+}
+
+/// A usearch pipeline index of `dim` at `index_root`, created if absent,
+/// with ingest's default HNSW settings (no package binds them). The restore
+/// drill opens a fresh one for each index it rebuilds.
+#[cfg(feature = "near-ai-scorer")]
+pub fn open_harness_index(
+    index_root: &Path,
+    dim: usize,
+) -> anyhow::Result<Arc<crate::versioned_pipeline_production::UsearchPipelineIndex>> {
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig;
+    std::fs::create_dir_all(index_root)
+        .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
+    Ok(Arc::new(
+        crate::versioned_pipeline_production::UsearchPipelineIndex::open(
+            index_root,
+            UsearchVectorIndexConfig {
+                dim,
+                hnsw_m: 16,
+                ef_construction: 200,
+                ef_search: 50,
+                max_open: 32,
+                flush_every: 32,
+                flush_interval: None,
+            },
+        )?,
+    ))
 }
 
 #[cfg(test)]
