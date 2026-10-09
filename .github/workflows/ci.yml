@@ -753,6 +753,8 @@ jobs:
           python3 scripts/operator/pipeline.py qualify \
             --signing-key "${RUNNER_TEMP}/pipeline-ci-check-key/ci_check_key.der" \
             --signing-key-id ci_check_key
+      - name: pipeline compare self-test
+        run: python3 scripts/operator/pipeline.py compare --self-test
       # A failed run prints only its label and a log path on this runner.
       # Keep the run directories `pipeline.py` writes (`Run.create`:
       # `.local/pipeline/runs/<run id>/`) -- the protected step logs, results,

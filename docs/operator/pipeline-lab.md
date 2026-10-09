@@ -68,6 +68,11 @@ downloads from Hugging Face -- arrives with the PR that needs the network
 canary (ruling HF-1), and this runbook does not print `pin-local.json`'s
 digest fields; read the file itself if you need them.
 
+The first network pin is
+[`versioned-pipeline-comparison-hf-pin-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json),
+the 10,000-trace sample of `pipeline.py compare`; see
+[pipeline-comparison.md](pipeline-comparison.md#the-full-run).
+
 ## Build a package
 
 ```bash
