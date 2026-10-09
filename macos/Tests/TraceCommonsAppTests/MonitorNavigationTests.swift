@@ -167,11 +167,12 @@ final class MonitorNavigationTests: XCTestCase {
     }
 
     func test_theInferenceStoreDropsAReadTheOldClientAnswersAfterAttach() async {
-        // Four of its five reads reach the daemon (harnesses, calls,
-        // destinations and the Private AI switch, a live `get_settings`
-        // read); the summary is provisional.
+        // Five of its six reads reach the daemon (harnesses, calls,
+        // destinations, the Private AI switch, a live `get_settings` read,
+        // and the ledger feed's switch, another); the summary is
+        // provisional.
         let entered = expectation(description: "every read reached the old daemon")
-        entered.expectedFulfillmentCount = 4
+        entered.expectedFulfillmentCount = 5
         let gate = GatedTransport(.normalDay, entered: entered)
         let store = InferenceStore(client: LiveDaemonClient(transport: gate))
         let loading = Task { await store.load() }
@@ -183,6 +184,7 @@ final class MonitorNavigationTests: XCTestCase {
         XCTAssertNil(store.harnesses)
         XCTAssertNil(store.destinations)
         XCTAssertNil(store.privateAI, "the old daemon's Private AI switch is drawn after a restart")
+        XCTAssertNil(store.ledgerFeed, "the old daemon's ledger feed switch is drawn after a restart")
         XCTAssertTrue(store.failures.isEmpty, "an old read's outcome is recorded against the new client")
     }
 

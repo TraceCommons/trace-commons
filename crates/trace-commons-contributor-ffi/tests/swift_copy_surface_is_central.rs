@@ -1063,6 +1063,15 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_copy_json",
     ),
+    // The Inference tab labels each call's ledger counters, and the ledger
+    // feed's switch, in the core's analytics words.
+    (
+        "Inference call token words",
+        "TraceCommonsApp/Views/Monitor/InferenceViews.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
     (
         "Insights week overview and drill-down reads",
         "TraceCommonsApp/InsightsModel.swift",
