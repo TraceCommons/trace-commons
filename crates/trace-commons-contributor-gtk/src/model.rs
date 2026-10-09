@@ -1746,6 +1746,9 @@ pub struct TokenStorage {
     pub scope_note: String,
     pub cleanup_label: String,
     pub discard_label: String,
+    /// The discard confirmation's title; empty from an older daemon.
+    #[serde(default)]
+    pub discard_title: String,
     pub discard_confirmation: String,
     pub cancel_label: String,
     pub confirm_label: String,

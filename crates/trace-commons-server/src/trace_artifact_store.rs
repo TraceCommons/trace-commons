@@ -23,6 +23,64 @@ use zeroize::Zeroizing;
 use crate::secrets::SecretsCrypto;
 use crate::trace_artifact_kek::{KekContext, KmsKeyWrapper};
 
+/// A store read that reached the object and found it missing or not what its
+/// receipt names: not found, a tenant, kind, key, object-ref or hash
+/// mismatch, an invalidated object, a decode, decrypt or parse failure, or
+/// a wrapped DEK the key wrapper cannot decode, size or authenticate (Zaki's
+/// approval of #1143, follow-up ZA-2; PR #1283 review, finding 1). Retrying
+/// cannot change it, unlike a transport or availability failure -- an I/O
+/// error reading the object, a remote fetch that failed, a key-wrap service
+/// call that failed, a record of another wrapper kind -- which carries no
+/// such marker. It wraps the failure as a
+/// context whose message is the failure's own, so a read's error message is
+/// what it was; `is_trace_artifact_integrity_error` tells the two apart.
+#[derive(Debug, Clone)]
+pub struct TraceArtifactIntegrityError(String);
+
+impl TraceArtifactIntegrityError {
+    pub fn new(message: String) -> Self {
+        Self(message)
+    }
+}
+
+impl std::fmt::Display for TraceArtifactIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TraceArtifactIntegrityError {}
+
+/// Whether `error` is a store read's integrity failure
+/// (`TraceArtifactIntegrityError`) rather than a transport or availability
+/// failure.
+pub fn is_trace_artifact_integrity_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<TraceArtifactIntegrityError>()
+        .is_some()
+}
+
+/// Marks `error` as an integrity failure, keeping its message.
+fn integrity_error(error: anyhow::Error) -> anyhow::Error {
+    if is_trace_artifact_integrity_error(&error) {
+        return error;
+    }
+    let message = error.to_string();
+    error.context(TraceArtifactIntegrityError(message))
+}
+
+/// An object read's I/O failure: a missing object is an integrity failure,
+/// any other I/O failure is not.
+fn read_failure(error: std::io::Error, message: String) -> anyhow::Error {
+    let not_found = error.kind() == std::io::ErrorKind::NotFound;
+    let error = anyhow::Error::new(error).context(message);
+    if not_found {
+        integrity_error(error)
+    } else {
+        error
+    }
+}
+
 pub const TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION: &str = "ironclaw.trace_artifact_ciphertext.v1";
 /// Envelope schema version for KEK-wrapped per-object DEK records.
 pub const TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2: &str = "ironclaw.trace_artifact_ciphertext.v2";
@@ -571,21 +629,27 @@ impl FileRemoteTraceArtifactProvider {
     ) -> anyhow::Result<FileRemoteTraceArtifactRecord> {
         let path = self.object_path(object_ref)?;
         let record = Self::read_record_at_path(&path)?;
-        anyhow::ensure!(
-            record.object_ref == *object_ref,
-            "remote trace artifact object ref mismatch"
-        );
+        if record.object_ref != *object_ref {
+            return Err(integrity_error(anyhow::anyhow!(
+                "remote trace artifact object ref mismatch"
+            )));
+        }
         Ok(record)
     }
 
     fn read_record_at_path(path: &Path) -> anyhow::Result<FileRemoteTraceArtifactRecord> {
-        let body = std::fs::read_to_string(path).with_context(|| {
-            format!(
-                "failed to read remote trace artifact object {}",
-                path.display()
+        let body = std::fs::read_to_string(path).map_err(|error| {
+            read_failure(
+                error,
+                format!(
+                    "failed to read remote trace artifact object {}",
+                    path.display()
+                ),
             )
         })?;
-        serde_json::from_str(&body).context("failed to parse remote trace artifact record")
+        serde_json::from_str(&body)
+            .context("failed to parse remote trace artifact record")
+            .map_err(integrity_error)
     }
 
     fn write_record(&self, record: &FileRemoteTraceArtifactRecord) -> anyhow::Result<()> {
@@ -889,21 +953,24 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
     ) -> anyhow::Result<EncryptedTraceArtifact> {
         validate_remote_object_ref(expected_scope, &self.config, object_ref)?;
         let record = self.provider.read_encrypted_artifact(object_ref)?;
-        anyhow::ensure!(
-            record.object_ref == *object_ref,
-            "remote trace artifact object ref mismatch"
-        );
-        anyhow::ensure!(
-            record.invalidated_at.is_none(),
-            "remote trace artifact object ref invalidated"
-        );
-        verify_encrypted_artifact(
-            &record.artifact,
-            expected_scope.tenant_storage_ref.as_str(),
-            &object_ref.artifact_kind,
-            object_ref.object_key.as_str(),
-            object_ref.ciphertext_sha256.as_str(),
-        )?;
+        (|| {
+            anyhow::ensure!(
+                record.object_ref == *object_ref,
+                "remote trace artifact object ref mismatch"
+            );
+            anyhow::ensure!(
+                record.invalidated_at.is_none(),
+                "remote trace artifact object ref invalidated"
+            );
+            verify_encrypted_artifact(
+                &record.artifact,
+                expected_scope.tenant_storage_ref.as_str(),
+                &object_ref.artifact_kind,
+                object_ref.object_key.as_str(),
+                object_ref.ciphertext_sha256.as_str(),
+            )
+        })()
+        .map_err(integrity_error)?;
         Ok(record.artifact)
     }
 
@@ -1383,9 +1450,9 @@ impl LocalEncryptedTraceArtifactStore {
             expected_ciphertext_sha256,
         )?;
         if artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 {
-            anyhow::bail!(
+            return Err(integrity_error(anyhow::anyhow!(
                 "LocalEncryptedTraceArtifactStore does not support v2 KEK-wrapped artifacts"
-            );
+            )));
         }
         decrypt_artifact_json(&self.crypto, &artifact)
     }
@@ -1401,39 +1468,46 @@ impl LocalEncryptedTraceArtifactStore {
             .strip_prefix("sha256:")
             .unwrap_or(expected_ciphertext_sha256);
         let path = self.artifact_path(expected_tenant_storage_ref, object_key)?;
-        let body = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read trace artifact {}", path.display()))?;
-        let artifact: EncryptedTraceArtifact =
-            serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
-        anyhow::ensure!(
-            artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
-            "encrypted trace artifact tenant mismatch"
-        );
-        anyhow::ensure!(
-            artifact.receipt.artifact_kind == expected_artifact_kind,
-            "encrypted trace artifact kind mismatch"
-        );
-        anyhow::ensure!(
-            artifact.receipt.object_key == object_key,
-            "encrypted trace artifact object key mismatch"
-        );
-        anyhow::ensure!(
-            artifact.receipt.ciphertext_sha256 == expected_ciphertext_sha256,
-            "encrypted trace artifact receipt hash mismatch"
-        );
-        let ciphertext = base64::engine::general_purpose::STANDARD
-            .decode(artifact.ciphertext_base64.as_bytes())
-            .context("failed to decode trace artifact ciphertext for hash check")?;
-        anyhow::ensure!(
-            sha256_hex(&ciphertext) == expected_ciphertext_sha256,
-            "trace artifact ciphertext hash mismatch"
-        );
-        verify_kek_binding(
-            &artifact,
-            expected_tenant_storage_ref,
-            &expected_artifact_kind,
-        )?;
-        Ok(artifact)
+        let body = std::fs::read_to_string(&path).map_err(|error| {
+            read_failure(
+                error,
+                format!("failed to read trace artifact {}", path.display()),
+            )
+        })?;
+        (|| {
+            let artifact: EncryptedTraceArtifact =
+                serde_json::from_str(&body).context("failed to parse encrypted trace artifact")?;
+            anyhow::ensure!(
+                artifact.receipt.tenant_storage_ref == expected_tenant_storage_ref,
+                "encrypted trace artifact tenant mismatch"
+            );
+            anyhow::ensure!(
+                artifact.receipt.artifact_kind == expected_artifact_kind,
+                "encrypted trace artifact kind mismatch"
+            );
+            anyhow::ensure!(
+                artifact.receipt.object_key == object_key,
+                "encrypted trace artifact object key mismatch"
+            );
+            anyhow::ensure!(
+                artifact.receipt.ciphertext_sha256 == expected_ciphertext_sha256,
+                "encrypted trace artifact receipt hash mismatch"
+            );
+            let ciphertext = base64::engine::general_purpose::STANDARD
+                .decode(artifact.ciphertext_base64.as_bytes())
+                .context("failed to decode trace artifact ciphertext for hash check")?;
+            anyhow::ensure!(
+                sha256_hex(&ciphertext) == expected_ciphertext_sha256,
+                "trace artifact ciphertext hash mismatch"
+            );
+            verify_kek_binding(
+                &artifact,
+                expected_tenant_storage_ref,
+                &expected_artifact_kind,
+            )?;
+            Ok(artifact)
+        })()
+        .map_err(integrity_error)
     }
 
     pub fn read_artifact(
@@ -1635,21 +1709,26 @@ impl TraceArtifactStore for LocalEncryptedTraceArtifactStore {
     }
 }
 
+/// Every failure here is an integrity failure: the store's own key decrypts
+/// a v1 record, so nothing outside the object can make it fail.
 fn decrypt_artifact_json<T: DeserializeOwned>(
     crypto: &SecretsCrypto,
     artifact: &EncryptedTraceArtifact,
 ) -> anyhow::Result<T> {
-    let ciphertext = base64::engine::general_purpose::STANDARD
-        .decode(artifact.ciphertext_base64.as_bytes())
-        .context("failed to decode trace artifact ciphertext")?;
-    let salt = base64::engine::general_purpose::STANDARD
-        .decode(artifact.salt_base64.as_bytes())
-        .context("failed to decode trace artifact salt")?;
-    let decrypted = crypto
-        .decrypt(&ciphertext, &salt)
-        .context("failed to decrypt trace artifact")?;
-    let plaintext = decrypted.expose().as_bytes();
-    serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
+    (|| {
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(artifact.ciphertext_base64.as_bytes())
+            .context("failed to decode trace artifact ciphertext")?;
+        let salt = base64::engine::general_purpose::STANDARD
+            .decode(artifact.salt_base64.as_bytes())
+            .context("failed to decode trace artifact salt")?;
+        let decrypted = crypto
+            .decrypt(&ciphertext, &salt)
+            .context("failed to decrypt trace artifact")?;
+        let plaintext = decrypted.expose().as_bytes();
+        serde_json::from_slice(plaintext).context("failed to deserialize trace artifact")
+    })()
+    .map_err(integrity_error)
 }
 
 pub(crate) fn verify_encrypted_artifact(
@@ -1803,17 +1882,26 @@ fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
     artifact: &EncryptedTraceArtifact,
     artifact_kind: &TraceArtifactKind,
 ) -> anyhow::Result<T> {
+    // Every failure here is an integrity failure except two inside the
+    // unwrap, which the wrapper leaves unmarked: its key-wrap service call
+    // (the service may be unavailable) and a record of another wrapper kind
+    // (a key-provider migration). The wrapper marks the unwrap's failures
+    // that come from the record's own bytes (`trace_artifact_kek`), and the
+    // context below keeps that marker.
     match artifact.schema_version.as_str() {
         v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_VERSION => {
-            anyhow::ensure!(
-                artifact.wrapped_dek.is_none(),
-                "KekDowngradeRejected: v1 record carries wrapped_dek"
-            );
+            if artifact.wrapped_dek.is_some() {
+                return Err(integrity_error(anyhow::anyhow!(
+                    "KekDowngradeRejected: v1 record carries wrapped_dek"
+                )));
+            }
             decrypt_artifact_json(crypto, artifact)
         }
         v if v == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2 => {
             let wrapped = artifact.wrapped_dek.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("KekDowngradeRejected: v2 record missing wrapped_dek")
+                integrity_error(anyhow::anyhow!(
+                    "KekDowngradeRejected: v2 record missing wrapped_dek"
+                ))
             })?;
             let ctx = KekContext {
                 tenant_storage_ref: artifact.receipt.tenant_storage_ref.clone(),
@@ -1822,13 +1910,18 @@ fn decrypt_artifact_json_with_kek<T: DeserializeOwned, K: KmsKeyWrapper>(
             let dek = kek
                 .unwrap_dek(wrapped, &ctx)
                 .context("KekUnwrapFailed: trace artifact DEK unwrap failed")?;
-            let ciphertext = base64::engine::general_purpose::STANDARD
-                .decode(artifact.ciphertext_base64.as_bytes())
-                .context("failed to decode trace artifact ciphertext")?;
-            let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
-            serde_json::from_slice(&plaintext).context("failed to deserialize trace artifact")
+            (|| {
+                let ciphertext = base64::engine::general_purpose::STANDARD
+                    .decode(artifact.ciphertext_base64.as_bytes())
+                    .context("failed to decode trace artifact ciphertext")?;
+                let plaintext = aead_decrypt_with_dek(&dek, &ciphertext)?;
+                serde_json::from_slice(&plaintext).context("failed to deserialize trace artifact")
+            })()
+            .map_err(integrity_error)
         }
-        _ => anyhow::bail!("KekDowngradeRejected: unknown schema_version"),
+        _ => Err(integrity_error(anyhow::anyhow!(
+            "KekDowngradeRejected: unknown schema_version"
+        ))),
     }
 }
 
@@ -2634,6 +2727,71 @@ mod tests {
         assert_eq!(publish.to_string(), "serialized_json_publish_unavailable");
     }
 
+    /// Zaki's approval of #1143, ZA-2: a read by object key that reached the
+    /// object and found it missing, corrupt, or not what its receipt names
+    /// is an integrity failure (`is_trace_artifact_integrity_error`), with
+    /// its message unchanged; an I/O failure that is not a missing object
+    /// (here a directory where the object should be) is not.
+    #[test]
+    fn local_reads_tell_integrity_failures_from_transport_failures() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = test_store(&temp);
+        let tenant = "tenant:sha256:alpha";
+        let receipt = TraceArtifactStore::put_serialized_json(
+            &store,
+            tenant,
+            TraceArtifactKind::ContributionEnvelope,
+            "integrity-object",
+            br#"{"safe":true}"#,
+        )
+        .expect("artifact writes");
+        let read = |object_key: &str, hash: &str| {
+            TraceArtifactStore::read_json_by_object_key(
+                &store,
+                tenant,
+                TraceArtifactKind::ContributionEnvelope,
+                object_key,
+                hash,
+            )
+        };
+        read(&receipt.object_key, &receipt.ciphertext_sha256).expect("the object reads");
+
+        let wrong_hash = format!("sha256:{}", "0".repeat(64));
+        let mismatch = read(&receipt.object_key, &wrong_hash).expect_err("a hash mismatch");
+        assert!(is_trace_artifact_integrity_error(&mismatch), "{mismatch:#}");
+        assert_eq!(
+            mismatch.to_string(),
+            "encrypted trace artifact receipt hash mismatch"
+        );
+
+        let path = store
+            .artifact_path(tenant, &receipt.object_key)
+            .expect("the object path");
+        std::fs::write(&path, b"not an encrypted trace artifact").unwrap();
+        let corrupt =
+            read(&receipt.object_key, &receipt.ciphertext_sha256).expect_err("a corrupt object");
+        assert!(is_trace_artifact_integrity_error(&corrupt), "{corrupt:#}");
+
+        std::fs::remove_file(&path).unwrap();
+        let missing =
+            read(&receipt.object_key, &receipt.ciphertext_sha256).expect_err("a missing object");
+        assert!(is_trace_artifact_integrity_error(&missing), "{missing:#}");
+        assert!(
+            missing
+                .to_string()
+                .starts_with("failed to read trace artifact")
+        );
+
+        std::fs::create_dir_all(&path).unwrap();
+        let unreadable =
+            read(&receipt.object_key, &receipt.ciphertext_sha256).expect_err("an I/O failure");
+        assert!(
+            !is_trace_artifact_integrity_error(&unreadable),
+            "an I/O failure that is not a missing object is not an integrity failure: \
+             {unreadable:#}"
+        );
+    }
+
     /// PR 4, rebase 10 option D: a store that cannot derive a key ahead of
     /// the content, or delete at a key alone, refuses both with labels, so a
     /// caller that needs them fails closed.
@@ -3292,5 +3450,157 @@ mod tests {
             .read_artifact("tenant:sha256:abc123", &receipt)
             .expect_err("deleted artifact should not read");
         assert!(error.to_string().contains("failed to read trace artifact"));
+    }
+
+    /// PR #1283 review, finding 1: the wrapped DEK is bytes inside the
+    /// object that no hash covers, so a key-wrap record the wrapper cannot
+    /// decode, size, or authenticate is an integrity failure, charged like
+    /// any other corrupt object. A key-wrap service that is unreachable,
+    /// and a record wrapped by another kind of wrapper (what a key-provider
+    /// migration would show on every record), stay transport: uncharged.
+    #[test]
+    fn a_corrupt_wrapped_dek_is_an_integrity_failure_and_an_unwrap_outage_is_not() {
+        use crate::trace_artifact_kek::{CloudKmsKeyWrapper, InMemoryCloudKmsClient, WrappedDek};
+
+        let scope = TraceArtifactScope::new("tenant:sha256:alpha", "submission-alpha");
+        let kind = TraceArtifactKind::ContributionEnvelope;
+
+        // The local wrapper.
+        let store = test_remote_store();
+        let prepared = store
+            .prepare_scoped_bytes(&scope, kind.clone(), "kek-object", br#"{"safe":true}"#)
+            .expect("the artifact prepares");
+        let read = |artifact: &EncryptedTraceArtifact| {
+            decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+                &store.crypto,
+                &store.kek,
+                artifact,
+                &kind,
+            )
+        };
+        assert_eq!(
+            read(&prepared.artifact).expect("the artifact reads"),
+            json!({"safe": true})
+        );
+        let with_wrapped = |ciphertext_base64: String| {
+            let mut artifact = prepared.artifact.clone();
+            artifact.wrapped_dek.as_mut().unwrap().ciphertext_base64 = ciphertext_base64;
+            artifact
+        };
+        let packed = base64::engine::general_purpose::STANDARD
+            .decode(
+                &prepared
+                    .artifact
+                    .wrapped_dek
+                    .as_ref()
+                    .unwrap()
+                    .ciphertext_base64,
+            )
+            .unwrap();
+        let mut flipped = packed.clone();
+        *flipped.last_mut().unwrap() ^= 0x01;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        for (case, ciphertext_base64) in [
+            ("not base64", "!!! not base64 !!!".to_string()),
+            ("too short", encode(&[0u8])),
+            ("salt longer than the buffer", encode(&[200u8, 1, 2, 3])),
+            ("ciphertext that does not authenticate", encode(&flipped)),
+        ] {
+            let error = read(&with_wrapped(ciphertext_base64)).expect_err(case);
+            assert!(
+                is_trace_artifact_integrity_error(&error),
+                "{case}: {error:#}"
+            );
+        }
+        let mut other_kind = prepared.artifact.clone();
+        other_kind.wrapped_dek.as_mut().unwrap().wrapper_kind = "gcp_cloud_kms".to_string();
+        let error = read(&other_kind).expect_err("another wrapper's record");
+        assert!(
+            !is_trace_artifact_integrity_error(&error),
+            "a wrapper-kind mismatch is transport: {error:#}"
+        );
+
+        // The cloud wrapper, over the in-memory KMS.
+        let cloud = CloudKmsKeyWrapper::new(
+            InMemoryCloudKmsClient::new_with_master([7u8; 32], "projects/p/keys/k"),
+            "gcp_cloud_kms",
+        );
+        let context = KekContext {
+            tenant_storage_ref: scope.tenant_storage_ref.clone(),
+            artifact_kind: kind.clone(),
+        };
+        let read_cloud = |wrapped: WrappedDek| {
+            let mut artifact = prepared.artifact.clone();
+            artifact.wrapped_dek = Some(wrapped);
+            decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+                &store.crypto,
+                &cloud,
+                &artifact,
+                &kind,
+            )
+        };
+        let mut not_base64 = cloud.wrap_dek(&[1u8; 32], &context).unwrap();
+        not_base64.ciphertext_base64 = "!!! not base64 !!!".to_string();
+        let error = read_cloud(not_base64).expect_err("not base64");
+        assert!(is_trace_artifact_integrity_error(&error), "{error:#}");
+
+        /// A KMS whose decrypt answers a short key, and one that cannot be
+        /// reached.
+        struct ShortKeyKms;
+        impl crate::trace_artifact_kek::CloudKmsClient for ShortKeyKms {
+            fn encrypt(&self, plaintext: &[u8], _aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+                Ok(plaintext.to_vec())
+            }
+            fn decrypt(
+                &self,
+                _ciphertext: &[u8],
+                _aad: &[u8],
+            ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+                Ok(Zeroizing::new(vec![0u8; 16]))
+            }
+            fn key_ref(&self) -> &str {
+                "short"
+            }
+        }
+        struct UnreachableKms;
+        impl crate::trace_artifact_kek::CloudKmsClient for UnreachableKms {
+            fn encrypt(&self, plaintext: &[u8], _aad: &[u8]) -> anyhow::Result<Vec<u8>> {
+                Ok(plaintext.to_vec())
+            }
+            fn decrypt(
+                &self,
+                _ciphertext: &[u8],
+                _aad: &[u8],
+            ) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+                anyhow::bail!("kms unavailable")
+            }
+            fn key_ref(&self) -> &str {
+                "unreachable"
+            }
+        }
+        let short = CloudKmsKeyWrapper::new(ShortKeyKms, "gcp_cloud_kms");
+        let wrapped = short.wrap_dek(&[1u8; 32], &context).unwrap();
+        let mut artifact = prepared.artifact.clone();
+        artifact.wrapped_dek = Some(wrapped.clone());
+        let error = decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+            &store.crypto,
+            &short,
+            &artifact,
+            &kind,
+        )
+        .expect_err("a DEK of the wrong length");
+        assert!(is_trace_artifact_integrity_error(&error), "{error:#}");
+        let unreachable = CloudKmsKeyWrapper::new(UnreachableKms, "gcp_cloud_kms");
+        let error = decrypt_artifact_json_with_kek::<serde_json::Value, _>(
+            &store.crypto,
+            &unreachable,
+            &artifact,
+            &kind,
+        )
+        .expect_err("an unreachable KMS");
+        assert!(
+            !is_trace_artifact_integrity_error(&error),
+            "a KMS call that fails is transport: {error:#}"
+        );
     }
 }

@@ -5,7 +5,38 @@
 
 use std::collections::BTreeSet;
 
+use anyhow::Context;
 use trace_commons_protocol::trace_contribution::{ConsentScope, TraceAllowedUse};
+
+use crate::trace_corpus_storage::TraceTenantPolicyRecord;
+
+/// Decodes the storage strings of a tenant policy row's allowlist.
+pub fn parse_storage_policy_values<T>(values: &[String], label: &str) -> anyhow::Result<BTreeSet<T>>
+where
+    T: for<'de> serde::Deserialize<'de> + Ord,
+{
+    values
+        .iter()
+        .map(|value| {
+            serde_json::from_value::<T>(serde_json::Value::String(value.clone()))
+                .with_context(|| format!("failed to parse trace tenant policy {label} value"))
+        })
+        .collect()
+}
+
+/// A `trace_tenant_policies` row as the allowlists it grants: the one
+/// decoding both `main`'s admission and the pipeline's authority use.
+pub fn submission_allowlists_from_storage(
+    policy: &TraceTenantPolicyRecord,
+) -> anyhow::Result<SubmissionAllowlists> {
+    Ok(SubmissionAllowlists {
+        allowed_consent_scopes: parse_storage_policy_values(
+            &policy.allowed_consent_scopes,
+            "allowed_consent_scopes",
+        )?,
+        allowed_uses: parse_storage_policy_values(&policy.allowed_uses, "allowed_uses")?,
+    })
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SubmissionAllowlists {

@@ -43,36 +43,33 @@ struct SummaryInspector: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                header
-                // The legend says its words or is not drawn, as Decisions.
-                if let table = MonitorWords.table {
-                    HStack(spacing: GlassTokens.Space.s3) {
-                        GlassLegendCell(
-                            table.shared, value: SummaryFacts.contributed(rollup), status: .shared)
-                        GlassLegendCell(
-                            table.kept, value: SummaryFacts.kept(loaded: loaded, sessions: sessions), status: .kept)
-                    }
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            header
+            // The legend says its words or is not drawn, as Decisions.
+            if let table = MonitorWords.table {
+                HStack(spacing: GlassTokens.Space.s3) {
+                    GlassLegendCell(
+                        table.shared, value: SummaryFacts.contributed(rollup), status: .shared)
+                    GlassLegendCell(
+                        table.kept, value: SummaryFacts.kept(loaded: loaded, sessions: sessions), status: .kept)
                 }
-                if let failure = home.failures["history_rollup"], let table = MonitorWords.table {
-                    GlassNotice(tone: .outside, title: table.line(for: failure)) { EmptyView() }
-                }
-                if let words {
-                    InspectorSection(words.inspector.decisions, collapsible: true) { decisions(words) }
-                    statistics(words)
-                }
-                safeguards
-                // An unread queue is not an empty one: before the daemon has
-                // answered, nothing (`CertificateSection` says when there
-                // are none).
-                if queueAnswered {
-                    CertificateSection(entries: awaitingDecision)
-                }
-                NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)
             }
+            if let failure = home.failures["history_rollup"], let table = MonitorWords.table {
+                GlassNotice(tone: .outside, title: table.line(for: failure)) { EmptyView() }
+            }
+            if let words {
+                InspectorSection(words.inspector.decisions, collapsible: true) { decisions(words) }
+                statistics(words)
+            }
+            safeguards
+            // An unread queue is not an empty one: before the daemon has
+            // answered, nothing (`CertificateSection` says when there
+            // are none).
+            if queueAnswered {
+                CertificateSection(entries: awaitingDecision)
+            }
+            NotOfferedGlassDisclosure(counts: outcomeCounts, words: words?.summaryPanel)
         }
-        .scrollIndicators(.never)
     }
 
     /// Ron's `InspectorHeader`: "Summary" over the tools watched, projects

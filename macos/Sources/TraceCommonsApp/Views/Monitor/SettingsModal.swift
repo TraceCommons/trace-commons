@@ -2,18 +2,16 @@ import SwiftUI
 import TCDesign
 import TCShellCore
 
-/// Settings as Ron's #1146 modal over the Monitor (`settings-modal.tsx`,
-/// with `surfaces.tsx` `Modal` and `glass.css` `.tc-scrim` / `.tc-modal`;
-/// #1241 Task 10, owner 2026-10-05).
+/// Settings, drawn as the body of its own window (owner, 2026-10-08:
+/// `SettingsWindowView`), no longer as #1146's modal over the Monitor. The
+/// name is kept from the modal it was (#1241 Task 10).
 ///
-/// A scrim dims the three panes behind it (the window blurs them); the modal
-/// is one more pane on the opaque base, with the pane edge and the modal
-/// shadow, so nothing behind it reads through. Its header is the core's
-/// title and subtitle, a Watching or Paused chip from the daemon's status,
-/// and a close button. Its body is two columns: the section list, which
-/// scrolls the body to a section, and one scrolling body holding every
-/// section in order, Compute included. Escape, the close button and a click
-/// on the scrim close it. Every word is the core's or a section's own
+/// One pane on the opaque base, so nothing behind it reads through. Its
+/// header is the core's title and subtitle and a Watching or Paused chip
+/// from the daemon's status; the window has its own close button. Its body
+/// is two columns: the section list, which scrolls the body to a section,
+/// and one scrolling body holding every section in order, Compute included.
+/// Escape closes the window. Every word is the core's or a section's own
 /// heading (`ShellWordingTests`).
 struct SettingsModal: View {
     let request: SettingsRequest
@@ -21,8 +19,9 @@ struct SettingsModal: View {
     /// Whether watching is paused, from the daemon's status; nil while the
     /// status is unknown, and then no chip is drawn (Ron's `core.data`).
     let paused: Bool?
+    /// Closes the window.
     let onClose: () -> Void
-    /// The Private AI pointer: closes the modal and opens Inference.
+    /// The Private AI pointer: opens Inference in the Monitor.
     let onPrivateAI: () -> Void
 
     @EnvironmentObject private var model: AppModel
@@ -35,37 +34,24 @@ struct SettingsModal: View {
     static let listed: [SettingsSection] = SettingsSection.listed
 
     var body: some View {
-        ZStack {
-            // `.tc-scrim`: dims what is behind; a click on it closes.
-            GlassTokens.Color.modalScrim.color
-                .contentShape(Rectangle())
-                .onTapGesture(perform: onClose)
-                .accessibilityHidden(true)
-            dialog
-                .frame(maxWidth: GlassTokens.Size.modalWidth)
-                .padding(.top, GlassTokens.Space.modalInsetTop)
-                .padding([.horizontal, .bottom], GlassTokens.Space.modalInset)
+        // The window's own surface, edge to edge on the opaque pane base:
+        // no pane inside it, whose rounded edge read as a window framed
+        // within the window (owner, 2026-10-09).
+        VStack(spacing: 0) {
+            header
+                .overlay(alignment: .bottom) { rule(.horizontal) }
+            columns
         }
-    }
-
-    private var words: MonitorScreensCopy? { MonitorWords.table }
-
-    /// `.tc-modal`: a pane on the opaque base, its edge and the modal shadow.
-    private var dialog: some View {
-        GlassPane(padding: 0, isContent: true) {
-            VStack(spacing: 0) {
-                header
-                    .overlay(alignment: .bottom) { rule(.horizontal) }
-                columns
-            }
-        }
-        .glassEdge(GlassTokens.Shadow.modal, in: RoundedRectangle(cornerRadius: GlassTokens.Radius.pane, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(GlassTokens.Color.paneOpaque.color)
+        .environment(\.glassPaneIsContent, true)
         .focusSection()
         .onExitCommand(perform: onClose)
         .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isModal)
         .accessibilityLabel(words?.settingsTitle ?? "")
     }
+
+    private var words: MonitorScreensCopy? { MonitorWords.table }
 
     private var header: some View {
         HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
@@ -83,11 +69,6 @@ struct SettingsModal: View {
             if let chip = Self.chip(paused: paused, words: words) {
                 GlassChip(chip.word, status: chip.status)
             }
-            GlassRoundButton(words?.close ?? "", systemImage: "xmark", small: true, action: onClose)
-                // Nothing here takes focus by default and the panes behind
-                // are disabled, so Escape binds to the close button as well
-                // as to the dialog's exit command.
-                .keyboardShortcut(.cancelAction)
         }
         // `.tc-modal__header`: 14 16 10 18, as every `GlassModal`.
         .padding(.top, GlassTokens.Space.s7)

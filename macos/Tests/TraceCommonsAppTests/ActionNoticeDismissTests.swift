@@ -1,5 +1,7 @@
 import Foundation
 import XCTest
+import TCBridge
+import TCShellCore
 @testable import TraceCommonsApp
 
 /// Both of the model's one-line action messages must be dismissible.
@@ -137,6 +139,21 @@ final class ActionNoticeDismissTests: XCTestCase {
         XCTAssertNotNil(model.lastActionNotice)
         model.lastActionNotice = nil
         XCTAssertNil(model.lastActionNotice)
+    }
+
+    /// The notices' dismiss control is the core's plain Dismiss
+    /// (`dismiss_action`), never the review's `dismiss` ("Not this one"),
+    /// which declines a session for good -- and no shell writes its own.
+    func testTheNoticeDismissWordIsTheCoresDismissNotTheSessionDecline() throws {
+        let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
+        XCTAssertEqual(ActionNoticeWords.coreDismissWord, copy.dismissAction)
+        XCTAssertEqual(ActionNoticeWords.dismissWord, copy.dismissAction)
+        XCTAssertNotEqual(ActionNoticeWords.coreDismissWord, copy.dismiss)
+        XCTAssertNotEqual(ActionNoticeWords.dismissWord, copy.dismiss)
+        let words = try XCTUnwrap(Self.appSources()["Views/SettingsView.swift"])
+        XCTAssertFalse(words.contains("\"Dismiss"), "the dismiss word is written in this shell")
+        XCTAssertFalse(words.contains("TCCoreCopy.monitorTracesCopyJSON())?.dismiss\n"),
+                       "the notices read the session decline")
     }
 
     /// `.../macos/Tests/TraceCommonsAppTests/<this file>` ->

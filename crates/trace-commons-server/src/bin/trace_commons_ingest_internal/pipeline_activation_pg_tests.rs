@@ -5297,16 +5297,17 @@ async fn a_refused_promotion_answers_its_blockers() {
     assert_eq!(view["active_bundle_id"], fixture.b.bundle_id);
 }
 
-/// Review round 1, point 5 (amendment A14): the 19 results that `qualify`
-/// produces must come from one run, wherever the promotion is evaluated. A
-/// set with one of them from a second run on the same revision is refused at
-/// the qualification, the activation, and the rollback, with the route's
+/// Review round 1, point 5 (amendment A14), and spec 2026-10-08 R-1: the 15
+/// mechanics results must come from one run, and the seven package-bearing
+/// results from one run, wherever the promotion is evaluated. A set with
+/// one mechanics result from a second run on the same revision is refused
+/// at the qualification, the activation, and the rollback, with the route's
 /// `409` label and the blocker `qualification_evidence_mixed_run`; nothing is
-/// written. A set whose three promotion-only results come from the second
-/// run qualifies and activates.
+/// written. A set whose seven package-bearing results come from the second
+/// run (the production run) qualifies and activates.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_result_set_from_two_runs_is_refused_at_every_route() {
-    use trace_commons_server::versioned_pipeline_qualification::PROMOTION_ONLY_CHECKS;
+    use trace_commons_server::versioned_pipeline_qualification::PROMOTION_PACKAGE_CHECKS;
 
     let Some(fixture) = RouteFixture::new().await else {
         return;
@@ -5340,7 +5341,7 @@ async fn a_result_set_from_two_runs_is_refused_at_every_route() {
         None
     );
 
-    // The three promotion-only results from the second run: accepted, at
+    // The seven package-bearing results from the second run: accepted, at
     // the qualification and at the activation.
     for package in [&fixture.a, &fixture.b] {
         let (status, record) = fixture
@@ -5350,7 +5351,7 @@ async fn a_result_set_from_two_runs_is_refused_at_every_route() {
                 Some(serde_json::json!({
                     "signed_package": fixture.signed(package),
                     "attestations":
-                        fixture.attestations_from_two_runs(package, PROMOTION_ONLY_CHECKS),
+                        fixture.attestations_from_two_runs(package, PROMOTION_PACKAGE_CHECKS),
                 })),
             )
             .await;
@@ -5368,7 +5369,7 @@ async fn a_result_set_from_two_runs_is_refused_at_every_route() {
                     "bundle_id": package.bundle_id,
                     "reason_code": reason,
                     "attestations":
-                        fixture.attestations_from_two_runs(package, PROMOTION_ONLY_CHECKS),
+                        fixture.attestations_from_two_runs(package, PROMOTION_PACKAGE_CHECKS),
                     "expected_record_id": fixture.record_id_in_force(&fixture.tenant).await,
                 })),
             )

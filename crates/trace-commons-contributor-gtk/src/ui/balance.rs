@@ -280,7 +280,7 @@ mod tests {
         // No ceiling line either: the head already said it, and twice is
         // once too many.
         assert!(
-            !uncapped.iter().any(|line| line.contains("Spending limit")),
+            !uncapped.iter().any(|line| line.contains("Limit:")),
             "an uncapped account drew a ceiling: {uncapped:?}"
         );
         // A zero SPEND is a real figure and is drawn.
