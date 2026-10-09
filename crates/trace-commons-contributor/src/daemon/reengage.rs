@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(frames[0]["kind"], "idle_sessions");
         assert_eq!(
             frames[0]["body"],
-            "1 session from Codex has been idle for 3 days or more. Review it to send or keep."
+            "1 session from Codex has been idle for 3 days. Contribute it?"
         );
         assert_eq!(frames[0]["actions"][0]["id"], nudge_render::ACTION_REVIEW);
         {
