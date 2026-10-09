@@ -309,8 +309,11 @@ pub fn assemble_harness_production_crashing_at(
 pub async fn harness_dependencies_from_env() -> anyhow::Result<HarnessDependencies> {
     use std::collections::BTreeMap;
 
-    use crate::versioned_pipeline_production::PipelineComponentInputs;
+    use crate::versioned_pipeline_production::{PipelineComponentInputs, std_env_lookup};
 
+    // `pipeline.py` points the root at a directory inside the run that
+    // does not exist yet; the deployment's is made by its installer.
+    create_harness_index_root(&std_env_lookup)?;
     let (components, _shared) = PipelineGateComponents::from_env(PipelineComponentInputs {
         tenant_policies: Arc::new(BTreeMap::new()),
         require_tenant_submission_policy: false,
@@ -318,6 +321,17 @@ pub async fn harness_dependencies_from_env() -> anyhow::Result<HarnessDependenci
     })
     .await?;
     Ok(HarnessDependencies::FromEnv(components))
+}
+
+/// Creates the pipeline index root `lookup` names, after the same checks
+/// `from_env` makes of it (required, never a legacy root), and returns it.
+pub fn create_harness_index_root(
+    lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<std::path::PathBuf> {
+    let root = crate::versioned_pipeline_production::pipeline_index_root_from(lookup)?;
+    std::fs::create_dir_all(&root)
+        .map_err(|_| anyhow::anyhow!("pipeline_vector_index_open_failed"))?;
+    Ok(root)
 }
 
 /// A second usearch pipeline index for the restore drill's rebuild, beside
@@ -425,6 +439,44 @@ mod tests {
                 novelty_utility_microcredits: 2_500_000,
             },
         }
+    }
+
+    /// The harness makes the run's pipeline index root before `from_env`
+    /// opens it, after `from_env`'s own checks: a missing root, or one that
+    /// is a legacy root, is refused and nothing is created.
+    #[test]
+    fn harness_index_root_is_created_after_from_envs_checks() {
+        use crate::versioned_pipeline_production::{
+            PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL, TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT,
+            TRACE_COMMONS_VECTOR_INDEX_ROOT,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .join("indexes")
+            .join("pipeline_restore_drill")
+            .join("seed");
+        let root_text = root.to_string_lossy().into_owned();
+        let lookup = |var: &str| {
+            (var == TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT).then(|| root_text.clone())
+        };
+        assert_eq!(create_harness_index_root(&lookup).unwrap(), root);
+        assert!(root.is_dir());
+
+        let missing = |_: &str| None;
+        assert_eq!(
+            create_harness_index_root(&missing).unwrap_err().to_string(),
+            PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL
+        );
+        let legacy = dir.path().join("legacy");
+        let legacy_text = legacy.to_string_lossy().into_owned();
+        let shared = |var: &str| {
+            (var == TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT
+                || var == TRACE_COMMONS_VECTOR_INDEX_ROOT)
+                .then(|| legacy_text.clone())
+        };
+        assert!(create_harness_index_root(&shared).is_err());
+        assert!(!legacy.exists());
     }
 
     /// A production package gives back exactly the pins it was built from,

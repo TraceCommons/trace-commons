@@ -1012,6 +1012,51 @@ mod tests {
         }
     }
 
+    /// `with_boundaries` replaces the authority and the privacy boundary and
+    /// nothing else: the scorer, embedder and index are the same objects,
+    /// and whether the adapters are production-qualified is carried over,
+    /// never raised. The qualification harness relies on both halves.
+    #[test]
+    fn with_boundaries_replaces_only_authority_and_privacy() {
+        fn same<T: ?Sized>(left: &Arc<T>, right: &Arc<T>) -> bool {
+            std::ptr::eq(
+                Arc::as_ptr(left) as *const (),
+                Arc::as_ptr(right) as *const (),
+            )
+        }
+        let authority: Arc<dyn PipelineAuthorityProvider> =
+            Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+                Arc::new(BTreeMap::new()),
+                false,
+                Arc::new(|_: &str| false),
+            ));
+        let privacy: Arc<dyn PipelinePrivacyBoundary> =
+            Arc::new(crate::versioned_pipeline_authority::DeterministicPipelinePrivacyBoundary);
+        let check = |original: PipelineGateComponents| {
+            let replaced = original.with_boundaries(authority.clone(), privacy.clone());
+            let (before, after) = (original.parts(), replaced.parts());
+            assert!(same(&before.scorer, &after.scorer));
+            assert!(same(&before.embedder, &after.embedder));
+            assert!(same(&before.index_reader, &after.index_reader));
+            assert!(same(&before.index_writer, &after.index_writer));
+            assert_eq!(before.scorer_descriptor, after.scorer_descriptor);
+            assert_eq!(before.embedder_descriptor, after.embedder_descriptor);
+            assert!(same(&after.authority, &authority));
+            assert!(same(after.privacy.as_ref().unwrap(), &privacy));
+            assert!(after.privacy_backend.is_none());
+            assert_eq!(
+                replaced.adapters_production_qualified(),
+                original.adapters_production_qualified()
+            );
+            replaced.adapters_production_qualified()
+        };
+        assert!(!check(PipelineGateComponents::with_unqualified_adapters(
+            double_parts()
+        )));
+        #[cfg(feature = "near-ai-scorer")]
+        assert!(check(PipelineGateComponents::production(double_parts())));
+    }
+
     /// PR #1295 review round 2, Major 1: the scorer and embedder adapters
     /// never call themselves production-qualified on their own say. Over a
     /// double, through `new` or through components built from parts, they
