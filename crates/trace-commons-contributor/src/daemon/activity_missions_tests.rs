@@ -471,3 +471,257 @@ async fn activity_missions_rotation_cannot_adopt_a_replacement_account_session()
     );
     server.abort();
 }
+
+// ---- the contribution-mission slot, fed from the activity catalogue ----
+
+/// A published activity catalogue whose missions carry `predicates` (one
+/// per mission, `null` for none), with a digest that verifies. The policy
+/// runs from yesterday for thirty days.
+pub(super) fn predicate_catalogue(predicates: &[serde_json::Value]) -> serde_json::Value {
+    let today = Utc::now().date_naive();
+    let missions: Vec<serde_json::Value> = predicates
+        .iter()
+        .enumerate()
+        .map(|(i, predicate)| {
+            let mut mission = serde_json::json!({
+                "id": format!("m-{i}"),
+                "title": format!("Mission {i}"),
+                "required_contributions": 1,
+            });
+            if !predicate.is_null() {
+                mission["predicate"] = predicate.clone();
+            }
+            mission
+        })
+        .collect();
+    let policy: trace_commons_protocol::activity_missions::ActivityPolicy =
+        serde_json::from_value(serde_json::json!({
+            "schema_version": 1, "policy_id": "test-policy",
+            "starts_on": today - chrono::Duration::days(1),
+            "ends_before": today + chrono::Duration::days(30),
+            "qualification": "accepted", "missions": missions,
+            "daily": null, "levels": null, "badges": null,
+        }))
+        .unwrap();
+    serde_json::to_value(
+        trace_commons_protocol::activity_missions::ActivityCatalogue::new(Some(policy)).unwrap(),
+    )
+    .unwrap()
+}
+
+fn claude_rust() -> serde_json::Value {
+    serde_json::json!({"version":1,"tools":["claude-code"],"languages":["rust"],"min_sessions":2})
+}
+
+fn parsed(raw: serde_json::Value) -> trace_commons_protocol::activity_missions::ActivityCatalogue {
+    serde_json::from_value(raw).unwrap()
+}
+
+/// Only missions with a version-1 predicate reach the matcher, each with
+/// its predicate as criteria. A mission without one, or with a version
+/// this build does not read, is left out, so fitting a mission never means
+/// fitting everything.
+#[test]
+fn the_mission_slot_takes_only_missions_with_a_supported_predicate() {
+    use crate::daemon::activity_missions::contribution_catalogue;
+    let today = Utc::now().date_naive();
+    let v2 = serde_json::json!({"version":2,"tools":["codex"],"repo_size":"large"});
+    let raw = contribution_catalogue(
+        &parsed(predicate_catalogue(&[
+            serde_json::Value::Null,
+            claude_rust(),
+            v2,
+        ])),
+        today,
+    )
+    .expect("one mission carries a supported predicate");
+    assert_eq!(
+        raw,
+        serde_json::json!({"schema_version": 1, "missions": [{
+            "mission_id": "m-1", "title": "Mission 1",
+            "criteria": {"tools": ["claude-code"], "tool_families": [], "languages": ["rust"], "min_sessions": 2},
+        }]})
+    );
+    crate::contribution_missions::ContributionMissionCatalogue::from_value(&raw)
+        .expect("the client catalogue reads it");
+
+    // Nothing to match on: no slot, never a slot that fits everything.
+    assert_eq!(
+        contribution_catalogue(
+            &parsed(predicate_catalogue(&[serde_json::Value::Null])),
+            today
+        ),
+        None
+    );
+    assert_eq!(
+        contribution_catalogue(&parsed(activity_empty_catalogue()), today),
+        None
+    );
+    // Outside the policy's dates its missions are not on offer.
+    let catalogue = parsed(predicate_catalogue(&[claude_rust()]));
+    assert!(contribution_catalogue(&catalogue, today).is_some());
+    assert_eq!(
+        contribution_catalogue(&catalogue, today + chrono::Duration::days(30)),
+        None
+    );
+    assert_eq!(
+        contribution_catalogue(&catalogue, today - chrono::Duration::days(2)),
+        None
+    );
+}
+
+/// The refresh is due at once, then every [`MISSION_SLOT_REFRESH`] after
+/// an attempt; a clock that moved back does not postpone it past one
+/// interval.
+#[test]
+fn the_mission_slot_schedule_runs_at_start_and_every_interval() {
+    use crate::daemon::activity_missions::{MISSION_SLOT_REFRESH, MissionSlotSchedule};
+    use crate::daemon::mission_matching::MISSION_CATALOGUE_MAX_AGE;
+    assert!(MISSION_SLOT_REFRESH * 3 < MISSION_CATALOGUE_MAX_AGE);
+    let start = Utc::now();
+    let interval = chrono::TimeDelta::from_std(MISSION_SLOT_REFRESH).unwrap();
+    let mut schedule = MissionSlotSchedule::default();
+    assert!(schedule.due(start));
+    schedule.attempted(start);
+    assert!(!schedule.due(start + interval - chrono::TimeDelta::seconds(1)));
+    assert!(schedule.due(start + interval));
+    assert!(schedule.due(start - chrono::TimeDelta::seconds(1)), "clock moved back");
+    schedule.unconfigured();
+    assert!(schedule.due(start), "a later enrollment fetches at once");
+}
+
+/// A mock ingest whose `/v1/activity-missions` answer can be swapped, and
+/// which counts requests and checks each is anonymous.
+pub(super) async fn activity_server(
+    answer: Arc<std::sync::Mutex<(StatusCode, serde_json::Value)>>,
+    calls: Arc<AtomicUsize>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = Router::new().route(
+        "/v1/activity-missions",
+        get(move |headers: HeaderMap, Query(query): Query<BTreeMap<String, String>>| {
+            let answer = answer.clone();
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                assert!(query.is_empty());
+                for name in ["authorization", "cookie", "x-tenant-id", "x-profile"] {
+                    assert!(!headers.contains_key(name));
+                }
+                let (status, body) = answer.lock().unwrap().clone();
+                (status, Json(body))
+            }
+        }),
+    );
+    mission_server(app).await
+}
+
+fn slot_missions(s: &DaemonShared) -> Option<Vec<String>> {
+    crate::daemon::mission_matching::live_catalogue(&s.mission_catalogue, Utc::now())
+        .map(|c| c.missions.into_iter().map(|m| m.mission_id).collect())
+}
+
+/// A predicate-bearing catalogue fills the slot; a failed fetch keeps it
+/// (it ages out on its own); a catalogue with nothing to match, or none at
+/// all, empties it.
+#[tokio::test]
+async fn the_mission_slot_refresh_fills_keeps_and_clears() {
+    use crate::daemon::activity_missions::{
+        MISSION_SLOT_REFRESH, MissionSlotSchedule, refresh_mission_slot,
+    };
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust(), serde_json::Value::Null]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer.clone(), calls.clone()).await;
+    let s = shared();
+    configure_catalogue(&s, &base);
+    let mut schedule = MissionSlotSchedule::default();
+    let step = chrono::TimeDelta::from_std(MISSION_SLOT_REFRESH).unwrap();
+    let mut now = Utc::now();
+    let before = persisted_files(s.store.dir());
+
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(slot_missions(&s), Some(vec!["m-0".to_string()]));
+
+    // Not due again until the interval has passed.
+    refresh_mission_slot(&s, now + step - chrono::TimeDelta::seconds(1), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    // A failed fetch, or a catalogue whose digest does not verify, keeps
+    // what is there.
+    let kept = format!("{:?}", s.mission_catalogue.lock().unwrap());
+    for failure in [
+        (StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({})),
+        (StatusCode::OK, {
+            let mut wrong = predicate_catalogue(&[claude_rust()]);
+            wrong["policy_sha256"] = "0".repeat(64).into();
+            wrong
+        }),
+    ] {
+        *answer.lock().unwrap() = failure;
+        now += step;
+        refresh_mission_slot(&s, now, &mut schedule).await;
+        assert_eq!(format!("{:?}", s.mission_catalogue.lock().unwrap()), kept);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    // Missions without a predicate: nothing to match, so no slot.
+    *answer.lock().unwrap() = (
+        StatusCode::OK,
+        predicate_catalogue(&[serde_json::Value::Null]),
+    );
+    now += step;
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+
+    // Filled again, then an unconfigured policy empties it.
+    *answer.lock().unwrap() = (StatusCode::OK, predicate_catalogue(&[claude_rust()]));
+    now += step;
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+    *answer.lock().unwrap() = (StatusCode::OK, activity_empty_catalogue());
+    now += step;
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 6);
+
+    // The slot is memory only.
+    assert_eq!(persisted_files(s.store.dir()), before);
+    server.abort();
+}
+
+/// Without a config there is no origin to ask: nothing is sent, and the
+/// first tick after enrollment fetches.
+#[tokio::test]
+async fn the_mission_slot_refresh_waits_for_enrollment() {
+    use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust()]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer, calls.clone()).await;
+    let s = shared();
+    let mut schedule = MissionSlotSchedule::default();
+    let now = Utc::now();
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+    assert!(schedule.due(now));
+
+    configure_catalogue(&s, &base);
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(5), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+
+    // Unenroll empties it, and with no config left the next due refresh
+    // sends nothing and fills nothing.
+    crate::daemon::unenroll::unenroll(&s).unwrap();
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+    refresh_mission_slot(&s, now + chrono::TimeDelta::days(1), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+    server.abort();
+}
