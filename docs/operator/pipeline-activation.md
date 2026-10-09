@@ -2351,7 +2351,10 @@ already computed their credit quality under the bundle. The perplexity
 re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
 submission with a pipeline row: rewriting its perplexity would leave the
 row's verdict disagreeing with the Score that awarded the credit and with
-its `attestation_chain_hash`, and its per-author columns stay NULL.
+its `attestation_chain_hash`, and its per-author columns stay NULL. A
+submission whose pipeline row Settle wrote after the pass enumerated it is
+left alone too, and counted as `pipeline_row_skipped` in the pass's
+completion log, not as `rescored`.
 
 Settle checks a compatibility run's Score evidence before the index write or
 any settlement leg. Evidence that lacks a field the row needs fails the run
