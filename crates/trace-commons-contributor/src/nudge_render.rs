@@ -688,13 +688,10 @@ mod tests {
     #[test]
     fn backlog_card_uses_the_plain_title_and_reads_singular() {
         let many = backlog_card(&batch(6, &[], 0));
-        assert_eq!(
-            many.title,
-            "6 previewed sessions are waiting for a decision"
-        );
+        assert_eq!(many.title, "6 unpurposed traces are waiting");
         assert_eq!(many.actions[0].label, "Review the 6 in Traces");
         let one = backlog_card(&batch(1, &[], 0));
-        assert_eq!(one.title, "1 previewed session is waiting for a decision");
+        assert_eq!(one.title, "1 unpurposed trace is waiting");
         assert_eq!(one.actions[0].label, "Review it in Traces");
         assert_eq!(one.panel_row, copy::NUDGE_PANEL_BACKLOG_ONE);
         card_filled(&many);
@@ -742,7 +739,7 @@ mod tests {
         let n1 = idle_notification(&batch(1, &["Codex"], 3));
         assert_eq!(
             n1.body,
-            "1 session from Codex has been idle for 3 days or more. Review it to send or keep."
+            "1 session from Codex has been idle for 3 days. Contribute it?"
         );
         assert_eq!(n1.title, copy::NOTIFY_TITLE);
         let n2 = verdicts_notification(&verdicts(1, 2, Some(15)));

@@ -7136,7 +7136,7 @@ named again.
 
 ```json
 {"event": "reengage_due", "data": {"kind": "idle_sessions", "title": "Trace Commons",
-  "body": "2 sessions from Codex have been idle for 3 days or more. Review them to send or keep.",
+  "body": "2 sessions from Codex have been idle for 3 days. Contribute them?",
   "actions": [{"id": "review", "label": "Review"}, {"id": "not_now", "label": "Not now"}]}}
 ```
 
