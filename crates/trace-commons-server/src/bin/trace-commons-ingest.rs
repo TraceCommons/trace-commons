@@ -14916,7 +14916,7 @@ async fn route_pipeline_receipt(
             // and answers 500 when the append fails. The receipt has
             // committed and the run exists; a retry replays and appends
             // nothing.
-            append_pipeline_receipt_submitted_event(state, tenant, envelope, &run)
+            append_pipeline_receipt_submitted_event(state, tenant, &run)
                 .await
                 .map_err(internal_error)?;
             Ok(Some(pipeline_processing_receipt()))
@@ -15008,11 +15008,12 @@ async fn route_pipeline_receipt(
 /// status follows the Admission decision; an admitted receipt has the stored
 /// status `received`, which `main`'s audit status type does not have, so its
 /// event has none and its row says `received`. The row carries the privacy
-/// risk the receipt stored in `trace_submissions`.
+/// risk the receipt stored in `trace_submissions`, read back after the
+/// commit: the receipt re-scrubs its own copy of the envelope, which can
+/// raise the risk, so the handler's envelope is not the source.
 async fn append_pipeline_receipt_submitted_event(
     state: &AppState,
     tenant: &TenantCtx,
-    envelope: &TraceContributionEnvelope,
     run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
 ) -> anyhow::Result<()> {
     let (status, stored_status) = match run.admission_decision.as_str() {
@@ -15025,8 +15026,17 @@ async fn append_pipeline_receipt_submitted_event(
             StorageTraceCorpusStatus::Rejected,
         ),
         "admit" => (None, StorageTraceCorpusStatus::Received),
+        // The run exists in this case, and the upload answers 500.
         _ => anyhow::bail!("pipeline_receipt_decision_unexpected"),
     };
+    let privacy_risk = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("pipeline_receipt_database_missing"))?
+        .get_trace_submission(tenant.tenant_id(), run.submission_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pipeline_receipt_submission_missing"))?
+        .privacy_risk;
     let event = TraceCommonsAuditEvent {
         event_id: Uuid::new_v4(),
         tenant_id: tenant.tenant_id().to_string(),
@@ -15051,7 +15061,7 @@ async fn append_pipeline_receipt_submitted_event(
             action: StorageTraceAuditAction::Submit,
             metadata: StorageTraceAuditSafeMetadata::Submission {
                 status: stored_status,
-                privacy_risk: serde_storage_string(&envelope.privacy.residual_pii_risk)?,
+                privacy_risk,
             },
             object_ref_id: Some(run.source_object_ref_id),
             actor_role_label: None,

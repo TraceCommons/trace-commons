@@ -1648,6 +1648,8 @@ event ahead in the database. Until the audit-chain repair, each new upload of
 the tenant answers `500` with its run created. A retry answers `409` until
 the admission lease ends. After that, the retry is a replay, which appends
 nothing. A bounded account is charged again for that retry.
+If the process stops between the receipt's commit and the append, the run has
+no `submitted` event, and a retry (a replay) does not append it.
 
 The authority provider and the privacy boundary are dependencies like the
 scorer and the index. An unqualified one refuses startup with

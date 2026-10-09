@@ -12813,21 +12813,25 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
 /// routes without a routing row, and an audit append writes its database
 /// row before its file line, the order a routed tenant has in production.
 async fn submitted_audit_fixture() -> Option<WithdrawalFixture> {
-    let mut fixture = withdrawal_fixture_with(
-        |runtime, artifacts| {
-            assemble_test_pipeline_service_configured(
-                runtime,
-                artifacts,
-                IsolatedPipelineIndex::new(),
-                None,
-                Vec::new(),
-                None,
-                true,
-            )
-        },
-        false,
-    )
-    .await?;
+    submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_test_pipeline_service_configured(
+            runtime,
+            artifacts,
+            IsolatedPipelineIndex::new(),
+            None,
+            Vec::new(),
+            None,
+            true,
+        )
+    })
+    .await
+}
+
+/// `submitted_audit_fixture`, with the pipeline service `service` builds.
+async fn submitted_audit_fixture_with(
+    service: impl FnOnce(Arc<PgBackend>, Arc<LocalEncryptedTraceArtifactStore>) -> Arc<PipelineService>,
+) -> Option<WithdrawalFixture> {
+    let mut fixture = withdrawal_fixture_with(service, false).await?;
     fixture
         .service
         .register_default_bundle(&fixture.tenant)
@@ -13022,4 +13026,74 @@ async fn a_quarantined_pipeline_receipt_appends_a_quarantined_submitted_event() 
             privacy_risk: "medium".to_string(),
         }
     );
+}
+
+/// A privacy boundary whose rescrub raises the residual risk to Medium, as a
+/// classifier that finds prose PII does.
+struct RiskRaisingBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for RiskRaisingBoundary {
+    async fn rescrub(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        Ok(Vec::new())
+    }
+}
+
+/// The receipt re-scrubs its own copy of the envelope, and a re-scrub can
+/// raise the risk: the `submitted` event's row carries the risk the receipt
+/// stored in `trace_submissions`, not the risk of the uploaded envelope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_submitted_audit_row_carries_the_risk_the_receipt_stored() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(RiskRaisingBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.privacy_risk, "medium");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    let StorageTraceAuditSafeMetadata::Submission { privacy_risk, .. } = &row.metadata else {
+        panic!("a submission row: {:?}", row.metadata);
+    };
+    assert_eq!(privacy_risk, &submission.privacy_risk);
 }
