@@ -372,6 +372,7 @@ mod tests {
             session_ref: "c".into(),
             import_seq: 1,
             placed_at: None,
+            harness_session: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: at,

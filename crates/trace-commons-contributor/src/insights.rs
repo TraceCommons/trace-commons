@@ -31,6 +31,7 @@ pub mod provider;
 pub mod recap;
 pub mod service;
 pub mod session_drill;
+pub mod session_identity;
 pub mod summary;
 pub mod task_attribution;
 pub mod time_evidence;
@@ -68,10 +69,12 @@ const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 // Advanced to 13 for Claude Code usage evidence (usage schema 2, with the
 // 5m/1h cache-write split), Claude time evidence, and the per-turn series. A
 // Claude snapshot saved before 13 keeps none of them and stays unknown until
-// it is reimported.
+// it is reimported. Version 13 also brings the keyed session identity of a
+// saved Claude Code or Codex snapshot.
 const STORE_VERSION: u32 = 13;
 /// Store version at which a Claude snapshot may carry usage evidence, time
-/// evidence, or a per-turn series.
+/// evidence, or a per-turn series, and a Claude or Codex snapshot a session
+/// identity.
 const CLAUDE_USAGE_STORE_VERSION: u32 = 13;
 const MAX_OUTCOME_LINKS: usize = 128;
 
@@ -235,6 +238,12 @@ pub struct LocalInsight {
     /// before store version 13 until they are reimported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_series: Option<turn_series::ClaudeTurnSeriesEvidence>,
+    /// Keyed digest of the session ID the harness recorded, made only for a
+    /// saved Claude Code or Codex snapshot under the store's digest key.
+    /// `None` for unsaved analysis, without a key, for a file recording no
+    /// single session ID, and before store version 13 until reimported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_identity: Option<session_identity::SavedSessionIdentity>,
     /// Import snapshot time; source freshness requires explicit reimport.
     pub analyzed_at: chrono::DateTime<chrono::Utc>,
 }
@@ -367,6 +376,8 @@ fn analyze_file_with_digest_keys(
         (SourceFormat::ClaudeCode, Some(keys)) => turn_series::saved_turn_series(&bytes, keys),
         _ => None,
     };
+    let session_identity =
+        digest_keys.and_then(|keys| session_identity::saved_session_identity(format, &bytes, keys));
     let task_attribution = match format {
         SourceFormat::Codex => Some(
             task_attribution::classify_codex_task_attribution_for_import(
@@ -404,6 +415,7 @@ fn analyze_file_with_digest_keys(
         task_attribution,
         claude_task_attribution,
         turn_series,
+        session_identity,
         analyzed_at: chrono::Utc::now(),
     })
 }
@@ -1308,6 +1320,13 @@ fn validate_stored_report(version: u32, id: &str, insight: &LocalInsight) -> Res
                 && (insight.usage_evidence.is_some() || insight.time_evidence.is_some())))
     {
         bail!(InsightsStoreError::Invalid);
+    }
+    if let Some(identity) = &insight.session_identity {
+        if version < CLAUDE_USAGE_STORE_VERSION || insight.source_format == SourceFormat::Trajectory
+        {
+            bail!(InsightsStoreError::Invalid);
+        }
+        identity.validate()?;
     }
     if let Some(series) = &insight.turn_series {
         if insight.source_format != SourceFormat::ClaudeCode {

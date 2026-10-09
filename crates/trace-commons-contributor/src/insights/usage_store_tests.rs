@@ -105,6 +105,7 @@ fn versions_one_through_five_remain_read_only_and_do_not_invent_usage() {
         let report = legacy["reports"][&saved.id].as_object_mut().unwrap();
         report.remove("usage_evidence");
         report.remove("task_attribution");
+        report.remove("session_identity");
         if version < 5 {
             report.remove("time_evidence");
         }
@@ -283,6 +284,9 @@ fn a_version_12_store_keeps_old_snapshots_and_upgrades() {
     report.remove("turn_series");
     report.remove("usage_evidence");
     report.remove("time_evidence");
+    report.remove("session_identity");
+    let codex_report = legacy["reports"][&codex_saved.id].as_object_mut().unwrap();
+    codex_report.remove("session_identity");
     legacy["reports"][&codex_saved.id]["usage_evidence"]["schema_version"] = 1.into();
     fs::write(&index_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
 
@@ -321,7 +325,12 @@ fn claude_series_or_usage_in_an_older_or_mismatched_snapshot_fails_closed() {
     for field in ["turn_series", "usage_evidence", "time_evidence"] {
         let mut older = valid.clone();
         older["version"] = 12.into();
-        for other in ["turn_series", "usage_evidence", "time_evidence"] {
+        for other in [
+            "turn_series",
+            "usage_evidence",
+            "time_evidence",
+            "session_identity",
+        ] {
             if other != field {
                 older["reports"][&saved.id]
                     .as_object_mut()
@@ -370,4 +379,122 @@ fn a_store_without_a_digest_key_saves_no_series() {
     let saved = store.import(SourceFormat::ClaudeCode, &path).unwrap();
     assert!(saved.turn_series.is_none());
     assert!(saved.usage_evidence.is_some());
+}
+
+/// A saved snapshot names the harness session it records by a keyed digest,
+/// so the overlap rule can tell a reimport from a concurrent session. Never
+/// readable, never on unsaved analysis.
+#[test]
+fn saved_snapshots_carry_a_keyed_session_identity() {
+    let root = tempfile::tempdir().unwrap();
+    let claude = root.path().join("claude.jsonl");
+    let codex = root.path().join("codex.jsonl");
+    fs::write(&claude, claude_fixture()).unwrap();
+    source(&codex, 150);
+    let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+    let codex_saved = store.import(SourceFormat::Codex, &codex).unwrap();
+    let claude_saved = store.import(SourceFormat::ClaudeCode, &claude).unwrap();
+    let codex_identity = codex_saved
+        .session_identity
+        .clone()
+        .expect("codex identity");
+    let claude_identity = claude_saved
+        .session_identity
+        .clone()
+        .expect("claude identity");
+    assert_ne!(codex_identity.session, claude_identity.session);
+    assert_eq!(
+        Some(codex_identity.key_fingerprint),
+        claude_saved
+            .turn_series
+            .as_ref()
+            .map(|series| series.key_fingerprint),
+        "one store key"
+    );
+    assert_eq!(
+        store.explain(&codex_saved.id).unwrap().session_identity,
+        Some(codex_identity)
+    );
+    let index = fs::read_to_string(store.dir.join("index.json")).unwrap();
+    assert!(
+        !index.contains("PRIVATE_SESSION_ID"),
+        "session ID reached the store"
+    );
+    assert!(
+        analyze_file(SourceFormat::Codex, &codex)
+            .unwrap()
+            .session_identity
+            .is_none()
+    );
+}
+
+#[test]
+fn a_session_identity_in_an_older_or_malformed_snapshot_fails_closed() {
+    let root = tempfile::tempdir().unwrap();
+    let codex = root.path().join("codex.jsonl");
+    source(&codex, 150);
+    let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+    let saved = store.import(SourceFormat::Codex, &codex).unwrap();
+    let index_path = store.dir.join("index.json");
+    let valid: Value = serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+
+    let mut older = valid.clone();
+    older["version"] = 12.into();
+    older["reports"][&saved.id]["usage_evidence"]["schema_version"] = 1.into();
+    fs::write(&index_path, serde_json::to_vec(&older).unwrap()).unwrap();
+    super::assert_quarantined(&store, &saved.id, "session identity in a v12 store");
+
+    let mut malformed = valid.clone();
+    malformed["reports"][&saved.id]["session_identity"]["schema_version"] = 99.into();
+    fs::write(&index_path, serde_json::to_vec(&malformed).unwrap()).unwrap();
+    super::assert_quarantined(&store, &saved.id, "unknown session identity schema");
+}
+
+/// Two Codex sessions that ran at the same time, saved from a store holding
+/// no Claude snapshot, are both counted; the same session saved twice is
+/// counted once.
+#[test]
+fn concurrent_codex_sessions_saved_to_the_store_both_count() {
+    use super::week_rollup::{CoverageReason, Feed, week_rollup};
+    let overlapped = |rollup: &super::week_rollup::WeekRollup| {
+        rollup
+            .sessions
+            .iter()
+            .filter(|session| session.reasons.contains(&CoverageReason::ReimportOverlap))
+            .count()
+    };
+    let root = tempfile::tempdir().unwrap();
+    let rollout = |name: &str, id: &str, final_input: u64| {
+        let path = root.path().join(name);
+        source(&path, final_input);
+        let text = fs::read_to_string(&path)
+            .unwrap()
+            .replace("PRIVATE_SESSION_ID", id);
+        fs::write(&path, text).unwrap();
+        path
+    };
+    let one = rollout("one.jsonl", "session-one", 150);
+    let two = rollout("two.jsonl", "session-two", 160);
+    let store = LocalInsightStore::open(&root.path().join("store")).unwrap();
+    store.import(SourceFormat::Codex, &one).unwrap();
+    store.import(SourceFormat::Codex, &two).unwrap();
+    let monday = chrono::NaiveDate::from_ymd_opt(2026, 9, 7).unwrap();
+    let rollup = |store: &LocalInsightStore| {
+        week_rollup(
+            Feed::Saved,
+            &week_glance::saved_sessions(&store.list().unwrap()),
+            monday,
+            &chrono::Utc,
+        )
+    };
+    let both = rollup(&store);
+    assert_eq!(both.sessions.len(), 2);
+    assert_eq!(overlapped(&both), 0, "{:?}", both.sessions);
+
+    // The same session, grown and saved again from another file.
+    let again = rollout("again.jsonl", "session-one", 170);
+    store.import(SourceFormat::Codex, &again).unwrap();
+    let reimported = rollup(&store);
+    assert_eq!(reimported.sessions.len(), 3);
+    assert_eq!(overlapped(&reimported), 1, "{:?}", reimported.sessions);
 }

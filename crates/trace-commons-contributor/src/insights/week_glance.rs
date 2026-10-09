@@ -255,18 +255,27 @@ fn codex_observed(insight: &LocalInsight) -> Option<CodexObserved> {
 
 /// Map saved snapshots onto counter rows.
 ///
-/// A Claude series whose digest key differs from the newest snapshot's has
-/// its message digests dropped: digests under different keys never match, so
-/// those snapshots fall back to the overlap rule instead of double counting.
+/// The current digest key is the one the newest keyed snapshot was made
+/// under, a Claude series or a session identity of either harness. A Claude
+/// series or a session identity under another key has its digests dropped:
+/// digests under different keys never match, so those snapshots fall back to
+/// the overlap rule instead of double counting.
 pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
     let mut ordered: Vec<&LocalInsight> = reports.iter().collect();
     // Import order only picks which of two overlapping imports is counted.
     ordered.sort_by(|a, b| a.analyzed_at.cmp(&b.analyzed_at).then(a.id.cmp(&b.id)));
-    let current_key = ordered
-        .iter()
-        .rev()
-        .find_map(|insight| insight.turn_series.as_ref())
-        .map(|series| series.key_fingerprint);
+    let current_key = ordered.iter().rev().find_map(|insight| {
+        insight
+            .turn_series
+            .as_ref()
+            .map(|series| series.key_fingerprint)
+            .or_else(|| {
+                insight
+                    .session_identity
+                    .as_ref()
+                    .map(|identity| identity.key_fingerprint)
+            })
+    });
     ordered
         .into_iter()
         .enumerate()
@@ -309,10 +318,18 @@ pub fn saved_sessions(reports: &[LocalInsight]) -> Vec<SessionInput> {
                     reason: UnknownReason::SourceUnsupported,
                 },
             };
+            // Compared only under the current key: a digest made under another
+            // key names no session this one can be matched with.
+            let harness_session = insight
+                .session_identity
+                .as_ref()
+                .filter(|identity| Some(identity.key_fingerprint) == current_key)
+                .map(|identity| identity.session);
             SessionInput {
                 session_ref: insight.id.clone(),
                 import_seq: seq as u64,
                 placed_at,
+                harness_session,
                 body,
             }
         })

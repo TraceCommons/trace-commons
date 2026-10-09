@@ -154,6 +154,9 @@ impl CounterRow {
             session_ref: format!("t{}", self.seq),
             import_seq: self.seq,
             placed_at: self.placed_at,
+            // Feed T rows are one per session address, and the overlap rule
+            // does not run here: no session ID is needed.
+            harness_session: None,
             body: match &self.body {
                 RowBody::Claude {
                     model_labels,

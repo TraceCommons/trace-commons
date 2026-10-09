@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Datelike, Duration, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use trace_commons_protocol::insights_usage_series::{TurnRecord, UsageSeries};
+use trace_commons_protocol::insights_usage_series::{KeyedDigest, TurnRecord, UsageSeries};
 
 use super::analytics_constants::{
     COMPARABLE_COVERAGE, COMPARABLE_MIN_SESSIONS, DEDUPE_TURNS_BY_MSG_KEY,
@@ -152,6 +152,10 @@ pub struct SessionInput {
     /// The session's first recorded event, for placing a session that has no
     /// dated turns. Never the import time.
     pub placed_at: Option<DateTime<Utc>>,
+    /// Keyed digest of the session ID the harness recorded, under the current
+    /// digest key; `None` when unknown or made under another key. Two
+    /// snapshots that both carry one overlap only when it is the same.
+    pub harness_session: Option<KeyedDigest>,
     pub body: SessionBody,
 }
 
@@ -176,6 +180,16 @@ impl SessionInput {
             }
             SessionBody::Codex { observed } => observed.map(|o| (o.first_at, o.last_at)),
             SessionBody::Unknown { .. } => None,
+        }
+    }
+
+    /// Two snapshots may record one session unless both name their session
+    /// and the names differ. Without a name on either side, only time can
+    /// tell, and the overlap rule decides.
+    fn may_be_same_session(&self, other: &SessionInput) -> bool {
+        match (&self.harness_session, &other.harness_session) {
+            (Some(one), Some(two)) => one == two,
+            _ => true,
         }
     }
 
@@ -328,6 +342,7 @@ fn prepare(feed: Feed, sessions: &[SessionInput]) -> Vec<Prepared<'_>> {
                 let newer_input = &sessions[newer];
                 newer_input.source() == older_input.source()
                     && (!older_input.keyed() || !newer_input.keyed())
+                    && older_input.may_be_same_session(newer_input)
                     && newer_input
                         .dated_range()
                         .is_some_and(|(low, high)| low <= older_high && older_low <= high)
@@ -775,6 +790,7 @@ mod tests {
             session_ref: name.into(),
             import_seq: seq,
             placed_at: None,
+            harness_session: None,
             body: SessionBody::Claude {
                 series: UsageSeries {
                     turns,
@@ -791,6 +807,7 @@ mod tests {
             session_ref: name.into(),
             import_seq: seq,
             placed_at: None,
+            harness_session: None,
             body: SessionBody::Codex {
                 observed: Some(CodexObserved {
                     first_at: first,
@@ -810,6 +827,7 @@ mod tests {
             session_ref: name.into(),
             import_seq: 0,
             placed_at: placed,
+            harness_session: None,
             body: SessionBody::Unknown {
                 source: Some(AnalyticsSource::ClaudeCode),
                 reason,
@@ -1065,6 +1083,48 @@ mod tests {
         assert_eq!(
             source(&rollup, AnalyticsSource::Codex).tokens,
             Some(2 * 1_200)
+        );
+    }
+
+    fn identified(mut input: SessionInput, session: u8) -> SessionInput {
+        input.harness_session = Some(KeyedDigest([session; 32]));
+        input
+    }
+
+    #[test]
+    fn overlapping_snapshots_of_two_identified_sessions_both_count() {
+        let older = identified(codex("older", 1, at(6, 1), at(6, 5)), 1);
+        let newer = identified(codex("newer", 2, at(6, 4), at(6, 8)), 2);
+        let rollup = roll(&[older, newer]);
+        assert_eq!(session(&rollup, "older").state, CoverageState::Known);
+        assert_eq!(session(&rollup, "newer").state, CoverageState::Known);
+        assert_eq!(
+            source(&rollup, AnalyticsSource::Codex).tokens,
+            Some(2 * 1_200)
+        );
+    }
+
+    #[test]
+    fn one_identified_session_imported_twice_keeps_the_newer() {
+        let older = identified(codex("older", 1, at(6, 1), at(6, 5)), 1);
+        let newer = identified(codex("newer", 2, at(6, 1), at(6, 8)), 1);
+        let rollup = roll(&[older, newer]);
+        assert_eq!(
+            session(&rollup, "older").reasons,
+            vec![CoverageReason::ReimportOverlap]
+        );
+        assert_eq!(session(&rollup, "newer").state, CoverageState::Known);
+    }
+
+    #[test]
+    fn an_unidentified_snapshot_falls_back_to_the_overlap_rule() {
+        // Saved before the identity was recorded, or under another key.
+        let older = codex("older", 1, at(6, 1), at(6, 5));
+        let newer = identified(codex("newer", 2, at(6, 4), at(6, 8)), 2);
+        let rollup = roll(&[older, newer]);
+        assert_eq!(
+            session(&rollup, "older").reasons,
+            vec![CoverageReason::ReimportOverlap]
         );
     }
 

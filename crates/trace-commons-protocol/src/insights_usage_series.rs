@@ -365,6 +365,7 @@ const DOMAIN_PATH: &[u8] = b"trace-commons/insights/path_key/v1\0";
 const DOMAIN_FINGERPRINT: &[u8] = b"trace-commons/insights/key_fingerprint/v1\0";
 const DOMAIN_SESSION: &[u8] = b"trace-commons/insights/session_key/v1\0";
 const DOMAIN_PROJECT: &[u8] = b"trace-commons/insights/project_digest/v1\0";
+const DOMAIN_HARNESS_SESSION: &[u8] = b"trace-commons/insights/harness_session/v1\0";
 
 /// A keyed digest that names `key` without revealing it. Stored beside rows
 /// so a reader can tell digests made under another key (a new device, a
@@ -407,6 +408,20 @@ pub fn session_key(key: &DigestKey, source: &str, address: &str) -> KeyedDigest 
         key,
         DOMAIN_SESSION,
         &[&length, source.as_bytes(), address.as_bytes()],
+    )
+}
+
+/// Keyed digest of the session ID a harness wrote into its own transcript
+/// (Claude Code's `sessionId`, Codex's `session_meta` id). Two saved imports
+/// of one session carry the same digest; two sessions never do. Not
+/// [`session_key`], which names where a host found a file, not which session
+/// the file records. The harness name is length-prefixed, as there.
+pub fn harness_session_digest(key: &DigestKey, source: &str, session_id: &str) -> KeyedDigest {
+    let length = (source.len() as u64).to_be_bytes();
+    keyed(
+        key,
+        DOMAIN_HARNESS_SESSION,
+        &[&length, source.as_bytes(), session_id.as_bytes()],
     )
 }
 
@@ -590,6 +605,19 @@ mod tests {
             assert_ne!(project, other);
         }
         assert_ne!(session, project);
+        let harness = harness_session_digest(&key, "claude-code", "same");
+        assert_ne!(harness, session);
+        assert_ne!(harness, project);
+        assert_ne!(harness, harness_session_digest(&key, "codex", "same"));
+        assert_ne!(
+            harness_session_digest(&key, "ab", "c"),
+            harness_session_digest(&key, "a", "bc")
+        );
+        assert_ne!(
+            harness,
+            harness_session_digest(&key8(), "claude-code", "same")
+        );
+        assert_eq!(harness, harness_session_digest(&key, "claude-code", "same"));
         assert_ne!(session, session_key(&key, "codex", "same"));
         // The harness and the address cannot run into each other.
         assert_ne!(session_key(&key, "ab", "c"), session_key(&key, "a", "bc"));
