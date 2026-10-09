@@ -186,6 +186,20 @@ pub const PROMOTION_PACKAGE_CHECKS: &[&str] = &[
     "pipeline_restore_drill",
 ];
 
+/// The local restore drill's check id. Its result always carries
+/// [`LOCAL_RESTORE_BLOCKER_LABEL`]: the artifact restore it proves is a local
+/// directory copy.
+pub const RESTORE_DRILL_CHECK_ID: &str = "pipeline_restore_drill";
+/// The safe blocker a local restore drill carries
+/// (`scripts/operator/pipeline.py`'s `RESTORE_SAFE_BLOCKER`).
+pub const LOCAL_RESTORE_BLOCKER_LABEL: &str = "filesystem_restore_local_only";
+/// The operator-run remote restore drill (`pipeline.py promote
+/// remote-restore`). A passing result of it, with no blocker of its own, from
+/// the drill's code revision and naming the drill's package, discharges the
+/// drill's [`LOCAL_RESTORE_BLOCKER_LABEL`] in [`evaluate_promotion`] (spec
+/// 2026-10-08 B-D4), and nothing else.
+pub const REMOTE_RESTORE_CHECK_ID: &str = "pipeline_remote_restore";
+
 /// Whether `value` is a safe label, `^[a-z0-9_]{1,64}$`: the only text an
 /// operational answer, log line, or stored refusal may carry. Public so that
 /// ingest's admin routes answer a store's refusal only when it is one.
@@ -602,6 +616,7 @@ pub fn evaluate_promotion(
     }
     let mut blockers = Vec::new();
     let mut package_rule_broken = false;
+    let local_restore_discharged = remote_restore_discharges_local_restore(&by_id, now);
     for check_id in PROMOTION_REQUIRED_CHECKS {
         let Some(item) = by_id.get(check_id) else {
             blockers.push(format!("{QUALIFICATION_EVIDENCE_MISSING_LABEL}:{check_id}"));
@@ -614,10 +629,17 @@ pub fn evaluate_promotion(
         // a pass can carry one (the restore drill passes with
         // `filesystem_restore_local_only`), and it names what that pass does
         // not prove (final review I4, ruling FR-4).
+        // The one exception (spec 2026-10-08 B-D4): a matching remote
+        // restore discharges the restore drill's local-copy blocker.
         blockers.extend(
             item.check
                 .safe_blockers
                 .iter()
+                .filter(|label| {
+                    !(local_restore_discharged
+                        && *check_id == RESTORE_DRILL_CHECK_ID
+                        && label.as_str() == LOCAL_RESTORE_BLOCKER_LABEL)
+                })
                 .map(|label| format!("{label}:{check_id}")),
         );
         // Which results name the package (P5-D15): the candidate checks all
@@ -707,6 +729,39 @@ pub fn evaluate_promotion(
             .then(|| packages.first().cloned())
             .flatten(),
     })
+}
+
+/// Whether the evidence holds a `pipeline_remote_restore` result that
+/// discharges the restore drill's [`LOCAL_RESTORE_BLOCKER_LABEL`]: it passed,
+/// carries no safe blocker of its own, is current at `now`, comes from the
+/// drill's code revision, and names exactly the drill's package (all three
+/// digests present and equal). Anything less, or either result missing, is
+/// `false`, and the blocker stays.
+fn remote_restore_discharges_local_restore(
+    by_id: &BTreeMap<&str, &DrillEvidence>,
+    now: DateTime<Utc>,
+) -> bool {
+    let (Some(remote), Some(drill)) = (
+        by_id.get(REMOTE_RESTORE_CHECK_ID),
+        by_id.get(RESTORE_DRILL_CHECK_ID),
+    ) else {
+        return false;
+    };
+    let current = maximum_age(remote).is_some_and(|maximum_age| {
+        remote.check.observed_at <= now && now - remote.check.observed_at <= maximum_age
+    });
+    let names_every_digest = |check: &PipelineCheckResult| {
+        check.package_hash.is_some()
+            && check.configuration_digest.is_some()
+            && check.dependency_digest.is_some()
+    };
+    remote.check.status == PipelineCheckStatus::Pass
+        && remote.check.safe_blockers.is_empty()
+        && current
+        && remote.check.code_revision_hash == drill.check.code_revision_hash
+        && names_every_digest(&remote.check)
+        && names_every_digest(&drill.check)
+        && PromotionPackage::of(&remote.check) == PromotionPackage::of(&drill.check)
 }
 
 /// `item`'s maximum age as a duration; `None` when it does not fit one
@@ -2036,6 +2091,29 @@ mod tests {
         assert!(bad_blocker.validate().is_err());
     }
 
+    /// `scripts/operator/fixtures/pipeline-package-digests-vector.json` is
+    /// the cross-language vector for [`package_digests`]: `pipeline.py
+    /// promote` recomputes all three digests in Python from the same file
+    /// (`test_package_digests_match_the_rust_vector`). This test is what holds
+    /// that file to the Rust rule, so the Python side cannot pass against an
+    /// oracle of its own making. Two instruments pin the instrument order.
+    #[test]
+    fn the_cross_language_package_digest_vector_follows_the_rust_rule() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/operator/fixtures/pipeline-package-digests-vector.json");
+        let vector: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("vector file reads"))
+                .expect("vector file parses");
+        let package: BundlePackage =
+            serde_json::from_value(vector["package"].clone()).expect("vector package loads");
+        assert_eq!(package.manifest.instruments.len(), 2);
+        assert_eq!(package.manifest.bundle_id().unwrap(), package.bundle_id);
+        let digests = package_digests(&package).expect("vector digests compute");
+        assert_eq!(digests.package_hash, vector["package_hash"]);
+        assert_eq!(digests.configuration_digest, vector["configuration_digest"]);
+        assert_eq!(digests.dependency_digest, vector["dependency_digest"]);
+    }
+
     #[test]
     fn package_digests_follow_the_manifest() {
         let package = minimal_test_package();
@@ -2625,6 +2703,130 @@ mod tests {
             }
         }
         assert!(is_safe_label(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL));
+    }
+
+    /// Spec 2026-10-08 B-D4: a passing `pipeline_remote_restore` with no
+    /// safe blockers, from the same code revision and naming the same
+    /// package as the restore drill, discharges exactly the drill's
+    /// `filesystem_restore_local_only` blocker, and nothing else.
+    ///
+    /// The proof is the absence of that one label. Until Slice A moves
+    /// `pipeline_remote_restore` into [`PROMOTION_PACKAGE_CHECKS`] (A-D12), a
+    /// remote result that names a package also carries
+    /// `qualification_evidence_package_unexpected:pipeline_remote_restore`,
+    /// so the set is not ready yet; that coupling is asserted below.
+    #[test]
+    fn remote_restore_discharges_only_the_local_restore_blocker() {
+        let now = Utc::now();
+        let local = format!("{LOCAL_RESTORE_BLOCKER_LABEL}:{RESTORE_DRILL_CHECK_ID}");
+        assert_eq!(LOCAL_RESTORE_BLOCKER_LABEL, "filesystem_restore_local_only");
+        assert_eq!(REMOTE_RESTORE_CHECK_ID, "pipeline_remote_restore");
+        assert!(PROMOTION_REQUIRED_CHECKS.contains(&REMOTE_RESTORE_CHECK_ID));
+        assert!(PROMOTION_REQUIRED_CHECKS.contains(&RESTORE_DRILL_CHECK_ID));
+
+        // The drill carries the local blocker, as every local drill does.
+        let mut base = passing_evidence(now);
+        check_mut(&mut base, RESTORE_DRILL_CHECK_ID).safe_blockers =
+            vec![LOCAL_RESTORE_BLOCKER_LABEL.to_string()];
+
+        // The remote result of `passing_evidence` names no package: it is not
+        // the drill's package, so nothing is discharged.
+        let decision = evaluate_promotion(&base, now).unwrap();
+        assert!(!decision.ready);
+        assert_eq!(decision.safe_blockers, vec![local.clone()]);
+
+        // A matching remote result: the local blocker is gone. Only the
+        // unexpected-package blocker of today's lists remains.
+        let mut matching = base.clone();
+        name_package(
+            check_mut(&mut matching, REMOTE_RESTORE_CHECK_ID),
+            "candidate",
+        );
+        let decision = evaluate_promotion(&matching, now).unwrap();
+        assert!(!decision.safe_blockers.contains(&local), "{decision:?}");
+        if PROMOTION_PACKAGE_CHECKS.contains(&REMOTE_RESTORE_CHECK_ID) {
+            assert!(decision.ready, "{:?}", decision.safe_blockers);
+        } else {
+            assert_eq!(
+                decision.safe_blockers,
+                vec![format!(
+                    "{QUALIFICATION_EVIDENCE_PACKAGE_UNEXPECTED_LABEL}:{REMOTE_RESTORE_CHECK_ID}"
+                )]
+            );
+        }
+
+        // Each way the remote result can fail to match keeps the blocker.
+        let cases: Vec<(&str, Box<dyn Fn(&mut PipelineCheckResult)>)> = vec![
+            (
+                "failing",
+                Box::new(|check| check.status = PipelineCheckStatus::Fail),
+            ),
+            (
+                "blocked",
+                Box::new(|check| check.status = PipelineCheckStatus::Blocked),
+            ),
+            (
+                "own_blocker",
+                Box::new(|check| {
+                    check.safe_blockers = vec!["remote_versioning_unverified".to_string()]
+                }),
+            ),
+            (
+                "another_revision",
+                Box::new(|check| check.code_revision_hash = sha256_prefixed(b"another-revision")),
+            ),
+            (
+                "another_package",
+                Box::new(|check| name_package(check, "other")),
+            ),
+            (
+                "partial_package",
+                Box::new(|check| check.dependency_digest = None),
+            ),
+            (
+                "stale",
+                Box::new(|check| check.observed_at = Utc::now() - Duration::hours(3)),
+            ),
+        ];
+        for (name, change) in &cases {
+            let mut unmatched = matching.clone();
+            change(check_mut(&mut unmatched, REMOTE_RESTORE_CHECK_ID));
+            let decision = evaluate_promotion(&unmatched, now).unwrap();
+            assert!(!decision.ready, "{name}");
+            assert!(
+                decision.safe_blockers.contains(&local),
+                "{name}: {decision:?}"
+            );
+        }
+        // A missing remote result keeps it too.
+        let without_remote = matching
+            .iter()
+            .filter(|item| item.check.check_id != REMOTE_RESTORE_CHECK_ID)
+            .cloned()
+            .collect::<Vec<_>>();
+        let decision = evaluate_promotion(&without_remote, now).unwrap();
+        assert!(decision.safe_blockers.contains(&local));
+
+        // Any other blocker on the drill still blocks, beside a matching
+        // remote result.
+        let mut other = matching.clone();
+        check_mut(&mut other, RESTORE_DRILL_CHECK_ID)
+            .safe_blockers
+            .push("restore_tenant_count_low".to_string());
+        let decision = evaluate_promotion(&other, now).unwrap();
+        assert!(!decision.safe_blockers.contains(&local));
+        assert!(decision.safe_blockers.contains(&format!(
+            "restore_tenant_count_low:{RESTORE_DRILL_CHECK_ID}"
+        )));
+
+        // The local blocker on another check is not discharged.
+        let mut elsewhere = matching.clone();
+        check_mut(&mut elsewhere, "pipeline_bundle_qualification").safe_blockers =
+            vec![LOCAL_RESTORE_BLOCKER_LABEL.to_string()];
+        let decision = evaluate_promotion(&elsewhere, now).unwrap();
+        assert!(decision.safe_blockers.contains(&format!(
+            "{LOCAL_RESTORE_BLOCKER_LABEL}:pipeline_bundle_qualification"
+        )));
     }
 
     /// Wave 2: among the results that name a package, every one must name
