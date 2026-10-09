@@ -1,10 +1,19 @@
 # Pipeline production assembly, promotion checks and gate-decision rows
 
-Status: draft for owner review, 2026-10-08. Base: `origin/main` at
-`d8f98f389` (PR #1291). Stage plan: PR #1286
+Status: draft, revised 2026-10-08 after poldsam's review of PR #1292, with the
+owner's decisions on R-1, O-A2, O-A3 and O-A4 recorded (section 10). Base:
+`origin/main` at `d8f98f389` (PR #1291). Stage plan: PR #1286
 (`docs/operator/pipeline-smoke-tests.md` on branch `pipeline-smoke-runbook`).
 Implementation plan:
 [`docs/superpowers/plans/2026-10-08-pipeline-production-assembly.md`](../plans/2026-10-08-pipeline-production-assembly.md).
+
+The slices are being built while this spec is reviewed: Slice A is PR #1295
+(branch `pipeline-production-assembly`), Slice B-1 is PR #1293
+(`pipeline-promotion-checks`), Slice C is PR #1294
+(`pipeline-gate-decision-rows`). Where this revision describes what a branch
+does, it cites `branch@sha path:line`, so the citation survives the branch
+moving: `pipeline-production-assembly@b85f09e9a`,
+`pipeline-promotion-checks@e889b5f0e`, `pipeline-gate-decision-rows@15cc64951`.
 
 ## 1. Goal
 
@@ -37,10 +46,10 @@ the CI job that runs them.
 | B | Operator promotion checks | 3 (activation: `pipeline_remote_restore`, `pipeline_hf_network_canary`, production package checks) |
 | C | Gate-decision rows | 3 (3a/3b comparisons), 4 (consumers see pipeline traffic) |
 
-Section 2 is a design gap that cuts across A and B. It is the first thing the
-owner needs to rule on.
+Section 2 is a design gap that cuts across A and B. The owner has ruled on
+it (R-1).
 
-## 2. The production package gap (owner decision)
+## 2. The production package gap (decided: R-1)
 
 **Finding.** As the code stands, no package that a production assembly can
 hold can ever receive a ready promotion, so no tenant can ever be activated on
@@ -86,8 +95,8 @@ part of this ("They join the package-bearing checks in the promotion work,
 when the production assembly exists",
 `docs/superpowers/plans/2026-10-02-versioned-pipeline-pr5-activation-plan.md:51`).
 
-**Recommended resolution (R-1; proceeding on it unless overruled).** Split
-qualification into two runs of the same code revision:
+**Decision (owner, 2026-10-08): R-1.** Split qualification into two runs of
+the same code revision:
 
 - **Mechanics run** (unchanged): `pipeline.py qualify` in CI and the lab,
   reference dependencies, no network. It produces the 15 mechanics results that
@@ -109,7 +118,7 @@ mechanics ones from it and the seven from the production run.
 `pipeline.py promote assemble` (Slice B) builds the 22-file set from the two
 run directories and refuses a missing or doubled id; nobody hand-picks files.
 
-Costs of R-1 the owner should weigh:
+Costs of R-1, accepted with it:
 
 - The corpus checks compare each fixture's `consent_state`, `privacy_state`,
   `scoring_state` and `settlement_state` with expectations keyed by fixture
@@ -130,7 +139,7 @@ What R-1 does **not** do: build a reference scorer that reports the production
 descriptor so the existing harness can name the production package. That would
 be a test double answering the question it is supposed to test.
 
-Alternatives the owner may prefer:
+Alternatives considered and not chosen:
 
 - **R-2.** Exclude the Score data-artifact hashes from what the four package
   checks bind, so a reference run can name a production package. Smaller, but
@@ -342,19 +351,69 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
 | Legacy drain report | `versioned_pipeline_activation.rs:566-645` (excludes `pipeline_runs`), withdrawal completeness `:862-866` | presence; dedup columns NULL after withdrawal |
 | Gate driver selection | `count/list_submissions_needing_gate_decision` (`db/postgres.rs:5316-5400`, excludes `pipeline_runs`) | presence |
 
+**A write to the table also takes account-trust locks (V114).** The trigger
+`account_trust_gate_frontier` (`migrations/V114__external_account_trust_evaluations.sql:403`)
+fires `AFTER INSERT OR UPDATE OR DELETE` on every row.
+`trace_account_trust_advance_gate_frontiers` (`:339-402`) returns at once for
+an UPDATE that changes none of `tenant_id`, `submission_id`, `decision_id`,
+`credit_quality_micros`, `credit_quality_calibration_version`,
+`dedup_signal_version`, `dedup_cluster_id`, `decided_at` (`:345-351`), and
+when external growth is off (`:353-356`). When it is on, it takes, in this
+order:
+
+1. `trace_account_trust_external_growth`'s single row `FOR SHARE` (`:353`);
+   `trace_account_trust_enable_external_growth` (`:190-204`) updates that row,
+   so turning growth on waits for every gate write in flight.
+2. One `trace_account_trust_dependency_locks` row per key, by
+   `INSERT ... ON CONFLICT DO UPDATE` in `trace_account_trust_lock_dependencies`
+   (`:309-321`, called at `:375`), held exclusively until commit. Keys are
+   `submission:<tenant>:<submission>` for the old and new submission, and
+   `cluster:<id>` for the row's old and new `dedup_cluster_id` and any
+   cluster already on another gate row of that submission (`:365-374`),
+   locked in `COLLATE "C"` order within the call.
+3. `trace_account_trust_frontiers` rows, one `UPDATE ... generation+1` per
+   account that has a `gate_evaluation` fact on that submission, that
+   decision, or any submission in an affected cluster, in
+   `(tenant_id, account_id)` order (`:380-400`).
+
+It reads `trace_gate_decisions` and `trace_account_trust_facts` without
+locking them, and takes no account or gate-row lock after step 2 (comment at
+`:376`). The fact-table trigger (`:107`, through
+`trace_account_trust_lock_fact_dependencies`, `:322-338`) takes the switch
+row and submission and cluster keys the same way, then advances the fact's
+account frontier (`:93-104`). Slice C's lock order is in C-D1.
+
 ## 4. Slice A: production assembly
 
 ### 4.1 Decisions
 
-- **A-D1. Where it lives.** A new module
-  `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/production_assembly.rs`
-  (AGPL header), declared beside `pipeline_runtime` in the ingest binary. The
-  adapter types and the assembler are **not** feature-gated: they hold
-  `Arc<dyn PerplexityScorer>`, `Arc<dyn Embedder>` and a usearch-backed index
-  behind traits, so the default-features `cargo test` exercises them with
-  qualified doubles. Only the function that constructs the NEAR AI scorer,
-  fastembed embedder and usearch index from the environment is
-  `#[cfg(feature = "near-ai-scorer")]`.
+- **A-D1. Where it lives: the library crate.** The descriptors
+  (`NearAiScorerDescriptor`, the fastembed descriptor), the pipeline adapters
+  (scorer, embedder, index, Trace Credit settlement, tenant-policy
+  authority), `PipelineGateComponents` and the production assembler live in a
+  module of the `trace-commons-server` library crate (`src/`, AGPL header).
+  Only the builder that constructs the NEAR AI scorer, the fastembed embedder
+  and the usearch indexes from the environment stays in the ingest binary,
+  behind `#[cfg(feature = "near-ai-scorer")]`. The reason is R-1: the
+  `pipeline_bundle_qualification` result is emitted only from the integration
+  target `tests/versioned_pipeline_runtime_pg.rs`
+  (`qualification_inspects_the_objects_the_constructor_receives`,
+  `origin/main` `:2769`, emit at `:2898`), and `checks.py` runs it as
+  `--test versioned_pipeline_runtime_pg`. An integration target links the
+  library crate only, so an assembler kept in the binary could never be used
+  by that check, and the production run could never produce one of its seven
+  package-bearing results. At `pipeline-production-assembly@b85f09e9a` the
+  whole module is still
+  `src/bin/trace_commons_ingest_internal/production_assembly.rs`; #1295 is
+  moving everything except the env builder into the library. The adapter
+  types and the assembler are not feature-gated: they hold
+  `Arc<dyn PerplexityScorer>`, `Arc<dyn Embedder>` and the index behind the
+  gate-api traits, so the default-features `cargo test` exercises them with
+  qualified doubles. The usearch-backed index adapter compiles only with
+  `near-ai-scorer` (usearch is feature-gated in gate-enclave), wherever it
+  sits. Switching the bundle-qualification check to the production assembly
+  is B-2's work, not #1295's (B-D1, and section 5.2 item 3 for which
+  assertions change).
 - **A-D2. Opt-in, not implied by the feature.** `main()` passes an assembler
   only when compiled with `near-ai-scorer` **and**
   `TRACE_COMMONS_PIPELINE_RUNTIME=production`. Unset (or empty) keeps today's
@@ -395,6 +454,61 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
   `assemble` stays the only entry.
   Memory matters: the pilot is CPU- and RAM-constrained by bge-large on ONNX;
   loading a second embedder is not acceptable.
+
+  **The component build moves ahead of pipeline assembly.** On `origin/main`
+  `assemble_ingest_pipeline_runtime` runs at `trace-commons-ingest.rs:4032`
+  and the gate service is built later, at `:4746`, inside the
+  `Ok(Self { .. })` literal, returning only `Arc<dyn TraceGateService>`. An
+  assembler there would always refuse with
+  `pipeline_production_components_missing`. Under the production selection
+  the legacy gate and the pipeline components are therefore built together,
+  before assembly. Boot order in `from_env_with_pipeline_runtime_assembler`
+  as #1295 implements it (`pipeline-production-assembly@b85f09e9a`,
+  `trace-commons-ingest.rs`):
+
+  1. `trace_corpus_db_mirror_from_env()` connects the database mirror
+     (`:3825`) and `trace_artifact_store_from_env` builds the artifact store
+     (`:3996`), as today.
+  2. `pipeline_main_gate_config_from_env` parses `main`'s floors (`:4041`).
+  3. Production selection only: `build_near_ai_gate_service_with_pipeline_components`
+     (`:4047-4073`) builds the NEAR AI client (`near_ai_gate_parts_from_env`,
+     `NearAiPerplexityScorer::try_new` on the blocking pool, `:6422`), loads
+     the fastembed model (`:6462`), opens the legacy novelty index, runs the
+     legacy all-zero-floor refusal ("cannot all be zero", `:6527-6533`),
+     then builds the legacy orchestrator and the pipeline components over
+     the same `Arc`s, including the pipeline index on its own root.
+  4. `assemble_ingest_pipeline_runtime_with_components` (`:4076`) runs every
+     refusal of 3.1 in its existing order, including
+     `pipeline_runtime_database_unavailable` and
+     `pipeline_runtime_artifact_store_unavailable`
+     (`pipeline_runtime.rs:220` on that branch) and, through
+     `CompatibilityBundleConfig::validate`, `compatibility_zero_floor`.
+  5. `validate_pipeline_receipt_rollout`, `validate_pipeline_privacy_filter_requirement`,
+     `validate_pipeline_tenant_bundles` (`:4095-4110`).
+  6. The rest of `AppState`'s locals, then the struct (`:4640`), whose
+     `gate_service` field takes the prebuilt gate, or calls
+     `build_trace_gate_service_from_env()` as before when there is none
+     (`:4794`).
+
+  What this changes at boot, under the production selection only:
+
+  - The NEAR AI client and the fastembed model load now come before the
+    pipeline's own refusals and before every `AppState` local built between
+    `:4110` and `:4640`. The database mirror and the artifact store are still
+    constructed first (step 1), and anything that fails there fails as it
+    does today. What moves behind the model load is the pipeline's refusal
+    of an absent database or artifact store (step 4) and every refusal after
+    step 3: a deployment misconfigured in any of those ways now loads the
+    embedder and builds the NEAR AI client before it refuses. Nothing is
+    served in that window, and the refusal labels are unchanged.
+  - The legacy all-zero-floor refusal moves from the end of `AppState`
+    construction to step 3, ahead of the pipeline's checks. An all-zero
+    floor configuration is therefore refused with the legacy message, after
+    the model load, and `compatibility_zero_floor` is never reached for it.
+    The two refusals guard the same three variables, so the configurations
+    refused are the same; only the label differs.
+  - With the selection unset (`None`) nothing moves: the gate is built at
+    `:4794` exactly as on `main`, and no model loads before step 4.
 - **A-D4. Scorer adapter and identity.** `NearAiPipelineScorer { inner:
   Arc<dyn PerplexityScorer>, descriptor: NearAiScorerDescriptor }` implements
   `PerplexityScorer` (forwarding `score` and `score_chunk`) and
@@ -409,8 +523,9 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
   by the package's `configuration_hash` through `main_gate`, so they are not
   repeated here. The API key, timeout and base URL are excluded (the base URL
   is operator configuration and the hash-only convention keeps it out of a
-  stored artifact; whether the attestation host should be bound is an open
-  question, O-A3). Because qualification binds per code revision and per
+  stored artifact). The descriptor does not bind the NEAR AI attestation host
+  or a measurement pin (O-A3, decided 2026-10-08): a change of the serving
+  TEE alone is not a new package. Because qualification binds per code revision and per
   package, rotating the model or any scoring knob produces a new package and
   needs a new qualification, which is the intended effect.
   `NearAiScorerDescriptor::from_env()` reads only the descriptor inputs, with
@@ -441,11 +556,37 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
   (`pipeline_vector_index_manifest_mismatch`); the operator then runs
   `POST /v1/workers/pipeline/index-rebuild` per tenant
   (`rebuild_index_from_authoritative_commands`,
-  `src/versioned_pipeline.rs:10126`) into an emptied root. Every call returns
-  well within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS` (60 s,
-  `versioned_pipeline.rs:218`), including a flush. Identities
+  `src/versioned_pipeline.rs:10126`) into an emptied root. Identities
   `usearch_pipeline_index_reader`/`_writer`, both qualified `true`. Namespace
   = `pipeline:<index_id>:<tenant_storage_ref>`.
+
+  **Flushing.** Every pipeline index write flushes usearch and then writes
+  the namespace's manifest atomically before it returns (`persist`,
+  `pipeline-production-assembly@b85f09e9a`
+  `production_assembly.rs:1201-1218`), and the pipeline index is opened with
+  `flush_interval = None` (`:723-726`), so no periodic flusher runs and the
+  legacy `TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY` setting has nothing to
+  bound: no `flush_every` refusal exists and none is specified. What must fit
+  inside `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS` (60 s,
+  `versioned_pipeline.rs:218`) is one write including its flush and manifest
+  rewrite; `flush_returns_within_the_fence_margin`
+  (`production_assembly_tests.rs:609` on that branch) measures it against a
+  generous bound. The flush and the manifest rewrite grow with the shard, so
+  this is measured again before stage 4 (R7).
+
+  **Routing is not held off during recovery.** Nothing in #1295 pauses a
+  routed tenant between a boot on an emptied root and the end of its
+  rebuild. In that window Score runs against an empty index, so novelty is
+  computed against nothing and the run settles on that verdict; the V113
+  fence covers only the rebuild's own writes against invalidation claims. So
+  the recovery procedure, which the operator runbook states, is: suspend the
+  tenant's Score policy (`POST /v1/admin/pipeline/policy-interventions`,
+  action `suspend`), empty the root, boot, run the per-tenant rebuild, check
+  its report, then resume. A suspended Score policy starts no Score attempt
+  (`policy_is_runnable`, `versioned_pipeline.rs:1645`), and the rebuild
+  evaluates no policy, so it runs while the policy is suspended. A
+  code-enforced hold (refuse to serve a routed tenant whose namespace has no
+  manifest while its index commands say it should) is not part of Slice A.
 - **A-D7. Privacy.** `ClassifierRedactorPipelinePrivacyBoundary::new(adapter,
   tag, PiiClassifyPolicy::from_env())` over `privacy_filter_adapter_from_env()`,
   built once at boot. An unset backend leaves the boundary out, and the
@@ -479,12 +620,12 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
   the pipeline service's own payout controls, so it stays false whatever the
   legacy mode is. No boot refusal on `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` is
   added: that variable is one deployment-wide value, and refusing on it would
-  couple the pipeline runtime to every legacy tenant's payout. Consequence the
-  owner should see: the stage plan's stage 3 precondition "NEAR settlement mode
-  is `disabled`", read literally, turns legacy NEAR payout off for the whole
-  deployment during stage 3. With this slice it is not needed for the pipeline
-  tenant, which cannot pay out; whether to keep it is the owner's call, and
-  PR #1286 should say which (O-A4).
+  couple the pipeline runtime to every legacy tenant's payout. The stage plan's
+  stage 3 precondition "NEAR settlement mode is `disabled`"
+  (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled`) stays: NEAR payout is off
+  deployment-wide for stage 3 (O-A4, decided 2026-10-08). It is an operator
+  precondition in PR #1286's stage plan, not a boot refusal, and the pipeline
+  tenant could not pay out without it either.
 - **A-D10. Bundle.** The assembler binds the compatibility bundle:
   `CompatibilityBundleConfig::production_compatible(scorer_model_id,
   projection_id, index_id, &context.main_gate)`
@@ -506,11 +647,33 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
 - **A-D11. `pipeline_production_adapters` from the startup path.** This
   result can only pass on the deployed host: the infrastructure profile is
   production only with the GCS artifact store, the Cloud KMS key wrapper and
-  managed EdDSA tokens. After
-  `validate_pipeline_privacy_filter_requirement` and
-  `validate_pipeline_tenant_bundles` pass (`trace-commons-ingest.rs:4051-4065`),
-  and only when the three `TRACE_COMMONS_PIPELINE_CHECK_*` variables are set,
-  ingest emits one result with `PipelineCheckEmitter::emit` (never
+  managed EdDSA tokens.
+
+  **Where it is emitted.** The pass rule needs
+  `infrastructure_profile_from_state(&AppState)`
+  (`bin/trace_commons_ingest_internal/pipeline_activation.rs:355`), which
+  reads `artifact_store`, `signed_token_verifier`, `db_mirror`,
+  `require_db_mirror_writes`, `require_managed_eddsa_signed_tokens` and
+  `tokens` off the built state, so the emit runs over the built `AppState`,
+  not from the locals after `validate_pipeline_tenant_bundles`. Building the
+  profile from the locals was rejected: it would be a second copy of the
+  profile's rules, and the activation route reads the state version. At
+  `pipeline-production-assembly@b85f09e9a` the emit is at the end of
+  `from_env_with_pipeline_runtime_assembler`
+  (`trace-commons-ingest.rs:4829-4844`, after `let state = Self { .. }` at
+  `:4640` and before `Ok(state)` at `:4845`). That is still ahead of
+  `run_ingest`'s scheduler validators (`:1442-1489`) and the listener bind
+  (`:1546`), so a boot those refuse could already have written a passing
+  result. The decided placement, being made on #1295, is after the scheduler
+  validators and after `TcpListener::bind` succeeds, and before
+  `axum::serve` (`:1609-1610`): the result then records a process that
+  passed every startup refusal. The emit returns its error to `run_ingest`
+  with `?`, so a failure there (`pipeline_check_revision_mismatch`, or an
+  emitter I/O error) still stops the start, with the port bound but nothing
+  served.
+
+  Only when the three `TRACE_COMMONS_PIPELINE_CHECK_*` variables are set
+  does ingest emit one result, with `PipelineCheckEmitter::emit` (never
   `emit_from_env`, which panics). Rules:
   - the variables' `code_revision_hash` must equal `DEPLOYED_CODE_REVISION_HASH`
     (`versioned_pipeline_qualification.rs:110-111`), else refuse the start
@@ -558,7 +721,9 @@ is `insert_trace_gate_decision[_with_chunk_entries]`
   (`digests_required`) and `scripts/operator/test_pipeline_tooling.py`
   (`_PROMOTION_ONLY`, `:2456`), whose self-tests require agreement.
   `pipeline_tooling/report.py` reads `digests_required` from `checks.py`
-  (`report.py:342`) and holds no copy of its own.
+  (`report.py:342`) and holds no copy of its own. #1295 carries the
+  seven-id list (`pipeline-production-assembly@b85f09e9a`
+  `versioned_pipeline_qualification.rs:186-194`).
 
 ### 4.2 Tests (TDD order)
 
@@ -607,11 +772,14 @@ Each test is written first and seen failing. Unit tests live in
     in a temp dir: pass result names the package, evidence matches the schema
     above, `evidence_hash` recomputes, a second boot does not refuse, a
     revision mismatch refuses, a missing privacy backend emits `fail` with
-    blockers.
+    blockers, and a boot refused after `AppState` is built (a scheduler
+    validator, or a bind failure) writes no result.
 13. `promotion_package_checks_include_the_promotion_only_three` and
     `promotion_run_rule_is_per_group` in `versioned_pipeline_qualification.rs`
     unit tests; Python `test_pipeline_tooling.py` list-agreement tests updated.
-14. pg (ingest binary, `--include-ignored`):
+14. pg (ingest binary; not `#[ignore]`, so it runs whenever
+    `TRACE_COMMONS_PG_TEST_DATABASE_URL` is set and returns early, reporting
+    `passed`, when it is not):
     `production_assembly_serves_a_routed_tenant_end_to_end` -- the production
     assembler over qualified scorer and embedder doubles and a temp-root
     usearch index (under `near-ai-scorer`) or a qualified wrapper over
@@ -620,15 +788,25 @@ Each test is written first and seen failing. Unit tests live in
 
 ### 4.3 CI
 
-- Default-features tests (1-3, 5-13) run in `cargo test (default features)`
-  and `trace-commons-ingest tests, whole bin, against PostgreSQL`
-  (`ingest-bin-postgres`, `.github/workflows/ci.yml:595`) for 14.
-- `cargo check (near-ai-scorer)` (`ci.yml:954-1001`) today only checks the
-  bins and runs gate-enclave's NEAR AI lib tests. Add one step:
+- Default-features tests (1-3, 5-13) run in `cargo test (default features)`.
+  The default arm of 14 runs in `trace-commons-ingest tests, whole bin,
+  against PostgreSQL` (`ingest-bin-postgres`, `.github/workflows/ci.yml:595`),
+  which builds default features only and keeps its xact_commit floor guard.
+- `cargo check (near-ai-scorer)` (`ci.yml:954-1001`) gets one step,
   `cargo test -p trace-commons-server --features near-ai-scorer --bin trace-commons-ingest production_assembly`
   with the existing "`[1-9][0-9]* passed`" grep guard (copy of the
-  gcs-client step at `:992-997`), so tests 4 and the `near-ai-scorer` arm of
-  14 run somewhere. No network: tests construct no `NearAiPerplexityScorer`
+  gcs-client step at `:992-997`); #1295 adds it
+  (`pipeline-production-assembly@b85f09e9a` `ci.yml:998-1008`). That job has
+  no PostgreSQL service and no `TRACE_COMMONS_PG_TEST_DATABASE_URL`, so this
+  step runs test 4 and the other non-pg tests only. The `near-ai-scorer` arm
+  of 14 would return early there and still count as passed, so it is not
+  claimed for that job.
+- The `near-ai-scorer` arm of 14 (the usearch-backed end-to-end path) runs
+  in a `near-ai-scorer` variant of `ingest-bin-postgres`: the same
+  PostgreSQL service, database URL and xact_commit floor guard, building the
+  ingest binary with `--features near-ai-scorer`. #1295 is adding it; it is
+  not on `b85f09e9a`. Without it the usearch path runs nowhere in CI.
+- No network in either job: tests construct no `NearAiPerplexityScorer`
   and load no fastembed model.
 - `cargo check (default features)` and `cargo check (local-gpu-models,
   non-CUDA)` must stay green; the forwarding impls and the cfg split are what
@@ -654,6 +832,34 @@ Each test is written first and seen failing. Unit tests live in
     bge embedding, usearch index in the run directory. The HF corpus run in
     this mode uses the network pin (B-D3), so `pipeline_http_corpus_hf_local`
     here is produced from a real download.
+    The switch is read in four harnesses: `CorpusAssembler`
+    (`pipeline_corpus_pg_tests.rs`), the restore seed and resume, and the
+    bundle-qualification test in `tests/versioned_pipeline_runtime_pg.rs`.
+    The last one reaches the assembler only because A-D1 puts it in the
+    library crate. In that test the switch replaces the candidate service
+    (`compatibility_test_service(..., qualification_candidate_config())`,
+    `origin/main` `:2866-2871`) with one built by the production assembler
+    from the operator's env file, and changes these assertions
+    (`:2880-2890`):
+
+    | Assertion today (reference mode) | Production mode |
+    |---|---|
+    | `candidate_scorer_is_reference` (identity `reference_perplexity_test_only`) | identity is `near_ai_perplexity_scorer` |
+    | `candidate_embedder_is_reference` (identity `reference_embedder_test_only`) | identity is `fastembed_text_embedder` |
+    | `!candidate_qualification.scorer.production_qualified` | `production_qualified` |
+    | `!candidate_qualification.embedder.production_qualified` | `production_qualified` |
+    | `!candidate_qualification.configuration_qualifiable` | `configuration_qualifiable` |
+
+    Unchanged in both modes: `candidate_resolved`, the
+    `assert_ne!(candidate.bundle_id, package.bundle_id)` at `:2891`, and the
+    constructor-object proof over the Q/U counting scorers (earlier in the
+    same test),
+    which is about `construct`, not about the candidate. The emitted evidence
+    (`emit_pass_from_env`, `:2898-2912`) replaces the two `_is_reference`
+    booleans with the two identity labels and adds
+    `"harness_assembly": "reference"|"production"`, so a reference result can
+    never be read as a production one. In reference mode the test behaves
+    exactly as today.
   - `promote remote-restore` -> `pipeline_remote_restore` (B-D2).
   - `promote hf-canary` -> `pipeline_hf_network_canary` (B-D3).
   - `promote adapters` collects `pipeline_production_adapters`; it does not
@@ -717,12 +923,25 @@ Each test is written first and seen failing. Unit tests live in
     `holdout_corpus_digest`. The owner commits the file in a PR; it is never
     regenerated by a canary.
   - `promote hf-canary` downloads again against `pin-network.json` and
-    verifies every digest. Evidence:
+    verifies every digest. Its result names the production package: all
+    three of `package_hash`, `configuration_digest` and `dependency_digest`,
+    the triple `promote init` recorded for the run, because A-D12 makes
+    `pipeline_hf_network_canary` package-bearing and `evaluate_promotion`
+    adds `qualification_evidence_package_missing` to a package-bearing
+    result without them. #1293 does this: every `promote` result goes
+    through `write_result`, which writes the run's triple
+    (`pipeline-promotion-checks@e889b5f0e`
+    `scripts/operator/pipeline_tooling/promote.py:354-391`, the triple at
+    `:369` and `:376-378`), `hf_canary` calls it (`:551`), and
+    `test_hf_canary_evidence_shape` asserts the triple
+    (`scripts/operator/test_pipeline_tooling.py:4923-4930`). Evidence, as
+    #1293 builds it:
 
     ```json
     {
       "schema": "trace_commons.pipeline_hf_network_canary.v1",
-      "repository": "jedisct1/security-audits",
+      "repository_owner": "jedisct1",
+      "repository_name": "security-audits",
       "revision": "<40-hex commit>",
       "pin_hash": "sha256:...",
       "source_digest": "sha256:...",
@@ -735,8 +954,11 @@ Each test is written first and seen failing. Unit tests live in
     ```
 
     The repository and revision are public dataset coordinates, not operator
-    secrets, so they appear in clear. A digest mismatch is `fail` with
-    `hf_pin_digest_mismatch:<field>`. Whether the revision in `pin-local.json`
+    secrets, so they appear in clear; the repository is split at the `/`,
+    which the evidence alphabet does not allow. A digest mismatch is `fail`
+    with `hf_pin_digest_mismatch_<field>`; a download that left no JSONL file
+    is `fail` with `hf_network_download_missing`; a cache outside the run
+    directory is `fail` with `hf_network_cache_outside_run`. Whether the revision in `pin-local.json`
     (`6d527ff0...`) is a real commit of that dataset is unknown; the first
     `record` run answers it (O-B2).
   - CI keeps `pin-local.json` and makes no network call.
@@ -770,7 +992,8 @@ Each test is written first and seen failing. Unit tests live in
 2. Python, `scripts/operator/test_pipeline_tooling.py`:
    `test_promote_refuses_in_ci`, `test_promote_requires_near_ai_build`,
    `test_hf_pin_network_has_no_local_dir`,
-   `test_hf_canary_evidence_shape`, `test_remote_restore_evidence_shape`,
+   `test_hf_canary_evidence_shape` (also asserts the result names the run's
+   package triple), `test_remote_restore_evidence_shape`,
    `test_remote_restore_evidence_rejects_url_like_values`
    (reuse `_reject_url_like_arguments`, `pipeline.py:152`),
    `test_promote_sign_signs_exactly_seven`,
@@ -779,8 +1002,15 @@ Each test is written first and seen failing. Unit tests live in
    bucket calls are injected callables in the tests.
 3. Rust, harness assembly switch (B-2):
    `harness_production_assembly_requires_the_feature` (default build refuses
-   with `harness_production_assembly_unavailable`) and
-   `production_corpus_mode_compares_only_deterministic_fields`.
+   with `harness_production_assembly_unavailable`),
+   `production_corpus_mode_compares_only_deterministic_fields`, and, in
+   `tests/versioned_pipeline_runtime_pg.rs`,
+   `bundle_qualification_production_mode_inverts_the_reference_assertions`
+   (`near-ai-scorer` only; the production assembler over qualified doubles,
+   no network): the five assertions of the B-D1 table hold in their
+   production form, the evidence carries `"harness_assembly": "production"`,
+   and the emitted result names the production package. The reference-mode
+   test is unchanged and must still pass.
 4. Manual, operator host, recorded in the PR that lands the pin: one
    `hf-pin record` run, one `promote hf-canary`, one `promote remote-restore`
    against a scratch bucket, with output pasted.
@@ -801,21 +1031,114 @@ unmodified.
 
 ### 6.1 Decisions
 
-- **C-D1. Where.** In `PgPipelineStore::commit_settle`
-  (`src/versioned_pipeline.rs:4677`), after `ensure_current_lease` and
-  `lock_runnable_policy` and before the run's state change, on the same `tx`,
-  for runs whose bundle is the compatibility bundle (the only bundle whose
-  Score evidence has the legacy fields). A stale lease or a suspended policy
-  therefore writes no row. A run rejected in Admission or Review never reaches
-  Settle and gets no row, as the legacy gate driver writes none for a
-  submission it does not score.
-- **C-D2. Idempotency.** `decision_id` = UUIDv5 over
-  `trace_commons.pipeline_gate_decision.v1\n<tenant_id>\n<run_id>`
-  (the same `Uuid::new_v5(&Uuid::NAMESPACE_URL, ..)` pattern as
-  `versioned_pipeline.rs:8737-8740`), inserted with
-  `ON CONFLICT (tenant_id, decision_id) DO NOTHING`. Plus V116's partial unique
-  index (C-D4) so a second run for the same submission cannot add a second
-  pipeline row.
+- **C-D1. Where, and the lock order.** In `PgPipelineStore::commit_settle`
+  (`src/versioned_pipeline.rs:4677` on `main`;
+  `pipeline-gate-decision-rows@15cc64951` `:4782`, the write at `:4820`),
+  after `ensure_current_lease` and `lock_runnable_policy` and before the
+  run's state change, on the same `tx`, for runs whose bundle is the
+  compatibility bundle (the only bundle whose Score evidence has the legacy
+  fields). A stale lease or a suspended policy therefore writes no row. A run
+  rejected in Admission or Review never reaches Settle and gets no row, as
+  the legacy gate driver writes none for a submission it does not score.
+
+  Locks, in the order `commit_settle` takes them (line numbers on
+  `pipeline-gate-decision-rows@15cc64951` `versioned_pipeline.rs`, V114
+  numbers from 3.7):
+
+  1. the run's `pipeline_runs` row, `FOR UPDATE` (`ensure_current_lease`,
+     `:4797`, statement at `:6618-6621`);
+  2. the Settle policy's `pipeline_bundle_policy_status` row, `FOR SHARE`
+     (`lock_runnable_policy`, `:4803`, statement at `:6659-6661`);
+  3. the new `phase_outcomes` row (`insert_outcome`);
+  4. the new `trace_gate_decisions` row and its keys in the primary key and
+     in `trace_gate_decisions_one_pipeline_row` (`:4927-4939`); a concurrent
+     insert of the same key waits on this transaction;
+  5. only when external growth is enabled, through the V114 trigger:
+     the switch row `FOR SHARE`, then the dependency-lock row
+     `submission:<tenant>:<submission>` (plus `cluster:<id>` for a cluster
+     already on another gate row of the submission), then the frontier rows
+     of accounts with a `gate_evaluation` fact on the submission, the
+     decision or such a cluster;
+  6. the `UPDATE pipeline_runs` that completes the run, on the row step 1
+     already holds.
+
+  This adds an edge from the pipeline's locks to the account-trust locks; it
+  adds none the other way. Every path that takes a dependency-lock or
+  frontier row while holding a pipeline lock takes the pipeline lock first:
+  the withdrawal (`withdraw_submission`: `pipeline_runs` `FOR UPDATE` at
+  `:4112`, `trace_submissions` `FOR UPDATE` at `:4126`, then the dedup clear
+  through `withdraw_pipeline_content_on_tx` `:6870` and
+  `invalidate_pipeline_exports_on_tx` `:6920`), the revocation and
+  withdrawal follow-ups (`follow_up_inoperable_submission`: runs `:4554`,
+  submission `:4570`, clear through `withdraw_pipeline_content_on_tx` at
+  `:4575`) and the retention follow-up (runs `:4633`, submission `:4648`,
+  clear at `:4670`). Every other writer that
+  reaches the V114 locks -- `main`'s `insert_trace_gate_decision`, the dedup
+  and credit-quality sweeps, `trace_record_account_trust_fact`
+  (`db/postgres_account_trust.rs:28`), `trace_account_trust_merge`
+  (`db/postgres.rs:5241`), `trace_account_trust_enable_external_growth`
+  (`admission_ledger.rs:644`) and the external evaluation recorder -- is in
+  code that takes no `pipeline_runs` or `pipeline_bundle_policy_status` lock:
+  outside `versioned_pipeline.rs` those tables are only read without a
+  locking clause (`db/postgres.rs:5344, 5403`,
+  `versioned_pipeline_activation.rs:553-765, 1294-1309`,
+  `versioned_pipeline_product.rs`). The one exclusive lock on a policy row,
+  `intervene_policy` (`:1820`; `FOR UPDATE` at `:1865`, update at `:1904`),
+  locks no other row in this order. So the order is
+  strictly layered -- pipeline run rows, then submission and policy rows,
+  then gate-decision rows, then the growth switch, then dependency keys in
+  `COLLATE "C"` order, then frontiers in `(tenant_id, account_id)` order --
+  and no cycle through a pipeline lock exists. Enabling growth while a
+  Settle commit is in flight waits for that commit (the switch row), and a
+  Settle that starts after it waits for the enable to commit; the enable
+  holds no pipeline lock.
+
+  Two consequences that are not inversions. `commit_settle` runs at READ
+  COMMITTED (`tenant_transaction`, `:1543-1560`), so a dependency-lock row
+  another writer holds makes it wait, not fail with a serialization error.
+  And for a submission's first pipeline row, no `gate_evaluation` fact can
+  exist yet (the fact names a decision that did not exist), so step 5 takes
+  the switch row and one dependency key and no frontier row; once it holds
+  the key it waits on nothing else, so it cannot close a cycle among the
+  account-trust locks either. The multi-row dedup clear in
+  `withdraw_submission` (several submissions of one source session) fires
+  the trigger once per row, each with its own sorted key set, so across rows
+  its keys are not in one global order; it can deadlock against another
+  multi-row account-trust writer touching the same clusters in the other
+  order. PostgreSQL detects that and aborts one transaction (`40P01`); the
+  withdrawal returns an error and writes nothing. That is the same exposure
+  `main`'s multi-row writers have, and it involves no pipeline lock.
+- **C-D2. Idempotency and the second-run conflict.** `decision_id` =
+  UUIDv5 over `trace_commons.pipeline_gate_decision.v1\n<tenant_id>\n<run_id>`
+  (`pipeline_gate_decision_id`, `pipeline-gate-decision-rows@15cc64951`
+  `versioned_pipeline.rs:220`), inserted with a **targetless**
+  `ON CONFLICT DO NOTHING` (`:4939`). V116's partial unique index (C-D4) allows
+  one pipeline row per submission. V92 allows several runs per submission
+  (the primary key is `(tenant_id, run_id)` and `idx_pipeline_runs_submission`
+  is not unique), and a second run has a new `run_id` and so a new
+  `decision_id`. With a conflict target of `(tenant_id, decision_id)` its
+  insert would miss that arbiter, hit the partial index, raise
+  `unique_violation` and roll back Settle on every retry. With no target,
+  both the primary key and the partial index are arbiters, so the insert
+  writes nothing instead. After a no-op insert, an owner check reads the
+  submission's pipeline row (`:4978-4993`): when it names this run (a
+  retried commit) the commit proceeds; when it names another run, the
+  commit refuses with `pipeline_gate_decision_conflict` and writes nothing.
+  That label, and `pipeline_gate_decision_evidence_incomplete`, are
+  classified as terminal: `process_claimed_run` fails the run instead of
+  spending its attempts (`:10796-10805`), and the Settle commit path
+  re-raises them bare (`:12740-12744`). The run is failed, not left wedged
+  in Settle.
+
+  The evidence check runs before any leg pays: Settle's Step 1 builds
+  `PipelineGateDecisionScoreValues::from_evidence` from the committed Score
+  evidence for a compatibility bundle (`:11845-11851`), so evidence the row
+  cannot be built from fails the run with nothing settled. The commit
+  repeats the check and refuses with the same label only if the outcome
+  changed in between. A value too large for its column saturates
+  (`i64::MAX`, `i32::MAX`) as `main`'s gate writer stores it, rather than
+  refusing (`from_evidence`, `:175-210`): the chunk aggregate saturates a
+  perplexity to `u64::MAX` on purpose.
 - **C-D3. Columns from pipeline evidence.** From the Score outcome's
   `ScoreEvidence` (`gate-api pipeline.rs:1703`; set by
   `CompatibilityScorePolicy::evaluate`, `versioned_pipeline_compat.rs:500-530`):
@@ -843,10 +1166,14 @@ unmodified.
   Pre-filling `credit_quality_micros` matters: the credit-quality sweep
   (`list_gate_decisions_for_credit_scoring`, `db/postgres.rs:5545`) selects
   every row with `perplexity_micros > 0` and does not skip rows that already
-  have a value (to verify in the implementation, O-C3); if rescoring a
-  pipeline row would overwrite the pipeline's own quality, the sweep must
-  exclude `source = 'pipeline_settle'`, which is the one consumer change this
-  slice allows.
+  have a value, so it would overwrite the pipeline's own quality. #1294
+  excludes `source = 'pipeline_settle'` there
+  (`pipeline-gate-decision-rows@15cc64951` `db/postgres.rs:5578`). The admin
+  perplexity re-score would likewise rewrite a pipeline row's verdict, which
+  the row's `attestation_chain_hash` covers, so its enumeration leaves out
+  any submission with a pipeline row (`db/postgres.rs:5520-5532`) and its
+  writers refuse one (`trace_corpus_pg.rs:6992, 7038`). Those two exclusions
+  are the consumer changes this slice makes (O-C3, answered by #1294).
 - **C-D4. Migration V116** (`V115` is the highest on `origin/main`, verified
   with `git ls-tree origin/main migrations/`):
   `migrations/V116__pipeline_gate_decision_rows.sql` adds
@@ -859,15 +1186,31 @@ unmodified.
   (V23:57-63); the Settle transaction is a tenant transaction
   (`Self::tenant_transaction`, `versioned_pipeline.rs:4689`) on the trace
   pool, the same pool and login the legacy `insert_trace_gate_decision` uses,
-  so `WITH CHECK (tenant_id = trace_current_tenant_id())` holds. The ingest
-  runtime group `trace_ingest_runtime` received table-wide grants at V62
-  (`migrations/V90__ingest_runtime_grants.sql` header), which covers INSERT on
-  `trace_gate_decisions`; V116 adds `GRANT SELECT (source, pipeline_run_id) ON
-  trace_gate_decisions TO trace_gate_driver` (that role holds column grants,
-  V47/V48/V57) only if a sweep selects them. A pg test proves the insert under
-  `SET ROLE trace_ingest_runtime` on a fresh database; if it is denied, V116
-  also grants `INSERT` and `UPDATE (dedup_simhash, dedup_cluster_id,
-  dedup_cluster_size, dedup_signal_version, credit_withheld_reason)` (O-C4).
+  so `WITH CHECK (tenant_id = trace_current_tenant_id())` holds.
+
+  The privilege to insert is not a migration grant. The V90 header
+  (`migrations/V90__ingest_runtime_grants.sql:1-25`) says the table-wide
+  grant to `trace_ingest_runtime` was made once, by hand, on the pilot when
+  its schema was at V62; elsewhere V90 creates the group with no table-wide
+  grant, and no migration grants it INSERT on `trace_gate_decisions` or
+  UPDATE on its dedup columns. So on a fresh database whose ingest login
+  holds only `trace_ingest_runtime`, both `main`'s gate writer and the
+  pipeline's are denied; a deployment that is not the pilot runs ingest as
+  the owning login, or grants by hand as V90's header tells the operator to.
+  V116 as built (`pipeline-gate-decision-rows@15cc64951`) grants only
+  `SELECT (source)` to `trace_gate_driver`, for the credit-quality filter.
+  `pipeline_gate_decision_insert_works_under_the_runtime_role`
+  (`tests/versioned_pipeline_runtime_pg.rs:43532` on that branch) passes
+  because its harness migrates the pilot's way: `migrate_like_the_pilot`
+  (`tests/support/pilot_runtime_login.rs:42`) applies the pilot's
+  `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO
+  trace_ingest_runtime` at V62 (`pilot_runtime_grants.rs:13-15`). It proves
+  the pilot's shape, not a fresh one. O-C4 is answered: no. The pipeline
+  writer needs exactly the privilege `main`'s writer needs, so this slice
+  opens no new gap. Whether V116 should grant `INSERT` and `UPDATE
+  (dedup_simhash, dedup_cluster_id, dedup_cluster_size, dedup_signal_version)`
+  to `trace_ingest_runtime` explicitly, so the pipeline path does not rest on
+  the pilot's one-time grant, is left to the owner (O-C4).
 - **C-D6. Withdrawal and revocation.** The legacy withdrawal clears the
   dedup columns by submission (`clear_trace_dedup_cluster_for_submission`,
   `trace_corpus_pg.rs:4865-4888`), and the drain report's
@@ -886,48 +1229,77 @@ unmodified.
   mirror functions for pipeline-owned submissions (in which case the pipeline
   needs no extra UPDATE) is to be confirmed first (O-C5); the test below
   decides.
-- **C-D7. What the consumers then do, unmodified.** Dedup sweeps compute
-  simhash from the submitted envelope (`list_dedup_rederive_rows`), so a
-  pipeline row gains `dedup_simhash` and a cluster on the next sweep;
-  contributor cap and account trust read the row as written. No legacy
+- **C-D7. What the consumers then do, unmodified.** A pipeline row is
+  written with `dedup_simhash` NULL, and the periodic sweep does not derive
+  one: `run_recluster_dedup_pass` (`trace-commons-ingest.rs:57304` on
+  `main`) clusters only rows that already have a simhash
+  (`.filter(|row| row.dedup_simhash.is_some())`, `:57320`). Only the
+  operator-run `POST /v1/admin/rederive-dedup` (`:8930`;
+  `run_rederive_dedup_pass`, `:58047`, through `list_dedup_rederive_rows`)
+  derives a simhash for such a row from its envelope. Until an operator
+  runs it, pipeline rows are not clustered and `dedup_cluster_size` stays
+  NULL for the contributor cap. #1294's operator doc says so. The
+  contributor cap and account trust otherwise read the row as written. No legacy
   credit is awarded from the row: legacy `NoveltyUtility` credit is written
   inline by the legacy gate path, not by the sweeps (O-C3 confirms).
 
 ### 6.2 Tests (TDD order)
 
-All pg tests on a fresh database with `--include-ignored`.
+All pg tests on a fresh database. They are not `#[ignore]`: each returns
+early when `TRACE_COMMONS_PG_TEST_DATABASE_URL` is unset, so a run without a
+database reports them as passed and proves nothing. Names below are as
+#1294 built them (`pipeline-gate-decision-rows@15cc64951`).
 
 1. `v116_adds_source_and_pipeline_run_id_with_defaults` (in
    `db/postgres/pipeline_upgrade_tests.rs`): legacy insert unchanged, CHECKs
    enforced, partial unique index present.
 2. `settle_writes_one_gate_decision_row_per_submission`
    (`tests/versioned_pipeline_runtime_pg.rs`): a compatibility run reaching
-   Settle writes exactly one row with the columns of C-D3; re-running Settle
-   (crash after commit, retried with a new lease) writes none.
+   Settle writes exactly one row with the columns of C-D3; and
+   `settle_gate_decision_row_is_idempotent_per_submission`: Settle's commit
+   cannot run twice for one run (transition guard and lease), so a retry
+   after a crash after commit amounts to the same row offered again, which
+   is a no-op.
+   `a_pipeline_row_naming_another_run_refuses_settle` (`:44221`) covers the
+   second run: a pipeline row for the same submission naming another run
+   fails Settle with `pipeline_gate_decision_conflict`, terminally, and
+   leaves the rows as they were. It seeds the other run's row directly
+   rather than driving a second run through Settle, because
+   `insert_pipeline_receipt` is meant to keep a second run from being
+   created. `saturated_score_evidence_saturates_on_the_gate_decision_row`
+   (`:44126`) covers the saturation in C-D2.
 3. `stale_settle_writes_no_gate_decision_row` and
    `suspended_settle_policy_writes_no_gate_decision_row`.
 4. `rejected_run_writes_no_gate_decision_row`.
-5. `pipeline_gate_decision_insert_works_under_the_runtime_role` --
-   `SET ROLE trace_ingest_runtime`.
-6. `withdrawal_clears_pipeline_row_dedup_columns` and the drain report's
-   `withdrawal_completion_pending` reads zero afterwards.
+5. `pipeline_gate_decision_insert_works_under_the_runtime_role` -- the
+   runtime login, a member of `trace_ingest_runtime` only, on the pilot's
+   grant shape (C-D5).
+6. `withdrawal_clears_pipeline_row_dedup_columns`,
+   `revocation_clears_pipeline_row_dedup_columns`,
+   `retention_clears_pipeline_row_dedup_columns`,
+   `withdrawal_leaves_credit_withheld_reason_as_legacy_does`; the drain
+   report's `withdrawal_completion_pending` reads zero afterwards.
 7. `consumers_see_pipeline_rows` -- the dedup rederive, contributor-cap and
    account-trust fact paths each pick up a pipeline row (one assertion each,
    calling the existing functions).
-8. `credit_quality_sweep_does_not_overwrite_pipeline_rows` (O-C3).
+8. `credit_quality_sweep_does_not_overwrite_pipeline_rows`,
+   `perplexity_rescore_enumeration_skips_pipeline_submissions`,
+   `perplexity_rescore_writers_leave_pipeline_rows_alone` (O-C3).
 9. `legacy_gate_driver_still_skips_pipeline_submissions` (regression on
    `db/postgres.rs:5333-5336`).
 
 ### 6.3 CI
 
 `database suites against a real PostgreSQL` (`postgres-suites`, `ci.yml:78`)
-runs `versioned_pipeline_runtime_pg` and the upgrade tests; with #737's
-`#[ignore]` selector semantics the new tests must be added to that job's
-selector list, or they never run (project memory, "Ignored pg suites").
+runs `cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg`
+(`ci.yml:420`) with a database and checks that the suite provisioned its
+runtime role (`:429`), and runs the upgrade tests. The new tests are not
+`#[ignore]`, so they run there with no selector change.
 
 ## 7. What stays the owner's
 
-- Ruling on section 2 (R-1, R-2 or R-3) and on every open question below.
+- Ruling on every open question in section 10 (section 2, O-A2, O-A3 and the
+  stage 3 settlement precondition of O-A4 are decided).
 - Merging each slice. No agent merges, approves or arms the queue.
 - Every pilot write: deploying a build, setting
   `TRACE_COMMONS_PIPELINE_RUNTIME=production` and
@@ -943,7 +1315,7 @@ selector list, or they never run (project memory, "Ignored pg suites").
 ## 8. Dependencies
 
 - PR #1291, merged as `d8f98f389`: the compatibility-merge review points this
-  design builds on (base of all three slices).
+  design builds on (base of every slice).
 - PR #1286 (`pipeline-smoke-runbook`): the stage plan. Not required to merge
   first; when it merges, its "What is not possible yet" section should point
   here.
@@ -961,10 +1333,11 @@ selector list, or they never run (project memory, "Ignored pg suites").
 - **R1. Shared scorer load.** Legacy and pipeline traffic share one NEAR AI
   quota and one embedder. A routed tenant adds load to the CPU-starved host.
   Mitigation: stage 3 traffic is synthetic and small; measure before stage 4.
-- **R2. Novelty history restarts.** The pipeline index starts empty, so the
-  first pipeline traces of a real tenant score novel against nothing the
-  legacy index holds. Stage 3's legacy comparison will show it; stage 4 needs
-  an owner decision (seed from legacy, or accept) (O-A2).
+- **R2. Novelty history restarts.** The pipeline index starts empty and is
+  not seeded from the legacy novelty index (O-A2, decided: cold start), so
+  the first pipeline traces of a real tenant score novel against nothing the
+  legacy index holds. Stage 3's legacy comparison will show it, and the
+  stage 4 change record states it.
 - **R3. Manifest drift.** A crash between a usearch write and its manifest
   flush leaves them inconsistent; the start then refuses, and the rebuild
   route is the recovery. A slow rebuild extends downtime.
@@ -976,24 +1349,45 @@ selector list, or they never run (project memory, "Ignored pg suites").
   and never edit a released one.
 - **R6. Evidence leakage.** Evidence and logs must stay hash-only; a review
   pass greps evidence fixtures for URL-like values and model names.
-- **R7. Overrun of the 60 s fence margin** by a usearch flush on a large
-  shard; A-D6 measures flush time in the integration test and refuses
-  `flush_every` settings that exceed it.
+- **R7. Overrun of the 60 s fence margin** by one pipeline index write on a
+  large shard: every write flushes usearch and rewrites the namespace's
+  manifest (A-D6), and both grow with the shard. There is no `flush_every`
+  setting to refuse. `flush_returns_within_the_fence_margin` measures a
+  write against a generous bound in CI; the operator measures it again on
+  the stage 4 tenant's shard size before stage 4.
 
-## 10. Open questions
+## 10. Decisions and open questions
+
+Decided by the owner, 2026-10-08:
+
+- **Section 2: R-1.** The package-bearing checks are re-run against the
+  production assembly, operator-only (`pipeline.py promote`, Slice B).
+- **O-A2: cold start.** The pipeline index is not seeded from the legacy
+  novelty index, for stage 3 or stage 4 (R2).
+- **O-A3: not bound.** The scorer descriptor does not bind the NEAR AI
+  attestation host or measurement pin for now (A-D4).
+- **O-A4, stage 3 precondition: kept.** Stage 3 keeps NEAR payout disabled
+  deployment-wide; `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=disabled` stays a
+  stage 3 precondition (A-D9).
+
+Answered by what was built:
+
+- **O-C3** (#1294): the credit-quality sweep did not skip rows with a value,
+  and the admin perplexity re-score reached pipeline rows; both now leave
+  pipeline rows out (C-D3).
+- **O-C4** (C-D5): no, a fresh database's `trace_ingest_runtime` holds no
+  INSERT on `trace_gate_decisions`; neither does it for `main`'s writer.
+  Still open: whether V116 grants it explicitly.
+
+Open:
 
 - **O-A1.** Legacy tenant authority semantics: how the tenant allowlist
   combines with the token-claim allowlist, and what a tenant absent from
   `TRACE_COMMONS_TENANT_POLICIES` gets. Must be read from the admission code
   before A-D8 is written.
-- **O-A2.** Seed the pipeline index from the legacy novelty index for the
-  stage 4 tenant, or accept a cold start?
-- **O-A3.** Should the scorer descriptor bind the NEAR AI attestation host or
-  measurement pin, so a change of the serving TEE is a new package?
-- **O-A4.** The stage 3d payout slice: a production `NearPayoutAdapter` over
-  `main`'s HTTP NEAR submitter and confirmer does not exist; is it a fourth
-  slice? And does stage 3 keep the deployment-wide "settlement mode
-  `disabled`" precondition now that the pipeline tenant cannot pay out (A-D9)?
+- **O-A4, payout slice.** The stage 3d payout slice: a production
+  `NearPayoutAdapter` over `main`'s HTTP NEAR submitter and confirmer does
+  not exist; is it a fourth slice?
 - **O-B3.** Production corpus expectations: a separate expectation set, or
   the deterministic-fields mode the plan picks (section 2)?
 - **O-B1.** The remote-restore scratch target: a prefix in the production
@@ -1005,10 +1399,6 @@ selector list, or they never run (project memory, "Ignored pg suites").
 - **O-C2.** Per-author perplexity for pipeline rows: compute it in the
   compatibility Score (changes Score output and so the package), or leave
   NULL and accept that per-author scoring skips pipeline traffic.
-- **O-C3.** Whether the credit-quality sweep skips rows that already hold a
-  value, and whether any sweep writes a credit event.
-- **O-C4.** Whether `trace_ingest_runtime` on a fresh (non-pilot) database
-  holds INSERT on `trace_gate_decisions`.
 - **O-C5.** Whether the legacy withdrawal route already runs
   `clear_trace_dedup_cluster_for_submission` for pipeline-owned submissions.
 - **O-C6.** Whether `trace_submissions.status` for a pipeline submission

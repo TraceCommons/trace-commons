@@ -1,13 +1,17 @@
 # Pipeline production assembly: implementation plan
 
 Spec: [`docs/superpowers/specs/2026-10-08-pipeline-production-assembly-design.md`](../specs/2026-10-08-pipeline-production-assembly-design.md).
-Base for every slice: `origin/main` (`d8f98f389` or later). Three branches,
-three PRs, any merge order; Slice B's operator paths refuse at run time until
-Slice A is deployed.
+Base for every slice: `origin/main` (`d8f98f389` or later). Four branches,
+four PRs: **A** (#1295, `pipeline-production-assembly`), **B-1** (#1293,
+`pipeline-promotion-checks`), **B-2** (`pipeline-promotion-production-harness`)
+and **C** (#1294, `pipeline-gate-decision-rows`). A, B-1 and C branch from
+`origin/main` and merge in any order. **B-2 branches from `origin/main` only
+after A has merged**, because it uses A's descriptors and library-side
+assembler; do not start it earlier. Slice B-1's operator paths refuse at run
+time until Slice A is deployed.
 
-Before starting any slice: the owner has ruled on spec section 2 (R-1 is the
-default). Read `CLAUDE.md` and `AGENTS.md` in the worktree. Every task is TDD:
-write the test, run it, see it fail for the stated reason, implement, see it
+The owner ruled on spec section 2 on 2026-10-08: R-1. Read `CLAUDE.md` and
+`AGENTS.md` in the worktree. Every task is TDD: write the test, run it, see it fail for the stated reason, implement, see it
 pass, commit.
 
 Gate for each slice's PR (paste real output, never from truncated output):
@@ -25,7 +29,9 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server
 pg tests touched by a slice run on a fresh database
 (`createdb -h localhost tc_<branch>_<n>`;
 `TRACE_COMMONS_PG_TEST_DATABASE_URL=postgresql://localhost/<db>`;
-`-- --include-ignored`; `dropdb` afterwards). Slice A also runs
+`dropdb` afterwards). The new pg tests are not `#[ignore]`; without the
+database URL they return early and report `passed`, so a run without it
+proves nothing. Slice A also runs
 `cargo check -p trace-commons-server --features local-gpu-models` (CI job
 `cargo check (local-gpu-models, non-CUDA)`), since it touches gate-api traits.
 
@@ -33,11 +39,17 @@ pg tests touched by a slice run on a fresh database
 
 ## Slice A: production assembly
 
-Branch `pipeline-production-assembly`. Files:
+Branch `pipeline-production-assembly` (#1295). Files:
 
-- Create `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/production_assembly.rs`
-  (AGPL header) and its test sibling `production_assembly_tests.rs`, wired with
-  `#[cfg(test)] #[path = "production_assembly_tests.rs"] mod tests;`.
+- Create a library module under `crates/trace-commons-server/src/` (AGPL
+  header) holding the descriptors, the pipeline adapters,
+  `PipelineGateComponents` and the production assembler (spec A-D1), so the
+  integration target `tests/versioned_pipeline_runtime_pg.rs` can reach them
+  in B-2. Keep only the `near-ai-scorer` env builder in
+  `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/production_assembly.rs`,
+  with its test sibling `production_assembly_tests.rs`, wired with
+  `#[cfg(test)] #[path = "production_assembly_tests.rs"] mod tests;`. At
+  `b85f09e9a` everything is still in the bin module; #1295 is moving it.
 - Modify `crates/trace-commons-gate-api/src/{perplexity,embedder,vector_index}.rs`
   (forwarding impls), `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`
   (`main`, component builder split, boot emit, config-status),
@@ -80,7 +92,15 @@ Branch `pipeline-production-assembly`. Files:
    the hash for a fixed config is the value `main` computes today).
 3. Store `Option<Arc<PipelineGateComponents>>` on `AppState` (set only by the
    `enclave_near_ai` arm when the production selection is on).
-4. Commit: "Build the NEAR AI gate components once".
+4. Move the component build ahead of pipeline assembly (spec A-D3, "The
+   component build moves ahead of pipeline assembly"): under the production
+   selection, build the legacy gate and the components before
+   `assemble_ingest_pipeline_runtime_with_components`, and let the
+   `gate_service` field take the prebuilt gate. With the selection unset the
+   gate is built where it is today. Test: with the production selection and
+   all-zero floors the start refuses with the legacy all-zero message; with
+   the selection unset the boot order is unchanged.
+5. Commit: "Build the NEAR AI gate components once".
 
 ### A3. Scorer and embedder adapters with deterministic identities
 
@@ -152,18 +172,27 @@ Branch `pipeline-production-assembly`. Files:
    (spec 4.2 item 12); `promotion_package_checks_include_the_promotion_only_three`;
    `promotion_run_rule_is_per_group`; Python list-agreement tests in
    `test_pipeline_tooling.py` updated to the seven-id package list.
-2. Implement spec A-D11 and A-D12. The emit runs after
-   `validate_pipeline_tenant_bundles` (`trace-commons-ingest.rs:4057-4064`) and
-   uses `PipelineCheckEmitter::emit`, never `emit_from_env`.
+2. Implement spec A-D11 and A-D12. The emit runs over the built `AppState`
+   (it needs `infrastructure_profile_from_state(&AppState)`), in
+   `run_ingest` after the scheduler validators and after
+   `TcpListener::bind`, before `axum::serve`; its error is returned with
+   `?`, so a revision mismatch still stops the start. It uses
+   `PipelineCheckEmitter::emit`, never `emit_from_env`. Test that a boot
+   refused by a scheduler validator writes no result.
 3. Commit: "Emit the production adapters check from startup".
 
 ### A8. End-to-end and CI
 
 1. pg test `production_assembly_serves_a_routed_tenant_end_to_end` in
    `pipeline_http_pg_tests.rs` (default features, qualified doubles in `PipelineGateComponents` behind the
-   production assembler); fresh DB, `--include-ignored`. Confirm the
-   `ingest-bin-postgres` job's selector includes it.
-2. Add to `cargo-check-near-ai-scorer` (`ci.yml:954`):
+   production assembler); fresh DB. The default arm runs in
+   `ingest-bin-postgres`.
+2. Add a `near-ai-scorer` variant of `ingest-bin-postgres`: same PostgreSQL
+   service, `TRACE_COMMONS_PG_TEST_DATABASE_URL` and xact_commit floor
+   guard, building the ingest binary with `--features near-ai-scorer`, so
+   the usearch arm of the end-to-end test runs against a database.
+3. Add to `cargo-check-near-ai-scorer` (`ci.yml:954`) for the non-pg tests
+   (that job has no database, so it does not count for the pg arm):
 
    ```yaml
    - name: production assembly tests (near-ai-scorer)
@@ -173,25 +202,29 @@ Branch `pipeline-production-assembly`. Files:
        cargo test -p trace-commons-server --features near-ai-scorer --bin trace-commons-ingest production_assembly 2>&1 | tee production-assembly-tests.log
        grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' production-assembly-tests.log
    ```
-3. Update the operator docs: new env vars
+4. Update the operator docs: new env vars
    (`TRACE_COMMONS_PIPELINE_RUNTIME`, `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`),
-   new labels, and "Current completion".
-4. Commit: "Run the production assembly tests in CI".
+   new labels, "Current completion", and the index recovery procedure of
+   spec A-D6 (suspend the Score policy, empty the root, boot, rebuild,
+   resume).
+5. Commit: "Run the production assembly tests in CI".
 
 ---
 
 ## Slice B: operator promotion checks
 
-Two PRs (spec section 8). **B-1**, branch `pipeline-promotion-checks`, from
-`origin/main`: tasks B1, B2, B4, B5. **B-2**, branch
-`pipeline-promotion-production-harness`, from `origin/main` after Slice A
+Two PRs (spec section 8). **B-1** (#1293), branch `pipeline-promotion-checks`,
+from `origin/main`: tasks B1, B2, B4, B5. **B-2**, branch
+`pipeline-promotion-production-harness`, from `origin/main` only after Slice A
 merges: tasks B3, B6. Files: `scripts/operator/pipeline.py`,
 `scripts/operator/pipeline_tooling/{checks,corpus,results}.py`, new
 `scripts/operator/pipeline_tooling/promote.py`,
 `scripts/operator/test_pipeline_tooling.py`,
 `src/versioned_pipeline_qualification.rs`,
-`bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs` and
-`pipeline_restore_pg_tests.rs` (harness assembly switch, remote store seam),
+`bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs`,
+`pipeline_restore_pg_tests.rs` and
+`tests/versioned_pipeline_runtime_pg.rs` (harness assembly switch, remote
+store seam, bundle-qualification check),
 `crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json`
 (added only after the owner's `record` run), `docs/operator/pipeline-qualification.md`,
 `docs/operator/pipeline-lab.md`.
@@ -222,11 +255,19 @@ merges: tasks B3, B6. Files: `scripts/operator/pipeline.py`,
 1. Tests: `harness_production_assembly_requires_the_feature`,
    `production_corpus_mode_compares_only_deterministic_fields` (spec section
    2: consent, privacy, replay, changed-content refusal and tenant isolation
-   compared; scoring and settlement states recorded as evidence only).
+   compared; scoring and settlement states recorded as evidence only),
+   `bundle_qualification_production_mode_inverts_the_reference_assertions`
+   (spec 5.2 item 3).
 2. Read `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY` in `CorpusAssembler`,
-   `pipeline_bundle_qualification`'s harness and the restore seed/resume; under
-   `production` and `near-ai-scorer`, build through Slice A's assembler from
-   the operator's env file. Refuse otherwise.
+   the restore seed/resume, and
+   `qualification_inspects_the_objects_the_constructor_receives` in
+   `tests/versioned_pipeline_runtime_pg.rs` (the only emitter of
+   `pipeline_bundle_qualification`); under `production` and `near-ai-scorer`,
+   build through Slice A's library-side assembler from the operator's env
+   file. Refuse otherwise. In the bundle-qualification test the candidate
+   service comes from the production assembler and the five reference
+   assertions take their production form (spec B-D1 table); the evidence
+   records `harness_assembly`.
 3. Commit: "Let the qualification harness run on the production assembly".
 
 ### B4. HF network pin and canary
@@ -287,7 +328,8 @@ Read and record in the PR body, before any code: O-C3 (credit-quality sweep and
 any sweep that writes a credit event), O-C4 (runtime-role INSERT on a fresh
 database), O-C5 (legacy withdrawal route for pipeline-owned submissions),
 O-C6 (pipeline submission status). If O-C3 finds a sweep that writes credit
-from a row, stop and report: the slice needs an owner decision.
+from a row, stop and report: the slice needs an owner decision. (Done on
+#1294; the spec records O-C3 and O-C4 as answered.)
 
 ### C1. V116
 
@@ -300,12 +342,20 @@ from a row, stop and report: the slice needs an owner decision.
 ### C2. Settle writes the row
 
 1. Tests: `settle_writes_one_gate_decision_row_per_submission`,
+   `settle_gate_decision_row_is_idempotent_per_submission`,
+   `a_pipeline_row_naming_another_run_refuses_settle` (a second run's row for
+   the same submission: Settle fails terminally with
+   `pipeline_gate_decision_conflict`, no unique violation, rows unchanged),
    `stale_settle_writes_no_gate_decision_row`,
    `suspended_settle_policy_writes_no_gate_decision_row`,
    `rejected_run_writes_no_gate_decision_row`,
    `pipeline_gate_decision_insert_works_under_the_runtime_role`.
-2. Implement in `commit_settle` (spec C-D1 to C-D3). If the runtime-role test
-   fails, add the grant to V116 (spec C-D5) rather than widening anything else.
+2. Implement in `commit_settle` (spec C-D1 to C-D3): targetless
+   `ON CONFLICT DO NOTHING`, then the owner check refusing
+   `pipeline_gate_decision_conflict`; both refusal labels terminal; the
+   evidence check in Settle's Step 1, before any leg settles. The runtime-role
+   test runs on the pilot's grant shape and cannot detect a missing grant on
+   a fresh database (spec C-D5); whether V116 grants explicitly is O-C4.
 3. Commit: "Write a gate decision row from Settle".
 
 ### C3. Withdrawal and revocation
@@ -326,6 +376,7 @@ from a row, stop and report: the slice needs an owner decision.
 2. Only if the credit-quality test fails: exclude `source = 'pipeline_settle'`
    in `list_gate_decisions_for_credit_scoring`, the single consumer change the
    spec allows.
-3. Add every new `#[ignore]` pg test to the `postgres-suites` job's selector
-   lists in `ci.yml` (`ci.yml:78`); an unlisted ignored test never runs.
+3. The new pg tests are not `#[ignore]`; `postgres-suites` runs
+   `--test versioned_pipeline_runtime_pg` with a database (`ci.yml:420`), so
+   no selector change is needed. Check that the job's log lists them.
 4. Commit: "Prove the gate decision consumers see pipeline rows".
