@@ -95,6 +95,26 @@ impl NearAiScorerDescriptor {
         format!("sha256:{}", sha256_hex(&self.bytes()))
     }
 
+    /// The descriptor whose [`Self::bytes`] are exactly `bytes` (a package's
+    /// stored scorer descriptor), or `None`. The cutoff comes back from its
+    /// micros, and the round trip is checked, so a descriptor this cannot
+    /// reproduce byte for byte is refused rather than approximated.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object()?;
+        if object.len() != 4 || object.get("schema")?.as_str()? != NEAR_AI_SCORER_DESCRIPTOR_SCHEMA
+        {
+            return None;
+        }
+        let micros = object.get("tail_logprob_cutoff_micros")?.as_i64()?;
+        let descriptor = Self {
+            model: object.get("model")?.as_str()?.to_string(),
+            tail_logprob_cutoff: (micros as f64 / 1_000_000.0) as f32,
+            logprobs_top_k: u32::try_from(object.get("logprobs_top_k")?.as_u64()?).ok()?,
+        };
+        (descriptor.bytes() == bytes).then_some(descriptor)
+    }
+
     /// The compatibility configuration's `scorer_model_id` (spec A-D10):
     /// `near_ai:` and the descriptor's SHA-256, so the stored configuration
     /// carries no model name in clear.
@@ -129,6 +149,78 @@ impl FastEmbedDescriptor {
     pub fn hash(&self) -> String {
         format!("sha256:{}", sha256_hex(&self.bytes()))
     }
+
+    /// The descriptor whose [`Self::bytes`] are exactly `bytes`, or `None`
+    /// (see [`NearAiScorerDescriptor::from_bytes`]).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+        let object = value.as_object()?;
+        if object.len() != 5
+            || object.get("schema")?.as_str()? != FASTEMBED_EMBEDDER_DESCRIPTOR_SCHEMA
+        {
+            return None;
+        }
+        let size =
+            |field: &str| -> Option<usize> { usize::try_from(object.get(field)?.as_u64()?).ok() };
+        let matryoshka_dim = match object.get("matryoshka_dim")? {
+            serde_json::Value::Null => None,
+            _ => Some(size("matryoshka_dim")?),
+        };
+        let descriptor = Self {
+            model_id: object.get("model_id")?.as_str()?.to_string(),
+            output_dim: size("output_dim")?,
+            max_tokens: size("max_tokens")?,
+            matryoshka_dim,
+        };
+        (descriptor.bytes() == bytes).then_some(descriptor)
+    }
+}
+
+/// Stands in for the scorer and embedder when only a package is built: the
+/// package names its dependencies by their descriptors alone, so building it
+/// loads no model and calls no network. Never served.
+struct NotLoaded;
+
+const PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL: &str = "production_dependency_not_loaded";
+
+impl PerplexityScorer for NotLoaded {
+    fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+
+    fn score_chunk(&self, _chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+}
+
+impl Embedder for NotLoaded {
+    fn embed(&self, _plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        anyhow::bail!(PRODUCTION_DEPENDENCY_NOT_LOADED_LABEL)
+    }
+}
+
+/// The production compatibility package (spec A-D10, B-D5): the package
+/// [`assemble_production_pipeline`] serves for these descriptors and `main`'s
+/// gate configuration. It reads only the descriptors, so `pipeline.py
+/// package --bundle production` builds it offline, and the assembler builds
+/// its own package through this same function, so the two cannot differ.
+pub fn production_compatibility_package(
+    scorer_descriptor: &NearAiScorerDescriptor,
+    embedder_descriptor: &FastEmbedDescriptor,
+    main_gate: &MainGateConfig,
+) -> anyhow::Result<trace_commons_gate_api::pipeline::BundlePackage> {
+    use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
+    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
+
+    let config = CompatibilityBundleConfig::production_compatible(
+        scorer_descriptor.compatibility_scorer_model_id(),
+        PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
+        PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+        main_gate,
+    )?;
+    let scorer = NearAiPipelineScorer::new(Arc::new(NotLoaded), scorer_descriptor.clone());
+    let embedder = FastEmbedPipelineEmbedder::new(Arc::new(NotLoaded), embedder_descriptor.clone());
+    MinimalPolicyBundle::compatibility_package(&config, &scorer, &embedder)
 }
 
 /// The NEAR AI scorer as the pipeline names it (spec A-D4). Holds the
@@ -426,8 +518,6 @@ pub fn assemble_production_pipeline(
     inputs: ProductionPipelineInputs,
 ) -> anyhow::Result<PipelineService> {
     use crate::versioned_pipeline::PipelineServiceBuilder;
-    use crate::versioned_pipeline_bundle::MinimalPolicyBundle;
-    use crate::versioned_pipeline_compat::CompatibilityBundleConfig;
     use crate::versioned_pipeline_credit::SettlementAdapterRegistry;
 
     let components = inputs.components;
@@ -439,14 +529,11 @@ pub fn assemble_production_pipeline(
         components.embedder.clone(),
         components.embedder_descriptor.clone(),
     ));
-    let config = CompatibilityBundleConfig::production_compatible(
-        components.scorer_descriptor.compatibility_scorer_model_id(),
-        PRODUCTION_COMPATIBILITY_PROJECTION_ID.to_string(),
-        PRODUCTION_COMPATIBILITY_INDEX_ID.to_string(),
+    let package = production_compatibility_package(
+        &components.scorer_descriptor,
+        &components.embedder_descriptor,
         &inputs.main_gate,
     )?;
-    let package =
-        MinimalPolicyBundle::compatibility_package(&config, scorer.as_ref(), embedder.as_ref())?;
     let registry =
         SettlementAdapterRegistry::new(vec![
             Arc::new(InternalTraceCreditSettlementAdapter::new())
