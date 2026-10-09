@@ -2,96 +2,121 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** draft, 2026-10-09. Written against branch `pipeline-async-privacy-rescrub` at `1e7ea3cc2` (spec commit on top of `main` `3c7d4a239`). Every line number below is a line in this worktree at that commit.
+**Status:** revision 2, 2026-10-09. Revises the first draft (`858842040`) against the 29 critiques in `.local/plan-critiques.json` and the owner decisions Q1-Q3 (see "Owner decisions"). Written against branch `pipeline-async-privacy-rescrub` at `1e7ea3cc2` (spec commit on top of `main` `3c7d4a239`). Every line number below is a line in this worktree at that commit.
 
-**Goal:** Move the prose-PII classifier out of `PipelineService::submit` (the HTTP receipt) and into a server-owned privacy pass at the start of the Review dispatch. The receipt keeps the bounded, local deterministic redactor only. The pass stores the classifier's output as its own encrypted object, records it on the run (V117), holds an escalated run for a human, retries classifier errors on a bounded budget, and hands the Review policy the scrubbed bytes. Score and exports keep reading approved content only.
+**Goal:** Move the prose-PII classifier out of `PipelineService::submit` (the HTTP receipt) and into a server-owned privacy pass at the start of the Review dispatch. The receipt keeps the bounded, local deterministic redactor only. The pass stores the classifier's output as its own encrypted object, records it on the run (V117), holds an escalated run for a human, retries classifier errors on a bounded budget, and hands the Review policy the scrubbed bytes. Score and exports keep reading approved content only, and the database refuses an approval of a run that needed a pass and has none.
 
-**Architecture:** `PipelinePrivacyBoundary` splits into `rescrub_deterministic` (receipt) and `rescrub_classifier` (pass). The pass runs inside `process_claimed`'s `Phase::Review` arm, under Review's lease and attempt budget, before `bundle.review.execute`. Its record is six new nullable columns on `pipeline_runs` (storage option (a)). Its object uses the existing per-attempt key, staging row and sweep (FR1), with a run-derived object ref id. Escalation is the server's: it parks the run `awaiting_review` with `privacy_review_required`, the review queue predicate learns the pass outcome, and a human rejection of an escalated Admit run is committed by the server. The gate-api `Phase` enum, `ReviewInput`, the bundle and its qualification fixtures do not change.
+**Architecture:** `PipelinePrivacyBoundary` splits into `rescrub_deterministic` (receipt) and `rescrub_classifier` (pass). The pass runs inside `process_claimed`'s `Phase::Review` arm, under Review's lease and attempt budget, before `bundle.review.execute`. Its record is new nullable columns on `pipeline_runs` (storage option (a); option (b) is impossible, spec correction 5). Its object uses the existing per-attempt key, staging row and sweep (FR1), with a run-derived object ref id. A run received after V117 carries `privacy_pass_required = TRUE`, a CHECK refuses its approval without a pass, and it is claimable for human review only once its pass is recorded. Escalation is the server's: it parks the run `awaiting_review` with `privacy_pass_review_required` (its own label, distinct from Admission's `privacy_review_required`), the review queue predicate learns the pass outcome, a human rejection of an escalated Admit run is committed by the server, and a human approval of one is linked to the run's pass record. The gate-api `Phase` enum, `ReviewInput`, the bundle and its qualification fixtures do not change.
 
 **Tech Stack:** Rust (tokio, tokio-postgres, serde, anyhow; existing dependencies only), PostgreSQL 16 with forced RLS, Python 3 standard library (`scripts/operator/`).
 
-**Spec:** `docs/superpowers/specs/2026-10-09-pipeline-async-privacy-rescrub-design.md` (cited as "spec:N"). Contracts: `docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md` (SUB-005 at :386-392, REV-001..004 at :535-585, RUN-004 at :821-833, CMP-002 at :1340, SCN-003 at :1471-1482).
+**Spec:** `docs/superpowers/specs/2026-10-09-pipeline-async-privacy-rescrub-design.md` (cited as "spec:N"). Contracts: `docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md` (SUB-005 at :386-392, REV-001..004 at :535-585, REV-003's bullets at :560-575, RUN-004 at :821-833, CMP-002 at :1340, SCN-003 at :1471-1482).
 
-**Abbreviations:** VP = `crates/trace-commons-server/src/versioned_pipeline.rs`; VPA = `crates/trace-commons-server/src/versioned_pipeline_authority.rs`; ING = `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`; RT = `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs`; HTTP = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_http_pg_tests.rs`; RESTORE = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_restore_pg_tests.rs`; UPG = `crates/trace-commons-server/src/db/postgres/pipeline_upgrade_tests.rs`; BUNDLE = `crates/trace-commons-server/src/versioned_pipeline_bundle.rs`.
+**Abbreviations:** VP = `crates/trace-commons-server/src/versioned_pipeline.rs`; VPA = `crates/trace-commons-server/src/versioned_pipeline_authority.rs`; VPP = `crates/trace-commons-server/src/versioned_pipeline_product.rs`; ING = `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`; RT = `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs`; HTTP = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_http_pg_tests.rs`; RESTORE = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_restore_pg_tests.rs`; CORPUS = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_corpus_pg_tests.rs`; UPG = `crates/trace-commons-server/src/db/postgres/pipeline_upgrade_tests.rs`; BUNDLE = `crates/trace-commons-server/src/versioned_pipeline_bundle.rs`; PROTO = `crates/trace-commons-protocol/src/trace_contribution.rs`.
 
-**Scope:** server crate, one migration (V117), docs and contracts. No protocol, client or gate-api change. Stage 3 stays as it is (see "Stage 3").
+**Scope:** server crate, one migration (V117), docs and contracts. No protocol, client or gate-api change. Stage 3 artifacts are untouched (see "Stage 3 and rollout").
 
-## Owner decisions applied (defaults given with the task)
+## Owner decisions
+
+From the spec's open questions (defaults confirmed):
 
 - **D0 (open question 0, SUB-005).** Read as the spec reads it: "synchronous privacy-risk handling" is the bounded, local deterministic redactor. The contracts document gets a clarifying sentence, not an amendment (Task 10).
-- **D1 (open question 1, High).** High is held for a human like Medium, never rejected by the pass. Note the asymmetry this leaves on purpose: `MinimalAdmissionPolicy` still rejects a receipt-time High with `privacy_risk_rejected` (BUNDLE:150-156); only a pass-time High is held.
-- **D2 (open question 2, client status).** The receipt keeps `status: "processing"`. No client change and no new status value. The contributor-facing mapping (`main_status_for_pipeline`, ING:17405-17421) is left as it is; Task 10 documents what it shows (see "Compatibility mapping").
-- **D3 (open question 3, retry budget).** Reuse the pipeline's own mechanism: the charged `mark_retry` and the run's `max_attempts` (V93 default 5, `migrations/V93__versioned_pipeline_durability.sql:16`). That count equals legacy's `TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS: i32 = 5` (ING:1153). The pipeline's backoff, however, is `DEFAULT_RETRY_MILLISECONDS = 50` doubling (VP:453, VP:5054-5056), which spends five attempts in about a second of classifier outage. So `mark_retry` gets a third label-keyed backoff branch, beside the existing hourly branch for `artifact_integrity_failed` (VP:5057), with legacy's shape: `30 s x 2^(attempt_count-1)`, from `TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30` (ING:1154) and legacy's `make_interval(secs => base * POWER(2, attempts))` (`crates/trace-commons-server/src/db/postgres.rs:5470-5471`). The pass call is bounded by legacy's per-submission bound, `TRACE_PII_BACKSTOP_DEFAULT_PER_SUBMISSION_TIMEOUT_SECONDS: i64 = 900` (ING:920), which sits inside Review's renewal cap (5 min lease, VP:777, times `PIPELINE_LEASE_RENEWAL_CAP_FACTOR = 4`, VP:785). Legacy's per-tick canary and its consecutive-failure breaker (`MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES = 3`, ING:45674) are tick-scoped and are not ported.
-- **Storage option (a).** Six new columns on `pipeline_runs` in V117.
+- **D1 (open question 1, High).** High is held for a human like Medium, never rejected by the pass. The asymmetry stays on purpose: `MinimalAdmissionPolicy` still rejects a receipt-time High with `privacy_risk_rejected` (BUNDLE:150-156); only a pass-time High is held.
+- **D2 (open question 2, client status).** The receipt keeps `status: "processing"`. No client change and no new status value. Q1 below changes one server-side mapping inside the existing vocabulary.
+- **D3 (open question 3, retry budget).** Reuse the pipeline's own mechanism: the charged `mark_retry` and the run's `max_attempts` (V93 default 5, `migrations/V93__versioned_pipeline_durability.sql:16`), which equals legacy's `TRACE_PII_BACKSTOP_DEFAULT_MAX_ATTEMPTS: i32 = 5` (ING:1153). The pipeline's backoff, `DEFAULT_RETRY_MILLISECONDS = 50` doubling (VP:453, VP:5054-5056), would spend five attempts in about a second of classifier outage, so `mark_retry` gets a third label-keyed branch beside the hourly `artifact_integrity_failed` one (VP:5057), with legacy's shape `30 s x 2^(attempt_count-1)` (`TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS: i64 = 30`, ING:1154; `make_interval(secs => base * POWER(2, attempts))`, `crates/trace-commons-server/src/db/postgres.rs:5470-5471`). The pass call is bounded by `min(900 s, review_lease x PIPELINE_LEASE_RENEWAL_CAP_FACTOR - PIPELINE_PRIVACY_PASS_COMMIT_MARGIN)` (see P8). Legacy's per-tick canary and consecutive-failure breaker (`MAX_CONSECUTIVE_PII_BACKSTOP_FAILURES = 3`, ING:45674) are tick-scoped and are not ported.
+- **Storage option (a).** New columns on `pipeline_runs` in V117.
+
+From the owner's review of the first draft:
+
+- **Q1.** A run failed with `privacy_classification_failed` maps to contributor status `quarantined` (existing vocabulary), not `accepted`. Task 8 adds the arm to `main_status_for_pipeline` (ING:17406-17422).
+- **Q2.** A server-committed Review rejection of an escalated Admit run is accepted, rule id `privacy_pass_human_review_rejected_v1` (Task 7). For an escalated approval, the server records the approving assessment's `evidence_hash` and resolved reasons on the pass record (two V117 columns, written in `commit_review`'s transaction), so the approved outcome is linked to the human decision (Task 7, with its test).
+- **Q3.** Legacy readers' and exports' refusal of a pipeline submission is pinned with a test now (Task 9). The follow-up issue to move them onto `read_mains_reviewer_metadata_view` is filed separately, outside this plan.
+- **Critique 0.** Adopt `privacy_pass_required BOOLEAN NOT NULL DEFAULT FALSE`, then `SET DEFAULT TRUE`, plus the CHECK, plus a pass predicate in `commit_review`'s approval UPDATE with a safe label, with a refusal test (Task 5).
+- **Critique 1.** Adopt both halves: (1) a run that requires the pass is claimable for review only once its pass is recorded (Task 6); (2) an assessment recorded before `privacy_pass_recorded_at` is ignored when the pass escalates (Task 6). The pass's hold label is `privacy_pass_review_required`.
+- **Critiques 7/11.** Update `redaction_counts` and `redaction_pipeline_version` from the pass envelope; keep `redaction_hash` deterministic (P5).
+- **Critiques 10/19.** The restore drill keeps exactly one pending run; no third seeded run. Pass resume is proved by runtime crash-matrix tests (Task 5). The stage 3 `restore_seed` blocker is already fixed on `main` (#1315, `e4a788ec4`, in this branch's history), so that gate is removed. Task 11 keeps only a fingerprint extension and runs `pipeline.py restore-drill` against a scratch server.
+- **Critiques 20/21.** Task 1 is a pure refactor: the receipt calls `rescrub_deterministic` then `rescrub_classifier` and merges, so Task 2's receipt test is red first. Each green step also runs the existing tests its task touches.
+- **Critique 17, 18, 22, 24.** The upgrade-test database is in the global constraints; every multi-filter cargo command puts its filters after `--`; the crash tests are red tests in Task 5; `#[ignore]` is never used as a placeholder.
 
 ## Spec corrections (what the code map shows is wrong or impossible)
 
-1. **"Keyed by content hash, so a repeated store is idempotent" (spec:110-111, 169-170) is impossible.** Ruling FR1 (VP:14587-14603) forbids content-addressed object keys: every encrypt uses a fresh salt and nonce, so two writes of equal plaintext differ in ciphertext, and a key shared across attempts would let a later write stop matching a committed ref's `content_sha256`. Resolution: the pass object key is `pipeline_attempt_object_id("privacy-pass", run_id, lease_token)`; the object ref id is derived from the run id alone (as `approved_object_ref`, VP:14814-14824); the attempt is staged in `pipeline_attempt_artifacts` and an uncommitted object is deleted by `sweep_attempt_artifacts`. Idempotency comes from "a pass recorded on the run is never re-run" plus the deterministic ref id. REV-002's "stored by content hash" is met by recording the plaintext hash (`privacy_pass_content_hash`), exactly as `approved_content_hash` does today. The spec test "stores no second object" becomes "commits one object ref; the orphaned attempt object is swept".
-2. **"Through the same state and queue as an Admission quarantine" (spec:143-144) does not work as written.** The queue, claim and assessment paths all use `run_waiting_for_review_sql!`, which requires `p.admission_decision = 'quarantine'` (VP:120-124), and `admission_decision` is not updatable by the runtime (`migrations/V92__versioned_pipeline_runs.sql:149-157`). An escalated Admit run would park forever. Resolution: Task 6 widens the predicate with `OR p.privacy_pass_outcome = 'escalated'`.
-3. **"A rejection ends the run as the reviewer's rejection does today" (spec:149-150) does not happen by calling the policy.** `MinimalReviewPolicy` ignores `human_assessment` when Admission admitted (`AdmissionDecision::Admit => (None, Vec::new())`, BUNDLE:192-194), so an escalated Admit run with a Reject assessment would be approved. Resolution: the server commits the rejection itself (Task 7), mirroring BUNDLE:204-221 with a server rule id. The server does not feed the policy a synthetic `AdmissionDecision::Quarantine`, because that would record an Admission reason Admission never gave.
-4. **"After the retry budget is spent, the run fails with `privacy_classification_failed`" (spec:163-164) needs new code.** `mark_retry` always writes `attempts_exhausted` on exhaustion (VP:5076-5079, VP:5090), and the `claim_next` sweep does too (VP:2085). Also, `privacy_classification_failed` is not on the P2 allowlist (VP:10954-10966), so a bare error with that label would be recorded as `PIPELINE_OPERATIONAL_ERROR_LABEL` = `"minimal_policy_failed"` (VP:136). Resolution: Task 8.
-5. **Option (b) "no schema change" (spec:196-197) is not available.** Staging the pass object needs a new `pipeline_attempt_artifacts.artifact` value, and V108 pins the set in a CHECK (`migrations/V108__versioned_pipeline_attempt_artifacts.sql:23`). Option (a) is taken anyway.
+1. **"Keyed by content hash, so a repeated store is idempotent" (spec:110-111, 169-170) is impossible.** Ruling FR1 (VP:14588-14600) forbids content-addressed object keys: every encrypt uses a fresh salt and nonce, so two writes of equal plaintext differ in ciphertext, and a key shared across attempts would let a later write stop matching a committed ref's `content_sha256`. Resolution: the pass object key is `pipeline_attempt_object_id("privacy-pass", run_id, lease_token)` (VP:14601-14603); the object ref id is derived from the run id alone (as `approved_object_ref`, VP:14814-14824); the attempt is staged in `pipeline_attempt_artifacts` and an uncommitted object is deleted by `sweep_attempt_artifacts`. Idempotency comes from "a pass recorded on the run is never re-run" plus the deterministic ref id. REV-002's "stored by content hash" is met by recording the plaintext hash (`privacy_pass_content_hash`), as `approved_content_hash` does today. The spec test "stores no second object" becomes "commits one object ref; the orphaned attempt object is swept".
+2. **"Through the same state and queue as an Admission quarantine" (spec:143-144) does not work as written.** The queue, claim and assessment paths all use `run_waiting_for_review_sql!`, which requires `p.admission_decision = 'quarantine'` (VP:120-124), and `admission_decision` is not updatable by the runtime (`migrations/V92__versioned_pipeline_runs.sql:149-157`). Resolution: Task 6 widens the predicate with `OR p.privacy_pass_outcome = 'escalated'` and narrows it with the pass-recorded condition (critique 1).
+3. **"A rejection ends the run as the reviewer's rejection does today" (spec:149-150) does not happen by calling the policy.** `MinimalReviewPolicy` ignores `human_assessment` when Admission admitted (`AdmissionDecision::Admit => (None, Vec::new())`, BUNDLE:192-194), so an escalated Admit run with a Reject assessment would be approved, and an approved one would carry no assessment hash. Resolution: the server commits the rejection itself (Task 7, Q2), and records the approving assessment on the pass record (Task 7, Q2). The server does not feed the policy a synthetic `AdmissionDecision::Quarantine`, which would record an Admission reason Admission never gave.
+4. **"After the retry budget is spent, the run fails with `privacy_classification_failed`" (spec:163-164) needs new code.** `mark_retry` always writes `attempts_exhausted` on exhaustion (VP:5076-5079, VP:5090), and the `claim_next` sweep does too (VP:2085). `privacy_classification_failed` is not on the P2 allowlist (VP:10954-10966), so a bare error with that label is recorded as `PIPELINE_OPERATIONAL_ERROR_LABEL` = `"minimal_policy_failed"` (VP:136). Resolution: Task 8.
+5. **Option (b) "no schema change" (spec:196-197) is not available.** Staging the pass object needs a new `pipeline_attempt_artifacts.artifact` value, and V108 pins the set in a CHECK (`migrations/V108__versioned_pipeline_attempt_artifacts.sql:23`). Option (a) is taken.
 6. **Pass step 2 says `rescrub` (spec:109).** It is `rescrub_classifier` after the split.
-7. **Line drift.** Spec "VPA:86" is the trait at VPA:87; spec "VP:11415" (Score's `load_approved_bytes` call) is correct in this worktree, but the loader itself is at VP:10300-10312.
-8. **"Exports are not confirmed yet" (spec:117-119) is now confirmed.** The pipeline export snapshot selects by `r.approved_object_ref_id` and `approved_content_hash` (`crates/trace-commons-server/src/versioned_pipeline_product.rs:448-480`) and reads no bytes; the index rebuild reads only sealed index commands (VP:10441-10466); Score reads `load_approved_bytes` (VP:11415). Legacy readers that can reach a pipeline submission (`get_latest_active_envelope_object_ref`, ING:56028-56049) fail closed on the P1 wrapper (ING:68039-68044). No reader takes the source. One gap remains and is fixed in Task 9: the export filter `s.privacy_risk = $8` (`versioned_pipeline_product.rs:477`) reads the submission row, which the receipt now writes from the deterministic envelope only.
+7. **Line drift.** Spec "VPA:86" is the trait at VPA:87; spec "VP:11415" (Score's `load_approved_bytes` call) is correct, but the loader itself is at VP:10300-10312.
+8. **"Exports are not confirmed yet" (spec:117-119) is now confirmed.** The pipeline export snapshot selects by `r.approved_object_ref_id` and `approved_content_hash` (VPP:448-480) and reads no bytes; the index rebuild reads only sealed index commands (VP:10441-10466); Score reads `load_approved_bytes` (VP:11415). No pipeline reader takes the source. Legacy readers that can reach a pipeline submission (`get_latest_active_envelope_object_ref`, ING:56028-56049; the benchmark, ranker and process-evaluation jobs at ING:54057, 54654, 54996, 41896) fail closed only because the P1 wrapper does not decode as an envelope (ING:68039-68044); Task 9 pins that with a test (Q3). One gap is fixed: the export filter `s.privacy_risk = $8` (VPP:477) reads the submission row, which the receipt now writes from the deterministic envelope only, so the pass writes it back (P5).
+9. **"High is held" needs a definition of escalation for Admission-quarantined runs.** See P3: the pass escalates when its risk is above the risk the receipt stored.
 
 ## Decisions made while writing this plan
 
 - **P1. Receipt refusal label for a deterministic failure.** VP:9099 maps every boundary error to `privacy_classification_failed`. A deterministic failure is a `PrivacyFilterConfigError`, which legacy reports as "privacy filter config invalid" (ING:15317-15318). New constant `PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL = "privacy_rescrub_failed"` in VPA beside VPA:22-23. `privacy_classification_failed` becomes a Review-phase run failure label only. pipeline-activation.md's refusal table (1620-1624) changes with it (Task 10).
-- **P2. Pass object artifact kind: `ReviewSnapshot`, with `created_by_job_id = Some(run_id)`.** Discriminators: (a) the deletion worker must verify it as `ContributionEnvelope` (ING:65689-65696): `WorkerIntermediate` maps to `VectorPayload` and is then rejected unless `is_pipeline_score_object_ref` knows it (VP:14924-14930); (b) no legacy by-name selector may pick it up: `rescrubbed_envelope` is selected with `status = 'quarantined'` by `requeue_quarantined_for_pii_backstop` and the residual-survivor reset (`crates/trace-commons-server/src/db/trace_corpus_pg.rs:2861-2875, 2890-2915`), and the pipeline writes `quarantined` for an Admission quarantine (VP:6396-6412), so it would push pipeline submissions into legacy's backstop; `submitted_envelope` is the "latest active object" selector (`trace_corpus_pg.rs:2249`, and `postgres.rs:5332, 5387, 5464`); (c) a new `TraceObjectArtifactKind` variant is decoded by `enum_from_storage` (`trace_corpus_pg.rs:480, 993`), so a Route B rollback to the previous binary would fail to read any ref row the new binary wrote. `ReviewSnapshot` meets all three: legacy selects it by name nowhere ("review_snapshot" appears only at VP:2409 and ING:52944 outside tests). `created_by_job_id = Some(run_id)` plus the run-derived id tell it apart from the approved ref (which has `None`, VP:14836).
-- **P3. Escalation is defined for Admission-admitted runs only.** `escalated` = Admission decided Admit AND the pass's mapped privacy risk is Medium or High. An Admission-quarantined run is already held by the policy (`review_assessment_required`, BUNDLE:196-203); its pass record is `cleared` or `escalated` by the same risk rule but the server does not double-park it, and its approval still resolves the Admission reason.
-- **P4. Risk mapping is factored and reproduces the ConsentContentFlag downgrade.** The receipt's mapping (VP:9203-9216: `Medium` with basis exactly `[ConsentContentFlag]` maps to `Low`) moves into `fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk`. The pass merges the receipt's basis (read back from `trace_submissions.residual_risk_basis` and parsed with `ResidualRiskCondition::from_label`, `crates/trace-commons-protocol/src/trace_contribution.rs:6348`) with the classifier's conditions, and maps the pass envelope's `residual_pii_risk` through the same helper. Classifier conditions defeat the downgrade exactly as they did when both passes ran at the receipt.
-- **P5. The pass writes back to `trace_submissions`.** In the pass transaction, `privacy_risk` and `residual_risk_basis` are set from the pass envelope and merged basis (through `safe_residual_risk_basis_labels`, `crates/trace-commons-server/src/trace_corpus_storage.rs:1083`), so the export filter (versioned_pipeline_product.rs:477) and every status reader see post-classifier risk. `status` is not changed (an escalated run stays `received`; `main_status_for_pipeline` already reports `AwaitingReview` as `quarantined`, ING:17414-17418). The value written is the composed envelope risk the receipt used to store, so the semantics of that column return to what they were before this change.
-- **P6. A worker without a privacy boundary.** The pass needs `self.privacy`. A missing boundary is a deployment gap, not the trace's fault: `privacy_control_missing` goes to the uncharged `mark_transient_retry` (FR3 shape, beside `PIPELINE_DEPENDENCY_MISSING_LABEL` at VP:10757-10759). It never falls back to running Review on the unscrubbed source.
-- **P7. The pass runs once per run and is never re-run after it is recorded,** including after an assessment and after a restore. A crash before the record transaction repeats the classifier call (the spec allows this, spec:169).
+- **P2. Pass object artifact kind: `ReviewSnapshot`, with `created_by_job_id = Some(run_id)`.** (a) The pipeline withdrawal queues `delete_object_payload` items (VP:7011-7060), which the revocation-propagation worker deletes through `delete_object_payload_for_revocation_propagation` (ING:65634), whose mapping sends `ReviewSnapshot` to `ContributionEnvelope` (ING:65689-65692); `WorkerIntermediate` would map to `VectorPayload` and be rejected unless `is_pipeline_score_object_ref` knows it (VP:14924-14930). The other mapping, `trace_artifact_kind_from_storage` (ING:19412-19421, `ReviewSnapshot -> Other`), is legacy's whole-submission delete (ING:19477); Task 9's test pins which one a pipeline withdrawal takes. (b) No legacy by-name selector picks it up: `rescrubbed_envelope` is selected with `status = 'quarantined'` by `requeue_quarantined_for_pii_backstop` and the residual-survivor reset (`crates/trace-commons-server/src/db/trace_corpus_pg.rs:2861-2875, 2890-2915`), and the pipeline writes `quarantined` for an Admission quarantine (VP:6396-6412); `submitted_envelope` is the "latest active object" selector (`trace_corpus_pg.rs:2249`; `postgres.rs:5332, 5387, 5464`). (c) A new `TraceObjectArtifactKind` variant is decoded by `enum_from_storage` (`trace_corpus_pg.rs:480, 993`), so a Route B rollback would fail to read any ref row the new binary wrote. `ReviewSnapshot` meets all three: legacy selects it by name nowhere outside tests ("review_snapshot" appears only at VP:2409 and ING:52944). `created_by_job_id = Some(run_id)` plus the run-derived id tell it apart from the approved ref (`None`, VP:14836).
+- **P3. Escalation is "the pass's risk is above the risk the receipt stored".** The pass reads the submission's receipt-time `privacy_risk` and `residual_risk_basis` before it overwrites them (P5). `outcome = Escalated` iff `pipeline_privacy_risk(pass envelope risk, merged basis)` is strictly above the receipt-time risk; else `Cleared`. For an Admission-admitted run (receipt Low) that is Medium or High. For an Admission-quarantined run (receipt Medium, `privacy_review_required`) it is High only. For a run received before V117 (whose stored source already went through the classifier) it is a rise past the classifier's own earlier verdict, which is rare. An escalated run is held by the server with `privacy_pass_review_required` whatever Admission decided; a non-escalated Admission-quarantined run is held by the policy with `review_assessment_required`, as today. An approval must resolve every hold that applies: the Admission reason if there is one, and `privacy_pass_review_required` if the pass escalated (Task 6).
+- **P4. Risk mapping is factored and reproduces the ConsentContentFlag downgrade.** The receipt's mapping (VP:9203-9216: `Medium` with basis exactly `[ConsentContentFlag]` maps to `Low`) moves into `fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk`. The pass merges the receipt's basis (read back from `trace_submissions.residual_risk_basis`, parsed with `ResidualRiskCondition::from_label`, PROTO:6348) with the classifier's conditions, and maps the pass envelope's `residual_pii_risk` through the same helper.
+- **P5. The pass writes back to `trace_submissions`, except `redaction_hash`.** In the pass transaction it sets `privacy_risk`, `residual_risk_basis` (through `safe_residual_risk_basis_labels`, `crates/trace-commons-server/src/trace_corpus_storage.rs:1083`), `redaction_counts` (the classifier adds to them, PROTO:5612-5617) and `redaction_pipeline_version` (the classifier appends `+near-ai-pii-backstop-v1`, PROTO:5713-5724), so the export filter (VPP:477), the public run record (`public_run.rs:139` returns `redaction_pipeline_version`) and every status reader see post-classifier values, as they did when the receipt stored the composed envelope (VP:9726-9730). `redaction_hash` stays the deterministic envelope's on purpose, for two reasons: (i) tombstone matching. A pipeline withdrawal writes its tombstone from the submission row's `redaction_hash` (VP:6797-6824), and a later receipt checks tombstones against the hash of its own deterministic envelope (VP:6102-6110); a post-classifier hash on the row would stop a resubmission of a withdrawn trace from matching. (ii) The V68 trigger revokes every token bundle of a submission whose `redaction_hash` changes (`migrations/V68__token_rescrub_revocation.sql:4-7`). Legacy's backstop does refresh the hash (ING:~46022-46035, "refreshes the redaction hash / counts / privacy risk"), so this is a deliberate pipeline-only difference, documented in Task 10. Task 4 checks that no reader recomputes `redaction_hash` from the stored counts. `status` is not changed. The runtime already updates `trace_submissions` (VP:2451, VP:2471; table-wide since V62, `migrations/V90__ingest_runtime_grants.sql:5-7`), so V117 grants nothing on it.
+- **P6. A worker without a privacy boundary.** The pass needs `self.privacy`. A missing boundary is a deployment gap, not the trace's fault: `privacy_control_missing` goes to the uncharged `mark_transient_retry` (FR3 shape, beside VP:10913-10923). It never falls back to running Review on the unscrubbed source.
+- **P7. The pass is recorded once per run and never re-run after it is recorded,** including after an assessment and after a restore. The classifier call itself can run more than once: a crash before the record transaction repeats it, and so does a live worker that loses its lease mid-pass (VP:765-770) while a second worker reclaims the run. Exactly one result is recorded (the `privacy_pass_object_ref_id IS NULL` fence and the lease predicate); the loser's commit is refused and its object deleted, or swept from its staged row. Tested in Task 5; stated in pipeline-activation.md (Task 10).
+- **P8. Pass timeout fits inside the Review lease cap.** The cap is `claim time + review_lease x 4` (VP:8081-8082) and the Review lease is configurable down to 1 s (VP:775-777, ING:664-665). The effective timeout is `min(900 s, review_lease x PIPELINE_LEASE_RENEWAL_CAP_FACTOR - PIPELINE_PRIVACY_PASS_COMMIT_MARGIN)` with a 60 s margin (source load, store, record, Review commit), computed when the service is built. When the boundary reports `classifies_prose_pii()` and that leaves under 60 s for the classifier (a Review lease under 30 s), the build refuses with `PIPELINE_LEASE_CONFIG_INVALID_LABEL`. When it does not (pass-through and test doubles, whose call is local), the bound is the 900 s ceiling, never the lease-derived value, so a short test lease never times the pass out. A test-only builder knob overrides the 900 s ceiling.
+- **P9. A superseded assessment has no re-assessment path in this change.** `pipeline_review_assessments` is append-only with one row per run (`UNIQUE (tenant_id, run_id)`, V105:47; the runtime holds `SELECT, INSERT` only, V105:240). An assessment ignored under critique 1 (2) therefore cannot be replaced. The run is held fail-closed: `awaiting_review`, `privacy_pass_review_required`, listed in the review queue with `assessment_superseded = true`, not claimable; its exits are withdrawal or operator containment. Because half (1) makes every `privacy_pass_required` run unassessable before its pass, only a run received before V117 can reach this. Task 10 gives the pre-deploy query that counts them. Listed as owner question 1.
 
 ## Stage 3 and rollout
 
-- "Keep what we have for stage 3": nothing in this plan changes the stage 3 artifacts, the pilot (`a14eaff0`/V116, pipeline off) or the in-flight promote of `q5be633d6`. In particular the restore seed's existing two lifetimes and the `("leased", "settle", true)` assertion (RESTORE:2158-2165), which is the current promote blocker, are not edited. Task 11 adds a run beside them and is sequenced after that blocker is fixed on its own branch.
+- Nothing in this plan changes the stage 3 artifacts, the pilot (`a14eaff0`/V116, pipeline off) or the in-flight promote of `q5be633d6`. The stage 3 `restore_seed` blocker is fixed on `main` by #1315 (`e4a788ec4`), which is in this branch's history, so no task waits on it. The restore seed keeps its two lifetimes and its one pending run (RESTORE:2141-2165).
 - The change ships as one promote cycle after stage 3: build, Route B deploy (V117), `qualify`, promote checks, sign, assemble, then requalify the pipeline tenant's bundle on the new revision (spec:244-250).
-- Stage 3 acceptance for this change (spec:240-242): `long-chunk-capped` stored with status `processing` in under 2 s and reaching a terminal state; `pii-residual` still reads `quarantined` (now via the pass's `AwaitingReview`, which `main_status_for_pipeline` maps to `quarantined`), but only after at least one worker dispatch has run the pass. Between the receipt and that dispatch it reads `accepted` (`_ => "accepted"`, ING:17421), so a smoke check that reads status immediately after upload must wait for the worker first; otherwise the rerun looks like a regression.
-- V117 adds nullable columns only, so existing pilot runs are valid. A run already past Review keeps NULL pass columns. A run at Review with no pass recorded runs the pass on its next dispatch. No constraint ties "approved" to "pass recorded" (it would fail on existing rows).
+- Stage 3 acceptance (spec:240-242): `long-chunk-capped` stored with status `processing` in under 2 s and reaching a terminal state; `pii-residual` reads `quarantined` (via the pass's `AwaitingReview`, which `main_status_for_pipeline` maps to `quarantined`) only after at least one worker dispatch has run the pass. Between the receipt and that dispatch it reads `accepted` (`_ => "accepted"`, ING:17421); a smoke check that reads status immediately after upload must wait for the worker first.
+- V117 adds nullable columns, plus `privacy_pass_required` which is FALSE on every existing row, so existing pilot runs stay valid. A run already past Review keeps NULL pass columns. A run at Review with no pass recorded runs the pass on its next dispatch. A run received after V117 by either binary gets `privacy_pass_required = TRUE` (the receipt's INSERT lists its columns explicitly, VP:6498-6502, so the default applies), and its approval without a pass fails the CHECK: a V116 binary rolled back onto a V117 database cannot approve unclassified content.
 
-## Compatibility mapping (D2, documented, not changed)
+## Compatibility mapping (D2 and Q1)
 
-`main_status_for_pipeline` (ING:17405-17421) maps: an escalated run parked `awaiting_review` to `quarantined` (good); a run waiting for its pass (state `pending`/`retry`, Admission admit) to `accepted`, which was already the case for any undecided admitted run; a run failed with `privacy_classification_failed` (submission `received`) to `accepted` (`_ => "accepted"`). The last one reads wrong to a contributor, but changing it is a vocabulary decision under D2. Task 10 documents it in pipeline-activation.md:2324 and lists it under "Questions for the owner".
+`main_status_for_pipeline` (ING:17406-17422) maps: an escalated run parked `awaiting_review` to `quarantined`; a run waiting for its pass (state `pending`/`retry`, Admission admit) to `accepted`, as for any undecided admitted run today; and, after Task 8 (Q1), a run whose processing is `Failed` with `reason_label` (`last_error_label`, VPP:1225) `privacy_classification_failed` to `quarantined`. `PipelineProcessingStatus::Failed` exists (VPP:139). Task 10 documents all three in pipeline-activation.md:2322-2324.
 
 ## Global constraints
 
-- TDD: each task writes its failing test first, runs it red, then implements.
+- TDD: each task writes its failing test first, runs it red, then implements. A test that pins behaviour which already holds is labelled **regression pin (expected green)**, not red.
 - `RUSTFLAGS="-D warnings"` on every check and test build. Clippy with the repo allow-list only: `cargo clippy -p trace-commons-server --all-targets -- -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching`.
-- `cargo fmt --all` before each commit (the repo is not rustfmt-clean everywhere; check the diff is confined to touched files).
+- Every cargo command with more than one test-name filter puts the filters after `--` (cargo accepts one `TESTNAME` positional; libtest accepts several): `cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- filter_a filter_b --test-threads=1`.
+- Never use `#[ignore]` as a placeholder. In this repo `#[ignore]` is a CI selector (the upgrade and restore suites run with `--ignored`; the RT step does not, `.github/workflows/ci.yml:419-420`). A test that stops applying is rewritten or deleted in the task that changes its behaviour.
+- New RT tests use a fresh `uuid` tenant and per-test counter doubles (no global counters), because CI runs RT in parallel (ci.yml:419-420); local runs use `--test-threads=1` only for speed of diagnosis, and Task 12 runs RT without it.
+- Each green step also runs the existing tests its task touches (named in the step).
+- `cargo fmt --all` before each commit; check the diff is confined to touched files.
 - Hash-only and label-only: the pass record and every log line carry hashes, ref ids and labels; never envelope text, never classifier spans.
-- Fail-closed: a classifier error never falls back to the deterministic result; a missing boundary never runs Review on the source.
+- Fail-closed: a classifier error never falls back to the deterministic result; a missing boundary never runs Review on the source; a run that needs a pass is never approved without one.
 - `trace-commons-gate-api` (`Phase`, `ReviewInput`, `AdmissionDecision`) and `versioned_pipeline_bundle.rs` are not edited.
 - New `.rs` files (none planned) would need the AGPL header.
-- PostgreSQL test database: a fresh database per session, on the literal host `127.0.0.1`:
+- PostgreSQL test databases: fresh per session, on the literal host `127.0.0.1`. The runtime and ingest-bin tests read `TRACE_COMMONS_PG_TEST_DATABASE_URL` (an `admission_test_*` database). The upgrade tests read `TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL` and require a database named `pipeline_test_*` (UPG:27-28, UPG:51-54; CI sets it at ci.yml:416-418); without it every `--ignored` upgrade test panics on the env lookup, which is a setup failure, not a red step. V117 is edited in Task 5 after Task 3 creates it, so drop and recreate both databases after any edit to V117.
 
 ```bash
 createdb -h 127.0.0.1 admission_test_async_rescrub_1
+createdb -h 127.0.0.1 pipeline_test_async_rescrub
 export TRACE_COMMONS_PG_TEST_DATABASE_URL=postgres://$USER@127.0.0.1:5432/admission_test_async_rescrub_1
 export TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL=postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_async_rescrub_1
+export TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL=postgres://$USER@127.0.0.1:5432/pipeline_test_async_rescrub
 ```
+
+- Baseline before Task 1: run RT, the ingest bin and the upgrade suite on the base commit and record pass/fail counts; Task 12 compares against them.
 
 ## File map
 
 | File | Change |
 |---|---|
 | `crates/trace-commons-server/src/versioned_pipeline_authority.rs` | Trait split (VPA:86-106), both impls (VPA:108-183), new label, unit tests (VPA:267-345) |
-| `crates/trace-commons-server/src/versioned_pipeline.rs` | Receipt step 3 (VP:9081-9117) and docs (VP:7875-7877, 8968-8984, 9388-9389); risk helper (VP:9203-9216); `PipelineRunRecord` (VP:1013-1051) and `pipeline_run_from_row` (VP:7220-7256); crash points (VP:918-942); `PipelineAttemptArtifact` (VP:14476-14507); pass object ref helper (beside VP:14814); store `record_privacy_pass` (beside `commit_review`, VP:2360); review predicate (VP:115-125) and approve check (VP:2817-2832); `commit_review` derived record (VP:2425-2441); Review arm (VP:11207-11253); error routing (VP:10880-10900); `mark_retry` (VP:5048-5101) |
+| `crates/trace-commons-server/src/versioned_pipeline.rs` | Receipt step 3 (VP:9081-9117) and docs (VP:7875-7877, 8968-8984, 9388-9389); risk helper (VP:9203-9216); `PipelineRunRecord` (VP:1013-1051) and `pipeline_run_from_row` (VP:7220-7256); crash points (VP:918-942); `PipelineAttemptArtifact` (VP:14476-14507); pass object ref helper (beside VP:14814); store `record_privacy_pass` and `load_submission_receipt_privacy` (beside `commit_review`, VP:2360); `commit_review` approval predicate and pass-approval columns (VP:2503-2526) and derived record (VP:2425-2441); review predicate (VP:115-125), claim (VP:2596-2605) and approve check (VP:2817-2832); `load_review_assessment` (VP:2899-2930, add `recorded_at`); `list_review_queue` (VP:3005-3020, hold reason and superseded flag); Review arm (VP:11207-11253); error routing (VP:10880-10925); `mark_retry` (VP:5048-5101); pass timeout (beside VP:775-790) |
 | `migrations/V117__pipeline_privacy_pass.sql` | New |
 | `crates/trace-commons-server/src/db/postgres.rs` | `MIGRATIONS` row after the V116 row (postgres.rs:1758-1767); optional shape pin (postgres.rs:8073+) |
 | `crates/trace-commons-server/src/db/postgres/pipeline_upgrade_tests.rs` | `RUNTIME_PIPELINE_GRANTS` (UPG:136-167); new `v117_*` test beside UPG:1564 |
-| `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` | Review queue item (ING:~43404-43433) |
-| `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs` | Doubles (RT:2363, 5713, 5761, 30387); inverted tests (RT:5723-5753, 5806); crash matrix (RT:14086-14096); new pass tests |
-| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_http_pg_tests.rs` | Doubles (HTTP:211, 7037, 7054); inverted leg (HTTP:7551-7598) |
-| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/production_assembly_tests.rs` | `ClassifyingPrivacy` (:638) |
-| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/tests.rs` | `QualifiedTestPrivacy` (:10990) |
-| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_restore_pg_tests.rs` | Task 11 only |
+| `crates/trace-commons-server/src/bin/trace-commons-ingest.rs` | Review queue item (ING:43404-43433); `main_status_for_pipeline` (ING:17406-17422, Q1) |
+| `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs` | Doubles (RT:2363, 5713, 5761, 30387); rewritten or deleted tests (RT:5723-5753, 5806); crash matrix (RT:14086-14096); direct `commit_review` and `claim_review` callers (7 and 17 sites); new pass tests |
+| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_http_pg_tests.rs` | Doubles (HTTP:211, 7037, 7054); inverted leg (HTTP:7551-7598); queue `hold_reason` test; legacy-reader pin |
+| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/production_assembly_tests.rs` | `ClassifyingPrivacy` (:637-639) |
+| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/tests.rs` | `QualifiedTestPrivacy` (:10989-10991); `main_status_for_pipeline` unit test |
+| `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/pipeline_restore_pg_tests.rs` | Task 11: `AUTHORITATIVE_FINGERPRINT_SQL` (:247-260) only |
 | `docs/operator/pipeline-activation.md`, `docs/operator/deployment.md`, `docs/operator/pipeline-qualification.md` | Task 10 / 11 |
 | `docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md`, `docs/superpowers/specs/2026-09-09-versioned-pipeline-design.md`, `docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json` | Task 10 |
 
-No change: `versioned_pipeline_production.rs` (passes the boundary through; reads `privacy_classifies_prose_pii`, :907-909), `versioned_pipeline_production/gate_env.rs:484-505`, `versioned_pipeline_harness.rs:239-262`, `pipeline_runtime.rs:330-345`, `versioned_pipeline_bundle.rs`, gate-api.
+No change: `versioned_pipeline_production.rs` (passes the boundary through; reads `privacy_classifies_prose_pii`, :907-909), `versioned_pipeline_production/gate_env.rs:484-505`, `versioned_pipeline_harness.rs:239-262`, `pipeline_runtime.rs:330-345`, `versioned_pipeline_bundle.rs`, gate-api, CORPUS (its harness sets `residual_pii_risk` on the fixture envelope directly, CORPUS:862-873, with a pass-through boundary, CORPUS:651, and reviews only after the run reaches `awaiting_review`, CORPUS:1094-1106, so its expectations hold; Task 12 runs `pipeline.py qualify` to confirm).
 
 ## Interfaces (the names every task uses)
 
@@ -111,8 +136,11 @@ pub trait PipelinePrivacyBoundary: Send + Sync {
 }
 
 // VP
-pub const PIPELINE_PRIVACY_REVIEW_REQUIRED_LABEL: &str = "privacy_review_required";
-const PIPELINE_PRIVACY_PASS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_review_required";
+pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
+pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_review_rejected_v1";
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+const PIPELINE_PRIVACY_PASS_COMMIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
 const PIPELINE_PRIVACY_RETRY_BASE_SECONDS: i64 = 30;
 pub enum PipelineCrashPoint { /* existing */ AfterPrivacyPassArtifactStorage, AfterPrivacyPassCommit }
 pub enum PipelineAttemptArtifact { Approved, IndexCommand, ScoreNeighbors, PrivacyPass } // "privacy-pass"
@@ -120,111 +148,136 @@ pub enum PipelineAttemptArtifact { Approved, IndexCommand, ScoreNeighbors, Priva
 #[serde(rename_all = "snake_case")]
 pub enum PrivacyPassOutcome { Cleared, Escalated }
 // PipelineRunRecord gains:
+pub privacy_pass_required: bool,
 pub privacy_pass_object_ref_id: Option<Uuid>,
 pub privacy_pass_content_hash: Option<String>,   // sha256: of the pass output (plaintext)
 pub privacy_pass_source_hash: Option<String>,    // sha256: of the source bytes the pass read
 pub privacy_pass_residual_risk_basis: Option<Vec<String>>, // labels, safe_residual_risk_basis_labels
 pub privacy_pass_outcome: Option<PrivacyPassOutcome>,
 pub privacy_pass_recorded_at: Option<DateTime<Utc>>,
+pub privacy_pass_approval_assessment_hash: Option<String>, // Q2: the approving assessment's evidence_hash
+pub privacy_pass_approval_resolved_reasons: Option<Vec<String>>, // Q2
+// HumanReviewAssessment as loaded by the store gains `recorded_at: DateTime<Utc>`
+// (a store-side wrapper if the gate-api type cannot change: `StoredReviewAssessment { assessment, recorded_at }`).
 fn pipeline_privacy_risk(risk: &ResidualPiiRisk, basis: &[ResidualRiskCondition]) -> PrivacyRisk;
 fn privacy_pass_object_ref(run, receipt, size_bytes, object_store) -> TraceObjectRefWrite; // ReviewSnapshot, created_by_job_id Some(run_id)
+pub struct PrivacyPassRecord<'a> { object_ref: &'a TraceObjectRefWrite, ciphertext_sha256: &'a str,
+    content_hash: &'a str, source_hash: &'a str, basis_labels: &'a [String], outcome: PrivacyPassOutcome,
+    privacy_risk: PrivacyRisk, redaction_counts: &'a BTreeMap<String, u32>, redaction_pipeline_version: &'a str }
+pub struct SubmissionReceiptPrivacy { privacy_risk: PrivacyRisk, residual_risk_basis: Vec<String> }
 impl PgPipelineStore {
     pub async fn record_privacy_pass(&self, run: &PipelineRunRecord, pass: PrivacyPassRecord<'_>)
         -> Result<PipelineRunRecord, DatabaseError>;
-    pub async fn load_submission_residual_risk_basis(&self, tenant_id: &str, submission_id: Uuid)
-        -> Result<Vec<String>, DatabaseError>;
+    pub async fn load_submission_receipt_privacy(&self, tenant_id: &str, submission_id: Uuid)
+        -> Result<SubmissionReceiptPrivacy, DatabaseError>;
+    // commit_review gains a fourth argument:
+    pub async fn commit_review(&self, run: &PipelineRunRecord, result: StoredPhaseResult,
+        approved: Option<ApprovedArtifactWrite>, pass_approval: Option<&HumanReviewAssessment>)
+        -> Result<PipelineRunRecord, DatabaseError>;
 }
 impl PipelineService {
-    async fn ensure_privacy_pass(&self, run: &PipelineRunRecord, admission: &AdmissionDecision)
+    async fn ensure_privacy_pass(&self, run: &PipelineRunRecord)
         -> anyhow::Result<(PipelineRunRecord, Vec<u8>)>; // (run as recorded, pass output bytes)
     async fn load_privacy_pass_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>>;
+    fn privacy_pass_timeout(&self) -> std::time::Duration; // P8
 }
 ```
 
+(Use the real parameter types of `commit_review` at VP:2360; the fourth argument is the only change.)
+
 ---
 
-### Task 1: Split the privacy boundary trait
+### Task 1: Split the privacy boundary trait (pure refactor)
+
+No behaviour changes in this task: the receipt still runs both halves, in the same order, and merges their bases as `ClassifierRedactorPipelinePrivacyBoundary::rescrub` does today (VPA:149-168).
 
 **Files:**
 - Modify: VPA:86-106 (trait), VPA:108-118 (`DeterministicPipelinePrivacyBoundary`), VPA:120-183 (`ClassifierRedactorPipelinePrivacyBoundary` and its docs at :120-126, :175-178), VPA:22-23 (new label), VPA tests at :267-345.
-- Modify (mechanical, compile only): RT:2363 `PassThroughPipelinePrivacyBoundary`, RT:30387 `QualifiedProductionPrivacy`, HTTP:211 `PassThroughPipelinePrivacyBoundary`, `production_assembly_tests.rs:638` `ClassifyingPrivacy`, `tests.rs:10990` `QualifiedTestPrivacy`: both methods `Ok(Vec::new())`.
-- Modify (behavioural doubles): RT:5713 and HTTP:7054 `FailingPrivacyBoundary`: deterministic `Ok(Vec::new())`, classifier bails. RT:5761 and HTTP:7037 `MarkerRedactingBoundary`: deterministic no-op, the MARKER_SECRET replacement moves into `rescrub_classifier`.
-- Modify: VP:9095-9105 call site, temporarily: `privacy.rescrub_deterministic(&mut envelope)` (Task 2 finishes the receipt).
+- Modify: VP:9095-9105 call site: `privacy.rescrub_deterministic(&mut envelope)` then `privacy.rescrub_classifier(&mut envelope)`, both mapped to `PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL` as today, merging each half's conditions into `residual_risk_basis` without duplicates.
+- Modify (mechanical): the 11 implementations. Production: VPA:111, VPA:148. Doubles with both methods `Ok(Vec::new())`: RT:2363 `PassThroughPipelinePrivacyBoundary`, RT:30387 `QualifiedProductionPrivacy`, HTTP:211 `PassThroughPipelinePrivacyBoundary`, `production_assembly_tests.rs:637-639` `ClassifyingPrivacy`, `tests.rs:10989-10991` `QualifiedTestPrivacy`. Behavioural doubles: RT:5713 and HTTP:7054 `FailingPrivacyBoundary` (deterministic `Ok(Vec::new())`, classifier bails); RT:5761 and HTTP:7037 `MarkerRedactingBoundary` (deterministic no-op, the MARKER_SECRET replacement moves into `rescrub_classifier`). Because the call site still runs both halves, these doubles behave exactly as before.
 
 Both methods are required, with no default and no provided composite `rescrub()`: a default no-op `rescrub_classifier` would let a classifying boundary skip the classifier while reporting `classifies_prose_pii() == true`, and a composite would let a future call site put the classifier back on the receipt.
 
-- [ ] **Step 1: Write the failing tests** (in the VPA test module):
-  - `deterministic_boundary_classifier_is_a_noop`: an envelope with a prose name ("Jane Doe") through `DeterministicPipelinePrivacyBoundary.rescrub_classifier` returns `Ok(vec![])` and leaves the envelope byte-identical (`serde_json::to_vec` equal before and after).
-  - `classifier_boundary_deterministic_half_never_calls_the_adapter`: a `ClassifierRedactorPipelinePrivacyBoundary` over a counting adapter; `rescrub_deterministic` returns Ok and the adapter's call count is 0.
-  - Rewrite `ordinary_identifier_prefixes_do_not_add_privacy_findings` (:284, call at :293): call `rescrub_deterministic` then `rescrub_classifier`, merge bases without duplicates, keep the assertions (basis `[ConsentContentFlag]`, Medium).
+- [ ] **Step 1: Write the failing tests** (VPA test module):
+  - `deterministic_boundary_classifier_is_a_noop`: an envelope with a prose name ("Jane Doe") through `DeterministicPipelinePrivacyBoundary.rescrub_classifier` returns `Ok(vec![])` and leaves the envelope byte-identical.
+  - `classifier_boundary_deterministic_half_never_calls_the_adapter`: a `ClassifierRedactorPipelinePrivacyBoundary` over a counting adapter; `rescrub_deterministic` is Ok and the adapter's call count is 0.
+  - Rewrite `ordinary_identifier_prefixes_do_not_add_privacy_findings` (:284, call at :293): `rescrub_deterministic` then `rescrub_classifier`, merged without duplicates; assertions kept (basis `[ConsentContentFlag]`, Medium).
   - Rewrite `classifier_pii_is_transformed_and_quarantinable` (:306, call at :308): the redaction of "Jane Doe" and risk >= Medium come from `rescrub_classifier` on an envelope that already went through `rescrub_deterministic`.
   - Rewrite `classifier_failure_fails_closed` (:325, assert at :344): `rescrub_deterministic` is Ok; `rescrub_classifier` is Err with message `privacy_classification_failed`.
-  - Keep `each_privacy_boundary_reports_what_it_is` (:267) unchanged; it must still pass.
+  - `each_privacy_boundary_reports_what_it_is` (:267) unchanged.
 - [ ] **Step 2: Run red.** `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib versioned_pipeline_authority` -> FAIL (no such methods).
-- [ ] **Step 3: Implement.** Trait per "Interfaces"; doc on `classifies_prose_pii` (VPA:97-102) says "whether `rescrub_classifier` runs a prose-PII classifier". `Deterministic`: `rescrub_deterministic` = `rescrub_trace_envelope(envelope).map_err(Into::into)`; `rescrub_classifier` = `Ok(Vec::new())`. `ClassifierRedactor`: `rescrub_deterministic` = `rescrub_trace_envelope(envelope)?`; `rescrub_classifier` = `rescrub_envelope_prose_pii_with(self.adapter.as_ref(), envelope, self.policy).await.map_err(|_| anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))`. The basis merge at VPA:160-164 moves to the callers. The classifier half does not re-run the deterministic redactor: `rescrub_envelope_prose_pii_with` already reconciles consent declarations, sweeps secrets over its own output and reads `envelope.privacy.residual_pii_risk` as its prior (trace_contribution.rs:5527-5529, 5566-5569, 5650-5672), so running it on the stored post-deterministic envelope reproduces today's in-order composition. Add `PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL` beside VPA:23. Update every double listed under Files.
-- [ ] **Step 4: Run green.** Same command -> PASS. Then:
+- [ ] **Step 3: Implement.** Trait per "Interfaces"; doc on `classifies_prose_pii` (VPA:97-102) says "whether `rescrub_classifier` runs a prose-PII classifier". `Deterministic`: `rescrub_deterministic` = `rescrub_trace_envelope(envelope).map_err(Into::into)`; `rescrub_classifier` = `Ok(Vec::new())`. `ClassifierRedactor`: `rescrub_deterministic` = `rescrub_trace_envelope(envelope)?`; `rescrub_classifier` = `rescrub_envelope_prose_pii_with(self.adapter.as_ref(), envelope, self.policy).await.map_err(|_| anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL))`. The basis merge at VPA:160-164 moves to the call site. The classifier half does not re-run the deterministic redactor: `rescrub_envelope_prose_pii_with` already reconciles consent declarations, sweeps secrets over its own output and reads `envelope.privacy.residual_pii_risk` as its prior (PROTO:5527-5529, 5566-5569, 5650-5672), so running it on a post-deterministic envelope reproduces today's in-order composition. Add `PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL` beside VPA:23 (unused until Task 2; mark it `pub` so `-D warnings` does not flag it). Update every implementation listed under Files.
+- [ ] **Step 4: Run green.** Same command -> PASS. Then the compile gates and the existing tests this task touches (all must pass unchanged, which is what makes this a pure refactor):
 
 ```bash
 RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- privacy_boundary_failure_fails_closed transformed_content_flows_to_score_and_replay_stays_exact --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export
 ```
 
-  Grep check: `grep -rn "\.rescrub(" crates/` returns nothing, and `grep -rn "impl PipelinePrivacyBoundary" crates/ | wc -l` is 9 (2 production + 7 doubles; VPA:111,148; RT:2363,5713,5761,30387; HTTP:211,7037,7054; production_assembly_tests.rs:638; tests.rs:10990 -- the HTTP file's three share names with RT's).
+  Grep checks: `grep -rn "\.rescrub(" crates/` returns nothing; `grep -rn "async fn rescrub_deterministic" crates/ | wc -l` is 12 and `grep -rn "async fn rescrub_classifier" crates/ | wc -l` is 12 (the trait plus 11 implementations: 2 production + 9 doubles). `cargo test --no-run` above already fails if any implementation lacks a method; the counts guard against an implementation that was deleted instead.
 - [ ] **Step 5: Commit** `Split the pipeline privacy boundary into deterministic and classifier halves`.
 
 ### Task 2: The receipt runs the deterministic half only
 
 **Files:**
-- Modify: VP:9081-9105 (step 3 and its comment), VP:8968-8984 (`submit` doc), VP:9388-9389 (`precheck_receipt` comment), VP:7875-7877 (`with_privacy` doc), VP:9203-9216 (factor `pipeline_privacy_risk`).
-- Test: RT (new tests beside `privacy_boundary_failure_fails_closed`, RT:5723), RT:5723-5753 (inverted), RT:5806 doc at :5800-5804 and comment at :5891-5893, RT:22193 doc.
+- Modify: VP:9081-9105 (step 3 and its comment: drop the `rescrub_classifier` call), VP:8968-8984 (`submit` doc), VP:9388-9389 (`precheck_receipt` comment), VP:7875-7877 (`with_privacy` doc), VP:9203-9216 (factor `pipeline_privacy_risk`).
+- Test: RT (new tests beside RT:5723); RT:5723-5753 `privacy_boundary_failure_fails_closed` (deleted, see Step 3); RT:5800-5804, RT:5891-5893, RT:22193 (docs).
 
-- [ ] **Step 1: Write the failing tests** (RT):
-  - `receipt_makes_no_classifier_call`: a double whose `rescrub_classifier` increments a counter and sleeps 60 s and whose `rescrub_deterministic` increments another counter. `tokio::time::timeout(Duration::from_secs(5), service.submit(..))` completes, returns the `processing` receipt, the classifier counter is 0, the deterministic counter is 1. A replay of the same key returns the stored receipt and both counters are unchanged.
-  - `receipt_deterministic_failure_refuses_with_privacy_rescrub_failed`: a double whose `rescrub_deterministic` bails. `submit` errors with `privacy_rescrub_failed`; 0 runs, 0 staged artifacts, 0 files (the assertions `privacy_boundary_failure_fails_closed` makes today at RT:5747-5752, moved here). This keeps the receipt's fail-closed coverage.
-  - `pipeline_privacy_risk_maps_like_the_receipt` (VP unit test): Low->Low; Medium + `[ConsentContentFlag]`->Low; Medium + `[ConsentContentFlag, FoundAndRemoved]`->Medium; High->High.
+- [ ] **Step 1: Write the failing tests.**
+  - RT `receipt_makes_no_classifier_call`: a double whose `rescrub_classifier` increments a per-test counter and sleeps 60 s and whose `rescrub_deterministic` increments another. `tokio::time::timeout(Duration::from_secs(5), service.submit(..))` completes, returns the `processing` receipt; classifier counter 0, deterministic counter 1. A replay of the same key returns the stored receipt and both counters are unchanged.
+  - RT `receipt_deterministic_failure_refuses_with_privacy_rescrub_failed`: a double whose `rescrub_deterministic` bails. `submit` errors with `privacy_rescrub_failed`; 0 runs, 0 staged artifacts, 0 files (the assertions `privacy_boundary_failure_fails_closed` makes today at RT:5747-5752, moved here).
+  - VP unit `pipeline_privacy_risk_maps_like_the_receipt`: Low->Low; Medium + `[ConsentContentFlag]`->Low; Medium + `[ConsentContentFlag, FoundAndRemoved]`->Medium; High->High.
 - [ ] **Step 2: Run red.**
 
 ```bash
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib pipeline_privacy_risk_maps_like_the_receipt
-RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg receipt_ -- --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- receipt_makes_no_classifier_call receipt_deterministic_failure_refuses_with_privacy_rescrub_failed --test-threads=1
 ```
 
-  Expected: the first fails to compile (no helper); `receipt_makes_no_classifier_call` passes already after Task 1 (record that; it guards the regression), `receipt_deterministic_failure_refuses_with_privacy_rescrub_failed` fails on the label.
-- [ ] **Step 3: Implement.** Map the deterministic error to `PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL`. Factor VP:9203-9216 into `pipeline_privacy_risk` and call it. Rewrite the comments: the receipt never calls the classifier; the stored source is the post-deterministic envelope; the classifier runs in the Review-start pass. Rewrite `privacy_boundary_failure_fails_closed` (RT:5723-5753) as a Review-phase test in Task 8 (mark it `#[ignore = "rewritten in Task 8"]` only if Task 8 lands in the same PR; otherwise rewrite it now to assert the receipt succeeds with `processing` and creates one run). Fix the docs at RT:5800-5804, RT:5891-5893, RT:22193 ("transformed at receipt" -> "transformed by the privacy pass").
+  Expected: the unit test fails to compile (no helper); `receipt_makes_no_classifier_call` fails because the receipt still calls the classifier (the 5 s timeout fires, or the counter is 1); the deterministic-failure test fails on the label (`privacy_classification_failed`).
+- [ ] **Step 3: Implement.** Remove the classifier call from the receipt. Map the deterministic error to `PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL`. Factor VP:9203-9216 into `pipeline_privacy_risk` and call it. Rewrite the comments: the receipt never calls the classifier; the stored source is the post-deterministic envelope; the classifier runs in the Review-start pass. Delete `privacy_boundary_failure_fails_closed` (RT:5723-5753): its receipt-side assertions now live in the deterministic-failure test, and Task 8 adds `classifier_failure_retries_then_fails_closed` for the Review side. Fix the docs at RT:5800-5804, RT:5891-5893, RT:22193 ("transformed at receipt" -> "transformed by the privacy pass").
 - [ ] **Step 4: Run green.** Commands of Step 2 -> PASS; then `RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins`.
 - [ ] **Step 5: Commit** `Run only the deterministic rescrub at the pipeline receipt`.
 
-Note: after Task 2 and before Task 5, Review is fed the deterministic-only source. Do not ship between them; Tasks 2-9 land in one PR.
+**Expected red between Task 2 and later tasks** (Tasks 2-9 land in one PR; do not ship between them):
+- Until Task 5: RT `transformed_content_flows_to_score_and_replay_stays_exact` (RT:5806; Review is fed the deterministic-only source, so MARKER_SECRET reaches approved content), the export test near RT:22201, and HTTP `compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export` at its MARKER_SECRET assertion (HTTP:7333). The last is a `1 passed`-gated CI step (ci.yml:446-450).
+- Until Task 8: the same HTTP test's failing-boundary leg (HTTP:7551-7598), which expects the receipt to refuse (HTTP:7576, :7597).
+Record the observed red set after Task 2 and check it equals this list; anything else is a regression of Task 2.
 
 ### Task 3: V117, the pass record on `pipeline_runs`
 
 **Files:**
 - Create: `migrations/V117__pipeline_privacy_pass.sql`.
 - Modify: `crates/trace-commons-server/src/db/postgres.rs` (append the `(117, "pipeline_privacy_pass", include_str!(..))` row after the V116 row at :1762-1766, with a comment in the style of :1758-1761; optionally a V117 block in `versioned_pipeline_migration_shape_is_pinned`, :8073+, next to the V108 pin at :8228).
-- Modify: UPG `RUNTIME_PIPELINE_GRANTS` (:136-167, add a `// V117` group of six columns to the `pipeline_runs` UPDATE list); check what the version list at UPG:406 means (`[92, ..., 113]`, V116 is absent) before adding 117 to it.
+- Modify: UPG `RUNTIME_PIPELINE_GRANTS` (:136-167, a `// V117` group of the eight updatable columns on `pipeline_runs`); check what the version list at UPG:406 means (`[92, ..., 113]`, V116 is absent) before adding 117 to it.
 - Modify: VP:1013-1051 `PipelineRunRecord`, VP:7220-7256 `pipeline_run_from_row`.
 
-- [ ] **Step 1: Look up V108's CHECK name** on a migrated test database (it is an inline column CHECK at V108:23, so PostgreSQL names it; expected `pipeline_attempt_artifacts_artifact_check`):
+`privacy_pass_required` and its CHECK are added to V117 in Task 5, together with the code that records a pass; adding the CHECK here would fail every existing Review approval until Task 5. V117 is unreleased until the PR merges, so editing it in Task 5 is safe; recreate the test databases after that edit (Global constraints).
+
+- [ ] **Step 1: Look up V108's CHECK names** on a migrated test database (inline column CHECK at V108:23, so PostgreSQL names it; expected `pipeline_attempt_artifacts_artifact_check`; and the named `pipeline_attempt_artifacts_approved_hash`, V108:42-43):
 
 ```bash
-psql "$TRACE_COMMONS_PG_TEST_DATABASE_URL" -c "SELECT conname FROM pg_constraint WHERE conrelid = 'pipeline_attempt_artifacts'::regclass AND contype = 'c'"
+psql "$TRACE_COMMONS_PG_TEST_DATABASE_URL" -c "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'pipeline_attempt_artifacts'::regclass AND contype = 'c'"
 ```
 
-- [ ] **Step 2: Write the failing test** `v117_adds_the_privacy_pass_record` in UPG beside `v116_adds_source_and_pipeline_run_id_with_defaults` (:1564), `#[ignore]` like its neighbours (CI selects them with `pipeline_upgrade -- --ignored`, `.github/workflows/ci.yml:416`). It asserts: the six columns exist and are NULL on a run inserted before V117; an UPDATE setting only some of them fails the shape CHECK; a `privacy_pass_outcome` outside `('cleared','escalated')` fails; a malformed hash fails; the FK to `trace_object_refs` is deferred (an insert of the ref after the run update in one transaction commits); `trace_ingest_runtime` holds UPDATE on the six columns (via the `RUNTIME_PIPELINE_GRANTS` check that `pipeline_upgrade_from_v91_installs_forced_rls_storage`, UPG:378, already runs); a `pipeline_attempt_artifacts` row with `artifact = 'privacy-pass'` inserts, and `'other'` still fails.
-- [ ] **Step 3: Run red.**
+- [ ] **Step 2: Write the failing test** `v117_adds_the_privacy_pass_record` in UPG beside `v116_adds_source_and_pipeline_run_id_with_defaults` (:1564), `#[ignore]` like its neighbours (this is the suite's CI selector, `pipeline_upgrade -- --ignored`, ci.yml:416; not a placeholder). It asserts: the eight columns exist and are NULL on a run inserted before V117; an UPDATE setting only some of the six pass columns fails the shape CHECK; a `privacy_pass_outcome` outside `('cleared','escalated')` fails; a malformed hash fails; the two approval columns can be set only together and only when `privacy_pass_outcome = 'escalated'`; the FK to `trace_object_refs` is deferred (an insert of the ref after the run update in one transaction commits); `trace_ingest_runtime` holds UPDATE on the eight columns (via the `RUNTIME_PIPELINE_GRANTS` check that `pipeline_upgrade_from_v91_installs_forced_rls_storage`, UPG:378, runs); a `pipeline_attempt_artifacts` row with `artifact = 'privacy-pass'` and a ciphertext hash inserts, one with no ciphertext hash fails, and `'other'` still fails.
+- [ ] **Step 3: Run red.** With `TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL` set (Global constraints):
 
 ```bash
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored --test-threads=1
-cargo test -p trace-commons-server --lib every_migration_is_wired_into_run_migrations
 ```
 
+  Expected: `v117_adds_the_privacy_pass_record` fails on its first column assertion (no such column), not on the env lookup. `every_migration_is_wired_into_run_migrations` (postgres.rs:7833) compares `MIGRATIONS` with the files on disk and is green before and after; it is a **regression pin (expected green)** for Step 6.
 - [ ] **Step 4: Write the migration** (template: V95:4-26 and V95:52-60):
 
 ```sql
 -- The Review-start privacy pass's record (spec 2026-10-09). A pass record,
 -- not a classifier verdict (CMP-002): the object it stored, the hashes of
 -- its input and output, the merged residual-risk labels, and whether it
--- held the run for a human. All six are NULL until the pass commits.
+-- held the run for a human. All six are NULL until the pass commits. The
+-- two approval columns link a human approval of an escalated run to it.
 ALTER TABLE pipeline_runs
     ADD COLUMN privacy_pass_object_ref_id UUID,
     ADD COLUMN privacy_pass_content_hash TEXT CHECK (
@@ -237,12 +290,23 @@ ALTER TABLE pipeline_runs
     ADD COLUMN privacy_pass_outcome TEXT CHECK (
         privacy_pass_outcome IS NULL OR privacy_pass_outcome IN ('cleared', 'escalated')),
     ADD COLUMN privacy_pass_recorded_at TIMESTAMPTZ,
+    ADD COLUMN privacy_pass_approval_assessment_hash TEXT CHECK (
+        privacy_pass_approval_assessment_hash IS NULL
+        OR privacy_pass_approval_assessment_hash ~ '^sha256:[0-9a-f]{64}$'),
+    ADD COLUMN privacy_pass_approval_resolved_reasons JSONB CHECK (
+        privacy_pass_approval_resolved_reasons IS NULL
+        OR jsonb_typeof(privacy_pass_approval_resolved_reasons) = 'array'),
     ADD CONSTRAINT pipeline_runs_privacy_pass_shape CHECK (
         (privacy_pass_object_ref_id IS NULL) = (privacy_pass_content_hash IS NULL)
         AND (privacy_pass_object_ref_id IS NULL) = (privacy_pass_source_hash IS NULL)
         AND (privacy_pass_object_ref_id IS NULL) = (privacy_pass_residual_risk_basis IS NULL)
         AND (privacy_pass_object_ref_id IS NULL) = (privacy_pass_outcome IS NULL)
         AND (privacy_pass_object_ref_id IS NULL) = (privacy_pass_recorded_at IS NULL)),
+    ADD CONSTRAINT pipeline_runs_privacy_pass_approval_shape CHECK (
+        (privacy_pass_approval_assessment_hash IS NULL)
+            = (privacy_pass_approval_resolved_reasons IS NULL)
+        AND (privacy_pass_approval_assessment_hash IS NULL
+             OR privacy_pass_outcome = 'escalated')),
     -- NO ACTION + DEFERRABLE for the reason V95 gives for approved_object_ref_fk.
     ADD CONSTRAINT pipeline_runs_privacy_pass_object_ref_fk
         FOREIGN KEY (tenant_id, submission_id, privacy_pass_object_ref_id)
@@ -251,9 +315,12 @@ ALTER TABLE pipeline_runs
         DEFERRABLE INITIALLY DEFERRED;
 
 ALTER TABLE pipeline_attempt_artifacts
-    DROP CONSTRAINT <name from Step 1>,
+    DROP CONSTRAINT <artifact CHECK name from Step 1>,
     ADD CONSTRAINT pipeline_attempt_artifacts_artifact_check CHECK (
-        artifact IN ('approved', 'index-command', 'score-neighbors', 'privacy-pass'));
+        artifact IN ('approved', 'index-command', 'score-neighbors', 'privacy-pass')),
+    DROP CONSTRAINT pipeline_attempt_artifacts_approved_hash,
+    ADD CONSTRAINT pipeline_attempt_artifacts_approved_hash CHECK (
+        ciphertext_sha256 IS NOT NULL OR artifact NOT IN ('approved', 'privacy-pass'));
 
 DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'trace_ingest_runtime') THEN
@@ -261,16 +328,19 @@ DO $$ BEGIN
     END IF;
 END $$;
 
--- pipeline_runs: the privacy pass records its result.
+-- pipeline_runs: the privacy pass records its result; commit_review links an
+-- escalated run's approval to it.
 GRANT UPDATE (privacy_pass_object_ref_id, privacy_pass_content_hash,
               privacy_pass_source_hash, privacy_pass_residual_risk_basis,
-              privacy_pass_outcome, privacy_pass_recorded_at)
+              privacy_pass_outcome, privacy_pass_recorded_at,
+              privacy_pass_approval_assessment_hash,
+              privacy_pass_approval_resolved_reasons)
     ON pipeline_runs TO trace_ingest_runtime;
 ```
 
-  No RLS change: a column on an already-forced table inherits the tenant predicate (V52:40-44), and `TRACE_COMMONS_RLS_TABLES` (postgres.rs:188) lists tables only. No gate-driver grant. No new table, so `PIPELINE_TABLES` (RESTORE:~222-243) is unchanged. Before writing, check whether V108's `pipeline_attempt_artifacts_approved_hash` constraint (V108:42) ties a hash rule to `artifact = 'approved'` and whether the new value needs a matching clause.
-- [ ] **Step 5: Wire the run record.** Add the six fields (Interfaces) and map them in `pipeline_run_from_row` (JSONB labels decode the way the V52 reader does). Every store read is `SELECT *`/`RETURNING *` (VP:1990, 2182, 2515, 3016, ...), so nothing else changes; the one test literal (RT:22291) uses `..run.clone()`. `PipelineRunRecord` derives `Serialize`: check every JSON surface that serialises it carries only hashes and labels (it does: the new fields are ids, hashes, labels, a timestamp).
-- [ ] **Step 6: Run green.** Commands of Step 3 -> PASS; `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run`.
+  No RLS change: a column on an already-forced table inherits the tenant predicate (V52:40-44), and `TRACE_COMMONS_RLS_TABLES` (postgres.rs:188) lists tables only. No gate-driver grant. No new table, so `PIPELINE_TABLES` (RESTORE:~222-243) is unchanged. No grant on `trace_submissions` (P5).
+- [ ] **Step 5: Wire the run record.** Add the eight fields (Interfaces; `privacy_pass_required` comes in Task 5) and map them in `pipeline_run_from_row` (JSONB labels decode the way the V52 reader does). Every store read is `SELECT *`/`RETURNING *` (VP:1990, 2182, 2515, 3016, ...), so nothing else changes; the one test literal (RT:22291) uses `..run.clone()`. `PipelineRunRecord` derives `Serialize`: the new fields are ids, hashes, labels and timestamps only.
+- [ ] **Step 6: Run green.** Step 3's command -> PASS; `cargo test -p trace-commons-server --lib every_migration_is_wired_into_run_migrations` -> PASS; `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run`.
 - [ ] **Step 7: Commit** `Add the privacy pass record to pipeline_runs (V117)`.
 
 ### Task 4: Pass object, crash points, store method
@@ -279,92 +349,191 @@ GRANT UPDATE (privacy_pass_object_ref_id, privacy_pass_content_hash,
 - Modify: VP:14476-14507 (`PipelineAttemptArtifact::PrivacyPass`, `as_str` "privacy-pass", `from_db_str`, `store_kind` `ContributionEnvelope`), the sweep comment at VP:10050-10057 ("the three known artifacts"), VP:14587 doc (lists the artifact names).
 - Modify: beside VP:14814, `privacy_pass_object_ref` (id `Uuid::new_v5(&Uuid::NAMESPACE_URL, format!("tracecommons:pipeline-privacy-pass-object:{run_id}"))`, kind `ReviewSnapshot`, `created_by_job_id: Some(run.run_id)`).
 - Modify: VP:918-942 `PipelineCrashPoint` (+2 variants; fix the stale doc at :918-921).
-- Modify: new `PgPipelineStore::record_privacy_pass` beside `commit_review` (VP:2360) and `load_submission_residual_risk_basis`.
+- Modify: new `PgPipelineStore::record_privacy_pass` and `load_submission_receipt_privacy` beside `commit_review` (VP:2360).
 
 - [ ] **Step 1: Write the failing tests.**
-  - VP unit: `privacy_pass_artifact_round_trips` (`from_db_str(as_str())`, store kind `ContributionEnvelope`); `privacy_pass_object_ref_is_derived_from_the_run` (same id for two receipts of one run; differs from the approved ref id; kind `ReviewSnapshot`; `created_by_job_id == Some(run_id)`); `privacy_pass_ref_is_not_a_score_object` (`!is_pipeline_score_object_ref(id, Some(run_id))`, so the deletion worker takes the `ContributionEnvelope` arm, ING:65689-65696).
-  - RT `record_privacy_pass_commits_once_under_the_lease`: claim a Review run, stage a `PrivacyPass` attempt artifact, call `record_privacy_pass`; the run row has all six columns, the ref row exists, the staged row is `committed`, `attempt_count` and `next_phase` unchanged. A second call with the same lease is refused (`privacy_pass_object_ref_id IS NULL` fence) and changes nothing. A call with a stale lease token is refused. A call for a withdrawn submission is refused with `submission_inoperable`. It also writes `trace_submissions.privacy_risk` and `residual_risk_basis` (P5).
-- [ ] **Step 2: Run red.** `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib privacy_pass_` and `cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg record_privacy_pass -- --test-threads=1` -> FAIL.
-- [ ] **Step 3: Implement** `record_privacy_pass`, modelled on `commit_review`'s single tenant transaction (VP:2360-2560): `ensure_current_lease` (lock order: run row, then submission row, as at VP:2374-2376); `review_submission_is_operable`; `INSERT INTO trace_object_refs ... ON CONFLICT DO NOTHING` (as VP:2410); `UPDATE trace_submissions SET privacy_risk = $, residual_risk_basis = $, updated_at = NOW()` (labels through `safe_residual_risk_basis_labels`); `UPDATE pipeline_runs SET privacy_pass_* = ..., privacy_pass_recorded_at = NOW(), updated_at = NOW() WHERE tenant_id AND run_id AND lease_token = $ AND lease_expires_at > NOW() AND privacy_pass_object_ref_id IS NULL RETURNING *`; mark the `privacy-pass` staged row committed (as `commit_review` does after VP:2528). No `attempt_count` reset, no phase change, no `lock_runnable_policy` (the pass is a server control, not a bundle policy). `load_submission_residual_risk_basis` reads `trace_submissions.residual_risk_basis` in a tenant transaction.
-- [ ] **Step 4: Run green**, then `RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins`.
+  - VP unit: `privacy_pass_artifact_round_trips` (`from_db_str(as_str())`, store kind `ContributionEnvelope`); `privacy_pass_object_ref_is_derived_from_the_run` (same id for two receipts of one run; differs from the approved ref id; kind `ReviewSnapshot`; `created_by_job_id == Some(run_id)`); `privacy_pass_ref_is_not_a_score_object` (`!is_pipeline_score_object_ref(id, Some(run_id))`, so the deletion worker takes the `ContributionEnvelope` arm, ING:65689-65692).
+  - RT `record_privacy_pass_commits_once_under_the_lease`: claim a Review run, stage a `PrivacyPass` attempt artifact, call `record_privacy_pass`. The run row has all six pass columns; the ref row exists; the staged `privacy-pass` row is `committed`; `attempt_count` and `next_phase` unchanged. `trace_submissions` has the pass's `privacy_risk`, `residual_risk_basis`, `redaction_counts` and `redaction_pipeline_version`; its `redaction_hash` is unchanged, and a `committed` `trace_token_bundles` row the test inserts for the submission before the call (V65 shape) is still `committed`, not `revoked` (P5, V68; without the inserted row the assertion would pass vacuously). A second call with the same lease is refused (`privacy_pass_object_ref_id IS NULL` fence) and changes nothing. A stale lease token is refused. A withdrawn submission is refused with `submission_inoperable`. A call whose staged row is missing, or names another object key or ciphertext hash, is refused with `pipeline_attempt_artifact_missing` and rolls back (no ref row, no run columns).
+  - RT `load_submission_receipt_privacy_reads_the_receipt_values`: after a receipt, returns the receipt's `privacy_risk` and basis labels.
+- [ ] **Step 2: Run red.**
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib privacy_pass_
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- record_privacy_pass load_submission_receipt_privacy --test-threads=1
+```
+
+  Expected: compile failure (no variant, no helper, no store method).
+- [ ] **Step 3: Implement** `record_privacy_pass`, modelled on `commit_review`'s single tenant transaction (VP:2360-2580): `ensure_current_lease` (lock order: run row, then submission row, as at VP:2374-2376); `review_submission_is_operable`; `INSERT INTO trace_object_refs ... ON CONFLICT DO NOTHING` (as VP:2410); `UPDATE trace_submissions SET privacy_risk = $, residual_risk_basis = $, redaction_counts = $, redaction_pipeline_version = $, updated_at = NOW()` (labels through `safe_residual_risk_basis_labels`; never `redaction_hash`); `UPDATE pipeline_runs SET privacy_pass_* = ..., privacy_pass_recorded_at = NOW(), updated_at = NOW() WHERE tenant_id AND run_id AND lease_token = $ AND lease_expires_at > NOW() AND privacy_pass_object_ref_id IS NULL RETURNING *` (zero rows -> refused); then
+
+```sql
+UPDATE pipeline_attempt_artifacts
+   SET state = 'committed', committed_at = NOW()
+ WHERE tenant_id = $1 AND run_id = $2 AND lease_token = $3
+   AND artifact = 'privacy-pass' AND state = 'staged'
+   AND object_key = $4
+   AND (ciphertext_sha256 IS NULL OR ciphertext_sha256 = $5)
+```
+
+  and require exactly one row moved, else `DatabaseError::Constraint(PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL)` and roll back (the shape `commit_review` uses, VP:2541-2579). Without this, a `privacy-pass` row left `staged` under the lease would make a same-dispatch rejection fail, because `commit_review`'s rejection branch moves every staged row of the lease and demands none moved (VP:2566-2580). No `attempt_count` reset, no phase change, no `lock_runnable_policy` (the pass is a server control). `load_submission_receipt_privacy` reads `trace_submissions.privacy_risk` and `residual_risk_basis` in a tenant transaction. Then grep: `grep -rn "redaction_hash(" crates/trace-commons-server/src` shows no reader that recomputes the hash from stored `redaction_counts` (PROTO:1543 checks only the prefix); record the result in the commit message.
+- [ ] **Step 4: Run green.** Step 2's commands -> PASS; `RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --bins`.
 - [ ] **Step 5: Commit** `Add the privacy pass object, crash points and record transaction`.
 
-### Task 5: The privacy pass in the Review dispatch
+### Task 5: The privacy pass in the Review dispatch, and the approval guard
 
 **Files:**
-- Modify: VP:11216-11244 (Review arm), new `ensure_privacy_pass` and `load_privacy_pass_bytes` beside `load_source_bytes` (VP:10292-10294); `load_privacy_pass_bytes` goes through `load_object_bytes` (VP:10238-10289, which already enforces operability, invalidation and deletion) and checks `sha256_prefixed(bytes) == privacy_pass_content_hash` like `load_approved_bytes` (VP:10300-10312), failing with `artifact_integrity_failed`.
-- Modify: VP:2425-2441 (`commit_review`'s `trace_derived_records` insert: `input_object_ref_id` becomes `run.privacy_pass_object_ref_id`, which is always set by then, so it names the object whose hash it stores in `input_hash`).
-- Test: RT, MarkerRedacting tests (RT:5806, RT:~22201, HTTP:7223/7272/7333).
+- Modify: VP:11216-11244 (Review arm), new `ensure_privacy_pass` and `load_privacy_pass_bytes` beside `load_source_bytes` (VP:10292-10294). `load_privacy_pass_bytes` goes through `load_object_bytes` (VP:10238-10289, which enforces operability, invalidation and deletion and ends in `decode_pipeline_artifact_bytes`, VP:10289) and checks `sha256_prefixed(bytes) == privacy_pass_content_hash` like `load_approved_bytes` (VP:10300-10312), failing with `artifact_integrity_failed`.
+- Modify: VP:2425-2441 (`commit_review`'s `trace_derived_records` insert: `input_object_ref_id` becomes `run.privacy_pass_object_ref_id` when set, so it names the object whose hash it stores in `input_hash`; a run with `privacy_pass_required = FALSE` and no pass keeps the source ref).
+- Modify: VP:2503-2526 `commit_review` approval UPDATE (critique 0) and `migrations/V117__pipeline_privacy_pass.sql` (append the `privacy_pass_required` block).
+- Test: RT, MarkerRedacting tests (RT:5806, RT:~22201, HTTP:7223/7272/7333), crash matrix (RT:14080-14100).
 
-Flow of `ensure_privacy_pass(run, admission)`:
+Flow of `ensure_privacy_pass(run)`:
 1. If `run.privacy_pass_object_ref_id` is set: return `load_privacy_pass_bytes(run)`; no classifier call.
-2. Else: `privacy = self.privacy.as_ref()` or `privacy_control_missing` (P6). `source = load_source_bytes(run)`; `source_hash = sha256_prefixed(&source)`; deserialize `TraceContributionEnvelope` from `source` (the receipt stores `serde_json::to_vec(envelope)`, VP:9123); `tokio::time::timeout(PIPELINE_PRIVACY_PASS_TIMEOUT, privacy.rescrub_classifier(&mut envelope))`; an error or timeout raises `PolicyError::permanent(privacy_classification_failed)` (Task 8 routes it).
-3. Merge: receipt basis (`load_submission_residual_risk_basis`, parsed with `ResidualRiskCondition::from_label`; an unknown label fails closed with `privacy_classification_failed`) plus classifier conditions, no duplicates. `risk = pipeline_privacy_risk(&envelope.privacy.residual_pii_risk, &merged)`. `outcome = Escalated` if `risk` is Medium or High, else `Cleared` (P3 limits the hold, not the record).
-4. `bytes = serde_json::to_vec(&envelope)`; `content_hash = sha256_prefixed(&bytes)`; prepare under `pipeline_attempt_object_id("privacy-pass", run_id, lease_token)`; `stage_attempt_artifact(run, PrivacyPass, .., self.attempt_artifact_cleanup_after(Phase::Review))`; publish (both on the blocking pool via `artifact_store_call`, as VP:11265-11289); `inject_crash(AfterPrivacyPassArtifactStorage)`.
-5. `record_privacy_pass(...)`; on a refused commit delete this attempt's object (as VP:11323-11330); `inject_crash(AfterPrivacyPassCommit)`; return the updated run and `bytes`.
+2. Else: `privacy = self.privacy.as_ref()` or `privacy_control_missing` (P6). `source = load_source_bytes(run)`; `source_hash = sha256_prefixed(&source)`; deserialize `TraceContributionEnvelope` from `source` (the receipt stores `serde_json::to_vec(envelope)` inside the P1 wrapper, VP:9123-9124; `load_source_bytes` unwraps it); `receipt = load_submission_receipt_privacy(..)`; `tokio::time::timeout(self.privacy_pass_timeout(), privacy.rescrub_classifier(&mut envelope))`; an error or timeout raises `PolicyError::permanent(privacy_classification_failed)` (Task 8 routes it).
+3. Merge: the receipt basis (parsed with `ResidualRiskCondition::from_label`; an unknown label fails closed with `privacy_classification_failed`) plus classifier conditions, no duplicates. `risk = pipeline_privacy_risk(&envelope.privacy.residual_pii_risk, &merged)`. `outcome = Escalated` iff `risk > receipt.privacy_risk` (P3), else `Cleared`.
+4. `bytes = serde_json::to_vec(&envelope)`; `content_hash = sha256_prefixed(&bytes)`; `let wrapper = encode_pipeline_artifact_bytes(&bytes)?` (as VP:9124 and VP:11263 do); `prepare_serialized_json(.., TraceArtifactKind::ContributionEnvelope, &pipeline_attempt_object_id("privacy-pass", run_id, lease_token), &wrapper)`; `stage_attempt_artifact(run, PrivacyPass, .., self.attempt_artifact_cleanup_after(Phase::Review))`; publish (both on the blocking pool via `artifact_store_call`, as VP:11265-11289); `inject_crash(AfterPrivacyPassArtifactStorage)`.
+5. `record_privacy_pass(...)` with `risk`, merged labels, `envelope.privacy.redaction_counts` and `redaction_pipeline_version`; on a refused commit delete this attempt's object (as VP:11323-11330); `inject_crash(AfterPrivacyPassCommit)`; return the updated run and `bytes`.
 
-Then the Review arm passes `bytes` as `source_artifact` and `sha256_prefixed(&bytes)` as `source_content_hash` (VP:11221-11222). `MinimalReviewPolicy` only requires `dependency_content_hash(source_artifact) == source_content_hash` (BUNDLE:188-191), so the bundle does not change.
+The Review arm then passes `bytes` as `source_artifact` and `sha256_prefixed(&bytes)` as `source_content_hash` (VP:11221-11222). `MinimalReviewPolicy` only requires `dependency_content_hash(source_artifact) == source_content_hash` (BUNDLE:188-191), so the bundle does not change.
+
+V117 addition (critique 0):
+
+```sql
+-- A run received from here on needs a privacy pass before Review may
+-- approve it. Existing rows are exempt (FALSE); the default then flips, so
+-- a receipt written by either binary gets TRUE, and an approval by a binary
+-- that has no pass fails this CHECK instead of approving unclassified bytes.
+ALTER TABLE pipeline_runs
+    ADD COLUMN privacy_pass_required BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pipeline_runs
+    ALTER COLUMN privacy_pass_required SET DEFAULT TRUE,
+    ADD CONSTRAINT pipeline_runs_privacy_pass_before_approval CHECK (
+        NOT privacy_pass_required
+        OR approved_object_ref_id IS NULL
+        OR privacy_pass_object_ref_id IS NOT NULL);
+```
+
+`commit_review`'s approval UPDATE (VP:2503-2526) gains `AND ($6::uuid IS NULL OR NOT privacy_pass_required OR privacy_pass_object_ref_id IS NOT NULL)` and becomes `query_opt`; `None` after `ensure_current_lease` has passed under the run lock means the pass is missing, and returns `DatabaseError::Constraint(PIPELINE_PRIVACY_PASS_MISSING_LABEL)` (a safe label, never the raw CHECK error). The CHECK stays as the backstop for a binary that lacks the predicate.
+
+- [ ] **Step 1: Write the failing tests** (RT; per-test tenant and counters):
+  - `privacy_pass_runs_once_and_feeds_review` (counting `rescrub_classifier` that replaces a planted span): one `process_one` takes the run through Review; classifier counter 1; the run has a pass record with `outcome = cleared`, `privacy_pass_source_hash == sha256(stored source bytes)`, `privacy_pass_content_hash == review outcome's source_content_hash`; one `review_snapshot` ref with `created_by_job_id = run_id`; the stored pass object satisfies `is_pipeline_artifact_wrapper`; the `trace_derived_records` row's `input_object_ref_id` is the pass ref.
+  - `score_never_sees_planted_prose_pii`: the source carries `MARKER_SECRET`; the stored source object still contains it; `load_approved_bytes` for the run does not; Score completes.
+  - `privacy_pass_crash_before_commit_repeats_the_call_and_commits_one_ref`: crash at `AfterPrivacyPassArtifactStorage` (service A); expire the lease; service B on the same database: the next dispatch calls the classifier a second time, commits exactly one pass ref with the run-derived id; the first attempt's staged row is still `staged`; after its `cleanup_after`, `sweep_attempt_artifacts` deletes the orphaned object (corrected spec test, correction 1). Red: the crash point does not exist or never fires, and the counter is wrong.
+  - `privacy_pass_crash_after_commit_does_not_call_again`: crash at `AfterPrivacyPassCommit`; the next dispatch makes no classifier call and Review completes with the recorded bytes. This is the pass-resume proof that replaces the restore-drill run (critiques 10/19).
+  - `privacy_pass_lease_loss_records_one_result` (P7, critique 8): worker A's classifier double blocks on a per-test `Notify`; while it blocks, expire A's lease in SQL and let worker B reclaim and complete the pass; release A. Assert: classifier counter 2, exactly one recorded `privacy_pass_object_ref_id` (B's), A's `record_privacy_pass` refused, A's object deleted or left `staged` for the sweep, and after the sweep only the committed object remains.
+  - `approval_without_a_pass_is_refused` (critique 0): a run received after V117 (`privacy_pass_required = TRUE`), claimed for Review, then `commit_review` called directly with an approved artifact and no pass: refused with `privacy_pass_missing`; the run is unchanged and no approved ref exists. A raw `UPDATE pipeline_runs SET approved_object_ref_id = ...` as the migrator on that run fails the CHECK. The same approval on a run with `privacy_pass_required = FALSE` (set by fixture SQL, modelling a pre-V117 row) commits.
+  - Add `AfterPrivacyPassArtifactStorage` and `AfterPrivacyPassCommit` to `crash_matrix_produces_one_logical_effect_per_point` (RT:14080; its evidence records a count, RT:14290-14299). This one cannot fail on its own (the matrix asserts per-run effects); it is a **regression pin**, red only through the compile error until the variants exist.
+  - **Regression pins (expected green after Task 5, already red since Task 2):** `transformed_content_flows_to_score_and_replay_stays_exact` (RT:5806) and the export test (RT:~22201): assertions on approved content and export output stay; an assertion that the stored source is redacted moves to the pass object. `stored_source_is_post_deterministic` (a deterministic secret is gone from the stored source, a prose marker is kept) holds since Task 2 and is a **regression pin (expected green)**.
+- [ ] **Step 2: Run red.**
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- privacy_pass_ score_never_sees approval_without_a_pass crash_matrix --test-threads=1
+```
+
+  Expected: compile errors first (no crash points, no label); once those exist, the pass tests fail on the missing record and classifier count, and `approval_without_a_pass_is_refused` fails because the approval commits.
+- [ ] **Step 3: Implement** the flow, the Review arm hand-off, the V117 block and the `commit_review` predicate. Recreate the test databases (V117 changed).
+  Note: a crash after `record_privacy_pass` and before the policy costs one Review attempt (the pass transaction does not refund it; `mark_awaiting_review` does, VP:5248). Acceptable at 5 attempts, which `commit_review` resets on approval.
+- [ ] **Step 4: Audit object-count assertions.** Every Review dispatch now stores one more object and one more ref, also with the no-op doubles. `grep -n "count_staged_artifacts\|count_files_under" crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs | wc -l` (62 at the plan's commit) and the same over `src/bin/trace_commons_ingest_internal/`; fix each count on a path that reached Review. The restore drill's object and artifact fingerprints are computed from the seed, not fixed (`pipeline.py`:820-840; RESTORE:3224's `object_count: 3` is a directory-double fixture of its own and does not move).
+- [ ] **Step 5: Audit direct `commit_review` callers.** `grep -n "\.commit_review(" crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs` (7 sites, including the store-level `review_snapshot` counts at RT:8573 and RT:8884): each approval on a fresh run now needs a pass. Record one through a test helper that stages and calls `record_privacy_pass`, or, where the test is about a pre-V117 run, set `privacy_pass_required = FALSE` in fixture SQL and say so in a comment. Add the fourth argument (`None`) everywhere.
+- [ ] **Step 6: Audit services built without a boundary** (P6). `grep -n "privacy: None" crates/trace-commons-server/tests crates/trace-commons-server/src/bin/trace_commons_ingest_internal` (one hit at RT:3187, a production-assembly readiness test) and every `test_service_with_controls(.., None)` call (RT:2638-2643): a service that drives Review must get `default_privacy_boundary()` (RT:2374). The restore seed already uses `PassThroughPipelinePrivacyBoundary` (RESTORE:1407).
+- [ ] **Step 7: Run green**: Step 2's command; the existing tests this task touches:
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- transformed_content_flows stored_source_is_post_deterministic --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run
+```
+
+  The HTTP test is still red at the failing-boundary leg (HTTP:7551-7598) until Task 8, and must be green at its MARKER_SECRET assertion (HTTP:7333). Extend `v117_adds_the_privacy_pass_record` with the `privacy_pass_required` assertions (FALSE on a pre-V117 row, TRUE on a new insert, CHECK refusal).
+- [ ] **Step 8: Commit** `Run the classifier as a server-owned privacy pass at the start of Review`.
+
+### Task 6: Escalation hold, review-queue visibility, assessment timing
+
+**Files:**
+- Modify: VP:115-125 `run_waiting_for_review_sql!` ->
+
+```sql
+p.next_phase = 'review'
+AND (p.admission_decision = 'quarantine' OR p.privacy_pass_outcome = 'escalated')
+AND (NOT p.privacy_pass_required OR p.privacy_pass_object_ref_id IS NOT NULL)
+AND p.state IN ('pending', 'retry', 'awaiting_review')
+```
+
+  The third line is critique 1 (1): a run that requires the pass is claimable, listable and assessable only once its pass is recorded. The macro's only users are `claim_review` (VP:2644), `record_review_assessment` (VP:2782) and `list_review_queue` (VP:3020); no worker claim path uses it, so dispatch is unaffected. Pre-V117 runs (`privacy_pass_required = FALSE`) keep today's behaviour. Update its doc and `claim_review`'s doc (VP:2596-2605, which calls claiming an Admit run a bug).
+- Modify: VP:2817-2832 approve check: the reasons to resolve are `admission_reason` (if set) and `privacy_pass_review_required` (if `privacy_pass_outcome = 'escalated'`; select it at the row read above :2812). An Approve that does not list every one is refused with the existing `quarantine reason is unresolved` (422 via ING:~43388).
+- Modify: VP:2899-2930 `load_review_assessment`: also select `recorded_at`.
+- Modify: VP:10891-10896 parking branch: also park on `PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL` when `next_phase == Review`.
+- Modify: Review arm, after `ensure_privacy_pass` and the assessment load (VP:11229-11232): if the pass outcome is `Escalated` and there is no assessment, or the assessment's `recorded_at` is before `privacy_pass_recorded_at` (critique 1 (2), P9), return `PolicyError::transient(privacy_pass_review_required)`; the policy is not called.
+- Modify: `list_review_queue` (VP:3005) and ING `PipelineReviewQueueItem` (ING:43404-43409, set at ~:43433): add `hold_reason: String` (`privacy_pass_review_required` when the pass escalated, else `admission_reason`) and `assessment_superseded: bool` (P9). Additive JSON fields; labels only. The queue's "leaves out a run that has an assessment" rule (VP:115-118) also lists a run whose assessment is superseded, so an operator sees it.
+
+- [ ] **Step 1: Write the failing tests** (RT; escalation double: `rescrub_classifier` sets `residual_pii_risk = Medium` and returns `[FoundAndRemoved]`; a High variant):
+  - `escalated_admit_run_parks_for_a_human`: Admission admits at Low; one dispatch leaves the run `awaiting_review`, `last_error_label = privacy_pass_review_required`, attempt refunded (`mark_awaiting_review`, VP:5236-5260), outcome `escalated`, no Review outcome row, a counting Review policy wrapper not called; `list_review_queue` lists it with `hold_reason = privacy_pass_review_required`; `claim_review` claims it. Repeat with High: same result, never rejected (D1).
+  - `escalated_approval_must_resolve_privacy_pass_review_required`: an Approve listing nothing, or listing another reason, is refused; listing `privacy_pass_review_required` is accepted and releases the run to `pending`.
+  - `escalated_approval_resumes_without_a_second_classifier_call`: after the approval, one dispatch completes Review; classifier counter still 1; the Review policy is called once with the pass bytes.
+  - `quarantined_run_is_not_claimable_before_its_pass` (critique 1 (1)): a deterministic Medium receipt (Admission quarantines); before any dispatch, `list_review_queue` does not list it and `claim_review` is refused; after one dispatch (pass recorded, policy parks with `review_assessment_required`), both succeed.
+  - `quarantined_run_escalated_to_high_is_held_for_both_reasons` (the critic's scenario, with (1) in place): deterministic Medium, one dispatch with a High classifier: parked with `privacy_pass_review_required`, outcome `escalated`; an Approve resolving only `privacy_review_required` is refused; one resolving both is accepted; the next dispatch approves through the policy. Never approved on an assessment recorded before the pass.
+  - `assessment_recorded_before_the_pass_is_ignored` (critique 1 (2), P9): a run with `privacy_pass_required = FALSE` (fixture SQL, modelling a pre-V117 row), Admission quarantine, an Approve assessment recorded before any dispatch, then a dispatch whose classifier returns High: the run is held `awaiting_review` with `privacy_pass_review_required`, not approved; the queue lists it with `assessment_superseded = true`; `claim_review` is refused.
+  - `admission_quarantine_not_escalated_parks_as_today`: deterministic Medium, classifier finds nothing more: outcome `cleared`, parked by the policy with `review_assessment_required`; approval must resolve the Admission reason as today.
+  - **Regression pin (expected green):** `cleared_consent_flag_only_run_goes_straight_to_review`: deterministic basis `[ConsentContentFlag]`, Medium, classifier finds nothing: outcome `cleared`, no hold.
+  - HTTP `pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason`: the quarantine queue route returns `hold_reason = privacy_pass_review_required` for an escalated run.
+- [ ] **Step 2: Run red.**
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- escalated quarantined_run assessment_recorded_before_the_pass admission_quarantine_not_escalated cleared_consent --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason -- --test-threads=1
+```
+
+  Expected: the escalated runs are not parked (the policy approves them); the quarantined run is claimable before its pass; the HTTP test fails on the missing field. `cleared_consent_flag_only_run_goes_straight_to_review` passes.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Audit existing review flows** (critique 1 (1) changes when a quarantined run becomes claimable): `grep -n "\.claim_review(\|record_review_assessment(" crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs` (17 `claim_review` sites) and the review routes in HTTP and `tests.rs` (`grep -n "review/pipeline" ...`). Every flow that claims a run received after V117 must dispatch once first (so the pass is recorded); CORPUS already waits for `awaiting_review` (CORPUS:1094-1106).
+- [ ] **Step 5: Run green**: Step 2's commands; the existing queue tests near RT:4824 and RT:4840; `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- review --test-threads=1`.
+- [ ] **Step 6: Commit** `Hold a run the privacy pass escalates for a human review`.
+
+### Task 7: Human decisions on an escalated Admit run (Q2)
+
+**Files:** Review arm (VP:11233 onwards); a server-side `PhaseResult` builder next to it; `commit_review`'s approval UPDATE (VP:2503-2526) writes the two approval columns.
 
 - [ ] **Step 1: Write the failing tests** (RT):
-  - `privacy_pass_runs_once_and_feeds_review` (double: counting `rescrub_classifier` that replaces a planted span): one `process_one` takes the run through Review; the classifier counter is 1; the run has a pass record with `outcome = cleared`, `privacy_pass_source_hash == sha256(stored source bytes)`, `privacy_pass_content_hash == review outcome's source_content_hash`; one `review_snapshot` ref with `created_by_job_id = run_id`; the `trace_derived_records` row's `input_object_ref_id` is the pass ref.
-  - `score_never_sees_planted_prose_pii`: the source carries `MARKER_SECRET`; the stored source object still contains it (the receipt did not run the classifier); `load_approved_bytes` for the run does not; Score completes.
-  - `stored_source_is_post_deterministic`: a source with a deterministic secret (an API-key-shaped token) and a prose marker; the stored source lacks the token and keeps the marker.
-  - Update `transformed_content_flows_to_score_and_replay_stays_exact` (RT:5806) and the export test (RT:~22201): assertions on approved content and export output stay; any assertion that the stored source is redacted moves to the pass object.
-- [ ] **Step 2: Run red.** `cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg privacy_pass_ score_never_sees stored_source_is transformed_content_flows -- --test-threads=1` (with `RUSTFLAGS="-D warnings"`).
-- [ ] **Step 3: Implement** per the flow above.
-Note: a crash after `record_privacy_pass` and before the policy costs one Review attempt (the pass transaction does not refund it; `mark_awaiting_review` does, VP:5248). Acceptable at 5 attempts, which `commit_review` resets on approval.
-
-- [ ] **Step 4: Audit object-count assertions.** Every Review dispatch now stores one more object and one more ref, also with the no-op doubles. Run `grep -n "count_staged_artifacts\|count_files_under" crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs | wc -l` (62 at the plan's commit) and the same over `src/bin/trace_commons_ingest_internal/`; fix each count on a path that reached Review. Re-check the two store-level `review_snapshot` counts (RT:8573, RT:8884): they call `commit_review` directly with no pass, so they should hold; if not, filter by the approved ref id.
-- [ ] **Step 5: Audit services built without a boundary** (P6). `grep -n "privacy: None" crates/trace-commons-server/tests crates/trace-commons-server/src/bin/trace_commons_ingest_internal` (one hit at RT:3187, a production-assembly readiness test) and every `test_service_with_controls(.., None)` call (RT:2638-2643): a service that drives Review must get `default_privacy_boundary()` (RT:2374).
-- [ ] **Step 6: Run green** and `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run`.
-- [ ] **Step 7: Commit** `Run the classifier as a server-owned privacy pass at the start of Review`.
-
-### Task 6: Escalation hold and review-queue visibility
-
-**Files:**
-- Modify: VP:115-125 `run_waiting_for_review_sql!` -> `p.next_phase = 'review' AND (p.admission_decision = 'quarantine' OR p.privacy_pass_outcome = 'escalated') AND p.state IN (...)`; update its doc and `claim_review`'s doc (VP:2596-2605, which calls claiming an Admit run a bug).
-- Modify: VP:2817-2832 approve check: the reason to resolve is `admission_reason`, or `privacy_review_required` when `admission_reason` is NULL and `privacy_pass_outcome = 'escalated'` (select the column at the row read above :2812). An approval of an escalated run that does not list `privacy_review_required` is refused with the existing `quarantine reason is unresolved` (422 via ING:~43388).
-- Modify: VP:10891-10896 parking branch: also park on `PIPELINE_PRIVACY_REVIEW_REQUIRED_LABEL` when `next_phase == Review`.
-- Modify: Review arm, after `ensure_privacy_pass` and the assessment load (VP:11229-11232): if Admission is Admit, the pass outcome is `Escalated` and there is no assessment, return `PolicyError::transient(privacy_review_required)`; the policy is not called.
-- Modify: ING `PipelineReviewQueueItem` (~ING:43404, `admission_reason` at ~:43407, set at ~:43433): add `hold_reason: String` = `admission_reason` or `privacy_review_required` for an escalated run (additive JSON field; label only).
-
-- [ ] **Step 1: Write the failing tests** (RT; escalation double: `rescrub_classifier` sets `residual_pii_risk = Medium` and returns `[FoundAndRemoved]`; a High variant for D1):
-  - `escalated_admit_run_parks_for_a_human`: Admission admits at Low; one dispatch leaves the run `awaiting_review`, `last_error_label = privacy_review_required`, attempt refunded (`mark_awaiting_review`, VP:5236-5260), outcome `escalated`, no Review outcome row, a counting Review policy wrapper is not called; `list_review_queue` lists it; `claim_review` claims it. Repeat with High: same result, never rejected (D1).
-  - `escalated_approval_must_resolve_privacy_review_required`: an Approve listing nothing, or listing another reason, is refused; listing `privacy_review_required` is accepted and releases the run to `pending`.
-  - `escalated_approval_resumes_without_a_second_classifier_call`: after the approval, one dispatch completes Review; classifier counter still 1; Review policy called once with the pass bytes.
-  - `admission_quarantine_is_not_double_parked`: Admission quarantines (Medium deterministic); the pass runs once and the run parks with `review_assessment_required` (the existing label), not the pass label; approval must resolve the Admission reason as today.
-  - `cleared_consent_flag_only_run_goes_straight_to_review`: deterministic basis `[ConsentContentFlag]`, Medium, classifier finds nothing: outcome `cleared`, no hold.
-  - ING (`pipeline_http_pg_tests.rs`): the quarantine queue route returns `hold_reason = privacy_review_required` for an escalated run.
-- [ ] **Step 2: Run red.** `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg escalat admission_quarantine_is_not cleared_consent -- --test-threads=1`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run green**; also the existing queue tests near RT:4824 and RT:4840 and the corpus test at `pipeline_corpus_pg_tests.rs:1205` ("quarantine a Medium one as privacy_review_required"): a prose-only Medium is now admitted at the receipt and parked after the pass, so move its expectation from receipt-time quarantine to post-pass `awaiting_review`.
-- [ ] **Step 5: Commit** `Hold a run the privacy pass escalates for a human review`.
-
-### Task 7: Human rejection of an escalated Admit run
-
-**Files:** Review arm (VP:11233 onwards); a server-side `PhaseResult` builder next to it.
-
-- [ ] **Step 1: Write the failing test** `escalated_rejection_ends_the_run_rejected` (RT): after a Reject assessment, one dispatch commits Review with `ReviewDecision::Rejected { reason: <assessment reason> }`, evidence `source_content_hash` = pass content hash, `human_assessment_hash` = the assessment's, `rule_id = "privacy_pass_human_review_rejected_v1"`; the submission is `rejected`, the run `complete` with no next phase (as commit_review's rejection, VP:2463-2477, 2491-2497); no approved object; the Review policy is not called; the classifier counter stays 1.
+  - `escalated_rejection_ends_the_run_rejected`: escalated Admit run, Reject assessment; one dispatch commits Review with `ReviewDecision::Rejected { reason: <assessment reason> }`, evidence `source_content_hash` = pass content hash, `human_assessment_hash` = the assessment's `evidence_hash`, `rule_id = "privacy_pass_human_review_rejected_v1"`; the submission is `rejected`, the run `complete` with no next phase (as `commit_review`'s rejection, VP:2463-2477, 2491-2497); no approved object; the Review policy is not called; the classifier counter stays 1.
+  - `escalated_approval_links_the_assessment`: escalated Admit run, Approve assessment resolving `privacy_pass_review_required`; after the approving dispatch the run row has `privacy_pass_approval_assessment_hash` = the assessment's `evidence_hash` and `privacy_pass_approval_resolved_reasons = ["privacy_pass_review_required"]`, and the approved Review outcome's run carries them (the outcome itself is the bundle policy's, `minimal_review_passthrough_v1`). A non-escalated run's approval leaves both NULL.
+  - `quarantined_rejection_same_dispatch_commits_after_the_pass` (critique 4): a pre-V117-style run (`privacy_pass_required = FALSE` by fixture SQL), Admission quarantine, a Reject assessment already recorded, no pass: one dispatch runs the pass (recording and committing its staged row) and the policy's rejection commits in the same dispatch; no `pipeline_attempt_artifact_missing`.
 - [ ] **Step 2: Run red.**
-- [ ] **Step 3: Implement.** When Admission is Admit, the outcome is `Escalated`, and the assessment is Reject: build the `PhaseResult` mirroring BUNDLE:204-221 with the server rule id, then `commit_review(run, StoredPhaseResult::from_result(Phase::Review, &result)?, None)`. An Approve falls through to the bundle policy with the pass bytes (it approves an Admit run, BUNDLE:192-194). Provenance needs nothing extra: `insert_outcome` writes `outcome_schema_id`/`version` from the fixed `SchemaRef::pipeline_v1()` and `bundle_id` from the run (VP:6284-6310), so the export join on `review.outcome_schema_id` (versioned_pipeline_product.rs:450-466) is unaffected; only `evaluation.rule_id` marks the outcome as the server's. Document in pipeline-activation.md (Task 10) that this one Review outcome's rule id comes from the server, not the bundle.
-- [ ] **Step 4: Run green; commit** `Commit a reviewer's rejection of an escalated run`.
 
-### Task 8: Classifier failure: charged retry, legacy backoff, terminal label
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- escalated_rejection escalated_approval_links --test-threads=1
+```
 
-**Files:** VP:5048-5101 `mark_retry`; VP:10880-10900 (routing); RT:5710-5753; HTTP:7051-7061 and the section at HTTP:7551-7598.
+  Expected: `escalated_rejection_ends_the_run_rejected` fails because the run is approved (`MinimalReviewPolicy` ignores the assessment on Admit, BUNDLE:192-194); `escalated_approval_links_the_assessment` fails on NULL columns. `quarantined_rejection_same_dispatch_commits_after_the_pass` is a **regression pin (expected green)** of Task 4's `moved == 1` rule.
+- [ ] **Step 3: Implement.** When Admission is Admit, the outcome is `Escalated`, and the assessment is a current Reject: build the `PhaseResult` mirroring BUNDLE:204-221 with `PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID`, then `commit_review(run, StoredPhaseResult::from_result(Phase::Review, &result)?, None, None)`. A current Approve goes to the bundle policy with the pass bytes, and the Review arm passes the assessment as `commit_review`'s `pass_approval`, which adds `privacy_pass_approval_assessment_hash = $, privacy_pass_approval_resolved_reasons = $` to the approval UPDATE when `privacy_pass_outcome = 'escalated'`. An Admission-quarantined escalated run goes through the policy as today (it records the assessment hash itself, BUNDLE:255-256), and also gets the two columns. Provenance needs nothing extra: `insert_outcome` writes `outcome_schema_id`/`version` from `SchemaRef::pipeline_v1()` and `bundle_id` from the run (VP:6284-6310), so the export join on `review.outcome_schema_id` (VPP:450-466) is unaffected; only `evaluation.rule_id` marks the rejection as the server's.
+- [ ] **Step 4: Run green**: Step 2's command plus `quarantined_rejection_same_dispatch_commits_after_the_pass` and Task 6's tests (`-- escalated quarantined_run --test-threads=1`).
+- [ ] **Step 5: Commit** `Commit a reviewer's decision on an escalated run`.
 
-Routing: the pass raises the error as a `PolicyError` value, `anyhow::Error::from(PolicyError::permanent(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL)?)`, never `anyhow!(label)`: the dispatch matches on `error.downcast_ref::<PolicyError>()` (VP:10880-10882), and a bare string falls through to the P2 allowlist and is recorded as `minimal_policy_failed`. With the value, so the existing non-transient branch at VP:10900-10902 takes it to the charged `mark_retry_or_record_lease_expired` under its own label; no allowlist edit. It must never be `transient` (that goes to the uncharged `mark_transient_retry`, VP:5108-5152, which has no terminal bound). `privacy_control_missing` (P6) goes to `mark_transient_retry` beside the FR3 gaps at VP:10913-10923.
+### Task 8: Classifier failure: charged retry, legacy backoff, terminal label, pass timeout, status
 
-`mark_retry` changes (one place, no new primitive): (a) for `error_label == PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL`, the delay is `PIPELINE_PRIVACY_RETRY_BASE_SECONDS * 2^(attempt_count-1)` seconds (30, 60, 120, 240 s before the fifth attempt; legacy's ING:1154 and postgres.rs:5470-5471); (b) on exhaustion that label is written as itself instead of `attempts_exhausted` (parameter `$4` becomes the error label for this one label). A worker that crashes mid-pass and is swept by `claim_next` (VP:2068-2086) still gets `attempts_exhausted`; that is a crash, not a classifier verdict, and is documented.
+**Files:** VP:5048-5101 `mark_retry`; VP:10880-10925 (routing); pass timeout (P8) beside VP:775-790 and the service builder; RT:5710-5760; HTTP:7051-7061 and the section at HTTP:7551-7598; ING:17406-17422 `main_status_for_pipeline` (Q1).
+
+Routing: the pass raises the error as a `PolicyError` value, `anyhow::Error::from(PolicyError::permanent(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL)?)`, never `anyhow!(label)`: the dispatch matches on `error.downcast_ref::<PolicyError>()` (VP:10881), and a bare string falls through to the P2 allowlist and is recorded as `minimal_policy_failed`. The existing non-transient branch (VP:10900-10902) takes it to the charged `mark_retry_or_record_lease_expired` under its own label; no allowlist edit. It must never be `transient` (that goes to the uncharged `mark_transient_retry`, VP:5108-5152, which has no terminal bound). `privacy_control_missing` (P6) goes to `mark_transient_retry` beside the FR3 gaps at VP:10913-10923.
+
+`mark_retry` changes (one place, no new primitive): (a) for `error_label == PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL`, the delay is `PIPELINE_PRIVACY_RETRY_BASE_SECONDS * 2^(attempt_count-1)` seconds (30, 60, 120, 240 s before the fifth attempt); (b) on exhaustion that label is written as itself instead of `attempts_exhausted`. A worker that crashes mid-pass and is swept by `claim_next` (VP:2068-2086) still gets `attempts_exhausted`; that is a crash, not a classifier verdict, and is documented.
 
 - [ ] **Step 1: Write the failing tests.**
-  - Rewrite `privacy_boundary_failure_fails_closed` (RT:5723) as `classifier_failure_retries_then_fails_closed`: the receipt succeeds (`processing`, one run); each Review dispatch leaves the run `retry` with `last_error_label = privacy_classification_failed`, `attempt_count` incremented, `next_attempt_at - NOW()` within 30 s x 2^(n-1) plus tolerance (assert on the stored interval, not wall-clock sleeps; see the CI wall-clock flake note); after `max_attempts` the run is `failed` with `privacy_classification_failed`; no pass record, no approved object, no Review outcome; `trace_submissions.status` still `received`. Drive the clock by setting `next_attempt_at = NOW()` in SQL between dispatches.
-  - `classifier_timeout_is_a_classifier_failure`: a double that sleeps past a test-shortened timeout (make `PIPELINE_PRIVACY_PASS_TIMEOUT` a builder knob with the 900 s default) gives the same `retry` state.
-  - `missing_boundary_is_an_uncharged_wait`: a service built without `with_privacy` leaves the run `retry` with `privacy_control_missing` and `attempt_count` unchanged.
+  - RT `classifier_failure_retries_then_fails_closed`: the receipt succeeds (`processing`, one run); each Review dispatch leaves the run `retry` with `last_error_label = privacy_classification_failed`, `attempt_count` incremented, `next_attempt_at - NOW()` within 30 s x 2^(n-1) plus tolerance (assert on the stored interval, not wall-clock sleeps); after `max_attempts` the run is `failed` with `privacy_classification_failed`; no pass record, no approved object, no Review outcome; `trace_submissions.status` still `received`. Drive the clock by setting `next_attempt_at = NOW()` in SQL between dispatches.
+  - RT `classifier_timeout_is_a_classifier_failure`: a double that sleeps past a test-shortened ceiling (the builder knob, P8) gives the same `retry` state.
+  - VP unit `privacy_pass_timeout_fits_inside_the_review_lease_cap` (P8): Review lease 300 s -> 900 s; 120 s -> 420 s; with a classifying boundary, 20 s -> the build refuses with `pipeline_lease_config_invalid`; with a non-classifying boundary, 20 s -> builds with a 900 s bound; 5 s -> builds with a 900 s bound (no negative value).
+  - RT `missing_boundary_is_an_uncharged_wait`: submit through service A built with `default_privacy_boundary()`, then dispatch Review through service B on the same database built with `privacy: None` (the crash matrix's two-service pattern, RT:14148-14168; a service without a boundary cannot take the receipt, VP:9064-9067). The run is left `retry` with `privacy_control_missing` and `attempt_count` unchanged.
+  - ING unit (`tests.rs`) `main_status_maps_a_failed_privacy_classification_to_quarantined` (Q1): a `PipelineContributorStatus` with `submission_status = "received"`, `processing = Failed`, `reason_label = Some("privacy_classification_failed")`, `admission_decision = "admit"` maps to `quarantined`; with `reason_label = Some("attempts_exhausted")` it still maps to `accepted`.
   - HTTP leg (HTTP:7551-7598, "A privacy boundary that fails"): the POST now answers 200 `processing` and creates a run (the old asserts at :7576 and :7597 invert); a worker pass leaves it in `retry` with `privacy_classification_failed`.
-- [ ] **Step 2: Run red.** `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg classifier_ missing_boundary -- --test-threads=1`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run green**; plus the whole ingest bin (it holds the HTTP leg):
+- [ ] **Step 2: Run red.**
+
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib privacy_pass_timeout_fits_inside_the_review_lease_cap
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- classifier_ missing_boundary --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest -- main_status_maps_a_failed_privacy_classification compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export --test-threads=1
+```
+
+  Expected: the retry test fails on the backoff interval and the terminal label (`attempts_exhausted`); the timeout unit test fails to compile; the status test maps to `accepted`; the HTTP test fails at the inverted leg.
+- [ ] **Step 3: Implement** routing, `mark_retry`, the timeout (P8) and the `main_status_for_pipeline` arm (`_ if status.processing == PipelineProcessingStatus::Failed && status.reason_label.as_deref() == Some(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL) => "quarantined"`, before `_ => "accepted"`; update its doc at ING:17400-17405). Grep the ingest tests for any legacy-status assertion that pins `accepted` for a failed pipeline run and update it.
+- [ ] **Step 4: Run green**: Step 2's commands; then the whole ingest bin (it holds the HTTP leg and the status tests):
 
 ```bash
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
@@ -372,67 +541,71 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-i
 
 - [ ] **Step 5: Commit** `Retry a failed privacy classification on the legacy backoff and fail closed`.
 
-### Task 9: Crash safety, downstream readers, withdrawal
+### Task 9: Withdrawal, purge, and legacy readers (Q3)
 
-**Files:** RT:14086-14096 crash matrix; withdrawal and retention-purge tests.
+**Files:** RT withdrawal and retention-purge tests; HTTP (end-to-end withdrawal through the revocation-propagation worker; legacy-reader pin).
 
-- [ ] **Step 1: Write the failing tests.**
-  - Add `AfterPrivacyPassArtifactStorage` and `AfterPrivacyPassCommit` to `crash_matrix_produces_one_logical_effect_per_point` (RT:14080; its evidence records a count, RT:14290-14299, so no fixed number moves).
-  - `privacy_pass_crash_before_commit_repeats_the_call_and_commits_one_ref`: crash at `AfterPrivacyPassArtifactStorage`; restart (new service, same DB); the next dispatch calls the classifier a second time, commits exactly one pass ref with the run-derived id, and the first attempt's staged row is still `staged`; after `cleanup_after`, `sweep_attempt_artifacts` deletes the orphaned object (this is the corrected spec test, correction 1).
-  - `privacy_pass_crash_after_commit_does_not_call_again`: crash at `AfterPrivacyPassCommit`; the next dispatch makes no classifier call and Review completes with the recorded bytes.
-  - `withdrawal_deletes_the_privacy_pass_object`: withdraw a run after its pass; the pass ref is invalidated and queued for `delete_object_payload` (the generic enumeration at VP:6778-6835 covers it), and the deletion worker's verification accepts it (`ReviewSnapshot` -> `ContributionEnvelope`, ING:65689-65696). Same for the retention purge (VP:6984-7008).
-- [ ] **Step 2: Run red; Step 3: implement only what fails** (the generic paths should already hold; the tests pin them). `inject_crash` errors propagate unchanged (VP:10770).
-- [ ] **Step 4: Run green** with `RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg crash_matrix privacy_pass_crash withdrawal_deletes -- --test-threads=1`.
-- [ ] **Step 5: Commit** `Pin the privacy pass's crash points and its deletion`.
+- [ ] **Step 1: Write the tests.** All three are **regression pins (expected green)**: the generic paths should already hold, and these tests fix them so a later change cannot break them silently. If one is red, fix the code it names.
+  - HTTP `pipeline_withdrawal_deletes_the_privacy_pass_object`: drive a run through Review (pass recorded) over HTTP, withdraw it through the contributor route, then run the revocation-propagation worker that the withdrawal's `delete_object_payload` items feed (VP:7011-7060 -> `delete_object_payload_for_revocation_propagation`, ING:65634). Assert: the pass ref is invalidated (VP:6826-6832); a `delete_object_payload` item exists for the pass ref; after the worker the object is physically gone from the store; and the item was verified under `TraceArtifactKind::ContributionEnvelope` (the ING:65689-65692 mapping), not `Other` (ING:19412-19421).
+  - RT `retention_purge_deletes_the_privacy_pass_object`: the retention purge (VP:6984-7008) queues the pass ref like the source and approved refs.
+  - HTTP `legacy_readers_never_emit_a_pipeline_source` (Q3, critique 2): a pipeline submission whose stored source carries a planted prose marker (MarkerRedacting double), driven to `accepted`. Assert that `get_latest_active_envelope_object_ref`-based reads (ING:56028-56049, read through ING:68039-68044) refuse it, and that `run_benchmark_conversion_job` (ING:54057), `run_ranker_training_candidates_export_job` (ING:54654), `run_ranker_training_pairs_export_job` (ING:54996) and `run_process_evaluation_worker` (ING:41896), run for the tenant, either refuse the submission or produce output that does not contain the marker. Name in a comment the follow-up issue that moves them to `read_mains_reviewer_metadata_view` (ING:61874-61883).
+- [ ] **Step 2: Run.**
 
-Optional, recommended (not required by the spec): legacy benchmark, ranker and process-evaluation exports read the unfiltered reviewer view (ING:54070, 54684, 55031, 41935) and can reach an `accepted` pipeline submission, safe today only because the P1 wrapper does not decode. Track as a follow-up issue to switch them to `read_mains_reviewer_metadata_view` (ING:61874-61883); not in this PR.
+```bash
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- retention_purge_deletes_the_privacy_pass_object --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest -- pipeline_withdrawal_deletes_the_privacy_pass_object legacy_readers_never_emit_a_pipeline_source --test-threads=1
+```
+
+  Expected green. Then check each test can fail: temporarily map `ReviewSnapshot` to `Other` at ING:65691 (the withdrawal test must go red) and temporarily skip the P1 unwrap check in the legacy reader (the legacy-reader test must go red); revert both by hand-editing back, not with `git checkout` (it would discard uncommitted work).
+- [ ] **Step 3: Commit** `Pin the privacy pass's deletion and the legacy readers' refusal`.
 
 ### Task 10: Docs and contracts
 
 **Files and edits:**
 - `docs/operator/pipeline-activation.md`:
   - 1595-1634 ("Authority and privacy at the receipt"): the receipt runs only the deterministic rescrub before staging (1597-1600); a failing classifier no longer refuses the receipt (1608-1612); "all three refusals" (1614) and the error-hash table (1620-1624) swap `privacy_classification_failed` for `privacy_rescrub_failed`; 1629-1631 becomes the spec's sentence: "the stored source is the content after the deterministic rescrub; the approved content, which is all that Score and exports read, is after the classifier"; replay calls neither (1632).
-  - New sub-section "The privacy pass at the start of Review": load, classify, store (per-attempt key, run-derived ref, sweep), record (V117 columns), hand off; escalation; failure; crash safety; server-committed rejection rule id.
+  - New sub-section "The privacy pass at the start of Review": load, classify, store (per-attempt key, run-derived ref, sweep), record (V117 columns), hand off; escalation rule (P3); `privacy_pass_required` and the approval guard; failure; crash safety and lease loss (P7: the classifier may run more than once, one result is recorded); timeout bound (P8); the server-committed rejection rule id and the approval link (Q2); the `redaction_hash` difference from legacy (P5).
   - 1570-1574: the pass spends Review's attempt budget; exhaustion fails with `privacy_classification_failed`.
-  - 1652-1682: second parking cause (`privacy_review_required`), queue lists escalated runs with `hold_reason`, what an approval must resolve, no re-run after an assessment.
+  - 1652-1682: second parking cause (`privacy_pass_review_required`); a run that needs the pass is not claimable until the pass is recorded; the queue's `hold_reason` and `assessment_superseded`; what an approval must resolve; no re-run after an assessment; P9's held runs and their exits.
   - 1703-1751: a bullet for the classifier error (charged, 30 s doubling, terminal label).
   - 1888-1900, 2500-2502, 2573-2576: the pass object in the withdrawal/purge payload lists and the attempt-artifact sweep list.
   - 2124-2127: the export guardrail reads the submission's risk, which the pass now writes.
-  - 2322-2324: escalation reads `quarantined`; a `privacy_classification_failed` run reads `accepted` (D2, documented).
+  - 2322-2324: escalation reads `quarantined`; a run waiting for its pass reads `accepted`; a `privacy_classification_failed` run reads `quarantined` (Q1).
   - 196-197 and 876-877: "costs no classifier call" is vacuous; reword to "costs no rescrub".
-- `docs/operator/pipeline-activation.md` rollback section: before rolling back below this revision, list runs at Review with no pass recorded (`SELECT run_id FROM pipeline_runs WHERE next_phase = 'review' AND privacy_pass_object_ref_id IS NULL AND state <> 'failed'`) and contain the tenant or drain them first; an older binary would run Review on their deterministic-only source. Also require `SELECT count(*) FROM pipeline_attempt_artifacts WHERE artifact = 'privacy-pass' AND state = 'staged'` to be zero (run the sweep first): the old binary's `PipelineAttemptArtifact::from_db_str` returns `None` for `privacy-pass` and its sweep then fails the whole pass with `pipeline_attempt_artifact_kind_unrecognized` (VP:10054-10057).
-- `docs/operator/deployment.md:673-682`: V117 section and the six `pipeline_runs` UPDATE columns.
-- `docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md`: SUB-005 (:392) clarifying sentence per D0; REV-001 (:535-536) and REV-002 (:547-548): Review's source artifact is the pass output, the pass record keeps the source hash; REV-003 (:569): an approval also resolves a server escalation (`privacy_review_required`); REV-004 (:577-585) or new REV-005: the server's pass runs before the Review policy, a bundle cannot opt out, a classifier failure never falls back; RUN-004 (:821-833): two crash boundaries; SCN-003 (:1471-1482): a sibling scenario (prose-only PII admitted Low, escalated, held, approved or rejected).
+  - Rollback section: before rolling back below this revision, require `SELECT count(*) FROM pipeline_attempt_artifacts WHERE artifact = 'privacy-pass' AND state = 'staged'` to be zero (run the sweep first): the old binary's `PipelineAttemptArtifact::from_db_str` returns `None` for `privacy-pass` and its sweep fails the whole pass with `pipeline_attempt_artifact_kind_unrecognized` (VP:10054-10057). Runs received after V117 need no containment: the CHECK refuses an old binary's approval of them (they wait, `retry`, until the new binary returns). Before deploying, count the runs P9 can hold: `SELECT count(*) FROM pipeline_runs r JOIN pipeline_review_assessments a USING (tenant_id, run_id) WHERE r.next_phase = 'review' AND r.privacy_pass_object_ref_id IS NULL`.
+- `docs/operator/deployment.md:673-682`: V117 section, the eight `pipeline_runs` UPDATE columns, `privacy_pass_required` and its CHECK. `docs/operator/deployment.md:836-846` (V108 paragraph): Review's privacy-pass object is now staged too, and V117 replaces V108's artifact CHECK and `pipeline_attempt_artifacts_approved_hash`.
+- `docs/superpowers/specs/2026-09-11-versioned-pipeline-behavioral-contracts.md`: SUB-005 (:392) clarifying sentence per D0; REV-001 (:535-536) and REV-002 (:547-548): Review's source artifact is the pass output, the pass record keeps the source hash; REV-003: :565 (a decision applies to a quarantined trace or one the privacy pass escalated, and only once its pass is recorded), :566-567 (human action on an escalated Admit run becomes server-generated evidence: the rejection's `human_assessment_hash`, and the approval's link on the pass record), :568 and :570 (the one exception: the server commits the rejection of an escalated Admit run under `privacy_pass_human_review_rejected_v1`; every approval is still the bound policy's), :569 (an approval also resolves `privacy_pass_review_required`); REV-004 (:577-585) or new REV-005: the server's pass runs before the Review policy, a bundle cannot opt out, a classifier failure never falls back, an approval of a run that needs a pass requires one; RUN-004 (:821-833): two crash boundaries; SCN-003 (:1471-1482): a sibling scenario (prose-only PII admitted Low, escalated, held, approved or rejected).
 - `docs/superpowers/specs/2026-09-09-versioned-pipeline-design.md`: Review (:397-407), receipt path (:742-752, step 4 stores the post-deterministic envelope), `pipeline_runs` schema (:668-681).
 - `docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json` (hygiene only; the cross-check is disabled, `scripts/operator/pipeline-deployment-inventory.py:275-280`): new test ids under SUB-005 (:57-62), REV (:79-84), RUN (:108-113) and the scenario.
-- Spec doc: add a "Corrections from the implementation plan" note pointing here.
 
 - [ ] **Step 1:** make the edits. **Step 2: verify.**
 
 ```bash
 python3 scripts/operator/test_pipeline_tooling.py
 python3 -c "import json;json.load(open('docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json'))"
-grep -n "privacy_classification_failed" docs/operator/pipeline-activation.md
+grep -n "privacy_classification_failed\|privacy_review_required\|privacy_pass_review_required" docs/operator/pipeline-activation.md
 ```
 
   `test_pipeline_tooling.py` compares the manifest digest to the live file (`scripts/operator/test_pipeline_tooling.py:3508`), so it passes after the edit. No required check is added, so the counts in pipeline-qualification.md (:69-135) do not move.
 - [ ] **Step 3: Commit** `Document the Review-start privacy pass`.
 
-### Task 11: Restore drill covers a run stopped after the pass (after the stage 3 restore_seed fix)
+### Task 11: Restore drill fingerprints the pass record
 
-Sequenced last and gated: do not start until the stage 3 `restore_seed` blocker is fixed on its own branch and merged, so this task never edits the seed's existing lifetimes.
+The drill keeps its one pending run (RESTORE:2141-2143, 2401-2416, 2553; `pipeline.py`:129, 830, 860; `promote.py`:957; the `test_pipeline_tooling.py` fixtures): none of them changes. After Task 5 both seeded runs pass Review through `PassThroughPipelinePrivacyBoundary` (RESTORE:1407), so both carry a pass record and a pass object, and the drill's generic object copy and artifact fingerprint already cover the object (`versioned_pipeline_remote_restore.rs:113-157`). This task only makes the database fingerprint name the pass record, so a restore that dropped it would be caught.
 
-**Files:** RESTORE (header :15-25, seed near :2018-2170, `AUTHORITATIVE_FINGERPRINT_SQL` :247-260); `docs/operator/pipeline-qualification.md:141-152, 188`.
+**Files:** RESTORE `AUTHORITATIVE_FINGERPRINT_SQL` (:247-260); `docs/operator/pipeline-qualification.md:141-152` (one sentence: the fingerprint covers the pass record).
 
-- [ ] **Step 1: Write the failing assertions.** The seed adds a third receipt run with crash point `AfterPrivacyPassCommit`, beside (not replacing) the `("leased", "settle", true)` run; its own label, `restore_seed_run_not_stopped_after_privacy_pass`, asserts `next_phase = review`, pass record present, no Review outcome. `AUTHORITATIVE_FINGERPRINT_SQL` adds `COALESCE(privacy_pass_object_ref_id::text,'')`, `COALESCE(privacy_pass_content_hash,'')`, `COALESCE(privacy_pass_outcome,'')` to the `concat_ws`. The resume asserts the run completes Review with a classifier call count of 0 after restore (the remote restore copies every object key generically, `versioned_pipeline_remote_restore.rs:113-157`).
-- [ ] **Step 2: Run red / implement / green.**
+- [ ] **Step 1: Edit.** Add `COALESCE(privacy_pass_object_ref_id::text,'')`, `COALESCE(privacy_pass_content_hash,'')`, `COALESCE(privacy_pass_outcome,'')`, `privacy_pass_required::text` to the `concat_ws` over `pipeline_runs`. This is a **coverage extension, not a red test**: the seed and resumed fingerprints move together, so it cannot fail before the edit.
+- [ ] **Step 2: Run the drill** (the seed and resume tests are `#[ignore]`d, RESTORE:2008 and :2281, and run only through `pipeline.py`, which passes `ignored=True`; a plain `cargo test ... restore` executes none of them):
 
 ```bash
-RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest restore -- --test-threads=1
+python3 scripts/operator/pipeline.py restore-drill --postgres-admin-url postgres://$USER@127.0.0.1:5432/postgres
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest production_restore_drill_resumes_once -- --ignored --test-threads=1
 python3 scripts/operator/test_pipeline_tooling.py
 ```
 
-- [ ] **Step 3:** update pipeline-qualification.md (drill description; sample line `pending_runs_resumed=1` -> `2`). **Commit** `Restore drill covers a run stopped after the privacy pass`.
+  Expected: `PipelineRestoreOK: ... pending_runs_resumed=1 duplicate_effects=0`, and the drill's "executed nothing" guard does not fire. Then confirm the seed's fingerprint text contains a non-empty pass hash for both runs (print it once from the seed test, or query `pipeline_runs` in the scratch database), so the new fields are not all empty strings. This coverage runs in the non-required `pipeline qualification and restore` CI job (ci.yml:845-848).
+- [ ] **Step 3: Commit** `Fingerprint the privacy pass record in the restore drill`.
 
 ### Task 12: Gate (no commit)
 
@@ -444,25 +617,54 @@ RUSTFLAGS="-D warnings" cargo check -p trace-commons-server --features near-ai-s
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --no-run
 cargo clippy -p trace-commons-server --all-targets -- -A clippy::type_complexity -A clippy::collapsible_if -A clippy::manual_option_as_slice -A clippy::useless_vec -A clippy::redundant_pattern_matching
 RUSTFLAGS="-D warnings" cargo test --workspace
-RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored --test-threads=1
-RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg -- --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --lib pipeline_upgrade -- --ignored --test-threads=1   # needs TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipeline_runtime_pg     # parallel, as CI runs it
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export   # CI requires "1 passed"
 python3 scripts/operator/test_pipeline_tooling.py
+python3 scripts/operator/pipeline.py qualify --postgres-admin-url postgres://$USER@127.0.0.1:5432/postgres
 grep -rn "\.rescrub(" crates/ | wc -l    # 0
 ```
 
-Capture a baseline of the runtime_pg and ingest-bin failure counts on the base commit before Task 1, and compare the final counts against it (fresh `admission_test_*` database for each run).
+`pipeline.py qualify` runs the corpus harness (CORPUS:1822, ignored, run through the command) and the restore drill. Check `privacy_quarantine_approved` (CORPUS:2869-2880) still observes `admission_decision = quarantine`, `privacy_state = medium`; `observed_privacy_state` (CORPUS:1203-1214) reads Admission's decision and needs no pass case, because no corpus fixture escalates (the pass-through boundary leaves risk unchanged). Compare the RT, ingest-bin and upgrade counts against the baseline taken before Task 1 (fresh databases for each run).
 
 ## Review focus
 
-- No path runs the classifier at the receipt (`grep -rn "rescrub_classifier" crates/trace-commons-server/src` shows only VPA and the pass).
-- No path hands the Review policy the raw source once a boundary exists; no fallback on classifier error.
+- No path runs the classifier at the receipt (`grep -rn "rescrub_classifier" crates/trace-commons-server/src` shows only VPA, the doubles' definitions and the pass).
+- No path hands the Review policy the raw source once a boundary exists; no fallback on classifier error; no approval of a `privacy_pass_required` run without a pass (predicate and CHECK).
 - The pass record and logs are label/hash only.
-- Escalated runs are reachable by the queue, claim and assessment paths, and an approval must name `privacy_review_required`.
-- A rollback binary (V116 code on a V117 database) reads every row the new binary writes: `pipeline_run_from_row` reads by column name (`row.get("tenant_id")`, VP:7224), so extra columns are ignored, and the pass ref uses an existing artifact kind (P2). Rollback hazard: the old binary has no pass, so it would run Review on a run received by the new binary (whose source is deterministic-only) and approve unclassified content. The runbook (Task 10) must require, before a rollback below this revision, that every `next_phase = 'review'` run with `privacy_pass_object_ref_id IS NULL` and `created_at` after the deploy is contained or drained first; Task 10 adds the query, and the same for staged `privacy-pass` attempt rows, which make the old binary's sweep fail its whole pass (VP:10054-10057).
+- Escalated runs are reachable by the queue, claim and assessment paths only after the pass is recorded; an approval must name every hold; an assessment that predates the pass never releases an escalated run.
+- `redaction_hash` is never written by the pass; `redaction_counts` and `redaction_pipeline_version` are.
+- A rollback binary (V116 code on a V117 database) reads every row the new binary writes: `pipeline_run_from_row` reads by column name (`row.get("tenant_id")`, VP:7224), so extra columns are ignored, and the pass ref uses an existing artifact kind (P2). It cannot approve a run received after V117 without a pass (the CHECK), and its sweep fails on a staged `privacy-pass` row, which the runbook drains first (Task 10).
 
 ## Questions for the owner
 
-1. D2 follow-up: should `main_status_for_pipeline` map a run failed with `privacy_classification_failed` to `quarantined` instead of `accepted`? Server-only, existing vocabulary.
-2. Spec correction 3: is a server-committed Review rejection (rule id `privacy_pass_human_review_rejected_v1`) acceptable, or should the bundle's Review policy learn to honour an assessment on an Admit run (a bundle and qualification change, which the spec rules out)?
-3. Legacy exports' implicit fail-closed on pipeline submissions (Task 9 note): file the follow-up?
+1. P9: a run received before V117 whose assessment predates its escalating pass is held with no re-assessment path, because assessments are append-only and one per run (V105:47, 240). Is the fail-closed hold (exits: withdrawal or containment) acceptable, or should V117 also let a superseded assessment be replaced (a DELETE grant or a supersession column on `pipeline_review_assessments`)? The pre-deploy count in Task 10 says how many runs this concerns.
+
+## Critique resolution index
+
+| # | Resolution |
+|---|---|
+| 0 | `privacy_pass_required` + CHECK + `commit_review` predicate with `privacy_pass_missing`; `approval_without_a_pass_is_refused` (Task 5) |
+| 1 | Claimable only after the pass; superseded assessment ignored (P9); label `privacy_pass_review_required`; escalation defined by P3 (Task 6). Partly: "park for a fresh one" becomes a fail-closed hold with no re-assessment path (V105:47, :240), owner question 1 |
+| 2 | `legacy_readers_never_emit_a_pipeline_source` (Task 9, Q3) |
+| 3, 16 | Timeout bounded by the lease cap, refused at build for a classifying boundary (P8, Task 8) |
+| 4 | `record_privacy_pass` requires exactly one moved row; same-dispatch test (Tasks 4, 7) |
+| 5 | Explicit `encode_pipeline_artifact_bytes` and `is_pipeline_artifact_wrapper` assertion (Task 5) |
+| 6, 12 | Approval link columns (Q2); REV-003 :565-570 edits (Tasks 3, 7, 10) |
+| 7, 11 | Counts and pipeline version written back; `redaction_hash` deterministic with reasons (P5, Task 4) |
+| 8 | P7 restated; lease-loss test (Task 5) |
+| 9 | End-to-end withdrawal through the propagation worker, mapping asserted (Task 9) |
+| 10, 19 | One pending run kept; fingerprint-only drill change, run through `pipeline.py restore-drill` (Task 11). "Generalise to N pending runs" declined per the owner; pass resume is proved by crash-matrix tests (Task 5) |
+| 13 | Distinct label and `hold_reason` (Task 6) |
+| 14, 28 | Grep counts on `async fn rescrub_*`, 12 each (Task 1) |
+| 15 | deployment.md:836-846 added (Task 10) |
+| 17 | Upgrade-test database in Global constraints (Task 3) |
+| 18 | Filters after `--` everywhere |
+| 20, 21 | Task 1 pure refactor; existing tests in each green step; expected-red list after Task 2 |
+| 22 | Crash tests are red tests in Task 5 |
+| 23 | No corpus expectation moved; `pipeline.py qualify` in Task 12 |
+| 24 | No `#[ignore]` placeholders; the old test is deleted in Task 2, its Review side added in Task 8 |
+| 25 | Two services on one database (Task 8) |
+| 26 | Fresh tenant and per-test counters; parallel RT run in Task 12 |
+| 27 | Regression pins labelled; real red commands for Tasks 3, 6, 7 |

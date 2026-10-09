@@ -1,9 +1,10 @@
 # Pipeline privacy rescrub out of the receipt
 
-Status: draft for owner review, 2026-10-09.
-Scope: `trace-commons-server` only. No client or protocol change. The
-recommended storage option adds one migration (see "What changes in
-storage").
+Status: revised after owner review, 2026-10-09. The implementation plan is
+`docs/superpowers/plans/2026-10-09-pipeline-async-privacy-rescrub.md`; see
+"Corrections from the implementation plan" at the end.
+Scope: `trace-commons-server` only. No client or protocol change. One
+migration, V117 (see "What changes in storage").
 
 ## Problem
 
@@ -44,8 +45,8 @@ derives, which Admission keeps under this proposal. A network classifier
 with a 4.5 s round trip per window is neither bounded nor local, so it does
 not belong in the request path. If the intent was the opposite, that the
 classifier's verdict must be known before the receipt commits, then this
-proposal changes a contract rather than restoring one. Owner's call
-(open question 0).
+proposal changes a contract rather than restoring one. The owner confirmed
+the first reading (owner decision 0).
 
 The design spec's receipt path (2026-09-09-versioned-pipeline-design.md
 §6) lists seven steps and has no scrub step. The receipt-time rescrub came
@@ -106,17 +107,31 @@ run has no recorded privacy pass, the server does the following before it
 calls the bundle's Review policy:
 
 1. Load the source bytes (`load_source_bytes`, as Review does today).
-2. Run the boundary's classifier rescrub on them (`rescrub`).
-3. Store the result as a new encrypted object, keyed by content hash, as
-   REV-002 requires for transformed content. Record its object ref and the
-   merged residual-risk conditions on the run, in one transaction.
+2. Run the boundary's classifier rescrub on them (`rescrub_classifier`).
+3. Store the result as a new encrypted object. Its object key is per
+   attempt (`pipeline_attempt_object_id("privacy-pass", run_id,
+   lease_token)`), staged in `pipeline_attempt_artifacts` like Review's
+   approved object, so an attempt that never commits is deleted by the
+   attempt sweep. Its object ref id is derived from the run id alone. A
+   content-addressed key is not possible: every write encrypts with a fresh
+   salt and nonce (ruling FR1). REV-002's "stored by content hash" is met by
+   recording the plaintext hash. In one transaction, record the object ref,
+   the hashes of the pass's input and output, the merged residual-risk
+   conditions and the outcome on the run, and write the post-classifier
+   `privacy_risk`, `residual_risk_basis`, `redaction_counts` and
+   `redaction_pipeline_version` back to the submission row.
 4. Hand the Review policy that object's bytes as `source_artifact`, in place
    of the raw source.
 
 Review's approved content is then derived from scrubbed content. Score
 reads only approved content (`load_approved_bytes`, VP:11415). Exports are
-not confirmed yet; the implementation plan must check that every export
-reader takes approved content, and fix any that reads the source.
+confirmed to read approved content only: the pipeline export snapshot
+selects by `approved_object_ref_id` and reads no bytes, and the index
+rebuild reads only sealed index commands. Its privacy filter reads the
+submission's `privacy_risk`, which is why step 3 writes it back. Legacy
+readers that can reach a pipeline submission refuse it only because the
+pipeline's object wrapper does not decode as an envelope; a test pins that,
+and moving them to the reviewer metadata view is a separate follow-up.
 
 Review's evidence hashes its input as `source_content_hash` (VP:11222).
 After this change that is the hash of the pass's output, not the raw
@@ -137,40 +152,65 @@ Admission's decision is committed and is not rewritten, and the bundle's
 Review policy only knows to wait for a human when Admission said
 Quarantine. So the escalation is the server's, not the policy's.
 
-When the pass's merged risk is Medium or High, the server holds the run
+The pass escalates when its merged risk is above the risk the receipt
+stored: Medium or High for a run Admission admitted, High for a run
+Admission quarantined at Medium. When it escalates, the server holds the run
 itself before it calls the Review policy:
-- **No human assessment recorded yet** (`load_review_assessment`): the
-  server parks the run as `AwaitingReview` with `privacy_review_required`,
-  through the same state and queue as an Admission quarantine. The policy
-  is not called.
-- **Assessment recorded:** `record_review_assessment` moves the run back to
-  `pending`. The next dispatch finds the pass already recorded and an
-  assessment present. An approval goes on to the Review policy with the
-  pass's output. A rejection ends the run as the reviewer's rejection does
-  today.
-- **Low, or no change:** the run goes straight to the Review policy.
+- **No human assessment recorded after the pass** (`load_review_assessment`,
+  compared with the pass's `privacy_pass_recorded_at`): the server parks the
+  run as `AwaitingReview` with `privacy_pass_review_required`. That label is
+  the pass's own, so a reviewer can tell it from Admission's
+  `privacy_review_required`. The review queue's predicate, which today
+  requires an Admission quarantine, also admits a run the pass escalated,
+  and lists the hold reason. The policy is not called.
+- **Assessment recorded after the pass:** `record_review_assessment` moves
+  the run back to `pending`. The next dispatch finds the pass already
+  recorded and an assessment present. An approval must resolve
+  `privacy_pass_review_required` (and the Admission reason, if there is
+  one); it goes on to the Review policy with the pass's output, and the
+  server records the approving assessment's evidence hash and resolved
+  reasons on the pass record, so the approved outcome is linked to the human
+  decision. A rejection of a run Admission admitted is committed by the
+  server under rule id `privacy_pass_human_review_rejected_v1`, because the
+  bundle's Review policy ignores an assessment when Admission admitted.
+- **Not escalated:** the run goes to the Review policy, which holds an
+  Admission-quarantined run for a human as today.
 
-High is held for a human, not rejected automatically. Legacy's backstop
-quarantines and never rejects. And a classifier-only finding with no
-deterministic signal is the case where a human look is worth most. Open
-question 1 asks whether High should reject instead.
+A run that needs the pass is claimable for human review only once its pass
+is recorded, so no assessment can be given before the classifier has seen
+the trace. An assessment that predates the pass (possible only for a run
+received before this change) is ignored when the pass escalates; the run
+stays held, fail-closed.
+
+High is held for a human, not rejected automatically (owner decision).
+Legacy's backstop quarantines and never rejects. And a classifier-only
+finding with no deterministic signal is the case where a human look is worth
+most. A receipt-time High is still rejected by Admission.
 
 This keeps the bundle untouched: `ReviewInput`, the Review policy and the
 qualification fixtures do not change.
 
-**Failure.** Any classifier error is transient: the run goes to `Retry`
-with backoff, as legacy's backstop leaves an item held. After the retry
-budget is spent, the run fails with `privacy_classification_failed` and
-stays out of the corpus, with nothing approved. The pass never falls back to
+**Failure.** Any classifier error or timeout is retried: the run goes to
+`Retry` with backoff, as legacy's backstop leaves an item held. The budget is
+the run's own (5 attempts, legacy's count) and the backoff is legacy's, 30 s
+doubling. The call is bounded by legacy's 900 s, or less when the Review
+lease's renewal cap is shorter. After the retry budget is spent, the run
+fails with `privacy_classification_failed` and stays out of the corpus, with
+nothing approved. A contributor sees such a run as `quarantined`. The pass never falls back to
 the deterministic result alone: a configured control whose dependency fails
 refuses the path (the repository's fail-closed rule).
 
 **Crash safety.**
 - A crash between the classifier call and the transaction repeats the call.
-  The object is content-addressed, so a repeated store is idempotent.
+  The crashed attempt's object stays staged and the attempt sweep deletes
+  it; only one object ref is ever committed.
+- A live worker that loses its lease mid-pass may finish the classifier
+  while a second worker runs it again. Only one result is recorded; the
+  loser's commit is refused and its object deleted or swept.
 - A crash after the transaction finds the pass recorded and skips straight
   to the Review policy.
-- The pass runs at most once per run to completion.
+- The pass is recorded at most once per run; the classifier call can run
+  more than once.
 
 **Customer access.** Until the pass has run, the trace has no approved
 content, so it is in no corpus, score or export. SYS-004, "unresolved
@@ -188,13 +228,30 @@ is the content after the deterministic rescrub; the approved content, which
 is all that Score and exports read, is after the classifier."
 
 Recording the pass needs a place on the run for its object ref, conditions
-and outcome. Two options:
-- **(a) New columns on `pipeline_runs`, behind one migration.**
-  Recommended: the record sits beside the run's other phase state, under
-  the same RLS. The deploy becomes a Route B migration deploy instead of
+and outcome. Two options were considered:
+- **(a) New columns on `pipeline_runs`, behind one migration (V117).**
+  Taken: the record sits beside the run's other phase state, under the same
+  RLS. The deploy becomes a Route B migration deploy instead of
   binary-only.
 - **(b) A row in an existing per-run object table**, with no schema change.
-  Only if the plan finds one that fits without overloading its meaning.
+  Not possible: staging the pass object needs a new
+  `pipeline_attempt_artifacts.artifact` value, and V108 pins that set in a
+  CHECK, so any option needs a migration.
+
+V117 also adds `privacy_pass_required`, FALSE on every existing run and TRUE
+by default from then on, and a CHECK that refuses an approved object on a
+run that requires the pass and has none. `commit_review` refuses the same
+approval with a safe label first. A binary that predates this change,
+rolled back onto a V117 database, therefore cannot approve unclassified
+content.
+
+The submission row's `redaction_counts` and `redaction_pipeline_version`
+are updated from the pass. Its `redaction_hash` stays the deterministic
+envelope's: a withdrawal's tombstone is written from that column and a later
+receipt matches tombstones against the hash of its own deterministic
+envelope, and a changed `redaction_hash` revokes the submission's token
+bundles (V68). Legacy's backstop does refresh the hash; this is a
+deliberate difference.
 
 ## Alternatives considered
 
@@ -219,48 +276,70 @@ and outcome. Two options:
   double whose `rescrub_classifier` counts calls and sleeps 60 s must not
   delay `submit`. Its `rescrub_deterministic` is still called once, and the
   receipt returns `processing`.
-- **The pass runs once.** A Review dispatch runs the pass once and stores
-  one content-addressed object. A crash point after the classifier and
-  before the transaction repeats the call and stores no second object. A
-  crash after the transaction does not call the classifier again.
+- **The pass runs once.** A Review dispatch runs the pass once and commits
+  one object ref. A crash point after the classifier and before the
+  transaction repeats the call and commits one ref; the orphaned attempt
+  object is swept. A crash after the transaction does not call the
+  classifier again. A lease lost mid-pass records one result.
 - **Escalation.** A run that Admission admitted at Low and the pass finds
-  Medium or High parks `AwaitingReview` with `privacy_review_required`, and
-  the Review policy is not called. After an approving assessment the next
-  dispatch calls the policy once, with the pass's output and no second
-  classifier call. After a rejecting assessment the run ends rejected.
+  Medium or High parks `AwaitingReview` with `privacy_pass_review_required`,
+  and the Review policy is not called. After an approving assessment the
+  next dispatch calls the policy once, with the pass's output and no second
+  classifier call, and the run records the assessment's hash. After a
+  rejecting assessment the run ends rejected. A quarantined run is not
+  claimable before its pass, and an assessment recorded before the pass
+  never releases an escalated run.
+- **Approval guard.** An approval of a run that requires the pass and has
+  none is refused, by `commit_review` and by the CHECK.
 - **Failure.** A classifier error leaves the run in `Retry`. Exhausted
   retries fail it with `privacy_classification_failed` and no approved
   object.
 - **Downstream reads.** Score's input is derived from the pass's output,
   never from the source. A source carrying a planted prose-PII span that the
   double redacts must not appear in the bytes Score loads.
-- **Restore drill.** It covers a run stopped after the pass and before the
-  Review policy: the restore keeps the pass's object and record, and the
-  resume does not call the classifier again.
+- **Resume after the pass.** Runtime crash-matrix tests cover a run stopped
+  after the pass and before the Review policy: the resume does not call the
+  classifier again. The restore drill keeps its one pending run; its
+  database fingerprint gains the pass record, which both seeded runs now
+  carry.
+- **Legacy readers.** A pipeline submission whose stored source carries a
+  planted prose marker is refused by the legacy envelope readers and
+  exports, or never appears in their output.
 - **Stage 3 rerun.** On the pilot, `long-chunk-capped` is stored with
   status `processing` in under 2 s and reaches a terminal state. The
-  `pii-residual` case is still quarantined.
+  `pii-residual` case is still quarantined, but only after a worker
+  dispatch has run the pass; until then it reads `accepted`.
 
 ## Rollout
 
 The change moves the code revision, so it ships as one promote cycle: a
 build and a Route B deploy for the migration in "What changes in storage"
 (a); then `qualify`, the promote checks, sign and assemble; then requalify
-the pipeline tenant's bundle on the new revision. With option (b) the deploy
-is binary-only.
+the pipeline tenant's bundle on the new revision.
 
-## Open questions for the owner
+## Owner decisions
 
-0. **SUB-005's intent.** Does "MUST own synchronous privacy-risk handling"
-   mean the bounded, local handling this proposal keeps at Admission? Or
-   must the classifier's verdict be known before the receipt commits? If
-   the latter, this proposal amends SUB-005, and the contracts document
-   changes in the same PR as the code.
-1. **High.** Hold it for a human, as recommended and as legacy does, or
-   reject automatically with `privacy_risk_rejected`?
-2. **Client status while the pass is pending.** Should the submission
-   status say something like legacy's "Held pending an automated privacy
-   check" rather than "processing"? That needs a status value the clients
-   know, so it is a client change.
-3. **Retry budget and backoff for classifier errors.** Default: legacy's
-   backstop budget.
+0. **SUB-005's intent.** "MUST own synchronous privacy-risk handling" means
+   the bounded, local handling this proposal keeps at Admission. The
+   contracts document gets a clarifying sentence, not an amendment.
+1. **High.** Held for a human, as legacy does. Not rejected by the pass.
+2. **Client status while the pass is pending.** The receipt keeps
+   `processing`; no client change and no new status value. One server-side
+   mapping changes inside the existing vocabulary: a run that failed with
+   `privacy_classification_failed` reads `quarantined`, not `accepted`.
+3. **Retry budget and backoff for classifier errors.** Legacy's backstop
+   budget: 5 attempts, 30 s doubling, a 900 s call bound.
+4. **Rejection of an escalated Admit run.** Committed by the server, rule id
+   `privacy_pass_human_review_rejected_v1`. An approval is still the bound
+   policy's, linked to the assessment on the pass record.
+5. **Legacy readers.** Their refusal of pipeline submissions is pinned by a
+   test now; moving them to the reviewer metadata view is a follow-up.
+
+## Corrections from the implementation plan
+
+The plan's "Spec corrections" list the places where this document was wrong
+or impossible as first written: a content-addressed object (now per-attempt
+keys with staging and sweep), the review queue's predicate (widened), the
+policy's handling of an assessment on an Admit run (server-committed
+rejection), the terminal label on retry exhaustion (new code), and storage
+option (b) (impossible). The text above has been updated to match.
