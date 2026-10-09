@@ -18,7 +18,26 @@
     "mark_kinds": [
       "idle_sessions"
     ],
-    "count": 2
+    "count": 2,
+    "text": {
+      "title": "2 sessions from Claude Code have been idle for 3 days or more",
+      "body": "They look finished. Nothing is sent until you decide on each one, and keeping one on this computer is just as good an answer.",
+      "actions": [
+        {
+          "id": "review",
+          "label": "Review"
+        },
+        {
+          "id": "not_now",
+          "label": "Not now"
+        }
+      ],
+      "panel_row": "Some sessions have been idle for 3 days or more"
+    },
+    "mark_text": {
+      "accessibility": "2 of them have been idle for 3 days or more.",
+      "tooltip": "2 idle for 3 days or more."
+    }
   },
   "next_digest_at": "1970-01-01T00:00:00Z",
   "health": {

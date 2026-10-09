@@ -283,6 +283,10 @@ extension DaemonData {
         public let tier: String?
         public let calibration: String
         public let basis: String
+        /// Whether to draw this estimate at all: only under a published
+        /// table with two or more tiers. `nil` from an older daemon draws
+        /// nothing.
+        public let drawn: Bool?
     }
 
     /// A queue entry's `attested_inference`
@@ -438,6 +442,14 @@ extension DaemonData {
         public let mark: String?
         /// The kind labels that lit `mark`, highest precedence first.
         public let markKinds: [String]?
+        /// The credit that newly became final, to one decimal; present only
+        /// with verdict news and only when it is not zero.
+        public let creditFinal: Double?
+        /// The leading card's words, composed by the daemon; present only
+        /// with a lead. A shell draws these and composes nothing.
+        public let text: NudgeText?
+        /// The lit mark's words; present only while `mark` is lit.
+        public let markText: NudgeMarkText?
 
         public enum CodingKeys: String, CodingKey {
             case state
@@ -446,7 +458,41 @@ extension DaemonData {
             case cooldownUntil = "cooldown_until"
             case mark
             case markKinds = "mark_kinds"
+            case creditFinal = "credit_final"
+            case text
+            case markText = "mark_text"
         }
+    }
+
+    /// `status.nudge.text`: a card's title, body, buttons and menu-bar panel
+    /// row, as the daemon composed them.
+    public struct NudgeText: Codable, Equatable, Sendable {
+        public let title: String
+        /// Empty when the title says everything.
+        public let body: String
+        public let actions: [NudgeAction]
+        public let panelRow: String
+
+        public enum CodingKeys: String, CodingKey {
+            case title
+            case body
+            case actions
+            case panelRow = "panel_row"
+        }
+    }
+
+    /// One button on a nudge: a stable id (`review`, `see_history`,
+    /// `not_now`) and its label.
+    public struct NudgeAction: Codable, Equatable, Sendable {
+        public let id: String
+        public let label: String
+    }
+
+    /// `status.nudge.mark_text`: the mark's accessibility sentence and its
+    /// tooltip clause.
+    public struct NudgeMarkText: Codable, Equatable, Sendable {
+        public let accessibility: String
+        public let tooltip: String
     }
 
     /// `status.idle_sessions` (nudge U4). Decoded only; no screen draws it
