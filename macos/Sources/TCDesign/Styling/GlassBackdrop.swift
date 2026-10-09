@@ -166,7 +166,13 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
     @MainActor
     static func configure(_ window: NSWindow) {
         window.isOpaque = false
-        window.backgroundColor = .clear
+        // Not quite clear: the window server passes a click on a fully
+        // transparent pixel to the window below, so the pane gaps and the
+        // panes' rounded corners took no clicks, and the edges and corners
+        // there would not start a resize. At this alpha nothing shows, and
+        // the whole frame catches the resize cursor (and, with
+        // `isMovableByWindowBackground`, a drag in a gap moves the window).
+        window.backgroundColor = NSColor(white: 0, alpha: 0.004)
         window.hasShadow = false
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -175,12 +181,17 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
         // No appearance of our own: the window follows the person's system
         // appearance, light or dark, and every token resolves for it.
         // An empty unified toolbar makes the title bar taller and brings the
-        // real traffic lights in from the window's corner, so with the 10pt
-        // window padding they sit inside the main pane, not on its rim.
+        // real traffic lights in from the window's corner, so they sit
+        // inside the main pane (which runs to the window's edge), not on
+        // its rim.
         if window.toolbar == nil {
             window.toolbar = NSToolbar(identifier: "glass-window")
         }
         window.toolbarStyle = .unified
+        // No title-bar separator: the panes run under the title bar, so its
+        // hairline was drawn across the window's top and showed as a line in
+        // each gap between the panes (owner, 2026-10-08).
+        window.titlebarSeparatorStyle = .none
     }
 
     private final class WindowProbe: NSView {
