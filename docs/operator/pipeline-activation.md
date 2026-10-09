@@ -1398,8 +1398,10 @@ the embedder model is loaded once. The pipeline gets:
   `NoveltyUtility` credit check, so a policy changed by
   `PUT /v1/admin/tenant-policy` applies to the next one, as it does in
   `main`. A policy row that cannot be read or decoded refuses the receipt
-  with a 503 `pipeline_authority_read_failed`, and a credit check retries; it
-  never falls back to the environment map or to "no policy". A receipt with
+  with a 503 `pipeline_authority_read_failed`. At Settle the run waits in an
+  uncharged retry under that label, with no leg dispatched or settled, and
+  settles once a later read succeeds. It never falls back to the
+  environment map or to "no policy". A receipt with
   no authority at all is answered 503 `authority_control_missing`. (The boot
   refusal `pipeline_routed_tenant_db_policy_reads` is gone; `main` already
   refuses database policy reads without a DB mirror.)
