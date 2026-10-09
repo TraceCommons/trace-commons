@@ -326,9 +326,15 @@ def _validate_comparison_report(report):
     require(set(report["permitted_counts"]) <= {rule["rule"] for rule in PERMITTED_RULES}, malformed)
     require(report["permitted_rules"] == list(PERMITTED_RULES), malformed)
     # `permitted_total` counts pairs, and a pair that several rules permit
-    # is counted once for each rule in `permitted_counts`.
-    rule_sum = sum(report["permitted_counts"].values())
-    require(report["permitted_total"] <= rule_sum and (report["permitted_total"] == 0) == (rule_sum == 0), malformed)
+    # is counted once for each rule in `permitted_counts`. A rule permits
+    # at most each permitted pair.
+    rule_counts = report["permitted_counts"].values()
+    rule_sum = sum(rule_counts)
+    require(
+        max(rule_counts, default=0) <= report["permitted_total"] <= rule_sum
+        and (report["permitted_total"] == 0) == (rule_sum == 0),
+        malformed,
+    )
     for field in ("first_unexplained_position", "alignment_lost_position"):
         require(report[field] is None or _is_count(report[field]), malformed)
     # The pair that lost the alignment is the last compared pair.

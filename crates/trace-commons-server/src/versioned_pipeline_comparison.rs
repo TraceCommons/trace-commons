@@ -1708,7 +1708,7 @@ mod tests {
             _ => None,
         };
         let mut summary = ComparisonSummary::default();
-        let (mut b, mut c) = pair_at(0);
+        let (b, mut c) = pair_at(0);
         c.admission = AdmissionLabel::Quarantine;
         c.member = false;
         let result = compare_records_with(&b, &c, &permit);
@@ -1719,7 +1719,6 @@ mod tests {
             }
         );
         summary.observe(&b, &c, &result);
-        b.position = 1;
         let (b, c) = pair_at(1);
         summary.observe(&b, &c, &TraceComparison::Equal);
         let (b, c) = pair_at(2);
@@ -1739,27 +1738,32 @@ mod tests {
 
     #[test]
     fn the_medium_risk_rule_needs_medium_on_each_side() {
+        // The risk differs, and the admission pair is not permitted.
+        let both = unexplained(&["privacy_risk", "admission"]);
         let (b, mut c) = medium_pair(&["found_and_removed"]);
         c.privacy_risk = Some("low".into());
-        let result = compare_records(&b, &c);
-        assert_ne!(result, permitted_medium());
+        assert_eq!(compare_records(&b, &c), both);
         let (mut b, c) = medium_pair(&["found_and_removed"]);
         b.privacy_risk = Some("low".into());
-        assert_ne!(compare_records(&b, &c), permitted_medium());
-        for change in [
-            (|c: &mut ComparisonRecord| c.terminal = false) as fn(&mut ComparisonRecord),
-            |c| {
-                c.scored = false;
-                c.gate = None;
-            },
-            |c| c.receipt_code = 202,
-        ] {
+        assert_eq!(compare_records(&b, &c), both);
+        // A second difference is reported alone: the rule still permits the
+        // admission.
+        type Change = fn(&mut ComparisonRecord);
+        let changes: [(Change, &[&'static str]); 3] = [
+            (|c| c.terminal = false, &["terminal"]),
+            (
+                |c| {
+                    c.scored = false;
+                    c.gate = None;
+                },
+                &["scored"],
+            ),
+            (|c| c.receipt_code = 202, &["receipt_code"]),
+        ];
+        for (change, fields) in changes {
             let (b, mut c) = medium_pair(&["found_and_removed"]);
             change(&mut c);
-            assert!(
-                !matches!(compare_records(&b, &c), TraceComparison::Permitted { .. }),
-                "a second difference must not be permitted"
-            );
+            assert_eq!(compare_records(&b, &c), unexplained(fields), "{fields:?}");
         }
     }
 }

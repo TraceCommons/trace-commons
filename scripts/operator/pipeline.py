@@ -883,6 +883,7 @@ def _compare_self_test(args, run):
             risk["unexplained_counts"] == {"admission": 1}
             and risk["unexplained_total"] == 1
             and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
+            and risk["permitted_total"] == 1
             and not risk["partial"]
             and risk["alignment_lost_position"] is None
             and not any(risk["distribution"][side]["refused"] for side in SIDES),

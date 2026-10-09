@@ -5675,6 +5675,12 @@ class ComparisonReportValidationTests(unittest.TestCase):
                 _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted={_PERMITTED_RULE: 1}, permitted_total=2)
             )
             self._refused(more, "comparison_report_malformed")
+            # A rule permits at most each permitted pair: one pair cannot give
+            # a rule the count 2.
+            fewer = _comparison_report(
+                _COMPARE_LOCAL, **fields, **_compared_fields(10, permitted={_PERMITTED_RULE: 2, "second_rule": 1}, permitted_total=1)
+            )
+            self._refused(fewer, "comparison_report_malformed")
 
     def test_the_digest_is_checked(self):
         report = _comparison_report(_COMPARE_LOCAL)
