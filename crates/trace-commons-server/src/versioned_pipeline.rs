@@ -51,8 +51,8 @@ use crate::trace_corpus_storage::{
 use crate::versioned_pipeline_activation::RoutingState;
 use crate::versioned_pipeline_authority::{
     PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL, PIPELINE_AUTHORITY_READ_FAILED_LABEL,
-    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL, PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL,
-    PipelineAuthorityProvider, PipelinePrivacyBoundary,
+    PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL, PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
+    PIPELINE_PRIVACY_RESCRUB_FAILED_LABEL, PipelineAuthorityProvider, PipelinePrivacyBoundary,
 };
 use crate::versioned_pipeline_bundle::{
     MinimalPolicyBundle, PIPELINE_BUNDLE_INVALID_LABEL, PIPELINE_DEPENDENCY_MISSING_LABEL,
@@ -281,6 +281,17 @@ pub const PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL: &str = "pipeline_attempt_arti
 /// recorded once per run and never re-run (decision P7). The refused call
 /// writes nothing.
 pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_already_recorded";
+/// Safe label of a Review approval refused because the run needs a privacy
+/// pass (`privacy_pass_required`, every run received from V117 on) and has
+/// none recorded. `commit_review` returns it instead of the raw CHECK
+/// violation (`pipeline_runs_privacy_pass_before_approval`), which stays as
+/// the backstop for a binary without the predicate. The refused commit
+/// writes nothing.
+pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
+/// The ceiling on one privacy pass classifier call. A call that has not
+/// returned by then is a classifier failure
+/// (`privacy_classification_failed`).
+const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
 /// Safe label of a receipt for a submission id that the legacy path owns
 /// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
 /// path, or a legacy submission row holds the id. A conflict with a legacy
@@ -1077,6 +1088,11 @@ pub struct PipelineRunRecord {
     pub score_neighbor_ref: Option<String>,
     pub score_neighbor_hash: Option<String>,
     pub settle_selection_hash: Option<String>,
+    /// Whether Review may approve this run only once a privacy pass is
+    /// recorded (V117). `false` on every run received before V117; the
+    /// column default makes it `true` on every run received after, by
+    /// either binary.
+    pub privacy_pass_required: bool,
     /// The Review-start privacy pass's record (V117). The six `privacy_pass_*`
     /// columns are set together when the pass commits and are `None` until
     /// then (and on every run that passed Review before V117). Ids, hashes,
@@ -2486,6 +2502,13 @@ impl PgPipelineStore {
     /// `PIPELINE_POLICY_NOT_RUNNABLE_LABEL`, writing nothing, when an operator
     /// suspended the policy while the attempt ran. The worker releases the run
     /// uncharged, and it commits after the resume.
+    ///
+    /// An approval of a run that needs a privacy pass (`privacy_pass_required`,
+    /// every run received from V117 on) and has none recorded is refused with
+    /// `PIPELINE_PRIVACY_PASS_MISSING_LABEL`, writing nothing (critique 0);
+    /// the CHECK `pipeline_runs_privacy_pass_before_approval` backs it. The
+    /// derived record names the privacy pass object as its input when a pass
+    /// is recorded, since that is the object whose hash it stores.
     pub async fn commit_review(
         &self,
         run: &PipelineRunRecord,
@@ -2529,6 +2552,12 @@ impl PgPipelineStore {
             ));
         }
 
+        // The derived record names the object Review read, whose hash it
+        // stores in `input_hash`: the privacy pass's output once a pass is
+        // recorded, else (a run received before V117) the source.
+        let derived_input_object_ref_id = run
+            .privacy_pass_object_ref_id
+            .unwrap_or(run.source_object_ref_id);
         let (approved_revision_id, approved_object_ref_id, approved_content_hash) =
             if let Some(approved) = &approved {
                 tx.execute(
@@ -2565,7 +2594,7 @@ impl PgPipelineStore {
                         &run.submission_id,
                         &run.trace_id,
                         &approved.worker_identity,
-                        &run.source_object_ref_id,
+                        &derived_input_object_ref_id,
                         &approved.source_content_hash,
                         &approved.object_ref.object_ref_id,
                     ],
@@ -2630,8 +2659,15 @@ impl PgPipelineStore {
         } else {
             PipelineRunState::Pending
         };
-        let row = tx
-            .query_one(
+        // Critique 0: an approval of a run that needs a privacy pass
+        // requires one recorded. `ensure_current_lease` already passed under
+        // the run lock, so no row here means the pass is missing; the
+        // refusal carries a safe label, never the raw CHECK violation
+        // (`pipeline_runs_privacy_pass_before_approval`), which stays as the
+        // backstop for a binary without this predicate. Returning drops the
+        // transaction, so the inserts above roll back.
+        let Some(row) = tx
+            .query_opt(
                 "UPDATE pipeline_runs
                  SET next_phase = $3, state = $4,
                      attempt_count = CASE WHEN $3 = 'none' THEN attempt_count ELSE 0 END,
@@ -2642,6 +2678,8 @@ impl PgPipelineStore {
                      next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
                    AND lease_token = $8 AND lease_expires_at > NOW()
+                   AND ($6::uuid IS NULL OR NOT privacy_pass_required
+                        OR privacy_pass_object_ref_id IS NOT NULL)
                  RETURNING *",
                 &[
                     &run.tenant_id,
@@ -2654,7 +2692,12 @@ impl PgPipelineStore {
                     &lease_token,
                 ],
             )
-            .await?;
+            .await?
+        else {
+            return Err(DatabaseError::Constraint(
+                PIPELINE_PRIVACY_PASS_MISSING_LABEL.to_string(),
+            ));
+        };
         let updated = pipeline_run_from_row(&row)?;
         // PR 4: the attempt's staged object -- the approved content, when
         // this commit approved one -- moves to `committed` in this same
@@ -7601,6 +7644,7 @@ fn pipeline_run_from_row(row: &Row) -> Result<PipelineRunRecord, DatabaseError> 
         score_neighbor_ref: row.get("score_neighbor_ref"),
         score_neighbor_hash: row.get("score_neighbor_hash"),
         settle_selection_hash: row.get("settle_selection_hash"),
+        privacy_pass_required: row.get("privacy_pass_required"),
         privacy_pass_object_ref_id: row.get("privacy_pass_object_ref_id"),
         privacy_pass_content_hash: row.get("privacy_pass_content_hash"),
         privacy_pass_source_hash: row.get("privacy_pass_source_hash"),
@@ -10660,6 +10704,191 @@ impl PipelineService {
         self.load_object_bytes(run, run.source_object_ref_id).await
     }
 
+    /// Reads the privacy pass object recorded on `run`, through the same
+    /// operability-guarded read as the source, and requires the decoded
+    /// bytes to hash to the `privacy_pass_content_hash` the pass recorded
+    /// (`artifact_integrity_failed` otherwise, as for any stored object that
+    /// no longer matches its record).
+    async fn load_privacy_pass_bytes(&self, run: &PipelineRunRecord) -> anyhow::Result<Vec<u8>> {
+        let (Some(object_ref_id), Some(content_hash)) = (
+            run.privacy_pass_object_ref_id,
+            run.privacy_pass_content_hash.as_deref(),
+        ) else {
+            anyhow::bail!(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL);
+        };
+        let bytes = self.load_object_bytes(run, object_ref_id).await?;
+        anyhow::ensure!(
+            sha256_prefixed(&bytes) == content_hash,
+            PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL
+        );
+        Ok(bytes)
+    }
+
+    /// The bound on one privacy pass classifier call.
+    fn privacy_pass_timeout(&self) -> std::time::Duration {
+        PIPELINE_PRIVACY_PASS_MAX_TIMEOUT
+    }
+
+    /// The Review-start privacy pass (spec 2026-10-09): returns the run as
+    /// recorded and the bytes Review reads.
+    ///
+    /// A run whose pass is recorded reads the recorded object back and makes
+    /// no classifier call: a pass is recorded once per run and never re-run
+    /// (decision P7). Otherwise the pass loads the source (the receipt's
+    /// post-deterministic envelope), runs the boundary's classifier half on
+    /// it under `privacy_pass_timeout`, and merges the receipt's basis with
+    /// the classifier's conditions. It escalates when the classified risk is
+    /// strictly above the receipt-time risk, both on Admission's scale
+    /// (`pipeline_privacy_risk`, decision P3). It stores the output under
+    /// this attempt's own key (staged as `privacy-pass`, so the sweep deletes
+    /// it if nothing commits it), then records the pass on the run
+    /// (`record_privacy_pass`). A refused record deletes this attempt's
+    /// object. The classifier call can run more than once for one run (a
+    /// crash before the record, or a lease lost mid-call); exactly one result
+    /// is recorded.
+    ///
+    /// Fail-closed: no boundary is `privacy_control_missing`, and Review is
+    /// never run on the unclassified source; a classifier error or timeout
+    /// is the permanent `PolicyError` `privacy_classification_failed`, never
+    /// a fall back to the deterministic result.
+    async fn ensure_privacy_pass(
+        &self,
+        run: &PipelineRunRecord,
+    ) -> anyhow::Result<(PipelineRunRecord, Vec<u8>)> {
+        if run.privacy_pass_object_ref_id.is_some() {
+            let bytes = self.load_privacy_pass_bytes(run).await?;
+            return Ok((run.clone(), bytes));
+        }
+        let classification_failed = || -> anyhow::Error {
+            match PolicyError::permanent(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL) {
+                Ok(error) => error.into(),
+                Err(_) => anyhow::anyhow!(PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL),
+            }
+        };
+        let privacy = self
+            .privacy
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!(PIPELINE_PRIVACY_CONTROL_MISSING_LABEL))?;
+        let source = self.load_source_bytes(run).await?;
+        let source_hash = sha256_prefixed(&source);
+        let mut envelope: TraceContributionEnvelope = serde_json::from_slice(&source)
+            .map_err(|_| anyhow::anyhow!(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL))?;
+        let receipt = self
+            .store
+            .load_submission_receipt_privacy(&run.tenant_id, run.submission_id)
+            .await?;
+        let receipt_basis = receipt
+            .residual_risk_basis
+            .iter()
+            .map(|label| ResidualRiskCondition::from_label(label))
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(classification_failed)?;
+        let classifier_basis = match tokio::time::timeout(
+            self.privacy_pass_timeout(),
+            privacy.rescrub_classifier(&mut envelope),
+        )
+        .await
+        {
+            Ok(Ok(basis)) => basis,
+            Ok(Err(_)) | Err(_) => return Err(classification_failed()),
+        };
+        let mut merged = receipt_basis.clone();
+        for condition in classifier_basis {
+            if !merged.contains(&condition) {
+                merged.push(condition);
+            }
+        }
+        let receipt_risk = pipeline_privacy_risk(&receipt.residual_pii_risk, &receipt_basis);
+        let risk = pipeline_privacy_risk(&envelope.privacy.residual_pii_risk, &merged);
+        let outcome = if risk > receipt_risk {
+            PrivacyPassOutcome::Escalated
+        } else {
+            PrivacyPassOutcome::Cleared
+        };
+        let basis_labels = safe_residual_risk_basis_labels(&merged);
+
+        let bytes = serde_json::to_vec(&envelope)?;
+        let content_hash = sha256_prefixed(&bytes);
+        let wrapper = encode_pipeline_artifact_bytes(&bytes)?;
+        let object_id = pipeline_attempt_object_id(
+            PipelineAttemptArtifact::PrivacyPass.as_str(),
+            run.run_id,
+            required_lease_token(run)?,
+        );
+        // Prepared, staged, then published, both object-store calls on the
+        // blocking pool (N-6), as the Review arm stores the approved object.
+        let store = self.artifact_store.clone();
+        let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
+        let prepared = artifact_store_call(move || {
+            store.prepare_serialized_json(
+                tenant.as_str(),
+                TraceArtifactKind::ContributionEnvelope,
+                &object_id,
+                &wrapper,
+            )
+        })
+        .await?;
+        self.store
+            .stage_attempt_artifact(
+                run,
+                PipelineAttemptArtifact::PrivacyPass,
+                &prepared.receipt().object_key,
+                &prepared.receipt().ciphertext_sha256,
+                self.attempt_artifact_cleanup_after(Phase::Review),
+            )
+            .await?;
+        let store = self.artifact_store.clone();
+        let written = artifact_store_call(move || store.publish_serialized_json(&prepared)).await?;
+        self.inject_crash(PipelineCrashPoint::AfterPrivacyPassArtifactStorage)?;
+
+        let object_ref =
+            privacy_pass_object_ref(run, &written, bytes.len(), &self.object_store_name);
+        let recorded = self
+            .store
+            .record_privacy_pass(
+                run,
+                PrivacyPassRecord {
+                    object_ref: &object_ref,
+                    ciphertext_sha256: &written.ciphertext_sha256,
+                    content_hash: &content_hash,
+                    source_hash: &source_hash,
+                    basis_labels: &basis_labels,
+                    outcome,
+                    residual_pii_risk: envelope.privacy.residual_pii_risk,
+                    redaction_counts: &envelope.privacy.redaction_counts,
+                    redaction_pipeline_version: &envelope.privacy.redaction_pipeline_version,
+                },
+            )
+            .await;
+        let recorded = match recorded {
+            Ok(recorded) => recorded,
+            Err(error) => {
+                // Nothing names this attempt's object: delete it, best
+                // effort, as a refused Review commit deletes its approved
+                // object. A failed delete leaves it to the sweep.
+                if phase_commit_refused(&error) {
+                    self.delete_attempt_objects(
+                        &run.tenant_id,
+                        std::iter::once(&written),
+                        "privacy_pass_object_delete_failed",
+                    )
+                    .await;
+                }
+                return Err(match error {
+                    DatabaseError::Constraint(label)
+                        if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                            || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL =>
+                    {
+                        anyhow::anyhow!(label)
+                    }
+                    error => error.into(),
+                });
+            }
+        };
+        self.inject_crash(PipelineCrashPoint::AfterPrivacyPassCommit)?;
+        Ok((recorded, bytes))
+    }
+
     /// Reads the approved-content object the run's Review commit wrote,
     /// decoding the P1 wrapper and requiring the decoded bytes hash to the
     /// `approved_content_hash` the run committed -- never trusting a
@@ -11585,7 +11814,12 @@ impl PipelineService {
                 let admission = self
                     .committed_decision::<AdmissionDecision>(run, Phase::Admission)
                     .await?;
-                let source_artifact = self.load_source_bytes(run).await?;
+                // The server's privacy pass runs before the Review policy,
+                // which reads its output, never the source. The run as
+                // recorded carries the pass record `commit_review` checks
+                // and links; its lease is the claim's.
+                let (run, source_artifact) = self.ensure_privacy_pass(run).await?;
+                let run = &run;
                 let source_content_hash = sha256_prefixed(&source_artifact);
                 // Ruling T3-5: loads whatever assessment a reviewer has
                 // already recorded for this run, so `MinimalReviewPolicy`
@@ -16024,6 +16258,7 @@ mod tests {
             score_neighbor_ref: None,
             score_neighbor_hash: None,
             settle_selection_hash: None,
+            privacy_pass_required: true,
             privacy_pass_object_ref_id: None,
             privacy_pass_content_hash: None,
             privacy_pass_source_hash: None,

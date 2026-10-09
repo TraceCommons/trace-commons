@@ -77,3 +77,18 @@ GRANT UPDATE (privacy_pass_object_ref_id, privacy_pass_content_hash,
               privacy_pass_approval_assessment_hash,
               privacy_pass_approval_resolved_reasons)
     ON pipeline_runs TO trace_ingest_runtime;
+
+-- A run received from here on needs a privacy pass before Review may
+-- approve it. Existing rows are exempt (FALSE); the default then flips, so
+-- a receipt written by either binary gets TRUE, and an approval by a binary
+-- that has no pass fails this CHECK instead of approving unclassified bytes.
+-- The runtime is granted no UPDATE on the column: only the receipt's INSERT
+-- (through the default) sets it.
+ALTER TABLE pipeline_runs
+    ADD COLUMN privacy_pass_required BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pipeline_runs
+    ALTER COLUMN privacy_pass_required SET DEFAULT TRUE,
+    ADD CONSTRAINT pipeline_runs_privacy_pass_before_approval CHECK (
+        NOT privacy_pass_required
+        OR approved_object_ref_id IS NULL
+        OR privacy_pass_object_ref_id IS NOT NULL);

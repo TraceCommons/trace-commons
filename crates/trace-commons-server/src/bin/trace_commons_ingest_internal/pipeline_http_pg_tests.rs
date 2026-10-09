@@ -1025,8 +1025,9 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
 
     // M11: the submitted envelope's and the approved content's object refs
     // carry the configured store's name, as a legacy receipt's do, and so
-    // does the ref of the index command Score stored (Zaki review 1, item 1:
-    // the minimal bundle stores no neighbour set).
+    // do the privacy pass object's ref (the second `review_snapshot`) and
+    // the ref of the index command Score stored (Zaki review 1, item 1: the
+    // minimal bundle stores no neighbour set).
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, "tenant-a").await;
     let stores: Vec<(String, String)> = tx
@@ -1045,6 +1046,10 @@ async fn real_http_receipt_completes_and_resumes_after_restart() {
     assert_eq!(
         stores,
         vec![
+            (
+                "review_snapshot".to_string(),
+                TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
+            ),
             (
                 "review_snapshot".to_string(),
                 TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE.to_string()
@@ -3597,8 +3602,9 @@ async fn the_revocation_worker_deletes_the_score_objects_of_a_withdrawn_run() {
         .await
         .expect("the worker runs");
     assert_eq!(
-        first_pass.checked, 4,
-        "one deletion per object: the source, the approved revision, and the two Score objects"
+        first_pass.checked, 5,
+        "one deletion per object: the source, the privacy pass object, the approved revision, \
+         and the two Score objects"
     );
     assert_eq!(
         (first_pass.failed, first_pass.skipped),
@@ -3802,11 +3808,13 @@ async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run(
         kinds,
         vec![
             StorageTraceObjectArtifactKind::ReviewSnapshot,
+            StorageTraceObjectArtifactKind::ReviewSnapshot,
             StorageTraceObjectArtifactKind::SubmittedEnvelope,
             StorageTraceObjectArtifactKind::WorkerIntermediate,
             StorageTraceObjectArtifactKind::WorkerIntermediate,
         ],
-        "the source, the approved revision, and the two Score objects are object refs"
+        "the source, the privacy pass object, the approved revision, and the two Score \
+         objects are object refs"
     );
     let tenant_ref = tenant_storage_ref(&tenant);
     // The local store answers presence from the object key alone.
@@ -3851,7 +3859,7 @@ async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run(
     .expect("the worker runs");
     assert_eq!(
         (pass.checked, pass.completed, pass.failed, pass.skipped),
-        (4, 4, 0, 0),
+        (5, 5, 0, 0),
         "one completed deletion per object"
     );
 

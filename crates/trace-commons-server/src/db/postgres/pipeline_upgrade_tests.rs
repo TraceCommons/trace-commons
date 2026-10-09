@@ -2147,6 +2147,129 @@ async fn v117_adds_the_privacy_pass_record() {
         assert!(granted, "trace_ingest_runtime may update {column}");
     }
 
+    // `privacy_pass_required`: FALSE on the run received before V117, TRUE on
+    // a run inserted after it (the column default), and never updatable by
+    // the runtime.
+    let required = |run: uuid::Uuid| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    "SELECT privacy_pass_required FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[&tenant, &run],
+                )
+                .await
+                .unwrap()
+                .get::<_, bool>(0)
+        }
+    };
+    assert!(
+        !required(run_id).await,
+        "a run received before V117 needs no pass"
+    );
+    let granted: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_ingest_runtime', 'pipeline_runs',
+                                         'privacy_pass_required', 'UPDATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!granted, "the runtime may not update privacy_pass_required");
+    let new_submission_id = uuid::Uuid::new_v4();
+    let new_source_ref_id = uuid::Uuid::new_v4();
+    let new_run_id = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'received', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[
+                &tenant,
+                &new_submission_id,
+                &uuid::Uuid::new_v4(),
+                &hash("d"),
+            ],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes
+             ) VALUES ($1, $2, $3, 'submitted_envelope', 'store', 'new-source-key', $4,
+                       'key-ref', 0)",
+            &[&tenant, &new_submission_id, &new_source_ref_id, &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs (
+                tenant_id, run_id, submission_id, trace_id, bundle_id,
+                request_idempotency_key, request_content_hash, source_object_ref_id,
+                next_phase, state, admission_decision
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'review', 'pending', 'admit')",
+            &[
+                &tenant,
+                &new_run_id,
+                &new_submission_id,
+                &uuid::Uuid::new_v4(),
+                &bundle_id,
+                &hash("7"),
+                &hash("8"),
+                &new_source_ref_id,
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        required(new_run_id).await,
+        "a run received after V117 needs a pass"
+    );
+    // An approval of it without a pass fails the CHECK.
+    let approve = |run: uuid::Uuid, approved_ref: uuid::Uuid| {
+        let admin = &admin;
+        async move {
+            admin
+                .execute(
+                    "UPDATE pipeline_runs
+                        SET approved_revision_id = $3, approved_object_ref_id = $4,
+                            approved_content_hash = $5
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[
+                        &tenant,
+                        &run,
+                        &uuid::Uuid::new_v4(),
+                        &approved_ref,
+                        &hash("9"),
+                    ],
+                )
+                .await
+        }
+    };
+    check_violation(
+        approve(new_run_id, new_source_ref_id)
+            .await
+            .expect_err("an approval without a pass is refused"),
+        "pipeline_runs_privacy_pass_before_approval",
+    );
+    // The run received before V117 is approved without a pass.
+    update([None, None, None, None, None, None], no_approval())
+        .await
+        .expect("clear the earlier run's pass record");
+    approve(run_id, source_ref_id)
+        .await
+        .expect("a run received before V117 is approved without a pass");
+
     // pipeline_attempt_artifacts: a `privacy-pass` row is a known artifact
     // and, like `approved`, never lacks its hash.
     let stage = |artifact: &'static str, ciphertext: Option<String>| {
