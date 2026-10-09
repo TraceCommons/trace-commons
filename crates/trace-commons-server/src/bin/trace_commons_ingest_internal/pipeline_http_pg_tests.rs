@@ -8794,6 +8794,68 @@ async fn mains_operational_summary_leaves_a_failed_pipeline_payout_line_out() {
     );
 }
 
+/// `main`'s operational summary leaves the derived records of pipeline
+/// submissions out of its vector counts and its `missing_active_vectors`
+/// gate: the pipeline indexes its own submissions, so only the legacy
+/// record, which has no vector entry, is missing. The record list is not
+/// filtered: the submission counts include both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_operational_summary_leaves_pipeline_submissions_out_of_the_vector_gate() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let admin_token = format!("{}-admin", fixture.token);
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin_token, TokenRole::Admin);
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+        state.require_derived_export_object_refs = true;
+    }
+    let state = fixture.state.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&fixture.token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+
+    let (status, body) = route_request(
+        state,
+        "GET",
+        "/v1/admin/operational-summary",
+        auth_headers(&admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gates = body["promotion_gates"]["blocking_gates"]
+        .as_array()
+        .expect("the blocking gates")
+        .iter()
+        .map(|gate| gate.as_str().expect("a gate label").to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        gates.iter().any(|gate| gate == "missing_active_vectors=1"),
+        "{gates:?}"
+    );
+    assert_eq!(body["vectors"]["accepted_current_derived"], 1, "{body}");
+    assert_eq!(body["submissions"]["total"], 2, "{body}");
+}
+
 /// Finding 18: `main`'s replay export with database replay reads leaves the
 /// submissions with a pipeline run out of its source selection (they are
 /// exported through pipeline snapshots, and their stored bodies are

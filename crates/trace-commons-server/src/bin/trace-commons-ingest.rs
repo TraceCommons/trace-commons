@@ -46896,8 +46896,22 @@ async fn read_trace_operational_summary(
     tenant: &TenantCtx,
     generated_at: DateTime<Utc>,
 ) -> anyhow::Result<TraceOperationalSummaryResponse> {
-    let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state, tenant.auth()).await?;
+    let TraceCommonsMetadataView {
+        records,
+        mut derived,
+    } = read_reviewer_metadata_view(state, tenant.auth()).await?;
+    // The pipeline indexes its own submissions, so their derived records
+    // stay out of `main`'s vector counts and its `missing_active_vectors`
+    // gate. `records` is not filtered: the submission counts include them.
+    if state.db_reviewer_reads_for_tenant(tenant.tenant_id())
+        && let Some(store) = state.pipeline_store.as_ref()
+    {
+        let pipeline_submission_ids = store
+            .pipeline_submission_ids(tenant.tenant_id())
+            .await
+            .context("failed to list pipeline submissions")?;
+        derived.retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+    }
     let credit_events = read_operational_credit_events(state, tenant.auth(), &records).await?;
     let credit_risk = build_credit_risk_summary(
         state,

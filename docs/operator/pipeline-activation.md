@@ -2519,6 +2519,9 @@ found only while a pipeline runtime is injected. `main`'s replay export with
 database replay reads (`TRACE_COMMONS_DB_REPLAY_EXPORT_READS`) leaves the
 pipeline submissions out of its sources: they are exported through pipeline
 snapshots.
+`main`'s operational summary leaves the derived records of pipeline
+submissions out of its vector counts and its `missing_active_vectors` gate.
+Its submission counts and review counts include pipeline submissions.
 
 ## DB reconciliation of a pipeline tenant
 
