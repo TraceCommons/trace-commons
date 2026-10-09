@@ -273,6 +273,116 @@ mod tests {
         );
     }
 
+    /// The answers the shells pin, recorded whole: printed by
+    /// `cargo test ... a_recorded_glance_for_the_shells -- --nocapture` and
+    /// pasted into the Swift wire tests, never reconstructed by hand.
+    ///
+    /// Claude Code is partial (one call's output unknown), Codex is fully
+    /// known through the OpenAI facade, and an endpoint no connection writes
+    /// is `unknown` with no figure. The stale answer's one call read no input,
+    /// so its tokens are known and its cache share is `null`. The lit tip is
+    /// recorded from `tip_value`, since advice is held on the wire.
+    #[test]
+    fn a_recorded_glance_for_the_shells() {
+        let mut unknown_output = row(2, now() - Duration::minutes(30));
+        unknown_output.output_tokens = None;
+        let mut codex = row(3, now() - Duration::minutes(20));
+        codex.facade = "openai".to_string();
+        codex.path = Some("/v1/responses".to_string());
+        codex.input_tokens = Some(1_000);
+        codex.cache_read_tokens = Some(600);
+        codex.cache_write_tokens = Some(0);
+        codex.output_tokens = Some(25);
+        let mut elsewhere = row(4, now() - Duration::minutes(10));
+        elsewhere.facade = "openai".to_string();
+        elsewhere.path = Some("/v1/chat/completions".to_string());
+        elsewhere.output_tokens = None;
+        let rows = vec![
+            row(1, now() - Duration::hours(1)),
+            unknown_output,
+            codex,
+            elsewhere,
+        ];
+        let glance = glance_value(&rows, &[], now(), utc(), None, now(), 0);
+        assert_eq!(
+            glance,
+            serde_json::json!({
+                "enabled": true,
+                "feed": "ledger",
+                "readable": true,
+                "updated_at": "2026-10-08T10:00:00+00:00",
+                "stale": false,
+                "date": "2026-10-08",
+                "tools": [
+                    {
+                        "tool": "claude-code",
+                        "calls": 2,
+                        "known_calls": 1,
+                        "tokens": 1_050,
+                        "cache_share": {"numerator": 800, "denominator": 1_000, "permille": 800},
+                    },
+                    {
+                        "tool": "codex",
+                        "calls": 1,
+                        "known_calls": 1,
+                        "tokens": 1_025,
+                        "cache_share": {"numerator": 600, "denominator": 1_000, "permille": 600},
+                    },
+                    {
+                        "tool": "unknown",
+                        "calls": 1,
+                        "known_calls": 0,
+                        "tokens": null,
+                        "cache_share": null,
+                    },
+                ],
+                "coverage": {"calls": 4, "known": 2, "unknown": 2, "unreadable_rows": 0},
+                "context_tip": {"state": "held"},
+            })
+        );
+
+        let mut output_only = row(5, now() - Duration::minutes(5));
+        output_only.input_tokens = Some(0);
+        output_only.cache_read_tokens = Some(0);
+        output_only.cache_write_tokens = Some(0);
+        output_only.output_tokens = Some(40);
+        let updated = now() - Duration::seconds(LEDGER_GLANCE_STALE_SECS + 1);
+        let stale = glance_value(&[output_only], &[], now(), utc(), None, updated, 2);
+        assert_eq!(
+            stale,
+            serde_json::json!({
+                "enabled": true,
+                "feed": "ledger",
+                "readable": true,
+                "updated_at": "2026-10-08T09:49:59+00:00",
+                "stale": true,
+                "date": "2026-10-08",
+                "tools": [{
+                    "tool": "claude-code",
+                    "calls": 1,
+                    "known_calls": 1,
+                    "tokens": 40,
+                    "cache_share": null,
+                }],
+                "coverage": {"calls": 1, "known": 1, "unknown": 0, "unreadable_rows": 2},
+                "context_tip": {"state": "held"},
+            })
+        );
+
+        let lit = tip_value(ContextTip::Lit {
+            context: 180_000,
+            threshold: 200_000,
+        });
+        assert_eq!(
+            lit,
+            serde_json::json!({"state": "lit", "context": 180_000, "threshold": 200_000})
+        );
+
+        for value in [&glance, &stale, &lit] {
+            println!("{}", serde_json::to_string(value).unwrap());
+        }
+    }
+
     #[test]
     fn the_day_is_the_shells_local_day() {
         // 23:30 UTC on the 7th is 00:30 on the 8th at UTC+1.

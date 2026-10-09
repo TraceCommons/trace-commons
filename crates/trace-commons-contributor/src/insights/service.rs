@@ -1596,6 +1596,11 @@ mod tests {
                 "analytics_coverage_line",
                 "Usage known for {k} of {n} sessions \u{b7} {p} partial \u{b7} {u} unknown, not counted as zero",
             ),
+            ("analytics_glance_tokens_only", "{tokens} tokens"),
+            (
+                "analytics_setting_ledger_feed",
+                "Count tokens in routed calls",
+            ),
         ] {
             assert_eq!(copy[key], words, "{key}");
         }

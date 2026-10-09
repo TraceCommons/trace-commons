@@ -1980,6 +1980,60 @@ mod tests {
         }
     }
 
+    /// The tokened calls the shells pin, recorded whole: printed by
+    /// `cargo test ... a_recorded_tokened_call_for_the_shells -- --nocapture`
+    /// and pasted into the Swift wire tests, never reconstructed by hand. The
+    /// rows are those of `tokens_ride_on_a_call_only_with_the_ledger_feed_on`:
+    /// one call fully known with a measured zero, one with counters that are
+    /// not known.
+    #[test]
+    fn a_recorded_tokened_call_for_the_shells() {
+        let mut known = row(1, 0, None);
+        known.input_tokens = Some(1_000);
+        known.cache_read_tokens = Some(600);
+        known.cache_write_tokens = Some(0);
+        known.output_tokens = Some(25);
+        let mut doubtful = row(2, 1, None);
+        doubtful.input_tokens = Some(-4);
+        doubtful.cache_read_tokens = None;
+        doubtful.cache_write_tokens = Some(i64::MAX);
+        doubtful.output_tokens = Some(3);
+        let rows = vec![known, doubtful];
+
+        let (on, next) = calls_page_with(&rows, &[], None, 10, true);
+        assert_eq!(next, None);
+        assert_eq!(
+            on,
+            vec![
+                serde_json::json!({
+                    "id": 2,
+                    "at": "2027-01-15T08:00:01+00:00",
+                    "tool": "unknown",
+                    "family": "openai",
+                    "model": MODEL,
+                    "route": "unknown",
+                    "cost": {"known": true, "priced_micros": 12_300},
+                    "proof": "unrecorded",
+                    "tokens": {"input": null, "cache_read": null, "cache_write": null, "output": 3},
+                }),
+                serde_json::json!({
+                    "id": 1,
+                    "at": "2027-01-15T08:00:00+00:00",
+                    "tool": "unknown",
+                    "family": "openai",
+                    "model": MODEL,
+                    "route": "unknown",
+                    "cost": {"known": true, "priced_micros": 12_300},
+                    "proof": "unrecorded",
+                    "tokens": {"input": 1_000, "cache_read": 600, "cache_write": 0, "output": 25},
+                }),
+            ]
+        );
+        for call in &on {
+            println!("{}", serde_json::to_string(call).unwrap());
+        }
+    }
+
     #[test]
     fn inference_calls_carries_tokens_only_while_the_setting_is_on() {
         let (_dir, s) = shared();

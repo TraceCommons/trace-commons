@@ -6800,7 +6800,8 @@ no poll of its own, so a call is announced on the first tick after it lands
 
 `usage_changed` is a coalesced pulse for the Insights glance: at most one
 per poll tick, published on the same tick and from the same ledger read as
-`inference_call_added` (any added call counts, with or without an id), and
+`inference_call_added` (only a call whose id is above the highest id the
+daemon has already seen counts; a row without an id never does), and
 only while the `insights_ledger_feed` setting is on (owner decision D3,
 open). Its data is `{}`; a shell re-reads `insights_glance` for the figures.
 An older daemon never sends it, and `hello.events` lists it on one that can.

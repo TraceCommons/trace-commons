@@ -14,9 +14,9 @@
 //! (owner decision D5, open).
 //!
 //! The glance, tip and news-mark words (`analytics_glance_*`,
-//! `analytics_tip_*`, `analytics_mark_a11y_tip`) are listed here so they are
-//! enumerated with the rest; the menu-bar slice moves them into the table the
-//! menu-bar panel reads.
+//! `analytics_tip_*`, `analytics_mark_a11y_tip`) stay in this table: the
+//! macOS menu-bar panel reads them through `tc_insights_copy_json`, like every
+//! other Insights surface, rather than from the Monitor screens table.
 
 /// Every `{name}` hole the table uses.
 pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
@@ -325,6 +325,8 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "analytics_glance_line",
         "{tokens} tokens · {p}% of input from cache",
     ),
+    // A day whose known calls read no input, so no cache share.
+    ("analytics_glance_tokens_only", "{tokens} tokens"),
     ("analytics_glance_routed_only", "Routed calls only"),
     (
         "analytics_tip_context",
@@ -376,5 +378,11 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Show the weekly summary card",
     ),
     ("analytics_setting_lever", "Lever suggestions"),
+    // The `insights_ledger_feed` switch (owner decision D3, open: off by
+    // default).
+    (
+        "analytics_setting_ledger_feed",
+        "Count tokens in routed calls",
+    ),
     // 24. The Spend chip is `analytics_later`.
 ];
