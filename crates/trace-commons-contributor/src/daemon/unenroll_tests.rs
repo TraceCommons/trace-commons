@@ -543,6 +543,30 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
 }
 
+/// Owner decision D3, open: with the ledger feed off nothing reads the
+/// ledger for Insights, so with the counter pass on, its store and key
+/// there, the daemon's fold reads no ledger row and writes nothing.
+#[test]
+fn no_fold_while_the_ledger_feed_is_off_even_with_the_pass_on() {
+    let s = shared();
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = false;
+    }
+    counted(&s);
+    let before = std::fs::read(rows_file(&s)).unwrap();
+    struct Unread;
+    impl crate::routing::RoutingLedger for Unread {
+        fn exchanges_since(&self, _: chrono::DateTime<Utc>) -> Vec<crate::routing::RoutedExchange> {
+            panic!("the ledger is not read while the feed is off");
+        }
+    }
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &Unread);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
+    assert_eq!(std::fs::read(rows_file(&s)).unwrap(), before);
+}
+
 /// Owner decision on #1287: unenroll also turns the counter pass off, in
 /// memory and on disk, so the next watcher tick does not rebuild the store
 /// it just cleared under a new key.
