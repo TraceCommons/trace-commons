@@ -806,6 +806,8 @@ const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_sec
 /// The most `CreditMutate` audit events the worker appends for one tenant
 /// in one pass.
 const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
+/// The review audit events one pass appends for a tenant (V117).
+const PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT: usize = 32;
 
 /// A follow-up step of a tenant's drain, after its runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1194,6 +1196,30 @@ pub(crate) async fn drain_pipeline_tenant(
             }
         }
     }
+    if due.credit_audits {
+        match append_pipeline_review_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant_id,
+            PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT,
+        )
+        .await
+        {
+            Ok(pass) => {
+                if pass.used_its_limit(PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT) {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit failed"
+                );
+            }
+        }
+    }
     if due.payouts {
         match service
             .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
@@ -1308,6 +1334,162 @@ pub(crate) async fn append_pipeline_credit_audit_events(
         Some(error) if audited == 0 => Err(error),
         _ => Ok(PipelineCreditAuditPass { audited, failed }),
     }
+}
+
+/// The review audit events of the runs the tenant's review audit markers
+/// name (V117, `review_audit_pending_at`): a run's committed Review decision
+/// and its human assessment each get one audit event, and the marker is
+/// cleared once each event of the run exists. The assessment event comes
+/// first. Its id is the assessment's, so the route's own append and this
+/// repair of a missed one are the same event; the automatic Review's event
+/// takes the id of the Review `phase_outcomes` row. Each event is read by id
+/// and appended only when absent, so a pass that stopped before it cleared a
+/// marker finds the events again and only clears it.
+///
+/// As the credit pass does: an item that fails keeps its marker and does not
+/// stop the items after it, the failure is logged by label with a hash of
+/// the run id, and the pass returns the first error only when it cleared no
+/// marker and one failed.
+pub(crate) async fn append_pipeline_review_audit_events(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<PipelineCreditAuditPass> {
+    let items = service
+        .store()
+        .list_pending_review_audits(tenant_id, i64::try_from(limit).unwrap_or(i64::MAX))
+        .await?;
+    let mut audited = 0;
+    let mut failed = 0;
+    let mut first_error = None;
+    for item in &items {
+        match append_pipeline_review_audit_item(state, service, tenant_id, item).await {
+            Ok(()) => audited += 1,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_item_failed",
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    run_ref_hash = %sha256_prefixed(&item.run_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit event failed"
+                );
+                failed += 1;
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) if audited == 0 => Err(error),
+        _ => Ok(PipelineCreditAuditPass { audited, failed }),
+    }
+}
+
+/// One item of `append_pipeline_review_audit_events`: appends each event of
+/// `item` that is absent, then clears its marker.
+async fn append_pipeline_review_audit_item(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    item: &trace_commons_server::versioned_pipeline::PipelineReviewAuditItem,
+) -> anyhow::Result<()> {
+    // Without the database the worker cannot tell an appended event from a
+    // missing one, so it appends none and leaves the marker.
+    let db = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("pipeline_review_audit_mirror_missing"))?;
+    if let Some(assessment) = &item.assessment {
+        if db
+            .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
+            .await?
+            .is_none()
+        {
+            let (status, status_label) = review_audit_status(assessment.approved)?;
+            let reviewer = TenantAuth {
+                role: TokenRole::Reviewer,
+                principal_ref: assessment.reviewer_principal_ref.clone(),
+                ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+            };
+            let mut event = TraceCommonsAuditEvent::review_decision(
+                &reviewer,
+                item.submission_id,
+                status,
+                Some(&trace_free_text_audit_reason(&assessment.reason_code)),
+            );
+            event.event_id = assessment.assessment_id;
+            event.actor_role = None;
+            append_audit_event_mirrored(
+                state,
+                &reviewer,
+                event,
+                AuditRowMirror {
+                    action: StorageTraceAuditAction::Review,
+                    metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+                        decision: status_label,
+                        resulting_status: storage_corpus_status(status),
+                        reason_code: Some(assessment.reason_code.clone()),
+                    },
+                    object_ref_id: None,
+                    actor_role_label: Some("reviewer"),
+                },
+                "pipeline review assessment audit event",
+            )
+            .await?;
+        }
+    }
+    if let Some(outcome) = &item.outcome {
+        if db
+            .get_trace_audit_event_by_id(tenant_id, outcome.outcome_id)
+            .await?
+            .is_none()
+        {
+            let (status, _) = review_audit_status(outcome.approved)?;
+            let reason_label = if outcome.approved {
+                "pipeline_review_approved"
+            } else {
+                "pipeline_review_rejected"
+            };
+            let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+            let mut event = TraceCommonsAuditEvent::lifecycle_status_change(
+                &actor,
+                LifecycleAuditActor::System,
+                item.submission_id,
+                status,
+                reason_label,
+            );
+            event.event_id = outcome.outcome_id;
+            append_audit_event_mirrored(
+                state,
+                &actor,
+                event,
+                AuditRowMirror {
+                    action: lifecycle_status_audit_action(status),
+                    metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
+                    object_ref_id: None,
+                    actor_role_label: Some("system"),
+                },
+                "pipeline review audit event",
+            )
+            .await?;
+        }
+    }
+    service
+        .store()
+        .clear_review_audit_pending(tenant_id, item)
+        .await?;
+    Ok(())
+}
+
+/// The corpus status a Review decision leads to, and its storage label.
+fn review_audit_status(approved: bool) -> anyhow::Result<(TraceCorpusStatus, String)> {
+    let status = if approved {
+        TraceCorpusStatus::Accepted
+    } else {
+        TraceCorpusStatus::Rejected
+    };
+    let label = serde_storage_string(&storage_corpus_status(status))?;
+    Ok((status, label))
 }
 
 /// What one pass of `append_pipeline_credit_audit_events` did.

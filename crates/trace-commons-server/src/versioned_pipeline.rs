@@ -1266,6 +1266,36 @@ pub struct PipelineCreditAuditItem {
     pub actor_role: String,
 }
 
+/// A Review decision of a run's automatic Review, as the review audit pass
+/// reads it from `phase_outcomes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditOutcome {
+    pub outcome_id: Uuid,
+    pub approved: bool,
+}
+
+/// A human review assessment of a run, as the review audit pass reads it
+/// from `pipeline_review_assessments`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditAssessment {
+    pub assessment_id: Uuid,
+    pub approved: bool,
+    pub reason_code: String,
+    pub reviewer_principal_ref: String,
+}
+
+/// A run with a review audit marker (`review_audit_pending_at`,
+/// `PgPipelineStore::list_pending_review_audits`): the Review outcome and
+/// the assessment whose audit events the worker may still have to append.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditItem {
+    pub run_id: Uuid,
+    pub submission_id: Uuid,
+    pub pending_at: DateTime<Utc>,
+    pub outcome: Option<PipelineReviewAuditOutcome>,
+    pub assessment: Option<PipelineReviewAuditAssessment>,
+}
+
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
 /// leg settled (its ledger row, the finalized batch that carries it, and
 /// the completed settlement row committed together), or a hold on the
@@ -2513,6 +2543,7 @@ impl PgPipelineStore {
                      approved_revision_id = $5,
                      approved_object_ref_id = $6,
                      approved_content_hash = $7,
+                     review_audit_pending_at = clock_timestamp(),
                      lease_token = NULL, lease_expires_at = NULL,
                      next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
@@ -2876,6 +2907,14 @@ impl PgPipelineStore {
                 &resolved_json,
                 &evidence_hash,
             ],
+        )
+        .await?;
+        // V117: the worker's review audit pass appends this assessment's
+        // audit event when the route's own append missed it.
+        tx.execute(
+            "UPDATE pipeline_runs SET review_audit_pending_at = clock_timestamp()
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&claim.tenant_id, &claim.run_id],
         )
         .await?;
         tx.execute(
@@ -3462,6 +3501,108 @@ impl PgPipelineStore {
                 &item.instrument_id,
                 &item.credit_event_id,
             ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The runs of the tenant with a review audit marker, oldest marker
+    /// first, at most `limit`: a Review decision or a human assessment
+    /// committed and its audit event is not known to be appended. The work
+    /// index (V117) holds only the marked runs.
+    pub async fn list_pending_review_audits(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PipelineReviewAuditItem>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT p.run_id, p.submission_id, p.review_audit_pending_at,
+                        o.outcome_id, o.decision ->> 'kind' AS decision_kind,
+                        a.assessment_id, a.recommendation, a.reason_code,
+                        a.reviewer_principal_ref
+                   FROM pipeline_runs p
+                   LEFT JOIN phase_outcomes o
+                     ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
+                    AND o.phase = 'review'
+                   LEFT JOIN pipeline_review_assessments a
+                     ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
+                  WHERE p.tenant_id = $1 AND p.review_audit_pending_at IS NOT NULL
+                  ORDER BY p.review_audit_pending_at, p.run_id
+                  LIMIT $2",
+                &[&tenant_id, &limit],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter()
+            .map(|row| {
+                let outcome = match row.get::<_, Option<Uuid>>("outcome_id") {
+                    Some(outcome_id) => {
+                        let approved =
+                            match row.get::<_, Option<String>>("decision_kind").as_deref() {
+                                Some("approved") => true,
+                                Some("rejected") => false,
+                                _ => {
+                                    return Err(DatabaseError::Serialization(
+                                        "unknown pipeline review decision".to_string(),
+                                    ));
+                                }
+                            };
+                        Some(PipelineReviewAuditOutcome {
+                            outcome_id,
+                            approved,
+                        })
+                    }
+                    None => None,
+                };
+                let assessment = match row.get::<_, Option<Uuid>>("assessment_id") {
+                    Some(assessment_id) => {
+                        let approved =
+                            match row.get::<_, Option<String>>("recommendation").as_deref() {
+                                Some("approve") => true,
+                                Some("reject") => false,
+                                _ => {
+                                    return Err(DatabaseError::Serialization(
+                                        "unknown review recommendation".to_string(),
+                                    ));
+                                }
+                            };
+                        Some(PipelineReviewAuditAssessment {
+                            assessment_id,
+                            approved,
+                            reason_code: row.get("reason_code"),
+                            reviewer_principal_ref: row.get("reviewer_principal_ref"),
+                        })
+                    }
+                    None => None,
+                };
+                Ok(PipelineReviewAuditItem {
+                    run_id: row.get("run_id"),
+                    submission_id: row.get("submission_id"),
+                    pending_at: row.get("review_audit_pending_at"),
+                    outcome,
+                    assessment,
+                })
+            })
+            .collect()
+    }
+
+    /// Clears `item`'s review audit marker once each of its audit events
+    /// exists. A marker set again since the list (a newer time) stays.
+    pub async fn clear_review_audit_pending(
+        &self,
+        tenant_id: &str,
+        item: &PipelineReviewAuditItem,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE pipeline_runs SET review_audit_pending_at = NULL
+              WHERE tenant_id = $1 AND run_id = $2 AND review_audit_pending_at = $3",
+            &[&tenant_id, &item.run_id, &item.pending_at],
         )
         .await?;
         tx.commit().await?;

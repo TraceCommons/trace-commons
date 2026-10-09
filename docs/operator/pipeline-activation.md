@@ -347,7 +347,7 @@ below. It never reports a revision, a path, a key id, or a key:
 | `pipeline_check_trust_store_loaded` | the check trust store was loaded at start |
 | `pipeline_unqualified_routing_allowed` | the test-only rule above is on |
 
-The pipeline's own tables (V92 to V95 and V105 to V113) grant the ingest runtime group,
+The pipeline's own tables (V92 to V95, V105 to V113, and V117) grant the ingest runtime group,
 `trace_ingest_runtime`, exactly what the pipeline reads and writes there. The
 pipeline also reads and writes tables from V62 and earlier -- submissions,
 object refs, derived records, tombstones, withdrawals, credit holds, the
@@ -1705,10 +1705,22 @@ committed result (the lease token, the assessment id), and logs
 `pipeline_review_audit_append_failed` with the tenant's storage reference, a
 hash of the run id and the route (`claim` or `assessment`). The audit trail
 then has no row for that claim or decision; the decision itself is in
-`pipeline_review_assessments`. Unlike a CreditMutate event, no repair pass
-adds the missing row later, also with `require_db_mirror_writes`: each
-`pipeline_review_audit_append_failed` line is a permanent gap in the audit
-log until an operator records it (an open item in #1185).
+`pipeline_review_assessments`.
+
+The worker's review audit pass repairs a missed assessment event. The
+marker is `review_audit_pending_at` on `pipeline_runs` (V117). A Review
+commit and an assessment each set it. The pass runs in the step and at the
+cadence of the credit audit events. It appends the assessment event with the
+id `assessment_id` when the log has none. The stored `reviewer_sha256:`
+reference then names the reviewer. The pass also appends one
+`lifecycle_status_change` event, with the actor `pipeline_worker`, for each
+automatic Review decision. It clears the marker once each event of the run
+exists. The time of an event is the time of the append. A decision from
+before V117 gets no event. A failed event keeps its marker and logs
+`pipeline_worker_review_audit_item_failed` with a hash of the run id. A
+failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit
+append fails stays logged under `pipeline_review_audit_append_failed` and is
+not repaired. The owner accepted this gap in #1185.
 
 Two other events release a parked run to `pending`:
 

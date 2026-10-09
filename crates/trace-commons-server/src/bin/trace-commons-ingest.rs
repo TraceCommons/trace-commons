@@ -43819,23 +43819,33 @@ async fn pipeline_review_assessment_handler(
     let appended: anyhow::Result<()> = async {
         let submission_id =
             pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
-        append_audit_event_with_db_mirror(
+        // V117: the event takes the assessment's id, so the worker's review
+        // audit pass finds it and appends none of its own.
+        let mut event = TraceCommonsAuditEvent::review_decision(
+            &tenant,
+            submission_id,
+            resulting_status,
+            Some(&trace_free_text_audit_reason(&reason_label)),
+        );
+        event.event_id = assessment.assessment_id;
+        append_audit_event_mirrored(
             state.as_ref(),
             &tenant,
-            TraceCommonsAuditEvent::review_decision(
-                &tenant,
-                submission_id,
-                resulting_status,
-                Some(&trace_free_text_audit_reason(&reason_label)),
-            ),
-            StorageTraceAuditAction::Review,
-            StorageTraceAuditSafeMetadata::ReviewDecision {
-                decision: decision_label,
-                resulting_status: review_status,
-                reason_code: Some(reason_label.clone()),
+            event,
+            AuditRowMirror {
+                action: StorageTraceAuditAction::Review,
+                metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+                    decision: decision_label,
+                    resulting_status: review_status,
+                    reason_code: Some(reason_label.clone()),
+                },
+                object_ref_id: None,
+                actor_role_label: None,
             },
+            "audit event",
         )
         .await
+        .map(|_| ())
     }
     .await;
     if let Err(error) = appended {

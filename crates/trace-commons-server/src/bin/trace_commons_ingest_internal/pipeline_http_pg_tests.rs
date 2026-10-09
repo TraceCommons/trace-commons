@@ -13097,3 +13097,345 @@ async fn the_submitted_audit_row_carries_the_risk_the_receipt_stored() {
     };
     assert_eq!(privacy_risk, &submission.privacy_risk);
 }
+
+// ---------------------------------------------------------------------------
+// The worker's review audit pass (V117, `review_audit_pending_at`).
+// ---------------------------------------------------------------------------
+
+/// A fixture for the tests of the review audit pass: the tenant is the
+/// test's own, a reviewer token exists, and an audit append writes its
+/// database row before its file line, the order a routed tenant has in
+/// production.
+async fn review_audit_fixture() -> Option<(WithdrawalFixture, String)> {
+    let mut fixture = withdrawal_fixture().await?;
+    let reviewer = format!("token-review-audit-pass-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    let state = Arc::make_mut(&mut fixture.state);
+    state.tokens = Arc::new(tokens);
+    state.require_db_mirror_writes = true;
+    Some((fixture, reviewer))
+}
+
+/// Whether `run_id` has a review audit marker.
+async fn review_audit_marker_is_set(fixture: &WithdrawalFixture, run_id: Uuid) -> bool {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let set: bool = tx
+        .query_one(
+            "SELECT review_audit_pending_at IS NOT NULL FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&fixture.tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    set
+}
+
+/// Sets the review audit marker of `run_id` again, as a new decision would.
+async fn set_review_audit_marker(fixture: &WithdrawalFixture, run_id: Uuid) {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET review_audit_pending_at = clock_timestamp()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&fixture.tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The id of the run's Review `phase_outcomes` row.
+async fn review_outcome_id(fixture: &WithdrawalFixture, run_id: Uuid) -> Uuid {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let id: Uuid = tx
+        .query_one(
+            "SELECT outcome_id FROM phase_outcomes
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'review'",
+            &[&fixture.tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    id
+}
+
+/// The tenant's file audit events of `kind` for `submission_id`.
+fn audit_file_events_of_kind(
+    fixture: &WithdrawalFixture,
+    submission_id: Uuid,
+    kind: &str,
+) -> Vec<TraceCommonsAuditEvent> {
+    read_all_audit_events(&fixture.state.root, &fixture.tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.kind == kind && event.submission_id == submission_id)
+        .collect()
+}
+
+async fn run_review_audit_pass(
+    fixture: &WithdrawalFixture,
+) -> anyhow::Result<pipeline_runtime::PipelineCreditAuditPass> {
+    pipeline_runtime::append_pipeline_review_audit_events(
+        fixture.state.as_ref(),
+        fixture.service.as_ref(),
+        &fixture.tenant,
+        32,
+    )
+    .await
+}
+
+/// `main`'s audit verification of the tenant: the file chain and the
+/// database chain both report no mismatch.
+async fn assert_audit_verification_is_clean(fixture: &WithdrawalFixture) {
+    let report = verify_audit_chain(fixture.state.as_ref(), &fixture.tenant)
+        .await
+        .expect("the audit chain verifies");
+    assert!(report.verified, "{:?}", report.failures);
+    let mirror = report.db_mirror.expect("the database chain is verified");
+    assert!(mirror.verified, "{:?}", mirror.failures);
+}
+
+/// A reviewer's claim on `run_id` through the route: the lease token.
+async fn claim_review_through_the_route(
+    fixture: &WithdrawalFixture,
+    reviewer: &str,
+    run_id: Uuid,
+) -> serde_json::Value {
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+        auth_headers(reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    claim["lease_token"].clone()
+}
+
+/// Each automatic Review decision gets one `lifecycle_status_change` audit
+/// event, with the id of the Review `phase_outcomes` row, in the file log
+/// and as a database row. An approval is `accepted`, a rejection `rejected`;
+/// the actor is `pipeline_worker`; the marker is cleared; a second pass over
+/// a marker set again appends nothing; and `main`'s audit verification finds
+/// no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_an_automatic_review() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+
+    // 1. An approved Review.
+    let approved = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, approved.run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let outcome_id = review_outcome_id(&fixture, approved.run_id).await;
+    let events =
+        audit_file_events_of_kind(&fixture, approved.submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, outcome_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    assert!(!review_audit_marker_is_set(&fixture, approved.run_id).await);
+
+    // 2. A rejected Review: a reviewer's rejection, then the run's Review.
+    let quarantined = quarantined_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, quarantined.run_id).await;
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", quarantined.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": lease_token,
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    fixture
+        .service
+        .process_run(&tenant, quarantined.run_id)
+        .await
+        .expect("Review runs");
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let outcome_id = review_outcome_id(&fixture, quarantined.run_id).await;
+    let events = audit_file_events_of_kind(
+        &fixture,
+        quarantined.submission_id,
+        "lifecycle_status_change",
+    );
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, outcome_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert!(!review_audit_marker_is_set(&fixture, quarantined.run_id).await);
+
+    // 3. A marker set again appends no second event.
+    set_review_audit_marker(&fixture, approved.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, approved.submission_id, "lifecycle_status_change")
+            .len(),
+        1
+    );
+    assert!(!review_audit_marker_is_set(&fixture, approved.run_id).await);
+
+    // 4. `main`'s audit verification.
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// An assessment that the route recorded has one `review_decision` event,
+/// with the assessment's id and the reviewer's reference. The pass finds it
+/// and appends no second one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_assessment_event_is_appended_one_time() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let run = quarantined_pipeline_run(&fixture.service, &tenant, "principal_sha256:rv-once").await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, run.run_id).await;
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", run.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": lease_token,
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+
+    let events = audit_file_events_of_kind(&fixture, run.submission_id, "review_decision");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].event_id.to_string(),
+        assessed["assessment_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some(static_token_principal_ref(&reviewer).as_str())
+    );
+    assert!(!review_audit_marker_is_set(&fixture, run.run_id).await);
+}
+
+/// An assessment that was recorded through the service, so that no route
+/// appended its event, gets its `review_decision` event from the pass: the
+/// id is the assessment's, the actor is the stored `reviewer_sha256:`
+/// reference, and the status is the one the recommendation leads to. A
+/// second pass adds none, and `main`'s audit verification finds no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_repairs_a_missed_review_assessment_event() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let run =
+        quarantined_pipeline_run(&fixture.service, &tenant, "principal_sha256:rv-repair").await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, run.run_id).await;
+    let reviewer_ref = format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(
+            static_token_principal_ref(&reviewer).as_bytes()
+        ))
+    );
+    let assessment = fixture
+        .service
+        .store()
+        .record_review_assessment(
+            &PipelineReviewClaim {
+                tenant_id: tenant.clone(),
+                run_id: run.run_id,
+                reviewer_principal_ref: reviewer_ref.clone(),
+                lease_token: serde_json::from_value(lease_token).unwrap(),
+                lease_expires_at: Utc::now(),
+            },
+            ReviewRecommendation::Reject,
+            ReasonCode::new("privacy_review_required".to_string()).unwrap(),
+            Vec::new(),
+        )
+        .await
+        .expect("the assessment records");
+    assert!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "review_decision").is_empty(),
+        "no route appended an event"
+    );
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let events = audit_file_events_of_kind(&fixture, run.submission_id, "review_decision");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, assessment.assessment_id);
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some(reviewer_ref.as_str())
+    );
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert!(!review_audit_marker_is_set(&fixture, run.run_id).await);
+
+    set_review_audit_marker(&fixture, run.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "review_decision").len(),
+        1
+    );
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// An item whose append fails keeps its marker and does not stop the item
+/// before it: the pass counts one cleared and one failed item. The fault is
+/// the last step, because a failed file append leaves the tenant's audit
+/// chain stale; the tenant is this test's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_audit_item_that_fails_keeps_its_marker() {
+    let Some((fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    // The first run's event is appended, and its marker is set again: its
+    // item needs no append. The second run's marker is newer.
+    let first = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    set_review_audit_marker(&fixture, first.run_id).await;
+    let second = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
+
+    fail_next_audit_file_append(&fixture.state.root, &tenant);
+    let pass = run_review_audit_pass(&fixture)
+        .await
+        .expect("one item cleared, so the pass answers");
+    assert_eq!((pass.audited, pass.failed), (1, 1));
+    assert!(!review_audit_marker_is_set(&fixture, first.run_id).await);
+    assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
+}
