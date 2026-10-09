@@ -2184,6 +2184,15 @@ char*       tc_nudge_copy_json(void);
  * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
  * APPROVAL. */
 char*       tc_nudge_entry_tags_json(const char* entry_json);
+/* The digest switch's Settings help, composed by the core. settings_json is
+ * a borrowed UTF-8 JSON object carrying digest_schedule and
+ * digest_interval_secs as get_settings sent them. Returns an owned JSON
+ * object with digest_help, present only when there is a line to draw: the
+ * evening line, or the interval in whole hours, singular at one. NULL,
+ * unreadable or mistyped input answers {}, which draws nothing. Free with
+ * tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_digest_help_json(const char* settings_json);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8

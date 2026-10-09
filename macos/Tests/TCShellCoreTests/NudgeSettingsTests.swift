@@ -40,7 +40,8 @@ final class NudgeSettingsTests: XCTestCase {
         """#
 
     func testEveryShownSwitchIsDrawnInOrderWithItsHelp() throws {
-        let rows = NudgeSettings.rows(try settings(Self.full), copy: Self.copy)
+        let rows = NudgeSettings.rows(
+            try settings(Self.full), copy: Self.copy, digestHelp: "At most one notification every 6 hours.")
         XCTAssertEqual(rows.map(\.id), [
             .suggestions, .menuBarMark, .notifications,
             .notify("digest"), .notify("verdicts_landed"), .notify("idle_sessions"),
@@ -60,7 +61,7 @@ final class NudgeSettingsTests: XCTestCase {
     /// The weekly recap and the insights tip are held: never a switch,
     /// whatever the daemon reports.
     func testHeldKindsAreNeverDrawn() throws {
-        let rows = NudgeSettings.rows(try settings(Self.full), copy: Self.copy)
+        let rows = NudgeSettings.rows(try settings(Self.full), copy: Self.copy, digestHelp: nil)
         XCTAssertFalse(rows.contains { $0.id == .notify("weekly_recap") || $0.id == .notify("insights_tip") })
     }
 
@@ -68,11 +69,11 @@ final class NudgeSettingsTests: XCTestCase {
     /// A string the core did not word draws no switch either.
     func testUnknownValuesAndMissingWordsDrawNoSwitch() throws {
         let partial = try settings(#"{"suggestions_enabled":false,"notify":{"verdicts_landed":true}}"#)
-        XCTAssertEqual(NudgeSettings.rows(partial, copy: Self.copy).map(\.id), [.suggestions, .notify("verdicts_landed")])
-        XCTAssertEqual(NudgeSettings.rows(nil, copy: Self.copy), [])
-        XCTAssertEqual(NudgeSettings.rows(try settings(Self.full), copy: nil), [])
+        XCTAssertEqual(NudgeSettings.rows(partial, copy: Self.copy, digestHelp: nil).map(\.id), [.suggestions, .notify("verdicts_landed")])
+        XCTAssertEqual(NudgeSettings.rows(nil, copy: Self.copy, digestHelp: nil), [])
+        XCTAssertEqual(NudgeSettings.rows(try settings(Self.full), copy: nil, digestHelp: nil), [])
         let unworded = NudgeCopy(table: ["SETTING_SUGGESTIONS": "Show suggestions"])
-        XCTAssertEqual(NudgeSettings.rows(try settings(Self.full), copy: unworded).map(\.id), [.suggestions])
+        XCTAssertEqual(NudgeSettings.rows(try settings(Self.full), copy: unworded, digestHelp: nil).map(\.id), [.suggestions])
     }
 
     /// The finer switch follows the broader one: the mark sits under the
@@ -83,7 +84,7 @@ final class NudgeSettingsTests: XCTestCase {
             {"suggestions_enabled":false,"menu_bar_mark_enabled":true,"notifications_enabled":false,
              "notify":{"digest":true,"idle_sessions":true,"verdicts_landed":true}}
             """#)
-        let rows = Dictionary(uniqueKeysWithValues: NudgeSettings.rows(off, copy: Self.copy).map { ($0.id, $0) })
+        let rows = Dictionary(uniqueKeysWithValues: NudgeSettings.rows(off, copy: Self.copy, digestHelp: nil).map { ($0.id, $0) })
         XCTAssertEqual(rows[.suggestions]?.enabled, true)
         XCTAssertEqual(rows[.menuBarMark]?.enabled, false)
         XCTAssertEqual(rows[.menuBarMark]?.isOn, true)
@@ -92,18 +93,34 @@ final class NudgeSettingsTests: XCTestCase {
         XCTAssertEqual(rows[.notify("idle_sessions")]?.enabled, false)
     }
 
-    /// The digest's help follows its schedule, and says nothing it cannot
-    /// say in whole hours.
-    func testDigestHelpFollowsTheSchedule() throws {
-        func help(_ json: String) throws -> String? {
-            NudgeSettings.rows(try settings(json), copy: Self.copy).first { $0.id == .notify("digest") }?.help
+    /// The digest's help is the core's finished line
+    /// (`tc_nudge_digest_help_json`), drawn exactly as given: this shell
+    /// fills no placeholder and picks no plural. No line, no help.
+    func testDigestHelpIsTheCoresLineAsGiven() throws {
+        func help(_ json: String, _ given: String?) throws -> String? {
+            NudgeSettings.rows(try settings(json), copy: Self.copy, digestHelp: given)
+                .first { $0.id == .notify("digest") }?.help
         }
-        XCTAssertEqual(try help(#"{"digest_schedule":{"mode":"evening","hour":18},"notify":{"digest":true}}"#),
-                       "At most one each evening.")
-        XCTAssertEqual(try help(#"{"digest_interval_secs":3600,"notify":{"digest":true}}"#),
-                       "At most one notification every 1 hours.")
-        XCTAssertNil(try help(#"{"digest_interval_secs":5400,"notify":{"digest":true}}"#))
-        XCTAssertNil(try help(#"{"notify":{"digest":true}}"#))
+        let digest = #"{"digest_interval_secs":3600,"notify":{"digest":true}}"#
+        XCTAssertEqual(try help(digest, "The core's line."), "The core's line.")
+        XCTAssertNil(try help(digest, nil))
+    }
+
+    /// What the core is asked: the schedule and the interval, and nothing
+    /// else about the settings; and its answer read back.
+    func testTheDigestHelpIsAskedOfTheCore() throws {
+        let input = try XCTUnwrap(NudgeSettings.digestHelpInput(try settings(Self.full)))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), ["digest_interval_secs", "digest_schedule"])
+        XCTAssertEqual(object["digest_interval_secs"] as? Int, 21600)
+        XCTAssertEqual((object["digest_schedule"] as? [String: Any])?["mode"] as? String, "interval")
+        XCTAssertNil(NudgeSettings.digestHelpInput(nil))
+        XCTAssertNil(NudgeSettings.digestHelpInput(try settings("{}")))
+
+        XCTAssertEqual(NudgeSettings.digestHelp(fromJSON: #"{"digest_help":"Line."}"#), "Line.")
+        XCTAssertNil(NudgeSettings.digestHelp(fromJSON: "{}"))
+        XCTAssertNil(NudgeSettings.digestHelp(fromJSON: #"{"digest_help":"  "}"#))
+        XCTAssertNil(NudgeSettings.digestHelp(fromJSON: nil))
     }
 
     func testThePendingOffersAreDrawnInTheCoresWords() throws {

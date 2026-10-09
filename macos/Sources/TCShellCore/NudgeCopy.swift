@@ -20,8 +20,6 @@ public struct NudgeCopy: Equatable, Sendable {
         case settingMarkHelp = "SETTING_MARK_HELP"
         case settingNotifyMaster = "SETTING_NOTIFY_MASTER"
         case settingDigest = "SETTING_DIGEST"
-        case settingDigestHelpInterval = "SETTING_DIGEST_HELP_INTERVAL"
-        case settingDigestHelpEvening = "SETTING_DIGEST_HELP_EVENING"
         case settingNotifyVerdicts = "SETTING_NOTIFY_VERDICTS"
         case settingNotifyIdle = "SETTING_NOTIFY_IDLE"
         case settingNotifyIdleHelp = "SETTING_NOTIFY_IDLE_HELP"
@@ -175,7 +173,9 @@ public enum NudgeSettings {
     /// the label the daemon gives an unknown settings key.
     public static let noOfferForKind = DaemonDataError.daemon(code: "bad_params", message: "settings-unknown-field")
 
-    public static func rows(_ settings: DaemonData.Settings?, copy: NudgeCopy?) -> [Row] {
+    /// `digestHelp` is the core's finished line for the digest switch
+    /// (`tc_nudge_digest_help_json`), drawn as given; nil draws none.
+    public static func rows(_ settings: DaemonData.Settings?, copy: NudgeCopy?, digestHelp: String?) -> [Row] {
         guard let settings, let copy else { return [] }
         var rows: [Row] = []
         func add(_ id: Switch, _ label: NudgeCopy.Key, help: String?, value: Bool?, enabled: Bool = true) {
@@ -190,7 +190,7 @@ public enum NudgeSettings {
         for kind in shownKinds {
             switch kind {
             case "digest":
-                add(.notify(kind), .settingDigest, help: digestHelp(settings, copy: copy),
+                add(.notify(kind), .settingDigest, help: digestHelp,
                     value: settings.notify?.digest, enabled: master)
             case "verdicts_landed":
                 add(.notify(kind), .settingNotifyVerdicts, help: nil, value: settings.notify?.verdictsLanded,
@@ -205,15 +205,39 @@ public enum NudgeSettings {
         return rows
     }
 
-    /// The digest's help for its schedule. Under the interval schedule it
-    /// names the interval, and says nothing it cannot say in whole hours.
-    static func digestHelp(_ settings: DaemonData.Settings, copy: NudgeCopy) -> String? {
-        if settings.digestSchedule?.mode == "evening" { return copy[.settingDigestHelpEvening] }
-        guard let secs = settings.digestIntervalSecs, secs >= 3600, secs % 3600 == 0,
-              let template = copy[.settingDigestHelpInterval]
+    /// What the core is asked for the digest's help: the schedule and the
+    /// interval as the daemon sent them, and nothing else about the
+    /// settings. Nil when the settings carry neither, so nothing is asked.
+    public static func digestHelpInput(_ settings: DaemonData.Settings?) -> String? {
+        guard let settings, settings.digestSchedule != nil || settings.digestIntervalSecs != nil else { return nil }
+        struct Input: Encodable {
+            let digestIntervalSecs: Int?
+            let digestSchedule: DaemonData.DigestSchedule?
+
+            enum CodingKeys: String, CodingKey {
+                case digestIntervalSecs = "digest_interval_secs"
+                case digestSchedule = "digest_schedule"
+            }
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(
+            Input(digestIntervalSecs: settings.digestIntervalSecs, digestSchedule: settings.digestSchedule))
         else { return nil }
-        // `{hours}` is a plain figure; the sentence around it is the core's.
-        return template.replacingOccurrences(of: "{hours}", with: String(secs / 3600))
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The core's digest help from `tc_nudge_digest_help_json`'s answer;
+    /// nil when it has none, or the answer cannot be read.
+    public static func digestHelp(fromJSON json: String?) -> String? {
+        struct Answer: Decodable {
+            let digestHelp: String?
+            enum CodingKeys: String, CodingKey { case digestHelp = "digest_help" }
+        }
+        guard let json, let answer = try? JSONDecoder().decode(Answer.self, from: Data(json.utf8)),
+              let help = answer.digestHelp, !help.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return help
     }
 
     /// The pending offers, verdicts first.

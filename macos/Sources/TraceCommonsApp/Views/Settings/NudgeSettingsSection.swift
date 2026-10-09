@@ -35,7 +35,13 @@ final class NudgeSettingsStore {
         writing = false
     }
 
-    var rows: [NudgeSettings.Row] { NudgeSettings.rows(settings, copy: copy) }
+    var rows: [NudgeSettings.Row] { NudgeSettings.rows(settings, copy: copy, digestHelp: digestHelp) }
+    /// The digest switch's help, composed by the core for the schedule the
+    /// daemon reported.
+    private var digestHelp: String? {
+        guard let input = NudgeSettings.digestHelpInput(settings) else { return nil }
+        return NudgeSettings.digestHelp(fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: input))
+    }
     var offers: [NudgeSettings.Offer] { NudgeSettings.offers(settings, copy: copy) }
     /// The offer `place` draws (`NudgeSettings.offers(_:copy:on:)`).
     func offers(on place: NudgeSurface.Place) -> [NudgeSettings.Offer] {

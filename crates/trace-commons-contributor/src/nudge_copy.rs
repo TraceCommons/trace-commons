@@ -286,6 +286,10 @@ pub const SETTING_DIGEST: &str = "Waiting and contributed sessions";
 /// (`SettingsWords.at_most_one_notification`). DRAFT, NEEDS APPROVAL.
 pub const SETTING_DIGEST_HELP_INTERVAL: &str =
     "At most one notification every {hours} hours, and none when nothing is waiting.";
+/// [`SETTING_DIGEST_HELP_INTERVAL`] at one hour, the shortest interval the
+/// daemon allows. DRAFT, NEEDS APPROVAL.
+pub const SETTING_DIGEST_HELP_INTERVAL_ONE: &str =
+    "At most one notification an hour, and none when nothing is waiting.";
 /// Under the Evening schedule. DRAFT, NEEDS APPROVAL.
 pub const SETTING_DIGEST_HELP_EVENING: &str =
     "At most one notification each evening, and none when nothing is waiting.";
@@ -365,8 +369,9 @@ pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the session's siz
      the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
-/// turns on is the string's first count placeholder (`{n}`, `{a}` or
-/// `{m}`), or for a panel row with no number, the count behind the row.
+/// turns on is the string's first count placeholder (`{n}`, `{a}`, `{m}`
+/// or `{hours}`), or for a panel row with no number, the count behind the
+/// row.
 pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE", "NUDGE_BACKLOG_TITLE_ONE"),
     ("NUDGE_BACKLOG_TITLE_RON", "NUDGE_BACKLOG_TITLE_RON_ONE"),
@@ -394,6 +399,10 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NOTIFY_VERDICTS_BODY", "NOTIFY_VERDICTS_BODY_ONE"),
     ("DIGEST_VERDICT_SENTENCE", "DIGEST_VERDICT_SENTENCE_ONE"),
     ("NUDGE_MISSION_FIT_CLAUSE", "NUDGE_MISSION_FIT_CLAUSE_ONE"),
+    (
+        "SETTING_DIGEST_HELP_INTERVAL",
+        "SETTING_DIGEST_HELP_INTERVAL_ONE",
+    ),
 ];
 
 /// `one` when `count` is exactly 1, else `many`. Zero takes the plural:
@@ -516,6 +525,10 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("SETTING_NOTIFY_MASTER", SETTING_NOTIFY_MASTER),
     ("SETTING_DIGEST", SETTING_DIGEST),
     ("SETTING_DIGEST_HELP_INTERVAL", SETTING_DIGEST_HELP_INTERVAL),
+    (
+        "SETTING_DIGEST_HELP_INTERVAL_ONE",
+        SETTING_DIGEST_HELP_INTERVAL_ONE,
+    ),
     ("SETTING_DIGEST_HELP_EVENING", SETTING_DIGEST_HELP_EVENING),
     ("SETTING_NOTIFY_VERDICTS", SETTING_NOTIFY_VERDICTS),
     ("SETTING_NOTIFY_IDLE", SETTING_NOTIFY_IDLE),
@@ -944,7 +957,6 @@ mod tests {
         "MARK_A11Y_VERDICTS",
         "NOTIFY_RECAP_BODY",
         "DIGEST_RECAP_SENTENCE",
-        "SETTING_DIGEST_HELP_INTERVAL",
         "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
     ];
 

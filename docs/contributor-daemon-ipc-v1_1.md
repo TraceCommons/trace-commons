@@ -7147,7 +7147,11 @@ idle sessions), `see_history` (open History), or `not_now` (send
 whole fixed table is `tc_nudge_copy_json`. A Traces row's tags ("Fits a
 mission", the estimate band and tier, and the band's explainer) are worded
 by `tc_nudge_entry_tags_json` from the row's own `mission_fit` and
-`credit_estimate`, present only when there is something true to draw.
+`credit_estimate`, present only when there is something true to draw. The
+digest switch's Settings help is worded by `tc_nudge_digest_help_json` from
+`get_settings`' `digest_schedule` and `digest_interval_secs`: the evening
+line, or the interval in whole hours with its singular at one hour, and
+nothing for an interval that is not whole hours.
 
 ## Queue states
 

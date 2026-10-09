@@ -441,6 +441,31 @@ pub fn mark_ready_text(batch: &Batch) -> MarkText {
     }
 }
 
+/// The digest switch's Settings help, finished, for its schedule: the
+/// evening line under the evening schedule; under the interval schedule the
+/// interval in whole hours, singular at one. `None` for an interval that is
+/// unknown, under an hour or not whole hours: nothing is said that cannot be
+/// said exactly.
+#[must_use]
+pub fn digest_help(evening: bool, interval_secs: Option<u64>) -> Option<String> {
+    if evening {
+        return Some(copy::SETTING_DIGEST_HELP_EVENING.to_string());
+    }
+    let secs = interval_secs?;
+    if secs < 3_600 || secs % 3_600 != 0 {
+        return None;
+    }
+    let hours = secs / 3_600;
+    Some(fill(
+        copy::pick(
+            hours,
+            copy::SETTING_DIGEST_HELP_INTERVAL,
+            copy::SETTING_DIGEST_HELP_INTERVAL_ONE,
+        ),
+        &[("hours", &hours.to_string())],
+    ))
+}
+
 /// A `list_pending` row's `credit_estimate`, as a shell hands it back.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryEstimate {
@@ -503,6 +528,33 @@ pub fn entry_tags(mission_fit: Option<u64>, estimate: Option<&EntryEstimate>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest help is finished here, singular at the one-hour minimum,
+    /// and absent for an interval it cannot state in whole hours.
+    #[test]
+    fn digest_help_is_whole_hours_and_singular_at_one() {
+        assert_eq!(
+            digest_help(false, Some(3_600)).as_deref(),
+            Some("At most one notification an hour, and none when nothing is waiting.")
+        );
+        assert_eq!(
+            digest_help(false, Some(21_600)).as_deref(),
+            Some("At most one notification every 6 hours, and none when nothing is waiting.")
+        );
+        assert_eq!(digest_help(false, Some(5_400)), None);
+        assert_eq!(digest_help(false, Some(1_800)), None);
+        assert_eq!(digest_help(false, Some(0)), None);
+        assert_eq!(digest_help(false, None), None);
+        assert_eq!(
+            digest_help(true, Some(3_600)).as_deref(),
+            Some(copy::SETTING_DIGEST_HELP_EVENING)
+        );
+        for secs in (3_600..=86_400).step_by(3_600) {
+            let line = digest_help(false, Some(secs)).unwrap();
+            assert!(!line.contains('{'), "{line}");
+            assert!(!line.contains(" 1 hours"), "{line}");
+        }
+    }
 
     fn date() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 8).unwrap()

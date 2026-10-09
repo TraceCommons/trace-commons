@@ -24,7 +24,9 @@ final class NudgeCopyExportTests: XCTestCase {
              "verdicts_offer_pending":true,"idle_offer_pending":true}
             """#
         let settings = try JSONDecoder().decode(DaemonData.Settings.self, from: Data(json.utf8))
-        let rows = NudgeSettings.rows(settings, copy: copy)
+        let help = NudgeSettings.digestHelp(
+            fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: NudgeSettings.digestHelpInput(settings)))
+        let rows = NudgeSettings.rows(settings, copy: copy, digestHelp: help)
         XCTAssertEqual(rows.count, 6)
         let offers = NudgeSettings.offers(settings, copy: copy)
         XCTAssertEqual(offers.map(\.kind), ["verdicts_landed", "idle_sessions"])
@@ -35,6 +37,23 @@ final class NudgeCopyExportTests: XCTestCase {
             XCTAssertFalse(text.contains("{"), text)
         }
         XCTAssertTrue(drawn.contains { $0.contains("6 hours") })
+    }
+
+    /// The digest help through the real export: the core fills the hours
+    /// and picks the singular at the one-hour minimum.
+    func testTheDigestHelpIsComposedByTheCore() throws {
+        func help(_ json: String) throws -> String? {
+            let settings = try JSONDecoder().decode(DaemonData.Settings.self, from: Data(json.utf8))
+            return NudgeSettings.digestHelp(
+                fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: NudgeSettings.digestHelpInput(settings)))
+        }
+        XCTAssertEqual(try help(#"{"digest_interval_secs":3600,"digest_schedule":{"mode":"interval"}}"#),
+                       "At most one notification an hour, and none when nothing is waiting.")
+        XCTAssertEqual(try help(#"{"digest_interval_secs":21600}"#),
+                       "At most one notification every 6 hours, and none when nothing is waiting.")
+        XCTAssertNil(try help(#"{"digest_interval_secs":5400}"#))
+        XCTAssertNotNil(try help(#"{"digest_schedule":{"mode":"evening","hour":18}}"#))
+        XCTAssertNil(NudgeSettings.digestHelp(fromJSON: TCCoreCopy.nudgeDigestHelpJSON(settingsJSON: nil)))
     }
 
     func testARowsTagsAreTheCoresWords() throws {

@@ -150,6 +150,16 @@ public enum TCCoreCopy {
         return take(entryJSON.withCString { tc_nudge_entry_tags_json($0) })
     }
 
+    /// `tc_nudge_digest_help_json`: the digest switch's Settings help,
+    /// composed by the core from the schedule and interval
+    /// (`NudgeSettings.digestHelpInput(_:)`). Decoded by
+    /// `TCShellCore.NudgeSettings.digestHelp(fromJSON:)`; `{}` for nil or
+    /// unreadable input.
+    public static func nudgeDigestHelpJSON(settingsJSON: String?) -> String? {
+        guard let settingsJSON else { return take(tc_nudge_digest_help_json(nil)) }
+        return take(settingsJSON.withCString { tc_nudge_digest_help_json($0) })
+    }
+
     /// `tc_first_run_copy_json`: the #1030 first run's words, grouped by
     /// screen. Decoded by `TCShellCore.FirstRunCopy`.
     public static func firstRunCopyJSON() -> String? {

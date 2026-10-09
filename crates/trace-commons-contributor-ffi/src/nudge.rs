@@ -69,9 +69,92 @@ pub unsafe extern "C" fn tc_nudge_entry_tags_json(entry_json: *const c_char) -> 
     })
 }
 
+/// The digest switch's Settings help, composed by the core:
+/// `settings_json` is a borrowed UTF-8 JSON object carrying
+/// `digest_schedule` and `digest_interval_secs` as `get_settings` sent them
+/// (the whole response, or just those keys). Returns an owned JSON object
+/// with `digest_help`, present only when there is a line to draw: the
+/// evening line, or the interval in whole hours, singular at one. A NULL,
+/// unreadable or mistyped input answers `{}`, which draws nothing. Free with
+/// `tc_string_free`. DRAFT, NEEDS APPROVAL wording.
+///
+/// # Safety
+/// `settings_json`, if non-null, must point to a valid, NUL-terminated C
+/// string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tc_nudge_digest_help_json(settings_json: *const c_char) -> *mut c_char {
+    guarded_string_no_err(|| {
+        let settings: serde_json::Value = if settings_json.is_null() {
+            serde_json::Value::Null
+        } else {
+            unsafe { CStr::from_ptr(settings_json) }
+                .to_str()
+                .ok()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or(serde_json::Value::Null)
+        };
+        let evening = settings
+            .get("digest_schedule")
+            .and_then(|s| s.get("mode"))
+            .and_then(serde_json::Value::as_str)
+            == Some("evening");
+        let interval = settings
+            .get("digest_interval_secs")
+            .and_then(serde_json::Value::as_u64);
+        let mut out = serde_json::Map::new();
+        if let Some(help) = trace_commons_contributor::nudge_render::digest_help(evening, interval)
+        {
+            out.insert("digest_help".to_string(), serde_json::Value::from(help));
+        }
+        let json = serde_json::to_string(&out).unwrap_or_else(|_| "{}".to_string());
+        Ok(to_owned_cstring(&json))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn digest_help(settings: Option<&str>) -> serde_json::Value {
+        let owned = settings.map(|s| CString::new(s).unwrap());
+        let result = unsafe {
+            tc_nudge_digest_help_json(owned.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()))
+        };
+        assert!(!result.is_null());
+        let value =
+            serde_json::from_str(unsafe { CStr::from_ptr(result) }.to_str().unwrap()).unwrap();
+        unsafe { tc_string_free(result) };
+        value
+    }
+
+    #[test]
+    fn the_digest_help_is_composed_from_the_settings() {
+        assert_eq!(
+            digest_help(Some(
+                r#"{"digest_interval_secs":3600,"digest_schedule":{"mode":"interval"}}"#
+            ))["digest_help"],
+            "At most one notification an hour, and none when nothing is waiting."
+        );
+        assert_eq!(
+            digest_help(Some(r#"{"digest_interval_secs":21600}"#))["digest_help"],
+            "At most one notification every 6 hours, and none when nothing is waiting."
+        );
+        assert_eq!(
+            digest_help(Some(
+                r#"{"digest_interval_secs":3600,"digest_schedule":{"mode":"evening","hour":18}}"#
+            ))["digest_help"],
+            trace_commons_contributor::nudge_copy::SETTING_DIGEST_HELP_EVENING
+        );
+        for nothing in [
+            None,
+            Some("not json"),
+            Some(r#"{"digest_interval_secs":5400}"#),
+            Some(r#"{"digest_interval_secs":"3600"}"#),
+            Some("{}"),
+        ] {
+            assert_eq!(digest_help(nothing), serde_json::json!({}), "{nothing:?}");
+        }
+    }
 
     #[test]
     fn the_copy_export_carries_the_whole_table() {
