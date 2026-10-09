@@ -14,6 +14,7 @@ struct GlassSettingsContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
             switch section {
+            case .general: GeneralSection()
             case .connection: ConnectionSection()
             case .startup: StartupSection()
             case .notifications: NotificationsSection()
