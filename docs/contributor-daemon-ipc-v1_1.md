@@ -4094,6 +4094,10 @@ sessions on disk. Otherwise:
   (no proxy ledger is declared, so a stored tally may lack every call
   since). When it is true, `routing_unavailable` is `null`. The answer reads
   only the store, never the ledger.
+- `started_at`, `routing`, `routing_available` and `routing_unavailable`
+  are additive: a daemon that predates them omits all four. A shell reads
+  an absent `routing_available` as false and draws no route, and an absent
+  `started_at` as unknown.
 
 Four further fields are additive. A daemon that predates them omits them;
 the macOS window then cannot draw the week in the core's shapes, so it shows
