@@ -100246,6 +100246,17 @@ mod credit_estimate_tests {
                 "/v1/admin/credit-estimate-eval?dry_run=true&fit=true",
                 StatusCode::BAD_REQUEST,
             ),
+            // Kristi's #1285 review, finding 3: a limit over the cap is
+            // refused, before any dependency is looked at, rather than
+            // run unbounded.
+            (
+                "/v1/admin/credit-estimate-eval?limit=10001",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?limit=-1",
+                StatusCode::BAD_REQUEST,
+            ),
         ] {
             let response = app(bare.clone())
                 .oneshot(admin(uri, "admin-token-a"))

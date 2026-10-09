@@ -44,6 +44,12 @@ pub(super) const CREDIT_ESTIMATE_TABLE_PATH_ENV: &str = "TRACE_COMMONS_CREDIT_ES
 /// rather than served.
 const TABLE_INVALID: &str = "credit_estimate_table_invalid";
 
+/// The most decisions one eval run enumerates, and the default when no
+/// `limit` is given. Each labelled submission is decrypted and derived
+/// within the one request and every row is held in memory, so a run is
+/// bounded rather than sized by the corpus. A larger `limit` is refused.
+pub(super) const CREDIT_ESTIMATE_EVAL_MAX_LIMIT: i64 = 10_000;
+
 pub(super) fn table_from_env() -> anyhow::Result<Arc<LocalEstimateTable>> {
     let path = std::env::var_os(CREDIT_ESTIMATE_TABLE_PATH_ENV).map(std::path::PathBuf::from);
     table_from_path(path.as_deref()).map(Arc::new)
@@ -84,7 +90,8 @@ pub(super) struct CreditEstimateEvalQuery {
     /// for it.
     #[serde(default)]
     pub(super) dry_run: bool,
-    /// Bounds the decisions enumerated, oldest first.
+    /// Bounds the decisions enumerated, oldest first. Defaults to, and
+    /// may not exceed, [`CREDIT_ESTIMATE_EVAL_MAX_LIMIT`].
     #[serde(default)]
     pub(super) limit: Option<i64>,
     /// Also fit and evaluate a candidate table.
@@ -135,7 +142,10 @@ pub(super) async fn run_credit_estimate_eval(
         .db_mirror
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("credit estimate eval requires a configured DB mirror"))?;
-    let limit = query.limit.unwrap_or(i64::MAX).max(0);
+    let limit = query
+        .limit
+        .unwrap_or(CREDIT_ESTIMATE_EVAL_MAX_LIMIT)
+        .clamp(0, CREDIT_ESTIMATE_EVAL_MAX_LIMIT);
     let decisions = db.list_dedup_rederive_rows(limit).await?;
     let mut counts = CreditEstimateEvalCounts {
         decisions: decisions.len(),
@@ -205,12 +215,19 @@ pub(super) async fn run_credit_estimate_eval(
                     load_trace_ciphertext_and_wrapped_dek(state, tenant_id, submission_id).await?;
                 // Canonical tenant_storage_ref, as every gate path uses.
                 let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
-                state.gate_service.derive_estimate_features(
-                    &tenant_ctx,
-                    &ciphertext,
-                    &wrapped_dek,
-                    TraceArtifactKind::ContributionEnvelope,
-                )
+                // Decrypting and deriving is CPU work: off the async
+                // runtime, so one eval run does not stall request handling.
+                let gate_service = state.gate_service.clone();
+                tokio::task::spawn_blocking(move || {
+                    gate_service.derive_estimate_features(
+                        &tenant_ctx,
+                        &ciphertext,
+                        &wrapped_dek,
+                        TraceArtifactKind::ContributionEnvelope,
+                    )
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("credit estimate derive task failed"))?
             }
             .await;
             let features = match derived {
@@ -259,7 +276,7 @@ pub(super) async fn run_credit_estimate_eval(
 ///
 /// Auth: the admin bearer credential (`require_admin`), as the other
 /// `/v1/admin/*` maintenance routes. Synchronous, because it returns rows;
-/// bound a first run with `limit`.
+/// `limit` defaults to and is capped at [`CREDIT_ESTIMATE_EVAL_MAX_LIMIT`].
 pub(super) async fn eval_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -271,6 +288,15 @@ pub(super) async fn eval_handler(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "credit_estimate_eval_fit_needs_rows",
+        ));
+    }
+    if query
+        .limit
+        .is_some_and(|limit| !(0..=CREDIT_ESTIMATE_EVAL_MAX_LIMIT).contains(&limit))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_estimate_eval_limit_out_of_range",
         ));
     }
     if state.db_mirror.is_none() {
