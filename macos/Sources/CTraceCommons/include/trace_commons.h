@@ -2174,6 +2174,16 @@ char*       tc_insights_copy_json(void);
  * for the fixed strings. Owned JSON string; free with tc_string_free.
  * Returns NULL only after a caught panic. DRAFT, NEEDS APPROVAL. */
 char*       tc_nudge_copy_json(void);
+/* A Traces row's tags, worded by the core from the row's own list_pending
+ * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
+ * mission_fit and credit_estimate as the daemon sent them. Returns an owned
+ * JSON object with mission_fit, estimate_band, estimate_tier and
+ * estimate_explainer, each present only when there is something true to
+ * draw: the mission tag above zero, the estimate only while drawn is true.
+ * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
+ * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_entry_tags_json(const char* entry_json);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8

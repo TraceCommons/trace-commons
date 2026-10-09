@@ -441,6 +441,65 @@ pub fn mark_ready_text(batch: &Batch) -> MarkText {
     }
 }
 
+/// A `list_pending` row's `credit_estimate`, as a shell hands it back.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryEstimate {
+    pub low: f64,
+    pub high: f64,
+    /// `lower`, `middle` or `higher`; absent for a one-tier table.
+    pub tier: Option<String>,
+    /// Whether the estimate is drawn at all; an older daemon's absent
+    /// `drawn` is `false`.
+    pub drawn: bool,
+}
+
+/// A queue row's tags: whether it fits a mission, and its estimate band,
+/// tier and the band's explainer. Each is absent when there is nothing true
+/// to draw, and a shell draws exactly what is present.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct EntryTags {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission_fit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_tier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate_explainer: Option<String>,
+}
+
+/// One row's tags from its `mission_fit` and `credit_estimate`. The mission
+/// tag only above zero; the estimate only while `drawn`, and never for a
+/// band that is not a band (non-finite, not above zero, or upside down). A
+/// tier this build does not know draws no tier tag.
+#[must_use]
+pub fn entry_tags(mission_fit: Option<u64>, estimate: Option<&EntryEstimate>) -> EntryTags {
+    let mut tags = EntryTags {
+        mission_fit: mission_fit
+            .filter(|m| *m > 0)
+            .map(|_| copy::ENTRY_MISSION_FIT.to_string()),
+        ..EntryTags::default()
+    };
+    let Some(e) = estimate.filter(|e| {
+        e.drawn && e.low.is_finite() && e.high.is_finite() && e.low > 0.0 && e.high >= e.low
+    }) else {
+        return tags;
+    };
+    tags.estimate_band = Some(fill(
+        copy::ENTRY_ESTIMATE_BAND,
+        &[("low", &band_text(e.low)), ("high", &band_text(e.high))],
+    ));
+    tags.estimate_tier = match e.tier.as_deref() {
+        Some("higher") => Some(copy::ENTRY_ESTIMATE_TIER_HIGHER),
+        Some("middle") => Some(copy::ENTRY_ESTIMATE_TIER_MIDDLE),
+        Some("lower") => Some(copy::ENTRY_ESTIMATE_TIER_LOWER),
+        _ => None,
+    }
+    .map(str::to_string);
+    tags.estimate_explainer = Some(copy::ESTIMATE_EXPLAINER.to_string());
+    tags
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +739,63 @@ mod tests {
         );
         let finals = mark_news_text(&verdicts(0, 0, Some(40)));
         assert_eq!(finals.accessibility, "New: 4.0 credit is now final.");
+    }
+
+    fn estimate(low: f64, high: f64, tier: Option<&str>, drawn: bool) -> EntryEstimate {
+        EntryEstimate {
+            low,
+            high,
+            tier: tier.map(str::to_string),
+            drawn,
+        }
+    }
+
+    #[test]
+    fn a_row_says_it_fits_a_mission_only_when_it_does() {
+        assert_eq!(
+            entry_tags(Some(2), None).mission_fit.as_deref(),
+            Some("Fits a mission")
+        );
+        assert_eq!(entry_tags(Some(0), None).mission_fit, None);
+        assert_eq!(entry_tags(None, None), EntryTags::default());
+    }
+
+    #[test]
+    fn a_row_draws_its_estimate_only_when_the_core_says_to() {
+        let drawn = entry_tags(None, Some(&estimate(2.0, 4.5, Some("higher"), true)));
+        assert_eq!(
+            drawn.estimate_band.as_deref(),
+            Some("Estimate: about 2 to 4.5 credit")
+        );
+        assert_eq!(drawn.estimate_tier.as_deref(), Some("Higher estimate"));
+        assert_eq!(
+            drawn.estimate_explainer.as_deref(),
+            Some(copy::ESTIMATE_EXPLAINER)
+        );
+        let hidden = entry_tags(None, Some(&estimate(1.0, 3.0, None, false)));
+        assert_eq!(hidden, EntryTags::default());
+        let middle = entry_tags(None, Some(&estimate(1.0, 3.0, Some("middle"), true)));
+        assert_eq!(middle.estimate_tier.as_deref(), Some("Typical estimate"));
+        let lower = entry_tags(None, Some(&estimate(0.5, 1.0, Some("lower"), true)));
+        assert_eq!(lower.estimate_tier.as_deref(), Some("Lower estimate"));
+        assert_eq!(
+            lower.estimate_band.as_deref(),
+            Some("Estimate: about 0.5 to 1 credit")
+        );
+    }
+
+    #[test]
+    fn a_row_estimate_the_core_cannot_read_draws_nothing() {
+        let unknown_tier = entry_tags(None, Some(&estimate(1.0, 3.0, Some("huge"), true)));
+        assert!(unknown_tier.estimate_band.is_some());
+        assert_eq!(unknown_tier.estimate_tier, None);
+        for (low, high) in [(0.0, 3.0), (-1.0, 2.0), (3.0, 1.0), (f64::NAN, 2.0)] {
+            assert_eq!(
+                entry_tags(None, Some(&estimate(low, high, Some("higher"), true))),
+                EntryTags::default(),
+                "{low} {high}"
+            );
+        }
     }
 
     #[test]

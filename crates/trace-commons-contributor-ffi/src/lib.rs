@@ -95,7 +95,7 @@ pub use insights::{tc_insights_call, tc_insights_copy_json};
 mod mission_drafts;
 pub use mission_drafts::tc_mission_drafts_call;
 mod nudge;
-pub use nudge::tc_nudge_copy_json;
+pub use nudge::{tc_nudge_copy_json, tc_nudge_entry_tags_json};
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_void};

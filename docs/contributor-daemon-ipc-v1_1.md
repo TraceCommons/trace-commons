@@ -7144,7 +7144,10 @@ Every word is composed by the daemon; a shell posts `title` and `body` as
 they are and draws `actions` in order. `id` is `review` (open Traces at the
 idle sessions), `see_history` (open History), or `not_now` (send
 `nudge_decline` for the kind). The words are DRAFT, NEEDS APPROVAL; the
-whole fixed table is `tc_nudge_copy_json`.
+whole fixed table is `tc_nudge_copy_json`. A Traces row's tags ("Fits a
+mission", the estimate band and tier, and the band's explainer) are worded
+by `tc_nudge_entry_tags_json` from the row's own `mission_fit` and
+`credit_estimate`, present only when there is something true to draw.
 
 ## Queue states
 
