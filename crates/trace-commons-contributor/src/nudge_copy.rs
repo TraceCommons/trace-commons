@@ -42,16 +42,11 @@ use crate::project_copy::folder_mode_ask_label;
 // The unpurposed backlog (U1): Traces and History card, panel row.
 // ---------------------------------------------------------------------
 
-/// Ron's draft card title (`native-app-design-data-audit.md:86`).
-/// DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE_RON: &str = "{n} unpurposed traces are waiting";
-/// The plain-wording alternative to [`NUDGE_BACKLOG_TITLE_RON`].
-/// DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE_PLAIN: &str = "{n} previewed sessions are waiting for a decision";
-/// The U1 card's title. Owner decision 9 picks between Ron's wording and
-/// plain wording; this selects Ron's until it is ruled, and changing the
-/// pick is this one line. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_RON;
+/// The U1 card's title. Owner decision 9 chose between Ron's first draft
+/// ("{n} unpurposed traces are waiting") and a plain alternative; Ron's
+/// #1303 design review (2026-10-09, adopted by the owner) replaced both
+/// with this, so neither candidate is kept. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_TITLE: &str = "{n} traces to review";
 /// DRAFT, NEEDS APPROVAL. The mode is named by its one spelling.
 pub const NUDGE_BACKLOG_BODY: &str = concat!(
     "They are in folders set to ",
@@ -248,12 +243,10 @@ pub const ABOUT_SUGGESTIONS: &str =
     "These counts are kept on this computer only, and are removed when you sign out.";
 
 /// Every nudge string, as `(key, text)`, including both candidates of each
-/// owner pick so the word rules hold whichever is chosen. The later C ABI
+/// owner pick still open so the word rules hold whichever is chosen. The later C ABI
 /// export is built from this table.
 pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE", NUDGE_BACKLOG_TITLE),
-    ("NUDGE_BACKLOG_TITLE_RON", NUDGE_BACKLOG_TITLE_RON),
-    ("NUDGE_BACKLOG_TITLE_PLAIN", NUDGE_BACKLOG_TITLE_PLAIN),
     ("NUDGE_BACKLOG_BODY", NUDGE_BACKLOG_BODY),
     ("NUDGE_BACKLOG_REVIEW", NUDGE_BACKLOG_REVIEW),
     (
@@ -613,9 +606,6 @@ mod tests {
     #[test]
     fn owner_picks_select_a_candidate_and_idle_strings_name_the_threshold() {
         assert!(
-            [NUDGE_BACKLOG_TITLE_RON, NUDGE_BACKLOG_TITLE_PLAIN].contains(&NUDGE_BACKLOG_TITLE)
-        );
-        assert!(
             [NOTIFY_IDLE_BODY_OWNER_DRAFT, NOTIFY_IDLE_BODY_ALTERNATIVE]
                 .contains(&NOTIFY_IDLE_BODY)
         );
@@ -626,6 +616,16 @@ mod tests {
                     "{key} must name the threshold: {text}"
                 );
             }
+        }
+    }
+
+    /// Ron's #1303 design review, item 8: the backlog title names the
+    /// action, and no nudge calls a trace "unpurposed".
+    #[test]
+    fn the_backlog_title_is_traces_to_review() {
+        assert_eq!(NUDGE_BACKLOG_TITLE, "{n} traces to review");
+        for (key, text) in NUDGE_COPY {
+            assert!(!text.to_lowercase().contains("unpurposed"), "{key}: {text}");
         }
     }
 
