@@ -134,6 +134,22 @@ public enum TCCoreCopy {
         take(tc_monitor_traces_copy_json())
     }
 
+    /// `tc_nudge_copy_json`: every fixed re-engagement nudge string, key to
+    /// text. Decoded by `TCShellCore.NudgeCopy`. Sentences with counts in
+    /// them arrive composed on `status.nudge`, never from here.
+    public static func nudgeCopyJSON() -> String? {
+        take(tc_nudge_copy_json())
+    }
+
+    /// `tc_nudge_entry_tags_json`: a Traces row's tags, worded by the core
+    /// from the row's `mission_fit` and `credit_estimate`
+    /// (`NudgeEntryTags.input(for:)`). Decoded by
+    /// `TCShellCore.NudgeEntryTags`; `{}` for nil or unreadable input.
+    public static func nudgeEntryTagsJSON(entryJSON: String?) -> String? {
+        guard let entryJSON else { return take(tc_nudge_entry_tags_json(nil)) }
+        return take(entryJSON.withCString { tc_nudge_entry_tags_json($0) })
+    }
+
     /// `tc_first_run_copy_json`: the #1030 first run's words, grouped by
     /// screen. Decoded by `TCShellCore.FirstRunCopy`.
     public static func firstRunCopyJSON() -> String? {

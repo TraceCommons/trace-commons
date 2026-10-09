@@ -410,25 +410,33 @@ public final class TCDaemon {
     ///
     /// Returns nil if the ABI refused (NULL handle or a stopped daemon --
     /// token 0 is never valid).
-    public func subscribe(_ handler: @escaping (String) -> Void) -> TCSubscription? {
+    ///
+    /// `accepts` names the opt-in events this subscriber can render, such as
+    /// `reengage_due` (`tc_subscribe_with_accepts`, which forwards them on
+    /// an attached handle's socket too). Empty declares none and is exactly
+    /// `tc_subscribe`: a subscriber that cannot draw an opt-in event never
+    /// receives one, and the daemon never counts it as a renderer.
+    public func subscribe(accepts: [String] = [], _ handler: @escaping (String) -> Void) -> TCSubscription? {
         // ctx must stay alive until tc_unsubscribe RETURNS, per the header's
         // SUBSCRIPTION LIFETIME rule -- retained here, released only by a
         // tc_unsubscribe that we confirmed was not refused.
         let box = TCCallbackBox(handler)
         let ctx = Unmanaged.passRetained(box).toOpaque()
+        let callback: @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void = { eventJSON, ctx in
+            guard let eventJSON, let ctx else { return }
+            let box = Unmanaged<TCCallbackBox>.fromOpaque(ctx).takeUnretainedValue()
+            // The event_json pointer is borrowed for this call only, so it
+            // is copied into a Swift String before anything else.
+            box.handler(String(cString: eventJSON))
+        }
+        let acceptsJSON = accepts.isEmpty
+            ? nil
+            : (try? JSONEncoder().encode(accepts)).map { String(decoding: $0, as: UTF8.self) }
         let registered: UInt64? = withHandle { h in
-            tc_subscribe(
-                h,
-                { eventJSON, ctx in
-                    guard let eventJSON, let ctx else { return }
-                    let box = Unmanaged<TCCallbackBox>.fromOpaque(ctx).takeUnretainedValue()
-                    // The event_json pointer is borrowed for this call only,
-                    // so it is copied into a Swift String before anything
-                    // else.
-                    box.handler(String(cString: eventJSON))
-                },
-                ctx
-            )
+            if let acceptsJSON {
+                return acceptsJSON.withCString { tc_subscribe_with_accepts(h, $0, callback, ctx) }
+            }
+            return tc_subscribe(h, callback, ctx)
         }
         // Refused by teardown: no subscription was ever registered, so no
         // callback can fire and the ctx retain is ours to drop.

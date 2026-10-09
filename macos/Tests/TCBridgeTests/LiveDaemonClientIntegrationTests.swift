@@ -122,6 +122,55 @@ final class LiveDaemonClientIntegrationTests: XCTestCase {
         }
     }
 
+    /// Every nudge request in the shape the real daemon accepts, and the
+    /// settings it reads back afterwards.
+    func testNudgeRequestsAreAcceptedByTheRealDaemon() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        let idle = try await client.listPending(projectId: nil, filter: .idleSessions, order: .suggested)
+        XCTAssertEqual(idle, [])
+        try await client.nudgeOpened(.verdictsLanded)
+        try await client.nudgeDecline(.idleSessions)
+        try await client.setSuggestionsEnabled(false)
+        try await client.setMenuBarMarkEnabled(false)
+        try await client.setNotificationsEnabled(false)
+        try await client.setNotifyKind("idle_sessions", on: true)
+        try await client.dismissNotifyOffer(kind: "verdicts_landed")
+        let settings = try await client.settings()
+        XCTAssertEqual(settings.suggestionsEnabled, false)
+        XCTAssertEqual(settings.menuBarMarkEnabled, false)
+        XCTAssertEqual(settings.notificationsEnabled, false)
+        XCTAssertEqual(settings.notify?.idleSessions, true)
+        XCTAssertNotEqual(settings.verdictsOfferPending, true)
+        // Verdict news has no "Not now"; the daemon refuses it.
+        do {
+            try await client.nudgeDecline(.verdictsLanded)
+            XCTFail("declined verdict news")
+        } catch {
+            XCTAssertEqual(error as? DaemonDataError, .daemon(code: "bad_params", message: "nudge-kind-not-declinable"))
+        }
+    }
+
+    /// A subscriber that declares it renders `reengage_due` is registered
+    /// and still receives the ordinary frames.
+    func testASubscriberThatAcceptsReengagementReceivesOrdinaryFrames() async throws {
+        let daemon = try startDaemon()
+        let client = live(daemon)
+        let subscription = try XCTUnwrap(daemon.subscribe(accepts: ["reengage_due"]) { client.deliver(eventJSON: $0) })
+        defer { daemon.unsubscribe(subscription) }
+        let watchdog = Task {
+            try? await Task.sleep(for: .seconds(30))
+            client.finishEvents()
+        }
+        defer { watchdog.cancel() }
+        var iterator = client.events().makeAsyncIterator()
+        guard case .snapshot? = await iterator.next() else { return XCTFail("first event is not a snapshot") }
+        _ = daemon.call("pause", params: "{}")
+        let next = await iterator.next()
+        XCTAssertEqual(next, .statusChanged)
+        client.finishEvents()
+    }
+
     /// The stream the app feeds from its one `tc_subscribe` callback: opens
     /// with a snapshot of the real queue, then carries the daemon's frames.
     func testEventsOpenWithASnapshotAndCarryRealFrames() async throws {
