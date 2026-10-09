@@ -4702,6 +4702,9 @@ class PromoteListTests(unittest.TestCase):
             lambda p: p.update(bundle_id=_fake_hash("another bundle")),
             lambda p: p["artifacts"].popitem(),
             lambda p: p["artifacts"].update({k: v + "00" for k, v in list(p["artifacts"].items())[:1]}),
+            # A lone surrogate: `json.loads` accepts the escape, and no UTF-8
+            # encoding of it exists.
+            lambda p: p["manifest"]["score"].update(policy_id="\udc80"),
         ):
             with self.assertRaises(errors.ToolingError) as ctx:
                 promote.bundle_package_hash(edited(edit))

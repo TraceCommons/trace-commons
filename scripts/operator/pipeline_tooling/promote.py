@@ -155,9 +155,14 @@ def _encode_len(output, length):
 
 
 def _encode_string(output, value):
-    """`encode_string`: the UTF-8 byte length, then the bytes."""
+    """`encode_string`: the UTF-8 byte length, then the bytes. A string with
+    no UTF-8 encoding (a lone surrogate, which `json.loads` accepts) is
+    refused: a Rust `String` cannot hold one."""
     require(isinstance(value, str), "promote_package_invalid")
-    data = value.encode()
+    try:
+        data = value.encode()
+    except UnicodeEncodeError as error:
+        raise ToolingError("promote_package_invalid") from error
     _encode_len(output, len(data))
     output += data
 
