@@ -30,6 +30,13 @@ final class MenuPanelStore {
     /// fails, there is no client, or the client's event stream ends: what
     /// is held is no longer current.
     private(set) var stale = true
+    /// Today's routed calls per tool (`insights_glance`). Read on its own:
+    /// no answer here ever stales the popover, since the glance is off by
+    /// default and an older daemon does not serve it.
+    private(set) var glance: MenuPanelData.GlanceState = .notRead
+    /// How often an open popover re-reads the glance: the ledger can stop
+    /// refreshing with no event, and only a re-read sees it go stale.
+    static let glanceRefresh: Duration = .seconds(60)
 
     private(set) var client: (any DaemonDataClient)?
 
@@ -56,6 +63,7 @@ final class MenuPanelStore {
         self.client = client
         if let configDirectory { self.configDirectory = configDirectory }
         stale = true
+        glance = .notRead
     }
 
     // MARK: The contribution override (#1208)
@@ -166,8 +174,7 @@ final class MenuPanelStore {
             case .digestDue, .previewReady, .unknown:
                 break
             case .usageChanged:
-                // Re-reads the glance once the panel holds one.
-                break
+                await loadGlance()
             }
         }
         // The stream ended: the daemon went away.
@@ -180,6 +187,7 @@ final class MenuPanelStore {
     func load() async {
         guard let client else {
             stale = true
+            glance = .unavailable
             return
         }
         var failed = false
@@ -200,6 +208,33 @@ final class MenuPanelStore {
             calls = value.readable ? value.calls : []
         }
         stale = failed
+        await loadGlance()
+    }
+
+    /// Reads the glance alone. Any failure, an older daemon's
+    /// `unknown_method` included, is no glance; it never marks the
+    /// popover's other data stale.
+    func loadGlance() async {
+        guard let client else {
+            glance = .unavailable
+            return
+        }
+        let result: Result<DaemonData.InsightsGlance, any Error>
+        do {
+            result = .success(try await client.insightsGlance(tzSeconds: TimeZone.current.secondsFromGMT()))
+        } catch {
+            result = .failure(error)
+        }
+        glance = MenuPanelData.glance(result)
+    }
+
+    /// Re-reads the glance while the popover is open, so a ledger that
+    /// stops refreshing is seen as stale without an event.
+    func followGlance() async {
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: Self.glanceRefresh) } catch { return }
+            await loadGlance()
+        }
     }
 
     /// The graph's columns: contributed (shared) and kept, per day.
@@ -213,6 +248,39 @@ final class MenuPanelStore {
 
 /// The popover's rules, as pure functions so they are tested.
 enum MenuPanelData {
+    /// What the glance read found. Only `data` is drawn; every other state
+    /// draws no card, never a zero.
+    enum GlanceState: Equatable {
+        /// Not read since the client was attached.
+        case notRead
+        /// The ledger feed is off (`enabled: false`).
+        case off
+        /// No answer: a failure, no client, or a daemon without the method.
+        case unavailable
+        /// The ledger did not answer, or the answer lacks its rows.
+        case unreadable
+        /// The ledger stopped refreshing; a missing `stale` counts as stale.
+        case stale
+        case data(DaemonData.InsightsGlance)
+    }
+
+    /// The glance read's state. Fails closed: only an enabled, readable
+    /// answer with rows and coverage that says it is fresh is data.
+    static func glance(_ result: Result<DaemonData.InsightsGlance, any Error>) -> GlanceState {
+        guard case .success(let glance) = result else { return .unavailable }
+        guard glance.enabled else { return .off }
+        guard glance.readable == true, glance.tools != nil, glance.coverage != nil else { return .unreadable }
+        guard glance.stale == false else { return .stale }
+        return .data(glance)
+    }
+
+    /// The glance the card draws: fresh data with at least one tool, while
+    /// the popover's own data is current. Anything else draws no card.
+    static func glanceToDraw(_ state: GlanceState, stale: Bool) -> DaemonData.InsightsGlance? {
+        guard !stale, case .data(let glance) = state, let tools = glance.tools, !tools.isEmpty else { return nil }
+        return glance
+    }
+
     /// Where "Manage rules" goes: the watched folders in Settings, or first
     /// run while onboarding is required, with no Settings section (R-43).
     static func manageRules(requiresOnboarding: Bool) -> MonitorDestination? {

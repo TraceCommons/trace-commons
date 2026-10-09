@@ -1054,6 +1054,15 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_copy_json",
     ),
+    // The menu-bar glance fills the core's analytics words with the
+    // daemon's `insights_glance` figures.
+    (
+        "Insights glance card words",
+        "TraceCommonsApp/Views/Monitor/InsightsGlanceCard.swift",
+        "TCInsights.copy()",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_copy_json",
+    ),
     (
         "Insights week overview and drill-down reads",
         "TraceCommonsApp/InsightsModel.swift",

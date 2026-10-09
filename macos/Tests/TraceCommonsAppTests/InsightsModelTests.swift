@@ -231,6 +231,9 @@ final class InsightsOverviewTests: XCTestCase {
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: Self.words), [""])
         XCTAssertEqual(InsightsOverviewWords.feedLines("counter_pass", copy: ["analytics_feed_counter_pass": "FEED_T"]),
                        ["FEED_T"])
+        // The ledger feed's caption, as GTK and Windows draw it.
+        XCTAssertEqual(InsightsOverviewWords.feedLines("ledger", copy: ["analytics_feed_ledger": "FEED_L"]),
+                       ["FEED_L"])
         XCTAssertEqual(InsightsOverviewWords.reason("no_usage_counters", copy: Self.words), "NO_COUNTERS")
         XCTAssertEqual(InsightsOverviewWords.state("unknown", copy: Self.words), "STATE_UNKNOWN")
         XCTAssertEqual(InsightsOverviewWords.fill("Largest: {t} tokens", ["t": "9"]), "Largest: 9 tokens")

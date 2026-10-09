@@ -752,6 +752,8 @@ enum InsightsOverviewWords {
             return [text("analytics_feed_saved", copy), text("analytics_feed_comparisons_need_counter_pass", copy)]
         case "counter_pass":
             return [text("analytics_feed_counter_pass", copy)]
+        case "ledger":
+            return [text("analytics_feed_ledger", copy)]
         default:
             return []
         }

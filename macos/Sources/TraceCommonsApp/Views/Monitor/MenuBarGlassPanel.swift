@@ -49,6 +49,7 @@ struct MenuBarGlassPanel: View {
             }
             legend
             graph
+            glance
             recent
             menuItems
         }
@@ -56,6 +57,8 @@ struct MenuBarGlassPanel: View {
         .frame(width: Self.width)
         .modifier(PanelSurface(owns: ownsSurface))
         .animation(reduceMotion ? nil : GlassMotion.curve(GlassTokens.Motion.slide), value: sub)
+        // The glance is re-read while open: its ledger can go stale silently.
+        .task { await store.followGlance() }
         // A fresh read on opening; the label follows the event stream. The
         // app's own reads (the Private AI pill and Cmd-Shift-M read
         // `model.daemonSettings`) refresh on opening too, as the legacy menu
@@ -337,6 +340,17 @@ struct MenuBarGlassPanel: View {
             keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
+    }
+
+    // MARK: Glance
+
+    /// Today's routed calls per tool, only for fresh data with rows; every
+    /// other state draws nothing, never a zero.
+    @ViewBuilder
+    private var glance: some View {
+        if let glance = MenuPanelData.glanceToDraw(store.glance, stale: store.stale) {
+            InsightsGlanceCard(glance: glance) { open(.inference) }
+        }
     }
 
     // MARK: Recent activity
