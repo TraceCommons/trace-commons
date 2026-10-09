@@ -87,7 +87,7 @@ pub const NUDGE_NOT_NOW: &str = "Not now";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_PANEL_BACKLOG: &str = "Previewed traces are waiting for a decision";
 /// [`NUDGE_PANEL_BACKLOG`] when one is waiting. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed session is waiting for a decision";
+pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed trace is waiting for a decision";
 
 // ---------------------------------------------------------------------
 // Idle sessions (U4): the primary phase-1 trigger.
@@ -96,11 +96,11 @@ pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed session is waiting for a 
 /// The panel row for U4. No number. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_PANEL_IDLE: &str = "Some traces have been idle for {days} or more";
 /// [`NUDGE_PANEL_IDLE`] when one is idle. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_IDLE_ONE: &str = "A session has been idle for {days} or more";
+pub const NUDGE_PANEL_IDLE_ONE: &str = "A trace has been idle for {days} or more";
 /// The Traces card's title. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_TITLE: &str = "{n} traces from {tool} have been idle for {days} or more";
 /// [`NUDGE_IDLE_TITLE`] for one. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_IDLE_TITLE_ONE: &str = "1 session from {tool} has been idle for {days} or more";
+pub const NUDGE_IDLE_TITLE_ONE: &str = "1 trace from {tool} has been idle for {days} or more";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_BODY: &str = "They look finished. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer.";
@@ -114,7 +114,7 @@ pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
     "{n} traces from {tool} have been idle for {days}. Contribute them?";
 /// [`NOTIFY_IDLE_BODY_OWNER_DRAFT`] for one.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE: &str =
-    "1 session from {tool} has been idle for {days}. Contribute it?";
+    "1 trace from {tool} has been idle for {days}. Contribute it?";
 /// The alternative to [`NOTIFY_IDLE_BODY_OWNER_DRAFT`]: a notification may
 /// only open Review, so it names what Review offers -- send or keep --
 /// instead of asking a question its one action cannot answer.
@@ -123,7 +123,7 @@ pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
     "{n} traces from {tool} have been idle for {days} or more. Review them to send or keep.";
 /// [`NOTIFY_IDLE_BODY_ALTERNATIVE`] for one. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
-    "1 session from {tool} has been idle for {days} or more. Review it to send or keep.";
+    "1 trace from {tool} has been idle for {days} or more. Review it to send or keep.";
 /// The N1 notification body: the alternative. Owner decision 28 first
 /// picked the owner's draft; Ron's #1303 design review (2026-10-09,
 /// adopted by the owner) reversed that, because the notification's one
@@ -178,7 +178,7 @@ pub const NUDGE_PANEL_VERDICTS_FINAL_ONLY: &str = "{x} credit is now final";
 /// the held count. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_VERDICTS_BODY: &str = "{a} traces accepted and {h} held for privacy review.";
 /// [`NOTIFY_VERDICTS_BODY`] when one was accepted. DRAFT, NEEDS APPROVAL.
-pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 session accepted and {h} held for privacy review.";
+pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 trace accepted and {h} held for privacy review.";
 /// The verdict sentence folded into a due digest: [`NOTIFY_VERDICTS_BODY`]
 /// and [`NUDGE_VERDICTS_FINAL_CLAUSE`]. Changes approved K9 digest copy
 /// (owner decision 6). DRAFT, NEEDS APPROVAL.
@@ -187,7 +187,7 @@ pub const DIGEST_VERDICT_SENTENCE: &str =
 /// [`DIGEST_VERDICT_SENTENCE`] when one was accepted. DRAFT, NEEDS
 /// APPROVAL.
 pub const DIGEST_VERDICT_SENTENCE_ONE: &str =
-    "1 session accepted and {h} held for privacy review. {x} credit is now final.";
+    "1 trace accepted and {h} held for privacy review. {x} credit is now final.";
 
 // ---------------------------------------------------------------------
 // The news mark.
@@ -921,7 +921,7 @@ mod tests {
                 .iter()
                 .any(|p| text.contains(p))
                 || text.starts_with("Some ")
-                || text.starts_with("Previewed sessions");
+                || text.starts_with("Previewed traces");
             if !counted {
                 continue;
             }
@@ -1102,6 +1102,12 @@ mod tests {
                 .replace("{tool}", "Claude Code")
                 .replace("{days}", &days_phrase(3)),
             "2 traces from Claude Code have been idle for 3 days or more"
+        );
+        assert_eq!(
+            NUDGE_IDLE_TITLE_ONE
+                .replace("{tool}", "Claude Code")
+                .replace("{days}", &days_phrase(1)),
+            "1 trace from Claude Code has been idle for 1 day or more"
         );
     }
 
