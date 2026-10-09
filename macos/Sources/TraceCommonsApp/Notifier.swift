@@ -30,8 +30,28 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// opens its place.
     var onNudge: ((NudgeSurface.Intent) -> Void)?
 
-    /// The opt-in events this app renders, declared when it subscribes.
-    static let acceptedEvents = ["reengage_due"]
+    /// The opt-in events this app can render.
+    static let renderedEvents = ["reengage_due"]
+
+    /// The opt-in events to declare: `renderedEvents` only while a
+    /// notification can actually be posted, and none otherwise. The daemon
+    /// stamps an announcement against its caps, and retires the idle
+    /// sessions it named, only while a subscriber has declared
+    /// `reengage_due`, so a declaration made while the system refuses
+    /// notifications (denied, never asked, or no notification centre)
+    /// would spend that budget on notifications nobody sees.
+    static func acceptedEvents(available: Bool, status: UNAuthorizationStatus?) -> [String] {
+        available && canPostDigest(status) ? renderedEvents : []
+    }
+
+    /// `acceptedEvents` for this process, read fresh.
+    func acceptedEvents() async -> [String] {
+        Self.acceptedEvents(available: available, status: await authorizationStatus())
+    }
+
+    /// Called on the main actor once the system's permission prompt has
+    /// been answered, so the app can declare or withdraw `reengage_due`.
+    var onAuthorizationAnswered: (() -> Void)?
     /// `userInfo` keys on a re-engagement notification.
     static let kindKey = "trace-commons.nudge.kind"
     static let defaultActionKey = "trace-commons.nudge.default"
@@ -114,10 +134,11 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     private var available: Bool {
-        // UNUserNotificationCenter traps in a process with no bundle
-        // identifier (a bare `swift run` binary), so this stays inert there
-        // instead of taking the app down.
-        Bundle.main.bundleIdentifier != nil
+        // UNUserNotificationCenter traps in a process that is not an app
+        // bundle: a bare `swift run` binary has no bundle identifier, and
+        // the `xctest` runner has one but no app bundle around it. This
+        // stays inert there instead of taking the process down.
+        Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
     }
 
     /// Registers the two-action category. Deliberately does NOT ask for
@@ -179,8 +200,10 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// sentence explaining what the notifications are -- never at launch.
     func requestAuthorization() async -> Bool {
         guard available else { return false }
-        return (try? await UNUserNotificationCenter.current()
+        let allowed = (try? await UNUserNotificationCenter.current()
             .requestAuthorization(options: [.alert, .sound])) ?? false
+        Task { @MainActor in Self.shared.onAuthorizationAnswered?() }
+        return allowed
     }
 
     /// Puts the system's prompt up only if it was never answered, after a

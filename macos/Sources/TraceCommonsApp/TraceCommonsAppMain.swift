@@ -339,6 +339,20 @@ private struct Launcher: View {
             }
         }
 
+        // The re-engagement declaration follows whether a notification can
+        // be posted: re-read once the prompt is answered, and whenever the
+        // app comes forward, since System Settings may have changed it.
+        Notifier.shared.onAuthorizationAnswered = {
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
+
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil,
