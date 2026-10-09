@@ -479,6 +479,19 @@ async fn activity_missions_rotation_cannot_adopt_a_replacement_account_session()
 /// runs from yesterday for thirty days.
 pub(super) fn predicate_catalogue(predicates: &[serde_json::Value]) -> serde_json::Value {
     let today = Utc::now().date_naive();
+    predicate_catalogue_between(
+        predicates,
+        today - chrono::Duration::days(1),
+        today + chrono::Duration::days(30),
+    )
+}
+
+/// [`predicate_catalogue`] with the policy's dates given.
+fn predicate_catalogue_between(
+    predicates: &[serde_json::Value],
+    starts_on: chrono::NaiveDate,
+    ends_before: chrono::NaiveDate,
+) -> serde_json::Value {
     let missions: Vec<serde_json::Value> = predicates
         .iter()
         .enumerate()
@@ -497,8 +510,8 @@ pub(super) fn predicate_catalogue(predicates: &[serde_json::Value]) -> serde_jso
     let policy: trace_commons_protocol::activity_missions::ActivityPolicy =
         serde_json::from_value(serde_json::json!({
             "schema_version": 1, "policy_id": "test-policy",
-            "starts_on": today - chrono::Duration::days(1),
-            "ends_before": today + chrono::Duration::days(30),
+            "starts_on": starts_on,
+            "ends_before": ends_before,
             "qualification": "accepted", "missions": missions,
             "daily": null, "levels": null, "badges": null,
         }))
@@ -779,5 +792,39 @@ async fn the_mission_slot_refills_on_the_first_tick_after_enrolling_again() {
     // The same enrollment inside the interval is not asked again.
     refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(25), &mut schedule).await;
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    server.abort();
+}
+
+/// A slot filled the day before the policy's `ends_before` stops being live
+/// at that day's start (UTC), though it is younger than
+/// `MISSION_CATALOGUE_MAX_AGE` and no fetch has run since: the policy's
+/// missions are no longer on offer.
+#[tokio::test]
+async fn the_mission_slot_is_not_live_past_the_policy_end() {
+    use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+    use crate::daemon::mission_matching::{MISSION_CATALOGUE_MAX_AGE, live_catalogue};
+    let now = Utc::now();
+    let today = now.date_naive();
+    let tomorrow = today + chrono::Duration::days(1);
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue_between(&[claude_rust()], today, tomorrow),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer, calls.clone()).await;
+    let s = shared();
+    configure_catalogue(&s, &base);
+    let mut schedule = MissionSlotSchedule::default();
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let end = tomorrow.and_time(chrono::NaiveTime::MIN).and_utc();
+    assert!(end - now < chrono::TimeDelta::from_std(MISSION_CATALOGUE_MAX_AGE).unwrap());
+    assert!(live_catalogue(&s.mission_catalogue, now).is_some());
+    assert!(live_catalogue(&s.mission_catalogue, end - chrono::TimeDelta::seconds(1)).is_some());
+    assert!(
+        live_catalogue(&s.mission_catalogue, end).is_none(),
+        "the policy has ended: unknown, never its old missions"
+    );
     server.abort();
 }

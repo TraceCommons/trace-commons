@@ -2893,7 +2893,8 @@ carries the field.
 
 **The catalogue.** The daemon holds at most one, in memory only: never
 persisted, emptied by `unenroll` and by a restart. It is live for 24 hours
-after it arrives (OWNER DECISION V2), after which it reads as absent. A
+after it arrives (OWNER DECISION V2), and never past the start (00:00 UTC) of
+the published policy's `ends_before`; after either it reads as absent. A
 catalogue the daemon refuses empties the slot rather than leaving an older
 one in force. `mission_matches` neither reads nor writes it -- its catalogue
 stays a parameter and matching still changes nothing (M2).

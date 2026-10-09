@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeSet, time::Duration};
 
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
 use serde::de::DeserializeOwned;
 use trace_commons_protocol::{
     ACCOUNT_NATIVE_ROTATED_TOKEN_HEADER,
@@ -429,7 +429,7 @@ pub(crate) async fn refresh_mission_slot(
     now: DateTime<Utc>,
     schedule: &mut MissionSlotSchedule,
 ) {
-    use super::mission_matching::{clear_catalogue, live_catalogue, receive_catalogue};
+    use super::mission_matching::{clear_catalogue, live_catalogue, receive_catalogue_until};
     // The config is read before the schedule is consulted: an unenroll
     // between two due attempts must still reset it, or enrolling again
     // inside the interval would wait out the old enrollment's schedule.
@@ -465,7 +465,13 @@ pub(crate) async fn refresh_mission_slot(
         // A refusal empties the slot inside `receive_catalogue`; the bounds
         // asserted above keep a published predicate from causing one.
         Some(raw) => {
-            let _ = receive_catalogue(&shared.mission_catalogue, &raw, now);
+            // Its missions are on offer only until the policy ends, which a
+            // slot filled shortly before then would otherwise outlive.
+            let not_after = catalogue
+                .policy
+                .as_ref()
+                .map(|policy| policy.ends_before.and_time(NaiveTime::MIN).and_utc());
+            let _ = receive_catalogue_until(&shared.mission_catalogue, &raw, now, not_after);
         }
         None => clear_catalogue(&shared.mission_catalogue),
     }
