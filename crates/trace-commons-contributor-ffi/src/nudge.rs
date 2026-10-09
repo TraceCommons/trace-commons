@@ -167,10 +167,7 @@ mod tests {
         for (key, text) in table {
             assert_eq!(copy[*key], *text, "{key}");
         }
-        assert_eq!(
-            copy["NUDGE_BACKLOG_TITLE"],
-            "{n} traces to review"
-        );
+        assert_eq!(copy["NUDGE_BACKLOG_TITLE"], "{n} traces to review");
         unsafe { tc_string_free(result) };
     }
 
