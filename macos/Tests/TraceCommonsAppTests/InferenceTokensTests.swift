@@ -103,6 +103,8 @@ final class InferenceTokensTests: XCTestCase {
             "                ledgerSections\n                InsightsLedgerFeedSwitch(store: store)\n"
                 + "                InferenceAccountSection(store: store)\n"))
         XCTAssertTrue(views.contains("if let on = store.ledgerFeed {"))
+        // It takes no second write while one is in flight.
+        XCTAssertTrue(views.contains("                        .disabled(store.ledgerFeedBusy)\n"))
     }
 
     // MARK: Store
@@ -171,6 +173,53 @@ final class InferenceTokensTests: XCTestCase {
         XCTAssertFalse(store.ledgerFeedBusy)
     }
 
+    /// A write in flight holds the switch, takes no second write, and once
+    /// another client is attached its answer changes nothing: no switch,
+    /// no refusal and no reread is drawn on the new daemon's tab.
+    func test_aWriteTheOldClientAnswersAfterAttachChangesNothing() async {
+        let entered = expectation(description: "the write reached the old daemon")
+        // A second write past the busy guard would wait at the gate too,
+        // so it shows as this expectation fulfilled twice.
+        let transport = LedgerFeedTransport(settings: #"{"insights_ledger_feed":false}"#,
+                                            write: #"{"insights_ledger_feed":true}"#,
+                                            gated: "set_settings", entered: entered)
+        let store = InferenceStore(client: LiveDaemonClient(transport: transport))
+        await store.load()
+        transport.reset()
+        let writing = Task { await store.setLedgerFeed(true) }
+        await fulfillment(of: [entered], timeout: 10)
+        XCTAssertTrue(store.ledgerFeedBusy)
+        await store.setLedgerFeed(false)
+        XCTAssertEqual(transport.calls.map(\.method), ["set_settings"], "a second write went out while one was in flight")
+        store.attach(nil)
+        transport.open()
+        await writing.value
+        XCTAssertNil(store.ledgerFeed, "the old daemon's write moved the new tab's switch")
+        XCTAssertNil(store.ledgerFeedRefusal)
+        XCTAssertFalse(store.ledgerFeedBusy)
+        XCTAssertNil(store.calls)
+        XCTAssertTrue(store.failures.isEmpty, "the old write's outcome is recorded against the new client")
+    }
+
+    /// A settings read that started before a confirmed write answers about
+    /// the switch before it, and never undoes it.
+    func test_aSettingsReadThatStartedBeforeAWriteNeverUndoesIt() async {
+        let entered = expectation(description: "both settings reads reached the daemon")
+        // The Private AI switch and the ledger feed each read `get_settings`.
+        entered.expectedFulfillmentCount = 2
+        let transport = LedgerFeedTransport(settings: #"{"insights_ledger_feed":false}"#,
+                                            write: #"{"insights_ledger_feed":true}"#,
+                                            gated: "get_settings", entered: entered)
+        let store = InferenceStore(client: LiveDaemonClient(transport: transport))
+        let loading = Task { await store.load() }
+        await fulfillment(of: [entered], timeout: 10)
+        await store.setLedgerFeed(true)
+        XCTAssertEqual(store.ledgerFeed, true)
+        transport.open()
+        await loading.value
+        XCTAssertEqual(store.ledgerFeed, true, "a read from before the write undid it")
+    }
+
     func test_theSampleClientReadsTheSwitch() async {
         let store = InferenceStore(client: SampleDaemonClient(.normalDay))
         await store.load()
@@ -179,30 +228,46 @@ final class InferenceTokensTests: XCTestCase {
 }
 
 /// Answers from the normal day's recorded replies, with `get_settings` and
-/// `set_settings` scripted. A nil `write` refuses the write. Records every
-/// call by method and params.
+/// `set_settings` scripted. A nil `write` refuses the write the way the
+/// daemon does when it cannot save (`handle_set_settings`). Records every
+/// call by method and params. A `gated` method waits, after fulfilling
+/// `entered`, until `open()`.
 private final class LedgerFeedTransport: DaemonTransport, @unchecked Sendable {
     private let settings: String
     private let write: String?
+    private let gated: String?
+    private let entered: XCTestExpectation?
+    private let gate = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var recorded: [(method: String, params: String)] = []
 
-    init(settings: String, write: String?) {
+    init(settings: String, write: String?, gated: String? = nil, entered: XCTestExpectation? = nil) {
         self.settings = settings
         self.write = write
+        self.gated = gated
+        self.entered = entered
     }
 
     var calls: [(method: String, params: String)] { lock.withLock { recorded } }
     func reset() { lock.withLock { recorded = [] } }
 
+    /// Lets every waiting gated call, and every later one, through.
+    func open() { gate.signal() }
+
     func call(_ method: String, params: String) -> String {
         lock.withLock { recorded.append((method, params)) }
+        if method == gated {
+            entered?.fulfill()
+            gate.wait()
+            // Pass the opening on to the next waiting call.
+            gate.signal()
+        }
         switch method {
         case "get_settings":
             return #"{"id":0,"result":\#(settings)}"#
         case "set_settings":
             guard let write else {
-                return #"{"id":0,"error":{"code":"internal","message":"settings-write-failed"}}"#
+                return #"{"id":0,"error":{"code":"unavailable","message":"settings-write-failed"}}"#
             }
             return #"{"id":0,"result":\#(write)}"#
         default:

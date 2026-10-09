@@ -235,9 +235,11 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
         let off = try result(daemon, "insights_glance", ["tz": 0])
         XCTAssertEqual((off as? [String: Any])?["enabled"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, off, method: "insights_glance")
-        assertDeclared(
-            DaemonData.Settings.self, try result(daemon, "set_settings", ["insights_ledger_feed": true]),
-            method: "set_settings")
+        // The Inference tab's switch moves only when the reply echoes what
+        // was asked, so the real daemon's reply must carry it.
+        let written = try result(daemon, "set_settings", ["insights_ledger_feed": true])
+        XCTAssertEqual((written as? [String: Any])?["insights_ledger_feed"] as? Bool, true)
+        assertDeclared(DaemonData.Settings.self, written, method: "set_settings")
         let unreadable = try result(daemon, "insights_glance", ["tz": 0])
         XCTAssertEqual((unreadable as? [String: Any])?["readable"] as? Bool, false)
         assertDeclared(DaemonData.InsightsGlance.self, unreadable, method: "insights_glance")
