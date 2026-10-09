@@ -467,3 +467,23 @@ async fn unenroll_clears_the_insights_counter_store() {
     assert!(!rows_file(&s).exists());
     assert!(s.insights_counter.key_is_absent_for_test());
 }
+
+/// Owner decision on #1287: unenroll also turns the counter pass off, in
+/// memory and on disk, so the next watcher tick does not rebuild the store
+/// it just cleared under a new key.
+#[tokio::test]
+async fn unenroll_turns_the_insights_counter_pass_off() {
+    let s = shared();
+    enroll_fixture(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.save(&s.store).unwrap();
+    }
+    counted(&s);
+    assert!(call(&s).await.error.is_none());
+    assert!(!s.settings.lock().unwrap().insights_counter_pass);
+    let persisted = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+    assert!(!persisted.insights_counter_pass);
+    assert!(!rows_file(&s).exists());
+}

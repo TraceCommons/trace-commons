@@ -3908,7 +3908,8 @@ the harness and the session's address, and carry a keyed digest of the
 folder's project key (owner decision D7, open); no path, project key,
 message or session ID is stored in readable form. The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
-removes the store and forgets the key.
+removes the store, forgets the key, and turns `insights_counter_pass` off, so
+the next watcher tick does not rebuild the store under a new key.
 
 `iso_week` is optional: a `YYYY-Www` string naming a real ISO week (for
 example `2026-W38`); absent or `null` is the week holding now. Anything else
@@ -4958,7 +4959,10 @@ and `get_settings` from it omits it. Takes a boolean and defaults to `false`
 loads it as `false`. It is the one gate on the Insights counter pass (feed T):
 while it is `false` the watcher runs no pass, nothing is read for Insights,
 and `insights_week` answers `enabled: false` without opening the store or its
-key. Turning it off does not remove rows already stored; `unenroll` does.
+key. Turning it off does not remove rows already stored; `unenroll` does,
+and also sets it to `false`. A settings file that cannot be read is not
+written over: the setting is then off in the running daemon only, and the
+unenroll still succeeds.
 
 #### `insights_recap_card_enabled`
 

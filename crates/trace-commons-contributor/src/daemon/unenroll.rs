@@ -195,10 +195,45 @@ pub(crate) fn unenroll(shared: &DaemonShared) -> Result<Unenrolled, (&'static st
 /// decision D4, open, clears it on unenroll. Under the pass lock the caller
 /// holds, so no watcher pass writes it again meanwhile.
 fn clear_insights_counter(shared: &DaemonShared) -> Result<(), (&'static str, &'static str)> {
+    // The setting goes off first, so the next watcher tick does not rebuild
+    // under a new key the store this clears.
+    turn_off_insights_counter_pass(shared);
     shared
         .insights_counter
         .clear()
         .map_err(|_| (ERR_UNAVAILABLE, ERR_UNENROLL_FAILED))
+}
+
+/// Off in memory always; on disk when the settings file can be read, since
+/// a file that cannot be read is not written over, as in `set_settings`. A
+/// setting that could not be persisted does not fail the unenroll: the
+/// removal matters more than the switch. Commit lock, then settings, in the
+/// order `set_settings` takes them.
+fn turn_off_insights_counter_pass(shared: &DaemonShared) {
+    let persisted = (|| -> anyhow::Result<()> {
+        let locks = super::nearai_credential::session::coordination(shared.store.dir())?;
+        let _commit = locks
+            .commit
+            .lock()
+            .map_err(|_| anyhow::anyhow!("settings commit lock"))?;
+        let mut settings = shared.settings.lock().expect("settings lock");
+        settings.insights_counter_pass = false;
+        let mut persisted = super::settings::DaemonSettings::load(&shared.store)?;
+        if persisted.insights_counter_pass {
+            persisted.insights_counter_pass = false;
+            persisted.save_locked(&shared.store)?;
+        }
+        Ok(())
+    })();
+    if persisted.is_err() {
+        shared
+            .settings
+            .lock()
+            .expect("settings lock")
+            .insights_counter_pass = false;
+        // A fixed label only.
+        tracing::warn!("insights counter pass could not be turned off on disk");
+    }
 }
 
 /// The socket entry point. Async-only: it waits on the pass lock, which a
