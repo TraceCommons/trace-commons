@@ -11971,7 +11971,40 @@ async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
 /// unqualified routing stays off, so the tenant is routed by its row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_assembly_serves_a_routed_tenant_end_to_end() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::Environment).await;
+}
+
+/// The same, for a tenant whose policy `main` reads from the database (the
+/// pilot: `TRACE_COMMONS_DB_TENANT_POLICY_READS=true` globally, no
+/// environment policies). The receipt and the Settle-time `NoveltyUtility`
+/// credit check both read the tenant's `trace_tenant_policies` row, which
+/// allows model training, so the run completes with its ledger row (Zaki's
+/// option 1, PR #1295).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_serves_a_db_policy_tenant_end_to_end() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::Database).await;
+}
+
+/// A tenant on database policy reads whose row cannot be read: the receipt
+/// is refused with `pipeline_authority_read_failed` before any database
+/// work, so no run exists (Zaki's option 1, PR #1295).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_refuses_a_receipt_whose_policy_read_fails() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFails).await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TenantPolicyMode {
+    Environment,
+    Database,
+    DatabaseReadFails,
+}
+
+async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
     use super::super::production_assembly::tests as production;
+    use super::super::production_assembly::{
+        DatabaseTenantPolicies, TenantPolicyPipelineAuthorityProvider, TenantPolicyStore,
+    };
 
     let Some(runtime) = runtime_backend(4).await else {
         return;
@@ -12004,10 +12037,48 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
     let index = Arc::new(production::QualifiedIsolatedIndex(
         IsolatedPipelineIndex::new(),
     ));
-    let components = production::test_components_with_index(
+    let authority = if mode == TenantPolicyMode::DatabaseReadFails {
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| true),
+            Some(Arc::new(production::FailingTenantPolicies) as Arc<dyn TenantPolicyStore>),
+        )
+    } else if mode == TenantPolicyMode::Database {
+        runtime
+            .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+                tenant_id: tenant.clone(),
+                policy_version: "db-policy-v1".to_string(),
+                allowed_consent_scopes: vec![
+                    serde_storage_string(&ConsentScope::ModelTraining).unwrap(),
+                ],
+                allowed_uses: vec![serde_storage_string(&TraceAllowedUse::ModelTraining).unwrap()],
+                updated_by_principal_ref: principal_storage_ref("admin-token"),
+            })
+            .await
+            .expect("the tenant policy row writes");
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| true),
+            Some(
+                Arc::new(DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>))
+                    as Arc<dyn TenantPolicyStore>,
+            ),
+        )
+    } else {
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| false),
+            None,
+        )
+    };
+    let components = production::test_components_with_authority(
         production::classifying_privacy(),
         index.clone(),
         index,
+        Arc::new(authority),
     );
     let mut main_gate = production::MAIN_GATE;
     main_gate.novelty_utility_microcredits = 2_500_000;
@@ -12049,7 +12120,7 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
     let envelope = model_training_envelope().await;
     let raw = serde_json::to_vec(&envelope).unwrap();
     let key = envelope.submission_id.to_string();
-    let created = match service
+    let receipt = service
         .submit(PipelineReceiptRequest {
             source_session: None,
             tenant_id: &tenant,
@@ -12064,9 +12135,27 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
                 max_per_principal_per_hour: 0,
             },
         })
-        .await
-        .expect("the receipt succeeds")
-    {
+        .await;
+    if mode == TenantPolicyMode::DatabaseReadFails {
+        assert_eq!(
+            receipt.expect_err("refused").to_string(),
+            trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL
+        );
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let runs: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        assert_eq!(runs, 0, "a refused receipt creates no run");
+        return;
+    }
+    let created = match receipt.expect("the receipt succeeds") {
         PipelineReceiptResult::Created(created) => created,
         other => panic!("the receipt creates a run: {other:?}"),
     };
@@ -12106,4 +12195,166 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
         .get(0);
     tx.commit().await.unwrap();
     assert_eq!(payout_lines, 0, "no payout");
+}
+
+/// Zaki's option 1 (PR #1295, after review round 2): for a tenant whose
+/// policy `main` reads from the database -- under the global
+/// `TRACE_COMMONS_DB_TENANT_POLICY_READS` and under its tenant rollout --
+/// the pipeline's authority answers what `main`'s admission answers, read
+/// from the same row: with no row (under both values of the require-policy
+/// flag), with a row narrowing scopes and uses, and after the row is
+/// rewritten (by `upsert_trace_tenant_policy`, the write `PUT
+/// /v1/admin/tenant-policy` makes) between two receipts. The environment
+/// map, which names a different policy for the same tenant, is never read
+/// for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn db_policy_tenant_authority_matches_legacy_admission() {
+    use super::super::production_assembly::tests::{policy_test_auth, policy_test_envelope};
+    use super::super::production_assembly::{
+        DatabaseTenantPolicies, TenantPolicyPipelineAuthorityProvider, TenantPolicyStore,
+    };
+    use trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider;
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let inside = policy_test_envelope(
+        &[ConsentScope::DebuggingEvaluation],
+        ConsentScope::DebuggingEvaluation,
+        &[TraceAllowedUse::Evaluation],
+    )
+    .await;
+    let training = policy_test_envelope(
+        &[ConsentScope::ModelTraining],
+        ConsentScope::ModelTraining,
+        &[TraceAllowedUse::ModelTraining],
+    )
+    .await;
+    let envelopes = [("inside", &inside), ("training", &training)];
+    let write =
+        |tenant_id: String, version: &'static str, scope: ConsentScope, used: TraceAllowedUse| {
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+                        tenant_id,
+                        policy_version: version.to_string(),
+                        allowed_consent_scopes: vec![serde_storage_string(&scope).unwrap()],
+                        allowed_uses: vec![serde_storage_string(&used).unwrap()],
+                        updated_by_principal_ref: principal_storage_ref("admin-token"),
+                    })
+                    .await
+                    .expect("the tenant policy row writes");
+            }
+        };
+
+    for global in [true, false] {
+        for require_policy in [false, true] {
+            let tenant_id = format!("tenant-db-policy-{global}-{require_policy}-{suffix}");
+            // The environment names a policy for this tenant too, wider than
+            // any row below: a pipeline that read it would permit `training`
+            // where `main` refuses it.
+            let env_policies = Arc::new(BTreeMap::from([(
+                tenant_id.clone(),
+                TenantSubmissionPolicy {
+                    allowed_consent_scopes: BTreeSet::new(),
+                    allowed_uses: BTreeSet::new(),
+                },
+            )]));
+            let gates = if global {
+                TraceTenantRolloutGates::default()
+            } else {
+                TraceTenantRolloutGates::for_feature(
+                    TraceTenantRolloutFeature::DbTenantPolicyReads,
+                    &[tenant_id.as_str()],
+                )
+            };
+            let root = tempfile::tempdir().unwrap();
+            let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+            state.db_mirror = Some(runtime.clone() as Arc<dyn Database>);
+            state.db_tenant_policy_reads = global;
+            state.tenant_rollout_gates = gates.clone();
+            state.tenant_policies = env_policies.clone();
+            state.require_tenant_submission_policy = require_policy;
+            assert!(state.db_tenant_policy_reads_for_tenant(&tenant_id));
+            let provider = TenantPolicyPipelineAuthorityProvider::new(
+                super::super::production_assembly::tenant_policy_allowlists(&env_policies),
+                require_policy,
+                Arc::new(move |tenant: &str| {
+                    gates.enabled_for(
+                        TraceTenantRolloutFeature::DbTenantPolicyReads,
+                        global,
+                        tenant,
+                    )
+                }),
+                Some(
+                    Arc::new(DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>))
+                        as Arc<dyn TenantPolicyStore>,
+                ),
+            );
+            let auth = policy_test_auth(&tenant_id);
+
+            for step in ["no_row", "narrowing_row", "rewritten_row"] {
+                match step {
+                    "narrowing_row" => {
+                        write(
+                            tenant_id.clone(),
+                            "v1",
+                            ConsentScope::DebuggingEvaluation,
+                            TraceAllowedUse::Evaluation,
+                        )
+                        .await
+                    }
+                    "rewritten_row" => {
+                        write(
+                            tenant_id.clone(),
+                            "v2",
+                            ConsentScope::ModelTraining,
+                            TraceAllowedUse::ModelTraining,
+                        )
+                        .await
+                    }
+                    _ => {}
+                }
+                let main_policy = tenant_submission_policy_for_request(&state, &auth)
+                    .await
+                    .expect("main reads the tenant policy");
+                let authority = provider
+                    .resolve_authority(&tenant_id)
+                    .await
+                    .expect("the pipeline reads the tenant policy")
+                    .expect("a tenant on DB policy reads has an authority");
+                assert_eq!(authority.require_policy, require_policy);
+                assert_eq!(
+                    authority.policy,
+                    main_policy.as_ref().map(|policy| {
+                        trace_commons_server::trace_authority::SubmissionAllowlists {
+                            allowed_consent_scopes: policy.allowed_consent_scopes.clone(),
+                            allowed_uses: policy.allowed_uses.clone(),
+                        }
+                    }),
+                    "{step} global={global} require_policy={require_policy}"
+                );
+                for (case, envelope) in envelopes {
+                    let legacy = enforce_tenant_submission_policy(
+                        &auth,
+                        envelope,
+                        main_policy.as_ref(),
+                        require_policy,
+                    )
+                    .is_ok();
+                    let mut scopes = envelope.consent.scopes.clone();
+                    if !scopes.contains(&envelope.trace_card.consent_scope) {
+                        scopes.push(envelope.trace_card.consent_scope);
+                    }
+                    let pipeline = authority.permits(&scopes, &envelope.trace_card.allowed_uses);
+                    assert_eq!(
+                        legacy, pipeline,
+                        "{step} {case} global={global} require_policy={require_policy}"
+                    );
+                }
+            }
+        }
+    }
 }

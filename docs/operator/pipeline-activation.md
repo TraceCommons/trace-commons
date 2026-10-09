@@ -1388,14 +1388,21 @@ the embedder model is loaded once. The pipeline gets:
   file) are never dropped, and entries no manifest names are never adopted.
   Empty the root and rebuild each tenant's index with
   `POST /v1/workers/pipeline/index-rebuild`;
-- the tenant policies of `TRACE_COMMONS_TENANT_POLICIES` and
-  `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` as its authority. A tenant
-  whose policy `main` reads from the database
-  (`TRACE_COMMONS_DB_TENANT_POLICY_READS`, globally or by tenant rollout) has
-  no authority here, so the production start refuses a routed or drained
-  tenant in that state (`pipeline_routed_tenant_db_policy_reads`), and any
-  receipt that still reaches the pipeline without an authority is answered
-  503 `authority_control_missing`;
+- the tenant policy exactly as `main`'s admission reads it, as its
+  authority: for a tenant on `TRACE_COMMONS_DB_TENANT_POLICY_READS` (globally
+  or by tenant rollout), its `trace_tenant_policies` row, read through
+  `main`'s DB mirror and decoded as `main` decodes it; otherwise
+  `TRACE_COMMONS_TENANT_POLICIES`. In both cases
+  `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` decides a tenant with no
+  policy. The policy is read at each receipt and again before each
+  `NoveltyUtility` credit check, so a policy changed by
+  `PUT /v1/admin/tenant-policy` applies to the next one, as it does in
+  `main`. A policy row that cannot be read or decoded refuses the receipt
+  with a 503 `pipeline_authority_read_failed`, and a credit check retries; it
+  never falls back to the environment map or to "no policy". A receipt with
+  no authority at all is answered 503 `authority_control_missing`. (The boot
+  refusal `pipeline_routed_tenant_db_policy_reads` is gone; `main` already
+  refuses database policy reads without a DB mirror.)
 - `main`'s privacy filter backend (`TRACE_PRIVACY_FILTER_BACKEND`) and
   `TRACE_COMMONS_PII_CLASSIFY_POLICY`. With no backend the runtime is not
   production-qualified;

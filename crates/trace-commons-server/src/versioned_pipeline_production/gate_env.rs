@@ -254,6 +254,10 @@ pub struct PipelineComponentInputs {
     pub tenant_policies: Arc<BTreeMap<String, SubmissionAllowlists>>,
     pub require_tenant_submission_policy: bool,
     pub db_policy_reads: DbTenantPolicyReads,
+    /// Where a tenant on `db_policy_reads` has its policy read: `main`'s DB
+    /// mirror. `None` with such a tenant refuses its receipts
+    /// (`pipeline_authority_read_failed`); `main` refuses that boot first.
+    pub db_policies: Option<Arc<dyn super::TenantPolicyStore>>,
 }
 
 #[cfg(feature = "near-ai-scorer")]
@@ -562,6 +566,7 @@ mod near_ai {
                     inputs.tenant_policies,
                     inputs.require_tenant_submission_policy,
                     inputs.db_policy_reads,
+                    inputs.db_policies,
                 )),
                 tenant_policy_count,
                 privacy,

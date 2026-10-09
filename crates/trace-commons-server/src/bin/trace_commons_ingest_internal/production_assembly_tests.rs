@@ -368,7 +368,7 @@ async fn internal_trace_credit_adapter_is_idempotent_and_qualified() {
     assert_eq!(first.external_receipt_hash(), None, "no external effect");
 }
 
-async fn policy_test_envelope(
+pub(crate) async fn policy_test_envelope(
     scopes: &[ConsentScope],
     card_scope: ConsentScope,
     uses: &[TraceAllowedUse],
@@ -405,7 +405,7 @@ async fn policy_test_envelope(
     envelope
 }
 
-fn policy_test_auth(tenant_id: &str) -> TenantAuth {
+pub(crate) fn policy_test_auth(tenant_id: &str) -> TenantAuth {
     TenantAuth {
         tenant_id: tenant_id.to_string(),
         role: TokenRole::Contributor,
@@ -481,6 +481,7 @@ async fn tenant_policy_authority_matches_legacy_admission() {
             tenant_policy_allowlists(&policies),
             require_policy,
             Arc::new(|tenant_id: &str| tenant_id == "tenant-db"),
+            None,
         );
         assert!(
             trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider::production_qualified(&provider)
@@ -678,6 +679,30 @@ pub(crate) fn test_components_with_index(
     index_reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
     index_writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
 ) -> Arc<PipelineGateComponents> {
+    test_components_with_authority(
+        privacy,
+        index_reader,
+        index_writer,
+        Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| false),
+            None,
+        )),
+    )
+}
+
+/// `test_components_with_index` over the given authority provider.
+pub(crate) fn test_components_with_authority(
+    privacy: Option<
+        Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
+    >,
+    index_reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
+    index_writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
+    authority: Arc<
+        dyn trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider,
+    >,
+) -> Arc<PipelineGateComponents> {
     Arc::new(PipelineGateComponents::with_unqualified_adapters(
         PipelineGateComponentParts {
             scorer: Arc::new(FixedScorer),
@@ -691,11 +716,7 @@ pub(crate) fn test_components_with_index(
             index_reader,
             index_writer,
             index_root_shared_with_legacy: false,
-            authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
-                Arc::new(BTreeMap::new()),
-                false,
-                Arc::new(|_: &str| false),
-            )),
+            authority,
             tenant_policy_count: 0,
             privacy_backend: privacy.is_some().then_some(
                 trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi,
@@ -1645,40 +1666,78 @@ fn production_caps_bound_trace_credit_by_mains_delta() {
     );
 }
 
-/// PR #1295 review, Minor 5: the authority provider answers no authority
-/// for a tenant whose policy `main` reads from the database, so a routed
-/// tenant under that rollout could never upload. The production start
-/// refuses it, under a safe label that names no tenant, and accepts routed
-/// and drained tenants that read their policy from the environment.
-#[test]
-fn a_routed_tenant_on_db_policy_reads_refuses_the_start() {
-    let db_reads = |tenant_id: &str| tenant_id == "tenant-db";
-    let tenants = |ids: &[&str]| {
-        ids.iter()
-            .map(|id| (*id).to_string())
-            .collect::<BTreeSet<_>>()
-    };
-    ensure_routed_tenants_have_authority(
-        &tenants(&["tenant-a"]),
-        &tenants(&["tenant-b"]),
-        &db_reads,
-    )
-    .unwrap();
-    for (routed, drained) in [
-        (tenants(&["tenant-a", "tenant-db"]), tenants(&[])),
-        (tenants(&["tenant-a"]), tenants(&["tenant-db"])),
-    ] {
-        let refused = ensure_routed_tenants_have_authority(&routed, &drained, &db_reads)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(refused, "pipeline_routed_tenant_db_policy_reads");
-        assert!(trace_commons_server::versioned_pipeline_qualification::is_safe_label(&refused));
+/// Replaces the boot refusal `pipeline_routed_tenant_db_policy_reads` (PR
+/// #1295 review, Minor 5), which refused the start for any routed or drained
+/// tenant on database policy reads -- on the pilot, every tenant. A
+/// production assembly whose tenants all read their policy from the
+/// database now starts with tenants processed, and its authority answers
+/// from the row its store holds, not from the environment map.
+#[tokio::test]
+async fn a_db_policy_tenant_starts_and_reads_its_row() {
+    use trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider;
+    let store = Arc::new(RowTenantPolicies(
+        trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord {
+            tenant_id: "tenant-db".to_string(),
+            policy_version: "v1".to_string(),
+            allowed_consent_scopes: vec!["debugging_evaluation".to_string()],
+            allowed_uses: vec!["evaluation".to_string()],
+            updated_by_principal_ref: "principal".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        },
+    ));
+    let authority = Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+        Arc::new(BTreeMap::new()),
+        true,
+        Arc::new(|_: &str| true),
+        Some(store as Arc<dyn TenantPolicyStore>),
+    ));
+    let index = Arc::new(QualifiedIsolatedIndex(
+        trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex::new(),
+    ));
+    Boot {
+        components: Some(test_components_with_authority(
+            classifying_privacy(),
+            index.clone(),
+            index,
+            authority.clone(),
+        )),
+        ..Boot::test_opt_in()
     }
-    // With the reads on for every tenant, any routed tenant refuses.
-    assert!(
-        ensure_routed_tenants_have_authority(&tenants(&["tenant-a"]), &tenants(&[]), &|_| true)
-            .is_err()
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("a production assembly over database-policy tenants starts");
+    let resolved = authority
+        .resolve_authority("tenant-db")
+        .await
+        .unwrap()
+        .expect("the row is the tenant's authority");
+    assert_eq!(
+        resolved.policy,
+        Some(
+            trace_commons_server::trace_authority::SubmissionAllowlists {
+                allowed_consent_scopes: BTreeSet::from([ConsentScope::DebuggingEvaluation]),
+                allowed_uses: BTreeSet::from([TraceAllowedUse::Evaluation]),
+            }
+        )
     );
+    assert!(resolved.require_policy);
+}
+
+/// A tenant policy store holding one row.
+struct RowTenantPolicies(trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord);
+
+#[async_trait::async_trait]
+impl TenantPolicyStore for RowTenantPolicies {
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<
+        Option<trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord>,
+        DatabaseError,
+    > {
+        Ok((self.0.tenant_id == tenant_id).then(|| self.0.clone()))
+    }
 }
 
 /// PR #1295 review, Minor 5: a receipt refused for a missing authority is a
@@ -1689,6 +1748,7 @@ fn a_routed_tenant_on_db_policy_reads_refuses_the_start() {
 fn a_receipt_without_authority_is_a_labelled_503() {
     for label in [
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
     ] {
         let (status, body) = crate::pipeline_receipt_error(anyhow::anyhow!(label));
@@ -1698,4 +1758,70 @@ fn a_receipt_without_authority_is_a_labelled_503() {
     let (status, _) =
         crate::pipeline_receipt_error(anyhow::anyhow!("context: authority_control_missing"));
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// A tenant policy store whose every read fails, as a database outage does.
+pub(crate) struct FailingTenantPolicies;
+
+#[async_trait::async_trait]
+impl TenantPolicyStore for FailingTenantPolicies {
+    async fn get_trace_tenant_policy(
+        &self,
+        _tenant_id: &str,
+    ) -> Result<
+        Option<trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord>,
+        DatabaseError,
+    > {
+        Err(DatabaseError::Query(
+            "injected tenant policy read failure".into(),
+        ))
+    }
+}
+
+/// Zaki's option 1: a tenant on database policy reads whose row cannot be
+/// read is refused with `pipeline_authority_read_failed` -- never answered
+/// from the environment map (which names a policy for it here) and never
+/// as "no policy". A tenant not on database reads still reads the map, and
+/// no store at all for a database tenant is the same refusal.
+#[tokio::test]
+async fn a_failed_tenant_policy_read_refuses_with_its_label() {
+    use trace_commons_server::versioned_pipeline_authority::{
+        PIPELINE_AUTHORITY_READ_FAILED_LABEL, PipelineAuthorityProvider,
+    };
+    let policies = Arc::new(BTreeMap::from([
+        (
+            "tenant-db".to_string(),
+            trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+        ),
+        (
+            "tenant-env".to_string(),
+            trace_commons_server::trace_authority::SubmissionAllowlists::default(),
+        ),
+    ]));
+    for store in [
+        Some(Arc::new(FailingTenantPolicies) as Arc<dyn TenantPolicyStore>),
+        None,
+    ] {
+        let provider = TenantPolicyPipelineAuthorityProvider::new(
+            policies.clone(),
+            false,
+            Arc::new(|tenant_id: &str| tenant_id == "tenant-db"),
+            store,
+        );
+        assert_eq!(
+            provider
+                .resolve_authority("tenant-db")
+                .await
+                .unwrap_err()
+                .to_string(),
+            PIPELINE_AUTHORITY_READ_FAILED_LABEL
+        );
+        assert!(
+            provider
+                .resolve_authority("tenant-env")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
 }
