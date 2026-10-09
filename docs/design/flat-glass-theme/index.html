@@ -1,0 +1,671 @@
+<title>Flat Glass Theme</title>
+<style>
+/* Layout: a reference sheet. Each row is one component, drawn twice (light tint, dark tint) over a shared backdrop, then the extracted tokens. */
+:root {
+  --bg: #eef0f5;
+  --fg: #151925;
+  --muted: #565d70;
+  --line: rgba(21, 25, 37, 0.12);
+  --panel: #ffffff;
+  --accent: #007a65;
+  --accent-ink: #ffffff;
+  --warn: #8a5a00;
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d0f17; --fg: #e7e9f1; --muted: #9ba1b5; --line: rgba(255, 255, 255, 0.1);
+    --panel: #161925; --accent: #00d4aa; --accent-ink: #04231c; --warn: #ffc75c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d0f17; --fg: #e7e9f1; --muted: #9ba1b5; --line: rgba(255, 255, 255, 0.1);
+  --panel: #161925; --accent: #00d4aa; --accent-ink: #04231c; --warn: #ffc75c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-ui); font-size: 14px; line-height: 1.5; }
+.wrap { max-width: 1180px; margin: 0 auto; padding-inline: 20px; padding-block: 32px 64px; display: grid; gap: 40px; }
+@media (max-width: 480px) { .wrap { padding-inline: 16px; } }
+
+header.intro { display: grid; gap: 10px; max-width: 70ch; }
+header.intro h1 { font-family: var(--font-display); font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+header.intro p { margin: 0; color: var(--muted); }
+.eyebrow { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); }
+
+/* controls bar */
+.bar { position: relative; top: env(safe-area-inset-top, 0px); z-index: 10; display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 10px 12px; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid var(--line); border-radius: 12px; }
+@media (min-width: 900px) { .bar { position: sticky; } }
+.bar label { font-size: 12px; color: var(--muted); font-weight: 500; }
+.seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 9px; background: var(--line); }
+.seg button { font: inherit; font-size: 13px; font-weight: 500; border: 0; background: transparent; color: var(--fg); padding: 4px 10px; border-radius: 7px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--panel); box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+.seg button:focus-visible, .chrome-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ctl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* component rows */
+section.row { display: grid; gap: 14px; scroll-margin-top: 130px; }
+.row-head { display: grid; gap: 4px; max-width: 75ch; }
+.row-head h2 { font-family: var(--font-display); font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+.row-head p { margin: 0; color: var(--muted); }
+.row-head .src { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr)); gap: 14px; }
+.frame { display: grid; gap: 6px; min-width: 0; }
+.frame-label { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+.frame-label b { color: var(--fg); font-weight: 600; }
+.frame-label .cr { font-variant-numeric: tabular-nums; }
+.frame-label .cr.fail { color: var(--warn); }
+
+/* backdrops: the scene the glass sits on */
+.scene { position: relative; height: 288px; border-radius: 14px; overflow: hidden; display: grid; place-items: center; }
+.scene::before, .scene::after { content: ""; position: absolute; z-index: 0; border-radius: 50%; pointer-events: none; }
+[data-backdrop="sky"] .scene { background: radial-gradient(60% 40% at 25% 78%, rgba(255,255,255,0.75), transparent 70%), radial-gradient(40% 30% at 85% 30%, rgba(255,255,255,0.55), transparent 70%), linear-gradient(180deg, #3b78d8 0%, #7eaef0 55%, #d6e4f6 100%); }
+[data-backdrop="sky"] .scene::before { width: 120px; height: 120px; left: 62%; top: 12%; background: radial-gradient(circle, #fff6d8 0 38%, rgba(255, 236, 170, 0.0) 70%); }
+[data-backdrop="sky"] .scene::after { width: 140%; height: 70%; left: -20%; bottom: -46%; background: #4f8a5a; }
+[data-backdrop="dusk"] .scene { background: radial-gradient(45% 35% at 70% 62%, #ffb27a, transparent 70%), linear-gradient(180deg, #1c2459 0%, #5b3f8c 45%, #d0697a 75%, #f3a46b 100%); }
+[data-backdrop="dusk"] .scene::before { width: 90px; height: 90px; left: 58%; top: 50%; background: #ffd3a0; }
+[data-backdrop="dusk"] .scene::after { width: 150%; height: 60%; left: -25%; bottom: -40%; background: #26183f; }
+[data-backdrop="desktop"] .scene { background: radial-gradient(55% 45% at 20% 25%, #3a2a78, transparent 70%), radial-gradient(50% 40% at 85% 80%, #1e3a5a, transparent 70%), #0f1219; }
+[data-backdrop="desktop"] .scene::before { width: 160px; height: 160px; left: 8%; top: 8%; background: radial-gradient(circle, rgba(109,20,243,0.55), transparent 70%); }
+[data-backdrop="desktop"] .scene::after { width: 120px; height: 120px; right: 6%; bottom: 10%; background: radial-gradient(circle, rgba(0,212,170,0.35), transparent 70%); }
+[data-backdrop="paper"] .scene { background: linear-gradient(160deg, #f6f7fa 0%, #e6eaf1 100%); }
+[data-backdrop="paper"] .scene::before { width: 140px; height: 140px; left: 6%; top: 10%; background: #d5dbe7; }
+[data-backdrop="paper"] .scene::after { width: 90px; height: 90px; right: 10%; bottom: 12%; background: #c9b3ff; }
+
+/* ====== the theme under test ====== */
+.t-light {
+  --g-tint: rgba(255, 255, 255, 0.12);
+  --g-veil: rgba(12, 18, 44, 0.42);
+  --g-edge: rgba(255, 255, 255, 0.2);
+  --g-hi: rgba(255, 255, 255, 0.32);
+  --g-drop: 0 14px 30px -12px rgba(4, 7, 22, 0.6);
+  --g-blur: 18px;
+  --g-sat: 1.4;
+  --g-text: #ffffff;
+  --g-text-2: rgba(255, 255, 255, 0.8);
+  --g-text-shadow: 0 1px 3px rgba(4, 7, 22, 0.35);
+  --g-well: rgba(10, 14, 36, 0.24);
+  --g-well-hover: rgba(10, 14, 36, 0.38);
+  --g-well-edge: rgba(255, 255, 255, 0.16);
+  --g-well-hi: rgba(255, 255, 255, 0.12);
+  --g-inner: rgba(255, 255, 255, 0.07);
+  --g-inner-edge: rgba(255, 255, 255, 0.14);
+  --g-inner-hi: rgba(255, 255, 255, 0.2);
+  --g-chip: rgba(255, 255, 255, 0.16);
+  --g-ring: rgba(255, 255, 255, 0.5);
+  --g-focus: rgba(255, 255, 255, 0.8);
+  --g-sel: #ffffff;
+  --g-sel-ink: #0b0b0c;
+  --g-plate: #1d2236;
+  --g-dash: rgba(255, 255, 255, 0.3);
+  --g-line: rgba(255, 255, 255, 0.55);
+  --g-line-dim: rgba(255, 255, 255, 0.22);
+  --g-lift: rgba(255, 255, 255, 0.12);
+}
+.t-dark {
+  --g-tint: rgba(255, 255, 255, 0.04);
+  --g-veil: rgba(7, 10, 26, 0.7);
+  --g-edge: rgba(255, 255, 255, 0.12);
+  --g-hi: rgba(255, 255, 255, 0.18);
+  --g-drop: 0 18px 36px -12px rgba(2, 3, 10, 0.75);
+  --g-blur: 22px;
+  --g-sat: 1.2;
+  --g-text: #f2f3f8;
+  --g-text-2: rgba(242, 243, 248, 0.74);
+  --g-text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --g-well: rgba(0, 0, 0, 0.3);
+  --g-well-hover: rgba(0, 0, 0, 0.44);
+  --g-well-edge: rgba(255, 255, 255, 0.1);
+  --g-well-hi: rgba(255, 255, 255, 0.06);
+  --g-inner: rgba(255, 255, 255, 0.05);
+  --g-inner-edge: rgba(255, 255, 255, 0.1);
+  --g-inner-hi: rgba(255, 255, 255, 0.12);
+  --g-chip: rgba(255, 255, 255, 0.1);
+  --g-ring: rgba(255, 255, 255, 0.36);
+  --g-focus: rgba(255, 255, 255, 0.8);
+  --g-sel: #e9ebf4;
+  --g-sel-ink: #0b0b0c;
+  --g-plate: #0b0d18;
+  --g-dash: rgba(255, 255, 255, 0.22);
+  --g-line: rgba(255, 255, 255, 0.4);
+  --g-line-dim: rgba(255, 255, 255, 0.16);
+  --g-lift: rgba(255, 255, 255, 0.08);
+}
+[data-accent="purple"] .stage { --g-sel: #6d14f3; --g-sel-ink: #ffffff; }
+
+.stage {
+  --s-working: #4c9dff; --s-ask: #ffc75c; --s-done: #30d158; --s-done-ink: #04230e; --s-outside: #ff6b6b;
+  position: relative; z-index: 1; width: 320px; height: 248px; user-select: none; color: var(--g-text);
+  font-family: var(--font-ui); font-size: 14px; font-weight: 500; line-height: 1.25;
+}
+@media (max-width: 360px) { .stage { transform: scale(0.86); } }
+.stage .abs { position: absolute; }
+.glass {
+  background: linear-gradient(var(--g-tint), var(--g-tint)), var(--g-veil);
+  box-shadow: inset 0 0 0 1px var(--g-edge), inset 0 1px 0 var(--g-hi), var(--g-drop);
+  color: var(--g-text); text-shadow: var(--g-text-shadow);
+}
+.glass.blur { backdrop-filter: blur(var(--g-blur)) saturate(var(--g-sat)); -webkit-backdrop-filter: blur(var(--g-blur)) saturate(var(--g-sat)); }
+.well {
+  background: var(--g-well);
+  box-shadow: inset 0 0 0 1px var(--g-well-edge), inset 0 1px 0 var(--g-well-hi);
+  color: var(--g-text); text-shadow: var(--g-text-shadow);
+  transition: background-color 200ms ease-out, box-shadow 200ms ease-out, color 200ms ease-out;
+}
+.well:hover { background: var(--g-well-hover); }
+.inner { background: var(--g-inner); box-shadow: inset 0 0 0 1px var(--g-inner-edge), inset 0 1px 0 var(--g-inner-hi); }
+.ringable { position: relative; }
+.ringable::after { content: ""; position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 1px var(--g-ring); opacity: 0; transition: opacity 150ms ease-out; pointer-events: none; }
+button:hover > .ringable::after, .ringable:hover::after { opacity: 1; }
+/* zero specificity, so .glass, .well, .sess and .answer keep their fill and padding */
+:where(.stage button) { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+.stage button:focus-visible { outline: 2px solid var(--g-focus); outline-offset: 2px; }
+.dashed { border: 1px dashed var(--g-dash); }
+.pill { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 14px; border-radius: 999px; white-space: nowrap; }
+.dot { display: inline-block; border-radius: 50%; flex-shrink: 0; position: relative; transition: background-color 200ms ease-out; }
+.dot.working { background: var(--s-working); }
+.dot.ask { background: var(--s-ask); }
+.dot.done { background: var(--s-done); }
+.dot.working::before { content: ""; position: absolute; inset: 0; border-radius: 50%; background: inherit; opacity: 0.5; animation: halo 1.6s ease-out infinite; }
+@keyframes halo { 0% { transform: scale(1); opacity: 0.5; } 100% { transform: scale(2.2); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .dot.working::before { animation: none; } .stage * { transition: none !important; } }
+.plate { display: grid; place-items: center; border-radius: 50%; background: var(--g-plate); }
+.tool { display: grid; place-items: center; border-radius: 27%; font-weight: 700; color: #0b0b0c; text-shadow: none; letter-spacing: -0.02em; }
+.tool.claude { background: #e08a6a; }
+.tool.codex { background: #e6e6ec; }
+.tool.opencode { background: #4fd39a; }
+.tool.theia { background: #9d93ff; }
+.check { color: var(--s-done); }
+.okbadge { position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: var(--s-done); color: var(--s-done-ink); box-shadow: 0 6px 14px -4px rgba(4, 7, 22, 0.6); }
+.connector path { fill: none; stroke-width: 1.5; stroke-linecap: round; }
+.connector .live { stroke: var(--g-line); }
+.connector .idle { stroke: var(--g-line-dim); stroke-dasharray: 2 5; }
+.t2 { color: var(--g-text-2); }
+.num { font-family: var(--font-display); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.mono { font-family: var(--font-mono); letter-spacing: -0.02em; }
+
+/* segmented control */
+.segg { padding: 4px; border-radius: 999px; }
+.segg .thumb { position: absolute; top: 4px; left: 4px; height: 32px; width: 96px; border-radius: 999px; background: var(--g-sel); box-shadow: 0 14px 30px -12px rgba(4, 7, 22, 0.6); transition: transform 220ms cubic-bezier(.2,.8,.2,1), background-color 200ms ease-out; }
+.segg .opts { position: relative; display: flex; height: 100%; }
+.segg button { width: 96px; height: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; border-radius: 999px; transition: color 200ms ease-out; text-shadow: var(--g-text-shadow); }
+.segg button[aria-pressed="true"] { color: var(--g-sel-ink); text-shadow: none; }
+
+/* answer rows */
+.answer { display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0 10px; border-radius: 11px; text-align: left; }
+.answer .k { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--g-chip); font-weight: 600; font-variant-numeric: tabular-nums; transition: background-color 200ms, color 200ms; }
+.answer[aria-pressed="true"] { background: var(--g-sel); color: var(--g-sel-ink); text-shadow: none; box-shadow: none; }
+.answer[aria-pressed="true"] .k { background: rgba(0, 0, 0, 0.08); }
+[data-accent="purple"] .answer[aria-pressed="true"] .k { background: rgba(255, 255, 255, 0.2); }
+.answers[data-answered="true"] .answer[aria-pressed="false"] { opacity: 0.45; }
+
+/* tiles */
+.sess { display: flex; flex-direction: column; align-items: center; justify-content: space-between; width: 92px; height: 84px; padding: 12px 0 11px; border-radius: 18px; transition: transform 200ms ease-out; }
+.sess::before { content: ""; position: absolute; inset: 0; border-radius: inherit; background: var(--g-lift); opacity: 0; transition: opacity 200ms ease-out; }
+.sess[aria-pressed="true"] { transform: translateY(-4px); }
+.sess[aria-pressed="true"]::before { opacity: 1; }
+.sess > * { position: relative; }
+.chip { height: 28px; padding: 0 12px; border-radius: 999px; font-size: 13px; }
+.chip[aria-pressed="true"] { background: var(--g-sel); color: var(--g-sel-ink); text-shadow: none; box-shadow: none; }
+
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid currentColor; border-right-color: transparent; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.fade-in { animation: fadein 300ms ease-out; }
+@keyframes fadein { from { opacity: 0; transform: translateY(4px); } }
+
+/* token table */
+.tokens { overflow-x: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.tokens table { border-collapse: collapse; width: 100%; min-width: 860px; font-size: 13px; }
+.tokens th, .tokens td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tokens th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+.tokens tr:last-child td { border-bottom: 0; }
+.tokens code { font-family: var(--font-mono); font-size: 12px; }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -2px; margin-right: 6px; box-shadow: inset 0 0 0 1px var(--line); }
+.tokens td.group { font-weight: 600; background: color-mix(in srgb, var(--line) 40%, transparent); }
+
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); gap: 14px; align-items: start; }
+.note { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--panel); display: grid; gap: 6px; align-content: start; }
+.note h3 { margin: 0; font-size: 14px; }
+.note p { margin: 0; color: var(--muted); }
+h2.sec { font-family: var(--font-display); font-size: 22px; letter-spacing: -0.01em; margin: 0; }
+</style>
+
+<div class="wrap" id="root">
+  <header class="intro">
+    <span class="eyebrow">Design exploration · design/visual-theme-exploration</span>
+    <h1>Flat glass: a light-tint and a dark-tint theme</h1>
+    <p>The getone.one components rebuilt with Trace Commons content. The light tint uses the site's own values unchanged. The dark tint keeps the same navy hue, raises the veil and lowers the rims. Click and hover the components: they respond as the originals do. Contrast is worked out for white text over the lightest and darkest point of each backdrop.</p>
+  </header>
+
+  <div class="bar" role="toolbar" aria-label="Preview settings">
+    <div class="ctl"><label id="bd-l">Backdrop</label>
+      <div class="seg" data-ctl="backdrop" aria-labelledby="bd-l">
+        <button type="button" data-v="sky" aria-pressed="true">Sky</button>
+        <button type="button" data-v="dusk" aria-pressed="false">Dusk</button>
+        <button type="button" data-v="desktop" aria-pressed="false">Dark desktop</button>
+        <button type="button" data-v="paper" aria-pressed="false">Light desktop</button>
+      </div>
+    </div>
+    <div class="ctl"><label id="ac-l">Selected state</label>
+      <div class="seg" data-ctl="accent" aria-labelledby="ac-l">
+        <button type="button" data-v="white" aria-pressed="true">White (source)</button>
+        <button type="button" data-v="purple" aria-pressed="false">Brand purple</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="rows"></div>
+
+  <section class="row" aria-labelledby="tok-h">
+    <h2 class="sec" id="tok-h">Extracted tokens</h2>
+    <p style="margin:0;color:var(--muted);max-width:75ch">The light-tint column is copied from the pasted markup. The dark tint is proposed here. The last column names the entry in <code>design-tokens/glass.tokens.json</code> that each value would replace, or marks it as new.</p>
+    <div class="tokens"><table>
+      <thead><tr><th>Role</th><th>Light tint (source)</th><th>Dark tint (proposed)</th><th>glass.tokens.json</th></tr></thead>
+      <tbody id="tok-body"></tbody>
+    </table></div>
+  </section>
+
+  <section class="row" aria-labelledby="dec-h">
+    <h2 class="sec" id="dec-h">Rulings this would reopen</h2>
+    <div class="notes">
+      <div class="note"><h3>Brand purple (D3)</h3><p>The source has no accent colour: a selected item is a solid white pill with near-black text. Use the "Selected state" switch above to see the brand purple in that role.</p></div>
+      <div class="note"><h3>Hover from #1146</h3><p>In the source, hover draws a 1px white ring at 50% and keeps the fill. #1146 changes the fill instead (controlHover, cardHover). On wells, as in the answer rows and the Run button, the source darkens the fill as well.</p></div>
+      <div class="note"><h3>WCAG floors on light grounds</h3><p>White text on the light tint falls below 4.5:1 over bright scenes such as Sky and the light desktop. The source relies on a text shadow, which the contrast tests do not count. The dark tint clears 4.5:1 on every backdrop shown.</p></div>
+      <div class="note"><h3>Type sizes</h3><p>The source sets 14px medium for body and 15px for titles. Our type steps are macOS text styles (body 13, title3 15), so 14 has no matching style. Moving to it means overriding Dynamic Type sizes or choosing the nearest style.</p></div>
+      <div class="note"><h3>Radii</h3><p>Source radii are 24, 20, 18, 16, 14, 11 and 6, against ours of 16, 14, 12, 8 and 6. Larger radii suit the flat look but take room in dense panes like the tree and the inspector.</p></div>
+      <div class="note"><h3>Native material</h3><p>On macOS, panes use Liquid Glass and our tokens only veil it. The source paints its own fill, rims and drop shadow. Either the veil carries the tint and the rims become overlays, or panes stop using the native material.</p></div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  const MARK = '<svg viewBox="0 0 64 64" width="SIZE" height="SIZE" aria-hidden="true"><path d="M11 28V11h17" fill="none" stroke="#00D4AA" stroke-width="7"/><path d="M53 36v17H36" fill="none" stroke="#ffffff" stroke-width="7"/></svg>';
+  const ic = {
+    check: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"/></svg>',
+    laptop: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M232,156h-4V72a28,28,0,0,0-28-28H56A28,28,0,0,0,28,72v84H24a12,12,0,0,0-12,12v24a28,28,0,0,0,28,28H216a28,28,0,0,0,28-28V168A12,12,0,0,0,232,156ZM52,72a4,4,0,0,1,4-4H200a4,4,0,0,1,4,4v84H52ZM220,192a4,4,0,0,1-4,4H40a4,4,0,0,1-4-4V180H220Z"/></svg>',
+    server: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M208,36H48A20,20,0,0,0,28,56V200a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V56A20,20,0,0,0,208,36Zm-4,24v56H52V60ZM52,196V140H204v56ZM160,88a16,16,0,1,1,16,16A16,16,0,0,1,160,88Zm32,80a16,16,0,1,1-16-16A16,16,0,0,1,192,168Z"/></svg>',
+    shield: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M208,36H48A20,20,0,0,0,28,56v56c0,54.29,26.32,87.22,48.4,105.29,23.71,19.39,47.44,26,48.44,26.29a12,12,0,0,0,6.32,0c1-.28,24.73-6.9,48.44-26.29,22.08-18.07,48.4-51,48.4-105.29V56A20,20,0,0,0,208,36Zm-4,76c0,35.71-13.09,64.69-38.91,86.15A126.28,126.28,0,0,1,128,219.38a126.14,126.14,0,0,1-37.09-21.23C65.09,176.69,52,147.71,52,112V60H204Z"/></svg>',
+    lock: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M208,76H180V56A52,52,0,0,0,76,56V76H48A20,20,0,0,0,28,96V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V96A20,20,0,0,0,208,76ZM100,56a28,28,0,0,1,56,0V76H100ZM204,204H52V100H204Z"/></svg>',
+    up: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M208.49,120.49a12,12,0,0,1-17,0L140,69V216a12,12,0,0,1-24,0V69L64.49,120.49a12,12,0,0,1-17-17l72-72a12,12,0,0,1,17,0l72,72A12,12,0,0,1,208.49,120.49Z"/></svg>',
+    list: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M28,64A12,12,0,0,1,40,52H216a12,12,0,0,1,0,24H40A12,12,0,0,1,28,64Zm12,76H216a12,12,0,0,0,0-24H40a12,12,0,0,0,0,24Zm0,64H216a12,12,0,0,0,0-24H40a12,12,0,0,0,0,24Z"/></svg>',
+    graph: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M200,152a31.84,31.84,0,0,0-19.53,6.68l-23.11-18A31.65,31.65,0,0,0,160,128c0-.74,0-1.48-.08-2.21l13.23-4.41A32,32,0,1,0,168,104c0,.74,0,1.48.08,2.21l-13.23,4.41A32,32,0,0,0,128,96a32.59,32.59,0,0,0-5.27.44L115.89,81A32,32,0,1,0,96,88a32.59,32.59,0,0,0,5.27-.44l6.84,15.4a31.92,31.92,0,0,0-8.57,39.64L73.83,165.44a32.06,32.06,0,1,0,10.63,12l25.71-22.84a31.91,31.91,0,0,0,37.36-1.24l23.11,18A31.65,31.65,0,0,0,168,184a32,32,0,1,0,32-32Z"/></svg>',
+    tray: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M208,28H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V48A20,20,0,0,0,208,28Zm-4,24v92H179.31a19.86,19.86,0,0,0-14.14,5.86L147,168H109L90.83,149.86A19.86,19.86,0,0,0,76.69,144H52V52ZM52,204V168H75l18.14,18.14A19.86,19.86,0,0,0,107.31,192h41.38a19.86,19.86,0,0,0,14.14-5.86L181,168h23v36Z"/></svg>',
+    search: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M232.49,215.51,185,168a92.12,92.12,0,1,0-17,17l47.53,47.54a12,12,0,0,0,17-17ZM44,112a68,68,0,1,1,68,68A68.07,68.07,0,0,1,44,112Z"/></svg>',
+    ret: '<svg width="S" height="S" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true"><path d="M204,32V176a12,12,0,0,1-12,12H77l27.52,27.51a12,12,0,0,1-17,17l-48-48a12,12,0,0,1,0-17l48-48a12,12,0,1,1,17,17L77,164H180V32a12,12,0,0,1,24,0Z"/></svg>'
+  };
+  const icon = (n, s) => ic[n].replace('width="S" height="S"', `width="${s}" height="${s}"`);
+  const mark = (s) => MARK.replace(/SIZE/g, s);
+  const tool = (cls, label, s, fs) => `<span class="tool ${cls}" style="width:${s}px;height:${s}px;font-size:${fs}px">${label}</span>`;
+  const sdot = (state, s) => `<span class="dot ${state}" style="width:${s}px;height:${s}px"></span>`;
+
+  const COMPONENTS = [
+    {
+      id: 'hub', name: 'Hub and connected tools', src: 'One mark + 4 agents connected',
+      about: 'A large blurred tile over four small glass tiles, joined by curves, with a status pill below. In Trace Commons: the app over the tools it watches. Click the hub to rerun the connect sequence.',
+      html: () => `
+        <svg class="connector abs" style="inset:0" width="320" height="248" viewBox="0 0 320 248" aria-hidden="true">
+          ${[61,127,193,259].map(x => `<path class="live" d="M160 96 C160 122 ${x} 112 ${x} 140"/>`).join('')}
+        </svg>
+        <button type="button" class="abs" data-act="hub" aria-label="Open Trace Commons" style="top:8px;left:118px;border-radius:24px">
+          <span class="glass blur ringable" style="display:grid;place-items:center;width:84px;height:84px;border-radius:24px">${mark(44)}</span>
+        </button>
+        <div class="abs" style="top:140px;left:37px;display:flex;gap:18px" aria-hidden="true">
+          ${[['claude','Cl','working'],['codex','Cx','ask'],['opencode','Oc','working'],['theia','Th','done']].map(([c,l,s]) => `
+            <span style="position:relative;width:48px;height:48px">
+              <span class="glass" style="position:absolute;inset:0;display:grid;place-items:center;border-radius:14px">
+                ${tool(c,l,26,11)}
+                <span class="plate" style="position:absolute;top:-4px;right:-4px;width:14px;height:14px">${sdot(s,8)}</span>
+              </span>
+            </span>`).join('')}
+        </div>
+        <span class="glass pill abs" data-out="hubpill" style="top:208px;left:50%;transform:translateX(-50%)">${'<span class="check">'+icon('check',14)+'</span>'}4 tools watched</span>`
+    },
+    {
+      id: 'devices', name: 'Connected endpoints', src: 'iPhone · Mac · Server',
+      about: 'Three glass tiles joined by dashed lines, with a glyph on each line, a green check badge and labels underneath. In Trace Commons: this Mac between Private AI and the server. Click Private AI or Server to connect or disconnect it.',
+      html: () => `
+        <svg class="connector abs" style="inset:0" width="320" height="248" viewBox="0 0 320 248" aria-hidden="true">
+          <path class="idle" d="M80 84 L118 84"/><path class="live" data-line="l" d="M80 84 L118 84"/>
+          <path class="idle" d="M202 84 L244 84"/><path class="live" data-line="r" d="M202 84 L244 84"/>
+        </svg>
+        <span class="glass abs" data-mid="l" style="left:86px;top:71px;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;transition:opacity 300ms ease-out" aria-hidden="true">${icon('lock',13)}</span>
+        <span class="glass abs" data-mid="r" style="left:210px;top:71px;width:26px;height:26px;border-radius:50%;display:grid;place-items:center;transition:opacity 300ms ease-out" aria-hidden="true">${icon('up',13)}</span>
+        <button type="button" class="abs" data-act="dev" data-side="l" aria-label="Disconnect Private AI" style="top:52px;left:16px;border-radius:16px">
+          <span class="glass ringable" style="display:grid;place-items:center;width:64px;height:64px;border-radius:16px">${icon('shield',28)}</span>
+          <span class="okbadge" data-badge="l">${icon('check',12)}</span>
+        </button>
+        <span class="glass blur abs" style="top:42px;left:118px;width:84px;height:84px;border-radius:24px;display:grid;place-items:center" aria-hidden="true">${icon('laptop',40)}</span>
+        <button type="button" class="abs" data-act="dev" data-side="r" aria-label="Disconnect the server" style="top:52px;left:244px;border-radius:16px">
+          <span class="glass ringable" style="display:grid;place-items:center;width:64px;height:64px;border-radius:16px">${icon('server',28)}</span>
+          <span class="okbadge" data-badge="r">${icon('check',12)}</span>
+        </button>
+        <div class="abs" style="top:136px;left:0;width:100%;height:20px;text-shadow:var(--g-text-shadow);pointer-events:none" aria-hidden="true">
+          <span class="abs" style="left:48px;transform:translateX(-50%);white-space:nowrap">Private AI</span>
+          <span class="abs" style="left:160px;transform:translateX(-50%)">Mac</span>
+          <span class="abs" style="left:276px;transform:translateX(-50%)">Server</span>
+        </div>
+        <span class="glass pill abs" data-out="devpill" style="top:196px;left:50%;transform:translateX(-50%)"></span>`
+    },
+    {
+      id: 'segmented', name: 'Segmented control and notice', src: 'Inbox | Talk + "Sent to codex-12"',
+      about: 'A blurred track holding a solid thumb that slides between options, a count tile, and a notice field. In Trace Commons: the Traces / Map view switch over a sharing notice.',
+      html: () => `
+        <div class="glass blur segg abs" role="group" aria-label="View" style="top:4px;left:60px;width:200px;height:40px">
+          <span class="thumb" data-thumb style="transform:translateX(0)"></span>
+          <div class="opts">
+            <button type="button" data-act="seg" data-i="0" aria-pressed="true">${icon('list',15)}Traces</button>
+            <button type="button" data-act="seg" data-i="1" aria-pressed="false">${icon('graph',15)}Map</button>
+          </div>
+        </div>
+        <span class="glass abs" style="top:66px;left:125px;width:70px;height:56px;border-radius:14px" aria-hidden="true">
+          <span class="abs num" style="top:9px;left:0;width:100%;text-align:center;font-size:20px;line-height:1">12</span>
+          <span class="abs t2" style="bottom:9px;left:0;width:100%;text-align:center;font-size:12px;line-height:1">shared</span>
+        </span>
+        <div class="glass blur abs" style="top:146px;left:34px;width:252px;height:48px;border-radius:999px;display:flex;align-items:center;padding:0 16px;overflow:hidden">
+          <span style="display:flex;align-items:center;gap:12px;min-width:0" data-out="segnote">
+            <span style="position:relative;flex-shrink:0">${tool('claude','Cl',22,10)}<span class="plate" style="position:absolute;right:-3px;bottom:-3px;width:10px;height:10px">${sdot('done',6)}</span></span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Shared 3 from claude-7</span>
+            <span class="t2" style="flex-shrink:0">${icon('check',14)}</span>
+          </span>
+        </div>`
+    },
+    {
+      id: 'question', name: 'Question card', src: '"Ship to all three screens?"',
+      about: 'A blurred card with a header row, a question and three numbered answer wells. In Trace Commons: the consent prompt for one trace. Pick an answer, then pick it again to clear it.',
+      html: () => `
+        <div class="glass blur abs" style="top:20px;left:18px;width:284px;height:208px;border-radius:20px;padding:14px">
+          <div style="display:flex;align-items:center;gap:8px;height:22px">
+            ${tool('claude','Cl',18,8)}
+            <span class="t2">claude-7</span>
+            <span style="margin-left:auto;display:flex" data-out="qdot">${sdot('ask',9)}</span>
+          </div>
+          <p style="margin:6px 0 0;font-size:15px;line-height:20px;white-space:nowrap">Share this trace?</p>
+          <div class="answers" data-answered="false" style="margin-top:12px;display:flex;flex-direction:column;gap:6px">
+            ${['Share','Not now','Never for this tool'].map((a,i) => `<button type="button" class="answer well" data-act="answer" aria-pressed="false" aria-label="Answer ${i+1}: ${a}"><span class="k">${i+1}</span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a}</span></button>`).join('')}
+          </div>
+        </div>`
+    },
+    {
+      id: 'rail', name: 'Status rail', src: 'Agent dots + "Working" label',
+      about: 'A vertical glass capsule with an inset icon well and four 44pt dot buttons, plus a floating label. In Trace Commons: one dot per watched session. Click a dot to move it to the next state. Blue pulses while recording.',
+      html: () => `
+        <div class="abs" data-out="raillabel" style="top:0;right:88px;transform:translateY(64px);transition:transform 220ms cubic-bezier(.2,.8,.2,1)" aria-live="polite">
+          <span class="glass pill" style="padding:0 14px 0 12px"><span data-out="raildot">${sdot('working',8)}</span><span data-out="railtext">Recording</span></span>
+        </div>
+        <div class="glass blur abs" style="top:2px;right:16px;width:60px;display:flex;flex-direction:column;align-items:center;padding:8px 0 10px;border-radius:999px">
+          <span class="inner" style="display:grid;place-items:center;width:44px;height:44px;border-radius:50%" aria-hidden="true">${icon('tray',20)}</span>
+          <div style="margin-top:4px;display:flex;flex-direction:column">
+            ${['working','done','working','ask'].map((s,i) => `<button type="button" class="raildot" data-act="rail" data-i="${i}" data-s="${s}" aria-label="Session ${i+1}" style="position:relative;display:grid;place-items:center;width:44px;height:44px;border-radius:50%"><span class="hov" style="position:absolute;inset:0;border-radius:50%;background:#fff;opacity:0;transition:opacity 150ms"></span>${sdot(s,14)}</button>`).join('')}
+          </div>
+        </div>`
+    },
+    {
+      id: 'search', name: 'Field, filter chips and tiles', src: 'Voice field + agent tiles',
+      about: 'A blurred field, a row of well chips and three session tiles. The chosen tile rises 4px and lightens. In Trace Commons: filtering the session list.',
+      html: () => `
+        <div class="glass blur abs" style="top:12px;left:10px;width:300px;height:48px;border-radius:999px;display:flex;align-items:center;gap:12px;padding:0 16px">
+          <span class="t2" style="display:flex">${icon('search',16)}</span><span class="t2">Search traces</span>
+        </div>
+        <div class="abs" style="top:78px;left:10px;display:flex;gap:6px">
+          ${['All','Shared','Kept','Asked'].map((c,i) => `<button type="button" class="chip well" data-act="chip" aria-pressed="${i===0}">${c}</button>`).join('')}
+        </div>
+        ${[['claude','Cl','claude-7',10],['codex','Cx','codex-12',114],['opencode','Oc','opencode-3',218]].map(([c,l,n,x],i) => `
+          <button type="button" class="glass sess abs" data-act="sess" aria-pressed="${i===2}" style="top:150px;left:${x}px">
+            <span style="position:relative">${tool(c,l,30,12)}${i===2?`<span class="plate" style="position:absolute;top:-5px;right:-5px;width:14px;height:14px">${sdot('working',8)}</span>`:''}</span>
+            <span style="line-height:1;white-space:nowrap">${n}</span>
+          </button>`).join('')}`
+    },
+    {
+      id: 'counter', name: 'Fading display card', src: 'iPhone lock screen, 9:41',
+      about: 'A tall blurred card with a mask that fades it out toward the bottom, holding one large number. In Trace Commons: the shared-trace count on Home.',
+      html: () => `
+        <div class="glass blur abs" style="top:8px;left:56px;width:208px;height:330px;border-radius:38px;-webkit-mask-image:linear-gradient(180deg,#000 55%,transparent 77%);mask-image:linear-gradient(180deg,#000 55%,transparent 77%)">
+          <span class="abs" style="top:11px;left:50%;transform:translateX(-50%);height:20px;padding:0 10px;border-radius:999px;background:var(--g-plate);display:flex;align-items:center;gap:6px;font-size:11px;text-shadow:none">${sdot('done',6)}Watching</span>
+          <span class="abs num" style="top:46px;width:100%;text-align:center;font-size:44px;line-height:1">1,284</span>
+          <span class="abs t2" style="top:100px;width:100%;text-align:center">traces shared</span>
+        </div>`
+    },
+    {
+      id: 'command', name: 'Command row and empty slot', src: 'curl … | sh + Run',
+      about: 'A blurred row with monospace text and a well button, over a dashed placeholder. In Trace Commons: enrolling with an invite code. Click Run.',
+      html: () => `
+        <div class="glass blur abs" style="top:34px;left:10px;right:10px;height:50px;border-radius:16px;display:flex;align-items:center;padding:0 9px 0 16px">
+          <code class="mono" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;text-shadow:var(--g-text-shadow)">trace-commons enroll x7K2</code>
+          <button type="button" class="well" data-act="run" aria-label="Run the command" style="height:32px;padding:0 12px;border-radius:999px;display:flex;align-items:center;gap:6px;flex-shrink:0">
+            <span class="ringable" style="position:absolute;inset:0;border-radius:inherit"></span>
+            <span data-out="runicon" style="display:grid;place-items:center;width:14px;height:14px">${icon('ret',13)}</span><span>Run</span>
+          </button>
+        </div>
+        <div class="abs" data-out="slot" style="top:118px;left:34px;width:252px;height:78px">
+          <span class="dashed" style="position:absolute;inset:0;border-radius:18px"></span>
+        </div>`
+    }
+  ];
+
+  // ---- contrast: white text over glass composited on a backdrop colour ----
+  const BACKDROP_STOPS = {
+    sky: ['#3b78d8', '#d6e4f6', '#ffffff'],
+    dusk: ['#1c2459', '#f3a46b', '#ffd3a0'],
+    desktop: ['#0f1219', '#3a2a78', '#1e3a5a'],
+    paper: ['#f6f7fa', '#c9b3ff', '#d5dbe7']
+  };
+  const TINTS = {
+    light: { veil: [12, 18, 44, 0.42], tint: [255, 255, 255, 0.12], text: [255, 255, 255] },
+    dark: { veil: [7, 10, 26, 0.7], tint: [255, 255, 255, 0.04], text: [242, 243, 248] }
+  };
+  const hex = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const over = (c, [r, g, b, a]) => [r * a + c[0] * (1 - a), g * a + c[1] * (1 - a), b * a + c[2] * (1 - a)];
+  const lum = c => { const l = c.map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2]; };
+  const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+  function worstContrast(bd, t) {
+    const T = TINTS[t];
+    return Math.min(...BACKDROP_STOPS[bd].map(h => ratio(T.text, over(over(hex(h), T.veil), T.tint))));
+  }
+
+  // ---- render rows ----
+  const rows = document.getElementById('rows');
+  rows.style.display = 'grid'; rows.style.gap = '40px';
+  rows.innerHTML = COMPONENTS.map(c => `
+    <section class="row" id="${c.id}" aria-labelledby="${c.id}-h">
+      <div class="row-head">
+        <h2 id="${c.id}-h">${c.name}</h2>
+        <span class="src">Source: ${c.src}</span>
+        <p>${c.about}</p>
+      </div>
+      <div class="pair">
+        ${['light', 'dark'].map(t => `
+          <div class="frame">
+            <div class="frame-label"><b>${t === 'light' ? 'Light tint' : 'Dark tint'}</b><span class="cr" data-cr="${t}"></span></div>
+            <div class="scene"><div class="stage t-${t}" data-comp="${c.id}">${c.html()}</div></div>
+          </div>`).join('')}
+      </div>
+    </section>`).join('');
+
+  const root = document.documentElement;
+  const wrap = document.getElementById('root');
+  function setBackdrop(v) {
+    wrap.dataset.backdrop = v;
+    ['light', 'dark'].forEach(t => {
+      const r = worstContrast(v, t);
+      document.querySelectorAll(`[data-cr="${t}"]`).forEach(el => {
+        el.textContent = `White text, lowest ${r.toFixed(2)}:1`;
+        el.classList.toggle('fail', r < 4.5);
+      });
+    });
+  }
+  function setAccent(v) { wrap.dataset.accent = v; }
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('flat-glass-prefs') || '{}'); } catch (e) {}
+  const prefs = { backdrop: saved.backdrop || 'sky', accent: saved.accent || 'white' };
+  function syncSeg() {
+    document.querySelectorAll('.seg').forEach(seg => {
+      const k = seg.dataset.ctl;
+      seg.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === prefs[k])));
+    });
+    setBackdrop(prefs.backdrop); setAccent(prefs.accent);
+  }
+  document.querySelectorAll('.seg').forEach(seg => seg.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    prefs[seg.dataset.ctl] = b.dataset.v; syncSeg();
+    try { localStorage.setItem('flat-glass-prefs', JSON.stringify(prefs)); } catch (err) {}
+  }));
+  syncSeg();
+
+  // ---- per-stage behaviour ----
+  const RAIL = { working: 'Recording', ask: 'Needs you', done: 'Shared' };
+  const NEXT = { working: 'ask', ask: 'done', done: 'working' };
+  document.querySelectorAll('.stage').forEach(stage => {
+    const q = s => stage.querySelector(s);
+    const comp = stage.dataset.comp;
+    if (comp === 'devices') {
+      const st = { l: true, r: true };
+      const paint = () => {
+        ['l', 'r'].forEach(s => {
+          q(`[data-line="${s}"]`).style.opacity = st[s] ? 1 : 0;
+          q(`[data-mid="${s}"]`).style.opacity = st[s] ? 1 : 0.35;
+          q(`[data-badge="${s}"]`).hidden = !st[s];
+          q(`[data-side="${s}"]`).setAttribute('aria-label', `${st[s] ? 'Disconnect' : 'Connect'} ${s === 'l' ? 'Private AI' : 'the server'}`);
+        });
+        const n = (st.l ? 1 : 0) + (st.r ? 1 : 0);
+        q('[data-out="devpill"]').innerHTML = n === 2
+          ? `<span class="check">${icon('check', 14)}</span>Private AI and server connected`
+          : n === 1 ? `${sdot('ask', 8)}${st.l ? 'Server' : 'Private AI'} not connected`
+          : `${sdot('ask', 8)}Nothing connected`;
+      };
+      stage.addEventListener('click', e => { const b = e.target.closest('[data-act="dev"]'); if (!b) return; st[b.dataset.side] = !st[b.dataset.side]; paint(); });
+      paint();
+    }
+    if (comp === 'hub') {
+      const pill = q('[data-out="hubpill"]');
+      stage.addEventListener('click', e => {
+        if (!e.target.closest('[data-act="hub"]')) return;
+        const paths = stage.querySelectorAll('.connector .live');
+        const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+        paths.forEach((p, i) => {
+          p.setAttribute('pathLength', '1'); p.style.strokeDasharray = '1 1';
+          p.style.transition = 'none'; p.style.strokeDashoffset = reduce ? 0 : 1;
+          requestAnimationFrame(() => requestAnimationFrame(() => { p.style.transition = `stroke-dashoffset 500ms ease-out ${i * 120}ms`; p.style.strokeDashoffset = 0; }));
+        });
+        pill.innerHTML = `${sdot('working', 8)}Connecting`;
+        setTimeout(() => { pill.innerHTML = `<span class="check">${icon('check', 14)}</span>4 tools watched`; pill.classList.add('fade-in'); setTimeout(() => pill.classList.remove('fade-in'), 320); }, reduce ? 0 : 1000);
+      });
+    }
+    if (comp === 'segmented') {
+      stage.addEventListener('click', e => {
+        const b = e.target.closest('[data-act="seg"]'); if (!b) return;
+        stage.querySelectorAll('[data-act="seg"]').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+        q('[data-thumb]').style.transform = `translateX(${b.dataset.i * 96}px)`;
+      });
+    }
+    if (comp === 'question') {
+      const box = q('.answers');
+      stage.addEventListener('click', e => {
+        const b = e.target.closest('[data-act="answer"]'); if (!b) return;
+        const was = b.getAttribute('aria-pressed') === 'true';
+        box.querySelectorAll('.answer').forEach(x => x.setAttribute('aria-pressed', 'false'));
+        if (!was) b.setAttribute('aria-pressed', 'true');
+        box.dataset.answered = String(!was);
+        const i = [...box.children].indexOf(b);
+        q('[data-out="qdot"]').innerHTML = was ? sdot('ask', 9) : sdot(i === 0 ? 'done' : 'working', 9);
+      });
+    }
+    if (comp === 'rail') {
+      const label = q('[data-out="raillabel"]');
+      const show = b => {
+        label.style.transform = `translateY(${64 + b.dataset.i * 44}px)`;
+        q('[data-out="raildot"]').innerHTML = sdot(b.dataset.s, 8);
+        q('[data-out="railtext"]').textContent = RAIL[b.dataset.s];
+      };
+      stage.querySelectorAll('.raildot').forEach(b => {
+        b.addEventListener('mouseenter', () => { b.querySelector('.hov').style.opacity = 0.1; show(b); });
+        b.addEventListener('mouseleave', () => { b.querySelector('.hov').style.opacity = 0; });
+        b.addEventListener('focus', () => show(b));
+        b.addEventListener('click', () => {
+          b.dataset.s = NEXT[b.dataset.s];
+          b.querySelector('.dot').className = `dot ${b.dataset.s}`;
+          b.setAttribute('aria-label', `Session ${+b.dataset.i + 1}: ${RAIL[b.dataset.s]}`);
+          show(b);
+        });
+        b.setAttribute('aria-label', `Session ${+b.dataset.i + 1}: ${RAIL[b.dataset.s]}`);
+      });
+    }
+    if (comp === 'search') {
+      stage.addEventListener('click', e => {
+        const c = e.target.closest('[data-act="chip"]');
+        if (c) stage.querySelectorAll('[data-act="chip"]').forEach(x => x.setAttribute('aria-pressed', String(x === c)));
+        const s = e.target.closest('[data-act="sess"]');
+        if (s) stage.querySelectorAll('[data-act="sess"]').forEach(x => x.setAttribute('aria-pressed', String(x === s)));
+      });
+    }
+    if (comp === 'command') {
+      const btn = q('[data-act="run"]'); const slot = q('[data-out="slot"]'); const ico = q('[data-out="runicon"]');
+      let state = 'idle';
+      btn.addEventListener('click', () => {
+        if (state === 'busy') return;
+        if (state === 'done') {
+          state = 'idle'; ico.innerHTML = icon('ret', 13); btn.setAttribute('aria-label', 'Run the command');
+          slot.innerHTML = '<span class="dashed" style="position:absolute;inset:0;border-radius:18px"></span>'; return;
+        }
+        state = 'busy'; btn.setAttribute('aria-busy', 'true');
+        ico.innerHTML = '<span class="spin"></span>';
+        setTimeout(() => {
+          state = 'done'; btn.setAttribute('aria-busy', 'false');
+          ico.innerHTML = `<span class="check">${icon('check', 13)}</span>`; btn.setAttribute('aria-label', 'Clear the result');
+          slot.innerHTML = `<div class="glass fade-in" style="position:absolute;inset:0;border-radius:18px;padding:14px 16px;display:grid;gap:4px;align-content:center">
+            <span style="display:flex;align-items:center;gap:8px">${sdot('done', 8)}Enrolled</span>
+            <span class="t2" style="font-size:13px">Watching 4 tools on this Mac</span></div>`;
+        }, 900);
+      });
+    }
+  });
+
+  // ---- token table ----
+  const sw = c => `<span class="sw" style="background:${c}"></span>`;
+  const T = [
+    ['Surface'],
+    ['Glass fill', 'white 12% over veil', 'white 4% over veil', 'gradient.paneFill, cardFill, controlFill (one flat fill replaces the three gradients)'],
+    ['Veil', `${sw('rgba(12,18,44,.42)')}<code>rgba(12,18,44,.42)</code>`, `${sw('rgba(7,10,26,.7)')}<code>rgba(7,10,26,.70)</code>`, 'color.glassVeil'],
+    ['Rim', '<code>inset 0 0 0 1px</code> white 20%', 'white 12%', 'new: shadow.glassRim (replaces paneEdge/cardEdge inset strokes)'],
+    ['Top highlight', '<code>inset 0 1px 0</code> white 32%', 'white 18%', 'shadow.*Edge first inset'],
+    ['Drop shadow', '<code>0 14px 30px -12px</code> rgba(4,7,22,.6)', '<code>0 18px 36px -12px</code> rgba(2,3,10,.75)', 'shadow.paneEdge last layer, shadow.modal'],
+    ['Material', 'blur 18, saturate 1.4', 'blur 22, saturate 1.2', 'not in tokens (native material on macOS)'],
+    ['Text'],
+    ['Primary', `${sw('#fff')}<code>#ffffff</code>`, `${sw('#f2f3f8')}<code>#f2f3f8</code>`, 'color.textPrimary'],
+    ['Secondary', 'white 80%', '#f2f3f8 at 74%', 'color.textSecondary'],
+    ['Text shadow', '<code>0 1px 3px</code> rgba(4,7,22,.35)', '<code>0 1px 2px</code> rgba(0,0,0,.4)', 'new'],
+    ['Wells and controls'],
+    ['Well fill', `${sw('rgba(10,14,36,.24)')}<code>rgba(10,14,36,.24)</code>`, `${sw('rgba(0,0,0,.3)')}<code>rgba(0,0,0,.30)</code>`, 'color.wellFill, fieldFill'],
+    ['Well hover', '<code>rgba(10,14,36,.38)</code>', '<code>rgba(0,0,0,.44)</code>', 'color.controlHover'],
+    ['Well rim / highlight', 'white 16% / 12%', 'white 10% / 6%', 'shadow.wellEdge'],
+    ['Inner well (icon socket)', 'white 7%, rim 14%, top 20%', 'white 5%, rim 10%, top 12%', 'new'],
+    ['Key chip', 'white 16%, radius 6', 'white 10%', 'color.tintNeutral'],
+    ['Hover ring', '<code>inset 1px</code> white 50%, 150ms', 'white 36%', 'new (see rulings)'],
+    ['Focus', '2px outline white 80%, offset 2', 'same', 'macOS keeps the system focus ring'],
+    ['Selected', `${sw('#fff')}solid white, ink <code>#0b0b0c</code>`, `${sw('#e9ebf4')}<code>#e9ebf4</code>, same ink`, 'color.controlSelected, controlSelectedFloating'],
+    ['Selected lift (tile)', 'white 12% + translateY(-4px)', 'white 8%', 'color.cardHover'],
+    ['Lines'],
+    ['Connector', 'white 55%, 1.5px', 'white 40%', 'color.mapIdle'],
+    ['Connector idle', 'white 22%, dash 2 5', 'white 16%', 'new'],
+    ['Empty slot', '1px dashed white 30%', 'white 22%', 'new'],
+    ['Status'],
+    ['Working', `${sw('#4c9dff')}<code>#4c9dff</code>`, 'same', 'new (closest is color.blue)'],
+    ['Waiting', `${sw('#ffc75c')}<code>#ffc75c</code>`, 'same', 'color.statusAsk (#f5c142)'],
+    ['Done', `${sw('#30d158')}<code>#30d158</code>, ink <code>#04230e</code>`, 'same', 'color.statusOn (#3ddc84)'],
+    ['Dot plate', `${sw('#1d2236')}<code>#1d2236</code>`, `${sw('#0b0d18')}<code>#0b0d18</code>`, 'new'],
+    ['Pulse', 'dot at 50%, scale to ~2, loop', 'same', 'motion.pulse (1.6s)'],
+    ['Shape and type'],
+    ['Radii', '24 hero tile, 20 card, 18 tile, 16 row, 14 small tile, 11 answer, 6 chip, pill', 'same', 'radius.* (now 16, 14, 12, 8, 6)'],
+    ['Heights', 'pill 32, field 48, answer 36, hit target 44', 'same', 'size.control 26, cta 34, listRow 40'],
+    ['Type', '14 medium body, 15 title, 44 display tabular, mono 14 at -0.02em', 'same', 'type.body 13, title 15, number 26'],
+    ['Motion', 'hover 150ms, colour 200ms, opacity 300ms, ease-out', 'same', 'motion.fast .15, standard .22, slow .3']
+  ];
+  document.getElementById('tok-body').innerHTML = T.map(r => r.length === 1
+    ? `<tr><td class="group" colspan="4">${r[0]}</td></tr>`
+    : `<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td><td>${r[3]}</td></tr>`).join('');
+})();
+</script>

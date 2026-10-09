@@ -19,7 +19,7 @@ public enum GlassMaterial: Sendable, Equatable {
     /// takes a contrasting border under Increase Contrast), and Apple's
     /// guidance is to let them rather than swap in a fill of our own (R14).
     public static func current(content: Bool = false) -> GlassMaterial {
-        if content { return .opaque }
+        if content && !GlassTheme.contentIsGlass { return .opaque }
         if #available(macOS 26.0, *) { return .liquidGlass }
         return .vibrancy
     }
@@ -51,9 +51,16 @@ struct GlassBackdrop: NSViewRepresentable {
     static func makeView(_ material: GlassMaterial, cornerRadius: CGFloat) -> NSView {
         switch material {
         case .liquidGlass:
+            if GlassTheme.current == .flat {
+                if let view = flatView(cornerRadius) { return view }
+            }
             if #available(macOS 26.0, *) {
                 let glass = NSGlassEffectView()
+                // The regular, frosted style in every theme: the clear
+                // style showed the desktop unblurred behind a focused window
+                // (owner feedback, 2026-10-09).
                 glass.style = .regular
+                glass.appearance = GlassTheme.materialAppearance
                 glass.cornerRadius = cornerRadius
                 return glass
             }
@@ -73,6 +80,33 @@ struct GlassBackdrop: NSViewRepresentable {
         }
     }
 
+    /// The flat theme's material, where it is not the default frosted glass.
+    private static func flatView(_ cornerRadius: CGFloat) -> NSView? {
+        switch GlassTheme.flatMaterial {
+        case .regular:
+            return nil
+        case .regularTint, .clearTint:
+            guard #available(macOS 26.0, *) else { return nil }
+            let glass = NSGlassEffectView()
+            glass.style = GlassTheme.flatMaterial == .clearTint ? .clear : .regular
+            glass.tintColor = GlassTokens.Color.glassVeil.dynamicNSColor
+            glass.appearance = GlassTheme.materialAppearance
+            glass.cornerRadius = cornerRadius
+            return glass
+        case .sidebar, .hud:
+            let effect = NSVisualEffectView()
+            effect.material = GlassTheme.flatMaterial == .sidebar ? .sidebar : .hudWindow
+            effect.blendingMode = .behindWindow
+            effect.state = .active
+            effect.appearance = GlassTheme.materialAppearance
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = cornerRadius
+            effect.layer?.cornerCurve = .continuous
+            effect.layer?.masksToBounds = true
+            return effect
+        }
+    }
+
     private static func opaque(_ cornerRadius: CGFloat) -> NSView {
         let view = OpaquePaneView()
         view.layer?.cornerRadius = cornerRadius
@@ -86,6 +120,7 @@ struct GlassBackdrop: NSViewRepresentable {
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
+        effect.appearance = GlassTheme.materialAppearance
         effect.wantsLayer = true
         effect.layer?.cornerRadius = cornerRadius
         effect.layer?.cornerCurve = .continuous
@@ -112,7 +147,9 @@ struct GlassPaneFill: View {
         case .liquidGlass, .vibrancy:
             ZStack {
                 GlassBackdrop(material: GlassMaterial.current(content: content), cornerRadius: radius)
-                shape.fill(GlassTokens.Color.glassVeil.color)
+                if !(GlassTheme.current == .flat && GlassTheme.flatMaterial.tintsGlass) {
+                    shape.fill(GlassTokens.Color.glassVeil.color)
+                }
                 shape.fill(GlassTokens.Gradient.paneFill.linear)
             }
         case .opaque:
@@ -137,6 +174,7 @@ struct GlassFloatingBlur: NSViewRepresentable {
         effect.material = .hudWindow
         effect.blendingMode = .withinWindow
         effect.state = .active
+        effect.appearance = GlassTheme.materialAppearance
         effect.wantsLayer = true
         effect.layer?.cornerRadius = cornerRadius
         effect.layer?.cornerCurve = .continuous

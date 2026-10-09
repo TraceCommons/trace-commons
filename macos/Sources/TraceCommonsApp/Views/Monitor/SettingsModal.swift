@@ -146,6 +146,17 @@ struct SettingsModal: View {
     /// said, and a refused daemon is said as a refusal (`MonitorGate`).
     @ViewBuilder
     private func section(_ item: SettingsSection) -> some View {
+        // General is the app's own (the appearance): it never waits on the
+        // core or on first run.
+        if item == .general {
+            GlassSettingsContent(navigation: navigation, section: item, onPrivateAI: onPrivateAI)
+        } else {
+            gatedSection(item)
+        }
+    }
+
+    @ViewBuilder
+    private func gatedSection(_ item: SettingsSection) -> some View {
         switch MonitorGate.of(
             startup: model.startup, onboardingKnown: model.onboardingKnown,
             requiresOnboarding: model.requiresOnboarding
