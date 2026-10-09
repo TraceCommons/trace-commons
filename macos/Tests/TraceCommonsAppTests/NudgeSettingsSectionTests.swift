@@ -21,6 +21,19 @@ final class NudgeSettingsSectionTests: XCTestCase {
         XCTAssertEqual(store.offers, [])
     }
 
+    /// The one-time offers are drawn where their news is (History and
+    /// Traces), never in Settings, which holds only the switches.
+    func test_settingsDrawsNoOffer() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(
+            contentsOf: root.appendingPathComponent("Sources/TraceCommonsApp/Views/Settings/NudgeSettingsSection.swift"),
+            encoding: .utf8)
+        let start = try XCTUnwrap(source.range(of: "struct NudgeSettingsSection: View {"))
+        let end = try XCTUnwrap(source.range(of: "struct NudgeOfferCard: View {", range: start.upperBound..<source.endIndex))
+        XCTAssertFalse(source[start.upperBound..<end.lowerBound].contains("NudgeOfferCard"))
+    }
+
     /// Unread settings draw no switch at all, never a row of offs.
     func test_unreadSettingsDrawNoSwitch() async {
         let store = NudgeSettingsStore(client: SampleDaemonClient(.coreDown))

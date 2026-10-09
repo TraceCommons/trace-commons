@@ -117,9 +117,7 @@ struct NotificationsSection: View {
                 unknown
             }
             GlassHairline()
-            NudgeSettingsSection(requestAuthorization: {
-                if await Notifier.shared.requestAuthorizationIfNeverAsked() { await refreshStatus() }
-            })
+            NudgeSettingsSection()
         }
     }
 

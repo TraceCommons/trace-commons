@@ -118,22 +118,16 @@ final class NudgeSettingsStore {
     }
 }
 
-/// The switches and offers, inside the Notifications card: the suggestions
-/// switch and the mark under it, the master switch and each kind under it,
-/// then the core's line on the caps. The held kinds are never drawn.
+/// The switches, inside the Notifications card: the suggestions switch and
+/// the mark under it, the master switch and each kind under it, then the
+/// core's line on the caps. The held kinds are never drawn, and neither are
+/// the one-time offers: History and Traces draw those (`NudgeOfferCards`).
 struct NudgeSettingsSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var store = NudgeSettingsStore(client: nil)
-    /// Asks for the system's permission after an offer is accepted, when it
-    /// was never asked: a kind turned on that can never post would be a
-    /// switch that does nothing.
-    var requestAuthorization: () async -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            ForEach(Array(store.offers.enumerated()), id: \.offset) { _, offer in
-                NudgeOfferCard(offer: offer, store: store, requestAuthorization: requestAuthorization)
-            }
             ForEach(store.rows, id: \.id) { row in
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Toggle(row.label, isOn: Binding(
