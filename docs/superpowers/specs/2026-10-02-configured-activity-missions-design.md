@@ -65,6 +65,13 @@ Version 1:
   key-sorted. The block is the policy's one versioned extension point: every
   other policy object stays strict.
 
+Rollout order matters. Mission objects are strict, so a contributor build
+from before this field refuses any catalogue in which a mission carries a
+`predicate` key at all: its whole activity-missions surface reads unavailable,
+not just mission fit. A policy without predicates is unaffected. Operators
+should configure predicates only once the client release that reads them is
+what contributors run.
+
 The contributor daemon fetches the catalogue on its own schedule, the same
 anonymous request for every contributor, and feeds only missions with a
 version-1 predicate to its local matcher. Missions without one are excluded
