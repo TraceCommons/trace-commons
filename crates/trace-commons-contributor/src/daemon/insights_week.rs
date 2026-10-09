@@ -2182,6 +2182,39 @@ mod tests {
         assert!(rows[0].get("session_ref").is_none());
     }
 
+    /// A whole routed answer, printed between markers for shells' decode
+    /// fixtures (`cargo test ... -- --nocapture`): one session with a mixed
+    /// route and an uncounted call, one with no tally.
+    #[test]
+    fn a_routed_week_answer_for_shell_fixtures() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &path),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let mut outside = ledger_call(2, 20, "PRIVATE-CODEX-ID");
+        outside.proof = Some(crate::routing::ProofStatus::Outside);
+        outside.output_tokens = None;
+        fold_with(
+            &f.pass,
+            true,
+            vec![ledger_call(1, 30, "PRIVATE-CODEX-ID"), outside],
+        )
+        .unwrap();
+        let value = f.week_routed();
+        let mut categories: Vec<String> = sessions_of(&value)
+            .iter()
+            .map(|row| row["routing"]["category"].as_str().unwrap().to_string())
+            .collect();
+        categories.sort();
+        assert_eq!(categories, ["mixed", "unobserved"]);
+        println!("BEGIN insights_week");
+        println!("{}", serde_json::to_string_pretty(&value).unwrap());
+        println!("END insights_week");
+    }
+
     #[test]
     fn a_row_with_no_tally_is_unobserved_never_outside() {
         let f = Fixture::new();
