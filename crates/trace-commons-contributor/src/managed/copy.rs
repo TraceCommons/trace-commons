@@ -1,9 +1,13 @@
 //! Shared wording for every managed-session shell.
+//!
+//! The buttons `launch`, `use_default`, `reconnect` and `save_login`:
+//! Approved 2026-10-08 (button rule). `launch_title` keeps the launch dialog's full title.
 pub fn copy() -> serde_json::Value {
     serde_json::from_str(r#"{
             "title": "Managed sessions",
             "description": "Start a session with a saved account. Your other sessions keep running.",
-            "launch": "Launch managed session",
+            "launch": "Launch",
+            "launch_title": "Launch managed session",
             "add": "Add account",
             "refresh": "Refresh",
             "terminal_scope": "Opens in {destination}. Launches from the CLI stay in their terminal.",

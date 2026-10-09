@@ -178,9 +178,11 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
             "The extra privacy scan isn't reachable.",
             "Your traces are waiting rather than going out unscanned. Retrying automatically.",
         ),
+        // The upload servers, not the app's own background service, are out
+        // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
             HealthLineCopy::waiting(
-                "Can't reach Trace Commons right now.",
+                "Can't upload right now.",
                 "Your queue is safe; it'll retry on its own.",
             )
         }

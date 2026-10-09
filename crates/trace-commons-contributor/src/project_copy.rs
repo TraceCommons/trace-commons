@@ -125,13 +125,13 @@ pub struct CustomizeCopy {
     pub picker_explainer: &'static str,
     /// The picker's action.
     pub picker_include: &'static str,
-    /// The sheet's button.
+    /// The sheet's button. Approved 2026-10-08 (button rule).
     pub keep: &'static str,
     /// Shown once a session is kept.
     pub kept_confirmation: &'static str,
     /// The heading over the kept list.
     pub kept_heading: &'static str,
-    /// The undo on a kept row.
+    /// The undo on a kept row. Approved 2026-10-08 (button rule).
     pub undo_keep: &'static str,
     /// Shown when an undo is refused because the queue is full.
     pub undo_keep_queue_full: &'static str,
@@ -149,11 +149,11 @@ pub fn customize_copy() -> CustomizeCopy {
         picker_explainer: "Tick the sessions already on this Mac that you want to include. \
              Anything you leave unticked keeps waiting for you.",
         picker_include: "Include selected",
-        keep: "Keep on this Mac",
+        keep: "Keep",
         kept_confirmation: "Kept on this Mac. It won't be sent, and it won't expire. You can \
              offer it again later.",
         kept_heading: "Kept on this Mac",
-        undo_keep: "Offer it again",
+        undo_keep: "Undo",
         undo_keep_queue_full: "Too many sessions are waiting. Decide some of them first, then \
              offer this one again.",
         undo_keep_folder_never: "This folder is set to Never. Change its rule first, then offer \
@@ -333,7 +333,8 @@ pub const CONTRIBUTION_OVERRIDE_ASK_BODY: &str = "Every folder asks you first un
      own, and anything approved without you that hasn't been sent goes back to waiting for \
      you. Folders set to Never stay off.\n\nTurning this off puts each folder back on its own \
      setting.";
-pub const CONTRIBUTION_OVERRIDE_ASK_CONFIRM: &str = "Ask me everywhere";
+/// The confirm button. Approved 2026-10-08 (button rule).
+pub const CONTRIBUTION_OVERRIDE_ASK_CONFIRM: &str = "Ask everywhere";
 
 /// The "Never" override's confirmation.
 pub const CONTRIBUTION_OVERRIDE_NEVER_TITLE: &str = "Stop contributing from every folder?";
@@ -388,7 +389,8 @@ pub const CONTRIBUTION_OVERRIDE_CLEAR_BODY: &str = concat!(
     folder_mode_auto_label!(),
     " send their finished sessions without asking again."
 );
-pub const CONTRIBUTION_OVERRIDE_CLEAR_CONFIRM: &str = "Use each folder's setting";
+/// The confirm button. Approved 2026-10-08 (button rule).
+pub const CONTRIBUTION_OVERRIDE_CLEAR_CONFIRM: &str = "Clear override";
 
 /// One choice in the pill's sub-list.
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]

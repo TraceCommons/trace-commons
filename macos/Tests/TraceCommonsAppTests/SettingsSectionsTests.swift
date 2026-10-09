@@ -26,9 +26,9 @@ final class SettingsSectionsTests: XCTestCase {
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
-            "Connection", "Startup & notifications", "Watching", "How traces may be used", "Public profile",
+            "Connection", "Startup & notifications", "Watching", "Data uses", "Public profile",
             "Watched folders", "Tools", "Private AI", "Redaction witness", "Projects",
-            "Changes on this machine", "Compute",
+            "Change log", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
         XCTAssertNil(SettingsSection.updates.navName(nav))

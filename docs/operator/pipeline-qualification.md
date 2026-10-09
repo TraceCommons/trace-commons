@@ -257,7 +257,10 @@ also requires:
 - every result to carry the same `code_revision_hash`
   (`qualification_evidence_mixed_revision` otherwise);
 - the 19 results that `qualify` produces to carry the same `run_id`
-  (`qualification_evidence_mixed_run` otherwise). The evidence of a bundle is
+  (`qualification_evidence_mixed_run` otherwise). Precisely, today's rule is
+  one run id across every result outside the three promotion-only checks;
+  spec A-D12 (PR #1295) makes it one run id per group, see "The production
+  run" below. The evidence of a bundle is
   the output of one `qualify` run plus the three promotion-only results. A set
   cannot take one result from one `qualify` run and the rest from another run,
   on the same revision or not. The three promotion-only results can come from
@@ -477,10 +480,54 @@ Closing these is promotion work, not part of `qualify`:
 `evaluate_promotion` also requires three promotion-only checks:
 `pipeline_production_adapters`, `pipeline_remote_restore`, and
 `pipeline_hf_network_canary`. Their results come from a production run, not a
-local one. No code in this repository emits them, and no local or CI run passes
-them. So a decision over the results of a local `qualify` run is never ready: it
-lacks these three results, and its restore drill carries the blocker
-`filesystem_restore_local_only`.
+local one: `pipeline.py promote` (below) writes the last two on the operator
+host, and no local or CI run passes any of them. So a decision over the results
+of a local `qualify` run is never ready: it lacks these three results, and its
+restore drill carries the blocker `filesystem_restore_local_only`.
+
+## The production run: `pipeline.py promote`
+
+Spec: `docs/superpowers/specs/2026-10-08-pipeline-production-assembly-design.md`
+(Slice B). Qualification is two runs of one code revision: the mechanics run
+(`qualify`, above) and a production run on the operator host, against the
+production package, with network. Every `promote` subcommand and `hf-pin
+record` refuses to start when `CI` is set (`promote_refused_in_ci`).
+
+| Command | What it does |
+|---|---|
+| `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
+| `promote package-checks --run-id R` | Refuses with `harness_production_assembly_unavailable` until the qualification harness can run on the production assembly. |
+| `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). The pin is the committed `crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json`, which the run's code revision covers; `hf_network_pin_missing` when it is absent. A `--pin` whose bytes differ from it is refused with `hf_network_pin_not_committed` before anything is downloaded, so an uncommitted pin (one `hf-pin record` just wrote, for example) is never certified. |
+| `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
+| `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
+| `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
+| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. Until spec A-D12 lands, `evaluate_promotion` refuses the set it writes; see below. |
+| `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
+
+`evaluate_promotion` discharges exactly one blocker on a production run's
+evidence: `filesystem_restore_local_only` on `pipeline_restore_drill` is not a
+blocker when the set holds a passing `pipeline_remote_restore` with no blocker of
+its own, from the same code revision, naming the same package. Every other
+blocker still blocks.
+
+An assembled set is two runs by design: the 15 mechanics results carry run M,
+and the seven production results carry run R. Today's `evaluate_promotion`
+(`versioned_pipeline_qualification.rs`) requires one run id across every
+result outside the three promotion-only checks, which takes in the four
+package checks, so the set is refused with `qualification_evidence_mixed_run`.
+It also requires the three promotion-only results to name no package, and
+the production run's results all name the production package, so each adds
+`qualification_evidence_package_unexpected:<check_id>`. Spec A-D12 (PR #1295,
+not yet on `main`) moves the three promotion-only ids into
+`PROMOTION_PACKAGE_CHECKS` and makes the run rule per group: one run id for
+the mechanics results, one for the package-bearing results. Until it lands,
+these refusals of an assembled set are expected and do not mean the assembly
+is broken. A set with more than one run within a group is still refused after
+it lands.
+
+The child processes `promote` starts see only the allowlisted environment
+(`child_environment`): no cloud credential variable reaches them. On the pilot
+host, Application Default Credentials come from the metadata server.
 
 ## Package trust and `qualify_bundle`
 

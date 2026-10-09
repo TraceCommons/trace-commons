@@ -122,7 +122,8 @@ public sealed partial class SettingsView : UserControl
     }
     private async void OnDiscardProbabilityStorage(object sender, RoutedEventArgs e) {
         if (Settings.ProbabilityStorage is not { } storage) return;
-        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = storage.DiscardLabel,
+        var title = string.IsNullOrEmpty(storage.DiscardTitle) ? storage.DiscardLabel : storage.DiscardTitle;
+        var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = title,
             Content = storage.DiscardConfirmation, PrimaryButtonText = storage.ConfirmLabel,
             CloseButtonText = storage.CancelLabel, DefaultButton = ContentDialogButton.Close };
         if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Settings.CleanProbabilityStorageAsync(true);

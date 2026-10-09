@@ -1143,13 +1143,16 @@ struct TranscriptTab: View {
                 .onChange(of: geometry.size.width) { _, width in measure(width: width) }
             }
 
-            // Ron's Load more, naming what is left, and his link to the
-            // turn separators once the whole body is shown.
+            // Ron's Load more, with what is left as its caption, and his
+            // link to the turn separators once the whole body is shown.
             if let words, remaining > 0 || onAddSeparators != nil {
                 HStack(spacing: GlassTokens.Space.s4) {
                     if remaining > 0 {
-                        Button(FirstRunCopy.fill(words.loadMore, ["size": Format.bytes(remaining)]), action: onLoadMore)
+                        Button(words.loadMore, action: onLoadMore)
                             .buttonStyle(GlassButtonStyle(.glass))
+                        Text(FirstRunCopy.fill(words.loadMoreRemaining, ["size": Format.bytes(remaining)]))
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
                     }
                     if let onAddSeparators {
                         Button(words.addTurnSeparators, action: onAddSeparators)

@@ -94,6 +94,7 @@ pub struct FrameCopy {
     pub step_tools: &'static str,
     pub step_rules: &'static str,
     pub step_uses: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub custom_setup_instead: &'static str,
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
@@ -161,6 +162,7 @@ pub struct JoinCopy {
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
     pub skip_note: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub skip: &'static str,
     /// After the passkey verification is cancelled (`ftux-page.tsx`).
     pub signed_out: &'static str,
@@ -254,6 +256,7 @@ pub struct RulesCopy {
     pub selected_summary: &'static str,
     pub folder_selected: &'static str,
     pub include_every: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub show_all: &'static str,
     pub show_fewer: &'static str,
     pub never_count: &'static str,
@@ -330,10 +333,15 @@ pub struct PasskeyCopy {
     pub close: &'static str,
     pub cancel: &'static str,
     pub choose_title: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub use_existing: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub create_new: &'static str,
     pub choose_note: &'static str,
+    /// The Name popup's title.
     pub name_title: &'static str,
+    /// The Name popup's submit button. Approved 2026-10-08 (button rule).
+    pub name_submit: &'static str,
     pub name_field: &'static str,
     pub clear_name: &'static str,
     pub default_name: &'static str,
@@ -350,7 +358,9 @@ pub struct PasskeyCopy {
     pub verify_note: &'static str,
     pub welcome_title: &'static str,
     pub welcome_body: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub welcome_sign_in: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub other_options: &'static str,
     /// A passkey ceremony the daemon or the system refused; its label is
     /// never shown.
@@ -401,7 +411,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             step_tools: "Tools",
             step_rules: "Rules",
             step_uses: "Uses",
-            custom_setup_instead: "Custom setup instead",
+            custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} sessions",
@@ -437,7 +447,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
-            skip: "Skip: watch only",
+            skip: "Skip",
             signed_out: "Passkey not verified, so you were signed out. Join again whenever you like.",
         },
         folders: FoldersCopy {
@@ -489,7 +499,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             selected_summary: "{selected} of {total} selected",
             folder_selected: "{selected} of {total}",
             include_every: "Include every past session in {folder}",
-            show_all: "Show all {count}",
+            show_all: "Show all",
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
@@ -531,10 +541,11 @@ pub fn first_run_copy() -> FirstRunCopy {
             close: "Close",
             cancel: "Cancel",
             choose_title: "Continue with passkey",
-            use_existing: "Use existing passkey",
-            create_new: "Create new passkey",
+            use_existing: "Use existing",
+            create_new: "Create new",
             choose_note: "A passkey is your sign-in for Trace Commons and near.ai. Nothing about your sessions is sent by signing in.",
             name_title: "Create new passkey",
+            name_submit: "Create",
             name_field: "Passkey name",
             clear_name: "Clear name",
             default_name: "My trace passkey",
@@ -547,8 +558,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             verify_note: "Cancelling signs you out.",
             welcome_title: "Welcome back",
             welcome_body: "Sign in with your passkey.",
-            welcome_sign_in: "Sign in with passkey",
-            other_options: "Other sign-in options",
+            welcome_sign_in: "Sign in",
+            other_options: "Other options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
             bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
             near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
@@ -906,9 +917,10 @@ mod tests {
     /// with its reason.
     #[test]
     fn no_two_keys_carry_the_same_string() {
-        // P-1's button and P-2's title are two of Ron's strings that read
-        // the same today; one is an action, the other names a sheet.
-        const MAY_DIVERGE: &[&[&str]] = &[&[".passkey.create_new", ".passkey.name_title"]];
+        // Join's near.ai sign-in and Welcome back's passkey sign-in both
+        // read "Sign in" under the button rule (2026-10-08); they start
+        // different ceremonies and may diverge.
+        const MAY_DIVERGE: &[&[&str]] = &[&[".join.near_ai_sign_in", ".passkey.welcome_sign_in"]];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),

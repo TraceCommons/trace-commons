@@ -33,8 +33,8 @@ final class MonitorScreensCopyExportTests: XCTestCase {
     /// words (owner ruling, 2026-10-06).
     func testTheHistoryActionsDecode() throws {
         let copy = try XCTUnwrap(MonitorScreensCopy.decode(fromJSON: TCCoreCopy.monitorScreensCopyJSON()))
-        XCTAssertEqual(copy.historyActions.requestRefresh, "Request server refresh")
-        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in to withdraw")
+        XCTAssertEqual(copy.historyActions.requestRefresh, "Refresh")
+        XCTAssertEqual(copy.historyActions.signInToWithdraw, "Sign in")
         XCTAssertTrue(copy.historyActions.refreshFailed.hasPrefix("Could not ask for updates"))
     }
 

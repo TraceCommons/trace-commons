@@ -178,7 +178,7 @@ public sealed class ManagedSessionsView : UserControl
         };
         form.Children.Add(choose);
         form.Children.Add(new TextBlock { Text = T("launch_scope").Replace("{destination}", _snapshot.Capabilities.TerminalDestination ?? T("terminal")), TextWrapping = TextWrapping.Wrap });
-        if (await Dialog("launch", form, "launch_short").ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
+        if (await Dialog("launch_title", form, "launch_short").ShowAsync() != ContentDialogResult.Primary || string.IsNullOrWhiteSpace(project.Text)) return;
         var selected = accounts[account.SelectedIndex];
         await OpenAsync(await CallAsync("managed_launch_prepare", new { request_id = Guid.NewGuid(), purpose = "coding", tool = selected.Tool, connection = selected.Connection, account_id = selected.Id, cwd = project.Text, expected_generation = _snapshot.Generations.GetValueOrDefault(selected.Tool), save_default = false }));
     }

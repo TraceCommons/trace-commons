@@ -143,7 +143,7 @@ pub const OFFER_LEARN_MORE: &str = "Learn more";
 pub const OFFER_NO_REPOINT: &str =
     "Turning it on doesn't change where any tool sends requests. You connect tools one at a time.";
 
-/// The accept button.
+/// The accept button. Approved 2026-10-08 (button rule).
 pub const OFFER_ACCEPT: &str = "Turn on";
 
 /// The decline button. "Not now" rather than "No", because the switch stays.
@@ -788,15 +788,16 @@ pub const SETTINGS_MOVED: &str = "Private AI has its own screen now.";
 ///
 /// Turning it OFF from a menu is safe in a way turning it on is not: it only
 /// ever reduces what this computer will answer, so it needs no sentence in
-/// front of it.
-pub const TRAY_TURN_OFF: &str = "Stop answering model calls";
+/// front of it. Approved 2026-10-08 (button rule).
+pub const TRAY_TURN_OFF: &str = "Stop answering";
 
 /// The tray action while it is off.
 ///
 /// Trailing ellipsis because it opens the screen rather than acting: turning
 /// it ON changes what anything else on this computer may send through, and
 /// that is not a decision to take from a menu with the consequence off-screen.
-pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
+/// Approved 2026-10-08 (button rule).
+pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 
 /// The heading over the list of tools found on this computer.
 ///

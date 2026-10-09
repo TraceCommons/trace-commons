@@ -1,11 +1,12 @@
+import Foundation
 import TCBridge
 import TCShellCore
 
 // The legacy Settings screen's words. The screen itself is gone: every
 // section now draws on glass from `Views/Settings/`. What the old bodies
 // wrote is the core's now (`shell_words_copy::settings_words`, through
-// `ShellWords`, #1146 parity 2026-10-07); only the notices' dismiss
-// fallback below is still this file's.
+// `ShellWords`, #1146 parity 2026-10-07). The notices' dismiss word below
+// is the core's too.
 
 /// Section headings the Settings list shows too, and the change log's
 /// sentences. Held once here so the list and the section say the same
@@ -109,17 +110,25 @@ enum SettingsLegacyWords {
 
 // MARK: - The notices' dismiss word
 
-/// What every glass notice that can be put away names its dismiss control.
-/// Moved verbatim from the retired legacy banner (R15), with its counted
-/// sentence: the core's word first, this file's when the core's copy does
-/// not decode, so no notice is ever left undismissable.
+/// What every glass notice that can be put away names its dismiss control:
+/// the core's plain Dismiss (`MonitorTracesCopy.dismiss_action`), never
+/// `dismiss` ("Not this one"), which declines a session for good.
 enum ActionNoticeWords {
-    /// The dismiss control's name, reachable so a glass notice that cannot
-    /// reach the core's word still names its control.
-    static let dismissWord = "Dismiss this message"
-
     /// The core's word for dismissing a notice, for every glass notice that
     /// can be put away; nil when the core's copy does not decode, and the
     /// caller falls back to `dismissWord`.
     static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction
+
+    /// The dismiss control's name when the whole table does not decode: the
+    /// same core word, read from its one key, so a glass notice still names
+    /// its control and no word is written in this shell.
+    static let dismissWord: String = coreDismissWord ?? dismissActionKey() ?? ""
+
+    /// `dismiss_action` alone, from the core's table as JSON.
+    private static func dismissActionKey() -> String? {
+        guard let json = TCCoreCopy.monitorTracesCopyJSON(),
+              let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        else { return nil }
+        return object["dismiss_action"] as? String
+    }
 }
