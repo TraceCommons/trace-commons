@@ -1610,8 +1610,61 @@ mod tests {
                 "analytics_setting_ledger_feed",
                 "Count tokens in routed calls",
             ),
+            // Where a feed T session's calls went (design part B). Only
+            // proof reads "verified"; no proxy record never reads as "not
+            // private".
+            ("analytics_drill_private", "Private AI"),
+            ("analytics_route_unobserved", "No proxy record"),
+            (
+                "analytics_route_unrecorded",
+                "Proxy didn't record where calls went",
+            ),
+            ("analytics_route_outside", "Not through Private AI"),
+            ("analytics_route_mixed", "Partly through Private AI"),
+            ("analytics_route_verified", "Private AI, verified"),
+            (
+                "analytics_route_unverified",
+                "Through Private AI, not verified",
+            ),
+            (
+                "analytics_route_check_failed",
+                "Through Private AI, check failed",
+            ),
+            (
+                "analytics_route_split",
+                "{v} verified \u{b7} {u} not verified \u{b7} {o} outside \u{b7} {n} unrecorded proxy tokens",
+            ),
+            (
+                "analytics_route_measure_note",
+                "Proxy tokens count each call and can differ from the transcript's count.",
+            ),
+            (
+                "analytics_route_feed_off",
+                "Where calls went shows only while counting tokens in routed calls is on.",
+            ),
+            (
+                "analytics_reason_some_calls_unrecorded",
+                "Some calls have no proxy record of where they went",
+            ),
         ] {
             assert_eq!(copy[key], words, "{key}");
+        }
+        // Each route category's word: only verified proof says "verified"
+        // without a "not", and no proxy record never says "not private" or
+        // "not through".
+        for key in ["analytics_route_unobserved", "analytics_route_unrecorded"] {
+            let lower = copy[key].to_lowercase();
+            assert!(!lower.contains("not private"), "{key}");
+            assert!(!lower.contains("not through"), "{key}");
+            assert!(!lower.contains("verified"), "{key}");
+        }
+        for (key, words) in &copy {
+            if key.starts_with("analytics_route_") && key != "analytics_route_verified" {
+                assert!(
+                    !words.contains("Private AI, verified"),
+                    "{key} claims proof"
+                );
+            }
         }
         // Owner decision D2, open: no advice, what-if or tip sentence.
         let held = [

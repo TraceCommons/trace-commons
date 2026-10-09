@@ -47,6 +47,9 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "span",
     "label",
     "tokens",
+    // The route split's verified and outside proxy tokens.
+    "v",
+    "o",
 ];
 
 /// Key, words. DRAFT, NEEDS APPROVAL (owner decision D17, open).
@@ -123,6 +126,13 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
         "Not routed through Private AI",
     ),
     ("analytics_reason_stale", "Not read recently"),
+    // A route qualifier, not a coverage reason: some of the session's calls
+    // carry a proof label and some do not, so its category is the labelled
+    // calls'. It never marks the transcript's token figure unknown.
+    (
+        "analytics_reason_some_calls_unrecorded",
+        "Some calls have no proxy record of where they went",
+    ),
     // 3. Feed lines.
     (
         "analytics_feed_saved",
@@ -189,6 +199,41 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ("analytics_drill_tokens", "Tokens"),
     ("analytics_drill_coverage", "Coverage"),
     ("analytics_drill_reason", "Reason"),
+    // 7a. Where a feed T session's calls went (design part B), from the
+    // proxy's own record. Its tokens are the proxy's per-call count, never
+    // summed with or reconciled to the transcript's. Only verified proof
+    // reads "verified"; no proxy record is never "not private".
+    ("analytics_drill_private", "Private AI"),
+    ("analytics_route_unobserved", "No proxy record"),
+    (
+        "analytics_route_unrecorded",
+        "Proxy didn't record where calls went",
+    ),
+    ("analytics_route_outside", "Not through Private AI"),
+    ("analytics_route_mixed", "Partly through Private AI"),
+    ("analytics_route_verified", "Private AI, verified"),
+    (
+        "analytics_route_unverified",
+        "Through Private AI, not verified",
+    ),
+    (
+        "analytics_route_check_failed",
+        "Through Private AI, check failed",
+    ),
+    (
+        "analytics_route_split",
+        "{v} verified · {u} not verified · {o} outside · {n} unrecorded proxy tokens",
+    ),
+    (
+        "analytics_route_measure_note",
+        "Proxy tokens count each call and can differ from the transcript's count.",
+    ),
+    // Shown once in place of the column while the `insights_ledger_feed`
+    // switch ("Count tokens in routed calls", Settings > Tools) is off.
+    (
+        "analytics_route_feed_off",
+        "Where calls went shows only while counting tokens in routed calls is on.",
+    ),
     // 8. By model.
     (
         "analytics_model_labels_note",
