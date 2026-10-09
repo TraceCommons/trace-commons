@@ -162,9 +162,9 @@ pub const PROMOTION_REQUIRED_CHECKS: &[&str] = &[
 
 /// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that no local or CI run
 /// passes: they need the production assembly, so their results come from
-/// other runs than the `qualify` run. Every other required check is a check
-/// that one `pipeline.py qualify` run produces, and [`evaluate_promotion`]
-/// requires those results to share one run id.
+/// the production run, not the `qualify` run (spec 2026-10-08, R-1). They
+/// name the production package, so they are among
+/// [`PROMOTION_PACKAGE_CHECKS`] (the Q7 amendment, spec A-D12).
 /// `scripts/operator/test_pipeline_tooling.py` holds the same three as
 /// `_PROMOTION_ONLY` (a test there requires the two lists to agree).
 pub const PROMOTION_ONLY_CHECKS: &[&str] = &[
@@ -175,15 +175,22 @@ pub const PROMOTION_ONLY_CHECKS: &[&str] = &[
 
 /// The checks, among [`PROMOTION_REQUIRED_CHECKS`], that test the candidate
 /// package and so carry its three digests (P5-D15): the bundle qualification,
-/// the compatibility and HF-local corpus runs, and the restore drill. Every
+/// the compatibility and HF-local corpus runs, and the restore drill, and
+/// (spec 2026-10-08, A-D12) the three [`PROMOTION_ONLY_CHECKS`], which run
+/// against the production assembly and name the package it holds. Every
 /// other required check is a mechanics check whose result names no package.
-/// `scripts/operator/pipeline_tooling/checks.py` holds the same four as
-/// `digests_required` (a self-test requires the two lists to agree).
+/// `scripts/operator/pipeline_tooling/checks.py` holds the same seven as
+/// `PROMOTION_PACKAGE_CHECK_IDS` (the four `qualify` produces with
+/// `digests_required`, and the three promotion-only ones; a self-test
+/// requires the two lists to agree).
 pub const PROMOTION_PACKAGE_CHECKS: &[&str] = &[
     "pipeline_bundle_qualification",
     "pipeline_http_corpus_compatibility",
     "pipeline_http_corpus_hf_local",
     "pipeline_restore_drill",
+    "pipeline_production_adapters",
+    "pipeline_remote_restore",
+    "pipeline_hf_network_canary",
 ];
 
 /// The local restore drill's check id. Its result always carries
@@ -551,29 +558,31 @@ pub struct PromotionDecision {
 /// and from more than one package `qualification_evidence_mixed_package`
 /// (a package is its three digests together).
 ///
-/// The results of one qualification are the output of one `qualify` run
-/// (review round 1 of #1240, point 5): every result of a check outside
-/// [`PROMOTION_ONLY_CHECKS`] must carry the same run id, else the decision is
-/// blocked with `qualification_evidence_mixed_run`. So a set cannot take a
-/// mechanics result from one run and a candidate result from another run of
-/// the same revision. The three promotion-only results come from the
-/// production assembly, not from `qualify`, and each may carry its own run
-/// id. The run id is a field of the signed result, so the rule needs no
-/// other field. It holds wherever this function runs: the qualification, the
+/// The results of one qualification are the output of two runs of one
+/// code revision (review round 1 of #1240, point 5; spec 2026-10-08, R-1):
+/// every mechanics result (a check outside [`PROMOTION_PACKAGE_CHECKS`])
+/// must carry one run id, the `qualify` run's, and every package-bearing
+/// result (one of [`PROMOTION_PACKAGE_CHECKS`]) one run id, the production
+/// run's, else the decision is blocked with
+/// `qualification_evidence_mixed_run`. So a set cannot take a mechanics
+/// result from one run and another mechanics result from a second run of
+/// the same revision, nor split the package-bearing results across runs.
+/// The run id is a field of the signed result, so the rule needs no other
+/// field. It holds wherever this function runs: the qualification, the
 /// activation, and the rollback.
 ///
 /// A qualification run names exactly one package (P5-D15), and this
 /// function enforces which results name it, in both directions, because the
 /// decision gates `qualify_bundle` and so activation, for evidence that did
 /// not pass through `pipeline.py`. Each check in [`PROMOTION_PACKAGE_CHECKS`]
-/// (the four that test the candidate) must carry all three package digests:
+/// (the seven that test the candidate) must carry all three package digests:
 /// one that carries fewer, none included, adds
 /// `qualification_evidence_package_missing:<check_id>`. Every other check
-/// (a mechanics check, or a promotion-only one) must carry none: one that
+/// (a mechanics check) must carry none: one that
 /// carries any digest adds `qualification_evidence_package_unexpected:<check_id>`.
 /// With either blocker the decision is not ready and `package` is `None`: no
 /// package is the one the candidate checks tested. A decision is therefore
-/// ready only when the four candidate checks name one package and no other
+/// ready only when the seven candidate checks name one package and no other
 /// result names any, and then `package` is that package.
 ///
 /// `evidence_hash` covers, for each check id, the result's run id, code
@@ -683,14 +692,19 @@ pub fn evaluate_promotion(
     if packages.len() > 1 {
         blockers.push(QUALIFICATION_EVIDENCE_MIXED_PACKAGE_LABEL.to_string());
     }
-    // One run for every result that `qualify` produces; a promotion-only
-    // result may come from another run.
-    let runs = evidence
-        .iter()
-        .filter(|item| !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()))
-        .map(|item| item.check.run_id.as_str())
-        .collect::<BTreeSet<_>>();
-    if runs.len() > 1 {
+    // Spec 2026-10-08, R-1: one run for the mechanics results (the `qualify`
+    // run) and one for the package-bearing results (the production run).
+    let package_bearing =
+        |item: &&DrillEvidence| PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str());
+    let run_count = |package: bool| {
+        evidence
+            .iter()
+            .filter(|item| package_bearing(item) == package)
+            .map(|item| item.check.run_id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+    };
+    if run_count(false) > 1 || run_count(true) > 1 {
         blockers.push(QUALIFICATION_EVIDENCE_MIXED_RUN_LABEL.to_string());
     }
     blockers.sort();
@@ -2459,19 +2473,21 @@ mod tests {
         );
 
         // Final review I4 (ruling FR-4): a passing result's safe blockers
-        // are promotion blockers, each as `<label>:<check_id>`. The restore
-        // drill passes carrying `filesystem_restore_local_only`.
+        // are promotion blockers, each as `<label>:<check_id>`. The label is
+        // not `filesystem_restore_local_only`: this set's remote restore
+        // names the drill's package, so it discharges that one label (spec
+        // 2026-10-08 B-D4, tested below) and no other.
         let mut restore_blocked = evidence.clone();
         let restore = restore_blocked
             .iter_mut()
             .find(|item| item.check.check_id == "pipeline_restore_drill")
             .expect("the restore drill is a promotion check");
-        restore.check.safe_blockers = vec!["filesystem_restore_local_only".to_string()];
+        restore.check.safe_blockers = vec!["restore_tenant_count_low".to_string()];
         let restore_decision = evaluate_promotion(&restore_blocked, now).unwrap();
         assert!(!restore_decision.ready);
         assert_eq!(
             restore_decision.safe_blockers,
-            vec!["filesystem_restore_local_only:pipeline_restore_drill".to_string()]
+            vec!["restore_tenant_count_low:pipeline_restore_drill".to_string()]
         );
         assert_ne!(
             restore_decision.evidence_hash,
@@ -2589,7 +2605,7 @@ mod tests {
     }
 
     /// One passing result for each promotion check, in the shape a real
-    /// qualification run has: the four checks of [`PROMOTION_PACKAGE_CHECKS`]
+    /// qualification run has: the seven checks of [`PROMOTION_PACKAGE_CHECKS`]
     /// name the one candidate package, every other check names none.
     fn passing_evidence(now: DateTime<Utc>) -> Vec<DrillEvidence> {
         PROMOTION_REQUIRED_CHECKS
@@ -2655,42 +2671,56 @@ mod tests {
         assert_eq!(decision.code_revision_hash, None);
     }
 
-    /// Review round 1 of #1240, point 5: the results of the checks that one
-    /// `qualify` run produces (every check outside [`PROMOTION_ONLY_CHECKS`])
-    /// must share one run id. A set that takes one of them from another run
-    /// is not ready, under `qualification_evidence_mixed_run`, whichever
-    /// check it is; the three promotion-only results may each come from a
-    /// run of their own.
+    /// Spec 2026-10-08, A-D12 (the Q7 amendment): the three promotion-only
+    /// checks name the production package, so they join the checks that
+    /// test it, which grow from four to seven.
     #[test]
-    fn promotion_binds_one_run() {
+    fn promotion_package_checks_include_the_promotion_only_three() {
+        assert_eq!(PROMOTION_ONLY_CHECKS.len(), 3);
+        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 7);
+        for check_id in PROMOTION_ONLY_CHECKS {
+            assert!(PROMOTION_REQUIRED_CHECKS.contains(check_id), "{check_id}");
+            assert!(PROMOTION_PACKAGE_CHECKS.contains(check_id), "{check_id}");
+        }
+        for check_id in [
+            "pipeline_bundle_qualification",
+            "pipeline_http_corpus_compatibility",
+            "pipeline_http_corpus_hf_local",
+            "pipeline_restore_drill",
+        ] {
+            assert!(PROMOTION_PACKAGE_CHECKS.contains(&check_id), "{check_id}");
+        }
+        assert_eq!(
+            PROMOTION_REQUIRED_CHECKS
+                .iter()
+                .filter(|check_id| !PROMOTION_PACKAGE_CHECKS.contains(check_id))
+                .count(),
+            15,
+            "the mechanics checks"
+        );
+    }
+
+    /// Spec 2026-10-08, R-1 and A-D12: qualification is two runs of one code
+    /// revision. The mechanics results (every check outside
+    /// [`PROMOTION_PACKAGE_CHECKS`]) share one run id, and the
+    /// package-bearing results (the seven of [`PROMOTION_PACKAGE_CHECKS`])
+    /// share another; a result from a third run in either group is
+    /// `qualification_evidence_mixed_run`, whichever check it is.
+    #[test]
+    fn promotion_run_rule_is_per_group() {
         let now = Utc::now();
         let evidence = passing_evidence(now);
         assert!(evaluate_promotion(&evidence, now).unwrap().ready);
 
-        // The constant names three of the required checks, and none of them
-        // tests the candidate package.
-        assert_eq!(PROMOTION_ONLY_CHECKS.len(), 3);
-        for check_id in PROMOTION_ONLY_CHECKS {
-            assert!(PROMOTION_REQUIRED_CHECKS.contains(check_id), "{check_id}");
-            assert!(!PROMOTION_PACKAGE_CHECKS.contains(check_id), "{check_id}");
+        let mut two_runs = evidence.clone();
+        for check_id in PROMOTION_PACKAGE_CHECKS {
+            check_mut(&mut two_runs, check_id).run_id = "qproduction".to_string();
         }
-
-        // One run for the other results, and each promotion-only result
-        // from a run of its own: ready.
-        let mut other_runs = evidence.clone();
-        for (index, check_id) in PROMOTION_ONLY_CHECKS.iter().enumerate() {
-            check_mut(&mut other_runs, check_id).run_id = format!("qpromotion{index}");
-        }
-        let decision = evaluate_promotion(&other_runs, now).unwrap();
+        let decision = evaluate_promotion(&two_runs, now).unwrap();
         assert!(decision.ready, "{:?}", decision.safe_blockers);
 
-        // Any one of the other results from a second run: blocked, with the
-        // one label, on the set above and on the one-run set.
-        for base in [&evidence, &other_runs] {
-            for check_id in PROMOTION_REQUIRED_CHECKS
-                .iter()
-                .filter(|check_id| !PROMOTION_ONLY_CHECKS.contains(check_id))
-            {
+        for base in [&evidence, &two_runs] {
+            for check_id in PROMOTION_REQUIRED_CHECKS {
                 let mut mixed = base.clone();
                 check_mut(&mut mixed, check_id).run_id = "q9999abcd".to_string();
                 let decision = evaluate_promotion(&mixed, now).unwrap();
@@ -2710,11 +2740,11 @@ mod tests {
     /// package as the restore drill, discharges exactly the drill's
     /// `filesystem_restore_local_only` blocker, and nothing else.
     ///
-    /// The proof is the absence of that one label. Until Slice A moves
-    /// `pipeline_remote_restore` into [`PROMOTION_PACKAGE_CHECKS`] (A-D12), a
-    /// remote result that names a package also carries
-    /// `qualification_evidence_package_unexpected:pipeline_remote_restore`,
-    /// so the set is not ready yet; that coupling is asserted below.
+    /// The proof is the absence of that one label. Since A-D12 moved
+    /// `pipeline_remote_restore` into [`PROMOTION_PACKAGE_CHECKS`], a
+    /// matching remote result makes the set ready; before it, the result
+    /// also carried `qualification_evidence_package_unexpected`. Both arms
+    /// are asserted below.
     #[test]
     fn remote_restore_discharges_only_the_local_restore_blocker() {
         let now = Utc::now();
@@ -2725,18 +2755,20 @@ mod tests {
         assert!(PROMOTION_REQUIRED_CHECKS.contains(&RESTORE_DRILL_CHECK_ID));
 
         // The drill carries the local blocker, as every local drill does.
+        // The remote result names no package: it is not the drill's
+        // package, so nothing is discharged.
         let mut base = passing_evidence(now);
         check_mut(&mut base, RESTORE_DRILL_CHECK_ID).safe_blockers =
             vec![LOCAL_RESTORE_BLOCKER_LABEL.to_string()];
-
-        // The remote result of `passing_evidence` names no package: it is not
-        // the drill's package, so nothing is discharged.
+        let remote = check_mut(&mut base, REMOTE_RESTORE_CHECK_ID);
+        remote.package_hash = None;
+        remote.configuration_digest = None;
+        remote.dependency_digest = None;
         let decision = evaluate_promotion(&base, now).unwrap();
         assert!(!decision.ready);
-        assert_eq!(decision.safe_blockers, vec![local.clone()]);
+        assert!(decision.safe_blockers.contains(&local), "{decision:?}");
 
-        // A matching remote result: the local blocker is gone. Only the
-        // unexpected-package blocker of today's lists remains.
+        // A matching remote result: the local blocker is gone.
         let mut matching = base.clone();
         name_package(
             check_mut(&mut matching, REMOTE_RESTORE_CHECK_ID),
@@ -3066,7 +3098,7 @@ mod tests {
     /// checks promotion requires, with no repeat.
     #[test]
     fn package_checks_are_required_promotion_checks() {
-        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 4);
+        assert_eq!(PROMOTION_PACKAGE_CHECKS.len(), 7);
         assert_eq!(
             PROMOTION_PACKAGE_CHECKS
                 .iter()
@@ -3132,20 +3164,23 @@ mod tests {
         let evidence = passing_evidence(now);
         let base = evaluate_promotion(&evidence, now).unwrap().evidence_hash;
 
-        // Another run, for every result that one `qualify` run produces:
-        // still ready (review round 1 of #1240, point 5: one run), so the
-        // hash differs by the run id itself, not by a blocker. And another
-        // run for one promotion-only result alone, which may have its own.
+        // Another run, for every mechanics result (the `qualify` run), and
+        // another for every package-bearing result (the production run):
+        // each still ready (spec 2026-10-08, R-1: one run per group), so the
+        // hash differs by the run id itself, not by a blocker.
         let mut run = evidence.clone();
         for item in &mut run {
-            if !PROMOTION_ONLY_CHECKS.contains(&item.check.check_id.as_str()) {
+            if !PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
                 item.check.run_id = "q9999abcd".to_string();
             }
         }
-        let mut promotion_only_run = evidence.clone();
-        check_mut(&mut promotion_only_run, PROMOTION_ONLY_CHECKS[0]).run_id =
-            "q9999abcd".to_string();
-        for one_run in [&run, &promotion_only_run] {
+        let mut production_run = evidence.clone();
+        for item in &mut production_run {
+            if PROMOTION_PACKAGE_CHECKS.contains(&item.check.check_id.as_str()) {
+                item.check.run_id = "q9999abcd".to_string();
+            }
+        }
+        for one_run in [&run, &production_run] {
             assert!(evaluate_promotion(one_run, now).unwrap().ready);
         }
         let mut revision = evidence.clone();
@@ -3187,7 +3222,7 @@ mod tests {
         let mut hashes = vec![base];
         for changed in [
             run,
-            promotion_only_run,
+            production_run,
             revision,
             package,
             package_hash,

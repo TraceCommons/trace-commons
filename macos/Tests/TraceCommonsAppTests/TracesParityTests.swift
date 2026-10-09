@@ -477,15 +477,21 @@ final class TracesParityTests: XCTestCase {
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
         XCTAssertFalse(offers[privateAI.lowerBound..<arming.lowerBound].contains("GlassButtonStyle(.primary"))
         // #1146's head: the destination as a mono accent eyebrow over the
-        // h2 title, and the four paragraphs drawn alike.
+        // h2 title, beside the X that answers Not now; the paragraphs drawn
+        // alike, the first and the one-line exposure always, the rest
+        // behind Learn more (owner, 2026-10-08).
         let card = String(offers[privateAI.lowerBound..<arming.lowerBound])
         let eyebrow = try XCTUnwrap(card.range(of: "Text(copy.destination)\n                    .glassType(Self.destinationType)"))
         let title = try XCTUnwrap(card.range(of: "Text(copy.offerTitle)\n                    .glassType(GlassTokens.TypeScale.title)"))
         XCTAssertLessThan(eyebrow.lowerBound, title.lowerBound)
+        XCTAssertTrue(card.contains("CardClose(label: copy.offerDecline, action: onDecline)"),
+                      "the X answers as Not now does")
         XCTAssertEqual(PrivateAIOfferGlassCard.destinationType.design, .monospaced)
         XCTAssertTrue(PrivateAIOfferGlassCard.destinationType.uppercase)
-        XCTAssertTrue(card.contains("Text(copy.offerAskedOnce)\n                }\n                .glassType(GlassTokens.TypeScale.body)"),
-                      "the asked-once paragraph is drawn apart from the other three")
+        XCTAssertTrue(card.contains("Text(copy.offerWhat)\n                    Text(copy.offerExposureShort)\n                    if learnMore {"),
+                      "what turning it on exposes must stay in sight without Learn more")
+        XCTAssertTrue(card.contains("Text(copy.offerAskedOnce)\n                    }\n                }\n                .glassType(GlassTokens.TypeScale.body)"),
+                      "the paragraphs behind Learn more are drawn as the first two")
     }
 
     /// The folder row offers Submit all only when the shared table offers

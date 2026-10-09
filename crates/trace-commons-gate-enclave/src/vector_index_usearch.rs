@@ -411,6 +411,25 @@ impl UsearchVectorIndex {
     pub fn flush_all(&self) -> anyhow::Result<()> {
         flush_inner(&self.inner)
     }
+
+    /// Flush `tenant_storage_ref`'s shard only. A tenant with no cached
+    /// handle has nothing unsaved (eviction flushes), so it is not opened
+    /// and nothing is written. The LRU lock is released before the shard
+    /// is saved, so other tenants are not held up by this save.
+    pub fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        let handle = {
+            let cache = self
+                .inner
+                .open_indexes
+                .lock()
+                .expect("UsearchVectorIndex lru mutex poisoned");
+            cache.peek(tenant_storage_ref).map(Arc::clone)
+        };
+        match handle {
+            Some(handle) => flush_handle_arc(&handle),
+            None => Ok(()),
+        }
+    }
 }
 
 /// Flush every still-cached tenant of `inner`. Shared by
@@ -657,6 +676,10 @@ impl VectorIndex for UsearchVectorIndex {
         self.flush_all()
     }
 
+    fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        UsearchVectorIndex::flush_tenant(self, tenant_storage_ref)
+    }
+
     fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
         // Opening the shard is the only way to count it, and `nearest` is
         // about to open it anyway. Nothing here mutates its contents. A
@@ -751,6 +774,38 @@ mod tests {
             "a restart does not make the corpus a different corpus"
         );
         assert_eq!(after_restart.cardinality, 2);
+    }
+
+    /// `flush_tenant` saves the named tenant's shard and no other, and a
+    /// tenant with no open shard writes nothing (its last eviction already
+    /// saved it). The pipeline index persists after every write through
+    /// this, so one tenant's write must not save every open shard.
+    #[test]
+    fn flush_tenant_saves_only_that_tenant() {
+        let dir = tempdir().unwrap();
+        let idx = build_index(dir.path(), 4);
+        idx.insert(Uuid::new_v4(), "tenant_a", &norm(vec![1.0, 0.0, 0.0, 0.0]))
+            .unwrap();
+        idx.insert(Uuid::new_v4(), "tenant_b", &norm(vec![0.0, 1.0, 0.0, 0.0]))
+            .unwrap();
+        let file_a = idx.tenant_file_path("tenant_a");
+        let file_b = idx.tenant_file_path("tenant_b");
+        assert!(!file_a.exists() && !file_b.exists(), "nothing flushed yet");
+
+        idx.flush_tenant("tenant_a").unwrap();
+        assert!(file_a.is_file());
+        assert!(!file_b.exists(), "tenant_b was not flushed");
+
+        idx.flush_tenant("tenant_never_opened").unwrap();
+        assert!(!idx.tenant_file_path("tenant_never_opened").exists());
+        assert_eq!(
+            idx.inner.open_indexes.lock().unwrap().len(),
+            2,
+            "flushing an unopened tenant does not open it"
+        );
+
+        let reopened = build_index(dir.path(), 4);
+        assert_eq!(reopened.tenant_entry_count("tenant_a").unwrap(), 1);
     }
 
     fn build_index_with_periodic_flush(

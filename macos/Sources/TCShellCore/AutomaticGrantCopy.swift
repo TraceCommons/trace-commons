@@ -27,6 +27,13 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
     /// nil as the copy being unavailable.
     public let pathAutomatic: String?
     public let pathAskFirst: String?
+    /// Each answer split into the line shown and the rest, shown behind an
+    /// info button (owner, 2026-10-08). The Sharing card treats nil as the
+    /// copy being unavailable, as for the whole answers.
+    public let pathAutomaticTitle: String?
+    public let pathAutomaticDetail: String?
+    public let pathAskFirstTitle: String?
+    public let pathAskFirstDetail: String?
 
     enum CodingKeys: String, CodingKey {
         case disclosure
@@ -35,11 +42,16 @@ public struct AutomaticGrantCopy: Decodable, Equatable, Sendable {
         case noReview = "no_review"
         case pathAutomatic = "path_automatic"
         case pathAskFirst = "path_ask_first"
+        case pathAutomaticTitle = "path_automatic_title"
+        case pathAutomaticDetail = "path_automatic_detail"
+        case pathAskFirstTitle = "path_ask_first_title"
+        case pathAskFirstDetail = "path_ask_first_detail"
     }
 
     /// The payload fields this shell decodes, by wire name.
     public static let consumedFields = [
         "disclosure", "patterns_only", "model_scrubbed", "no_review", "path_automatic", "path_ask_first",
+        "path_automatic_title", "path_automatic_detail", "path_ask_first_title", "path_ask_first_detail",
     ]
 
     /// The scrub wording for the disclosure named, and only that one.

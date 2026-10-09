@@ -559,7 +559,7 @@ struct PasskeySheets: View {
         let corners = PasskeyPopupLayout.corners(step)
         return PasskeyPopup(
             icon: PasskeyPopupLayout.icon(step), title: title, subtitle: subtitle, display: display,
-            backLabel: copy.passkey.back, onBack: corners.back ? { model.back() } : nil,
+            backLabel: copy.frame.back, onBack: corners.back ? { model.back() } : nil,
             closeLabel: copy.passkey.close, onClose: corners.close ? { model.close() } : nil,
             content: body)
     }

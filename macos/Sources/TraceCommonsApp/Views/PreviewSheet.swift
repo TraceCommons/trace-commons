@@ -549,8 +549,10 @@ struct PreviewSheet: View {
             // there is no visible control, and Escape still closes (an
             // unseen control in the sheet's background carries it).
             if let closeLabel = closeWord {
+                // The sheet's action bar: bar-sized (owner ruling,
+                // 2026-10-08), as Close stands in a modal's bar.
                 Button(closeLabel) { close() }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.glass, size: .bar))
                     .keyboardShortcut(.cancelAction)
             }
         }
