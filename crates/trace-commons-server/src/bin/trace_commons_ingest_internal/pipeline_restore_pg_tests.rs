@@ -721,10 +721,20 @@ async fn remote_client(kind: &RemoteStoreKind, location: &RemoteStoreLocation) -
     )
 }
 
+/// `main()`'s rustls provider choice, made here because a test binary never
+/// runs `main()`: with `ring` and `aws-lc-rs` both compiled in (the pilot's
+/// feature set), rustls panics at the first TLS connection, the GCS client's
+/// or the KMS key wrapper's, unless a provider is installed. An error means
+/// one already is.
+fn install_tls_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[cfg(feature = "gcs-client")]
 async fn gcs_bucket_client(
     bucket: &str,
 ) -> Arc<dyn trace_commons_server::trace_artifact_gcs::GcsObjectClient> {
+    install_tls_provider();
     Arc::new(
         trace_commons_server::trace_artifact_gcs::prod_client::ProdGcsObjectClient::try_new(
             bucket.to_string(),
@@ -758,6 +768,7 @@ async fn remote_kek(
     kind: &RemoteStoreKind,
     master_key_hex: &str,
 ) -> Box<dyn trace_commons_server::trace_artifact_kek::KmsKeyWrapper + Send + Sync> {
+    install_tls_provider();
     let kek =
         build_selected_kek_wrapper_async(secrecy::SecretString::from(master_key_hex.to_string()))
             .await
@@ -3230,6 +3241,21 @@ async fn the_remote_copy_step_restores_a_seeded_store_over_the_directory_double(
 /// key wrapper only when that wrapper is a production one: under the local
 /// master key every count would pass and say nothing about KMS. The double
 /// runs on the local key.
+/// The remote drill's key wrapper and GCS client open TLS connections from a
+/// test binary, which never runs `main()`'s rustls provider install. With two
+/// providers compiled in (the pilot's feature set), rustls panics at the
+/// first TLS use unless one is installed, so building the key wrapper
+/// installs it. Run alone (`--exact`): another test may install it first.
+#[tokio::test]
+async fn the_remote_key_wrapper_installs_the_tls_provider() {
+    let _kek = remote_kek(
+        &RemoteStoreKind::DirectoryDouble(PathBuf::from("/nonexistent")),
+        &trace_commons_server::secrets::keychain::generate_master_key_hex(),
+    )
+    .await;
+    assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+}
+
 #[test]
 fn a_gcs_drill_refuses_a_key_wrapper_that_is_not_production() {
     assert_eq!(
