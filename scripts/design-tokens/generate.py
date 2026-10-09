@@ -158,13 +158,12 @@ def shadow_expr(layers: list, where: str) -> str:
 
 
 # The flat theme (design exploration) names its values per appearance:
-# `flatLight` is its light appearance and `flatDark` its dark one. The two
-# must name the same tokens with the same shape, and they are paired into one
-# value per token that follows the system appearance, as a classic token's
-# dark and light values are. A token they leave alone takes its classic dark
-# value in both appearances: the flat theme draws white text on tinted glass
-# whatever the appearance. Only colours, gradients, shadows and radii take
-# overrides.
+# `flatLight` is its light appearance and `flatDark` its dark one, each
+# naming only what it changes. A colour one leaves alone keeps its classic
+# value for that appearance. Gradients and shadows are named by both or by
+# neither, with the same stops or layers, because each stop and layer is one
+# value with a light and a dark side. Only colours, gradients, shadows and
+# radii take overrides.
 THEME_APPEARANCES = ("flatLight", "flatDark")
 THEMED_SECTIONS = ("color", "gradient", "shadow", "radius")
 
@@ -185,7 +184,7 @@ def check_themes(tokens: dict) -> None:
     light, dark = (themes.get(name, {}) for name in THEME_APPEARANCES)
     for json_key in THEMED_SECTIONS:
         a, b = light.get(json_key, {}), dark.get(json_key, {})
-        if set(a) != set(b):
+        if json_key != "color" and set(a) != set(b):
             raise TokenError(f"themes.{json_key}: flatLight and flatDark override different tokens: {sorted(set(a) ^ set(b))}")
         for key in a:
             where = f"themes.*.{json_key}.{key}"
@@ -219,17 +218,20 @@ def flat_entry(tokens: dict, json_key: str, key: str):
     if json_key == "radius":
         return light
     if json_key == "color":
-        entry = paired(light, dark) if light is not None else dark_only(base)
+        if light is None and dark is None:
+            return None
+        classic_light = base.get("light", dark_only(base))
+        entry = paired(light if light is not None else classic_light, dark if dark is not None else dark_only(base))
         return None if entry == base else entry
     if json_key == "gradient":
         if light is None:
-            entry = {**base, "stops": [dark_only(stop) for stop in base["stops"]]}
+            return None
         else:
             entry = {**dark, "stops": [{**paired(a, b), "at": b["at"]} for a, b in zip(light["stops"], dark["stops"])]}
         return None if entry == base else entry
     if json_key == "shadow":
         if light is None:
-            entry = [dark_only(layer) for layer in base]
+            return None
         else:
             entry = [{**paired(a, b), **{k: b[k] for k in ("x", "y", "blur", "inset") if k in b}} for a, b in zip(light, dark)]
         return None if entry == base else entry

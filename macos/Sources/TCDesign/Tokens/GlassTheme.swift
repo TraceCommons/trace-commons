@@ -68,13 +68,10 @@ public enum GlassTheme: String, Sendable, CaseIterable {
         var tintsGlass: Bool { self == .regularTint || self == .clearTint }
     }
 
-    /// The appearance a flat material is drawn in: dark, in both of the
-    /// app's appearances. The tint is the veil's; a light material adds a
-    /// white frost of its own that washes the tint out (2026-10-09). Nil
-    /// (the app's own) for classic.
-    static var materialAppearance: NSAppearance? {
-        current == .flat ? NSAppearance(named: .darkAqua) : nil
-    }
+    /// The appearance a material is drawn in: the app's own, light or dark.
+    /// The flat theme's Light is dark text on white frosted glass, so it
+    /// takes the light material (owner choice, 2026-10-09).
+    static var materialAppearance: NSAppearance? { nil }
 
     /// The Liquid Glass tint: the veil at `glassTintShare` of its alpha,
     /// for the glass's own colour and refraction. Contrast does not rest on

@@ -1363,7 +1363,7 @@ private enum TranscriptMarkers {
             var chip = AttributedString(String(text[range]))
             chip.font = font.weight(.bold)
             chip.backgroundColor = GlassTokens.Color.controlSelected.color
-            chip.foregroundColor = GlassColor.textPrimary
+            chip.foregroundColor = GlassTokens.Color.textOnSelected.color
             out.append(chip)
             cursor = range.upperBound
         }

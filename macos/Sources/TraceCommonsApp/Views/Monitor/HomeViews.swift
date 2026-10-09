@@ -669,7 +669,9 @@ private struct HistoryFilterPill: View {
                 Text("\(count)").monospacedDigit().opacity(0.7)
             }
             .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
-            .foregroundStyle(selected || hovering ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .foregroundStyle(
+                selected ? GlassTokens.Color.textOnSelected.color
+                    : hovering ? GlassColor.textPrimary : GlassColor.textTertiary)
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, GlassTokens.Space.s5)

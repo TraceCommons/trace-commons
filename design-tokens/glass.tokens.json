@@ -21,6 +21,7 @@
     "edgeHighContrast": { "hex": "#f2f2f4", "alpha": 0.4, "note": "A painted surface's edge under Increase Contrast: a solid 1pt stroke at 40% text colour (spec, Appearance). Light: 55%, for 3:1 or more on every light ground (40% was 2.44).", "light": { "hex": "#1d1d1f", "alpha": 0.55 } },
     "textOnAccent": { "hex": "#ffffff" },
     "textOnStatus": { "hex": "#0c0c0e" },
+    "textOnSelected": { "hex": "#f2f2f4", "note": "Text on a selected fill (controlSelected): textPrimary in classic, white in the flat theme, whose selected fill is the brand purple.", "light": { "hex": "#1d1d1f" } },
     "statusOn": { "hex": "#3ddc84", "note": "Watching, share automatically, automatic, always on. Glyph and label only.", "light": { "hex": "#1a8f4c" } },
     "statusAsk": { "hex": "#f5c142", "note": "Ask me, worth a second look.", "light": { "hex": "#a8690f" } },
     "statusOff": { "hex": "#a9a9b0", "note": "Never, not used. Never for text.", "light": { "hex": "#8a8a90" } },
@@ -318,76 +319,61 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatLight is its light appearance (the site's light tint) and flatDark its dark appearance (a darker tint of the same navy); Settings > General > Appearance picks Light, Dark or System. The two name the same tokens with the same shape. A token neither names keeps its classic dark value in both appearances, because the flat theme draws white text on tinted glass either way. Veils and text alphas are set for contrast, measured on screen over a bright snow-and-sky desktop with the window in and out of focus (2026-10-09): primary, secondary and tertiary text all 4.5:1 or more (lowest 4.6, tertiary in Dark in focus). flatLight: 70% navy veil, 6% white; flatDark: 72% and 4% (the mock's 42% and 70% fell to 2.3:1 on a bright desktop). On macOS the veil is painted over a clear Liquid Glass drawn in the dark appearance and lightly tinted with it, for the system's refraction; out of focus inactiveDim darkens it further, and Increase Contrast deepens it; Reduce Transparency is left to the system, which frosts the glass (R14); the map is on the same glass under a lighter field (owner feedback, 2026-10-09). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic). Selected states are the brand purple (owner choice, 2026-10-09). Buttons, segmented controls, wells and checkboxes are flat: a 1pt rim at most, no top highlight, shade or glow, as the map's floating view tabs are drawn (owner feedback, 2026-10-09). Cards, tags and the pane, popover and menu frames are flat too: a faint rim and, for frames, a soft drop shadow; cards are frosted by a light white fill. Light's veil is a deep indigo, Dark's a neutral navy: with white text on any desktop both must keep the ground behind text equally dark, so the two differ in hue, not lightness (2026-10-09). Every text colour clears 4.5:1 on the pane, a card and a field over a pure white desktop, the worst case (FlatThemeContrastTests); status text is a pale tint of its colour for it, beside its full-colour dot.",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; out of focus inactiveDim darkens a window; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- black for Light, white for Dark (FlatThemeContrastTests). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
     "flatLight": {
       "color": {
-        "textPrimary": { "hex": "#ffffff" },
-        "textSecondary": { "hex": "#ffffff", "alpha": 0.92 },
-        "textTertiary": { "hex": "#ffffff", "alpha": 0.88 },
-        "statusOn": { "hex": "#30d158" },
-        "statusOnText": { "hex": "#c1f1cd" },
-        "watchOn": { "hex": "#30d158" },
-        "statusAsk": { "hex": "#ffc75c" },
-        "statusAskText": { "hex": "#ffe3ae" },
-        "sceneBase": { "hex": "#0c122c" },
-        "sceneWarm": { "hex": "#1d2450" },
-        "paneBase": { "hex": "#1b2140", "alpha": 0.96 },
-        "paneOpaque": { "hex": "#1b2140" },
-        "glassVeil": { "hex": "#121c80", "alpha": 0.8 },
-        "wellFill": { "hex": "#0a0e24", "alpha": 0.24 },
-        "fieldFill": { "hex": "#0a0e24", "alpha": 0.24 },
-        "consentFill": { "hex": "#0a0e24", "alpha": 0.24 },
-        "controlHover": { "hex": "#0a0e24", "alpha": 0.38 },
-        "cardHover": { "hex": "#ffffff", "alpha": 0.12 },
-        "rowHover": { "hex": "#ffffff", "alpha": 0.05 },
-        "toolbarExpanded": { "hex": "#6d14f3" },
+        "glassVeil": { "hex": "#ffffff", "alpha": 0.74 },
+        "inactiveDim": { "hex": "#000000", "alpha": 0.04 },
+        "textSecondary": { "hex": "#3e3e45" },
+        "textTertiary": { "hex": "#404047" },
+        "placeholder": { "hex": "#000000", "alpha": 0.64 },
+        "purpleText": { "hex": "#4c0aa8" },
+        "statusOnText": { "hex": "#0d5531" },
+        "statusAskText": { "hex": "#6a3f04" },
+        "statusOutsideText": { "hex": "#8c1c17" },
+        "destructiveText": { "hex": "#8a1616" },
+        "textOnSelected": { "hex": "#ffffff" },
         "controlSelected": { "hex": "#6d14f3" },
         "controlSelectedFloating": { "hex": "#6d14f3" },
         "toggleOn": { "hex": "#6d14f3" },
-        "hairline": { "hex": "#ffffff", "alpha": 0.1 },
-        "rule": { "hex": "#ffffff", "alpha": 0.16 },
-        "popoverFill": { "hex": "#141a36", "alpha": 0.78 },
-        "menuFill": { "hex": "#141a36", "alpha": 0.78 },
-        "nodeCardFill": { "hex": "#141a36", "alpha": 0.78 },
-        "menuHover": { "hex": "#6d14f3", "alpha": 0.9 },
-        "menuSelection": { "hex": "#6d14f3" },
         "selection": { "hex": "#6d14f3" },
-        "mapFieldInner": { "hex": "#121c80", "alpha": 0.08 },
-        "mapFieldOuter": { "hex": "#121c80", "alpha": 0.2 },
-        "purpleText": { "hex": "#f3edff" },
-        "inactiveDim": { "hex": "#0c122c", "alpha": 0.14 },
-        "statusOutsideText": { "hex": "#ffe1e1" },
-        "destructiveText": { "hex": "#ffdcdc" },
-        "placeholder": { "hex": "#ffffff", "alpha": 0.84 }
+        "menuSelection": { "hex": "#6d14f3" },
+        "menuHover": { "hex": "#6d14f3", "alpha": 0.9 },
+        "wellFill": { "hex": "#ffffff", "alpha": 0.3 },
+        "fieldFill": { "hex": "#ffffff", "alpha": 0.3 },
+        "consentFill": { "hex": "#ffffff", "alpha": 0.22 },
+        "cardHover": { "hex": "#ffffff", "alpha": 0.5 },
+        "mapFieldInner": { "hex": "#ffffff", "alpha": 0.1 },
+        "mapFieldOuter": { "hex": "#ffffff", "alpha": 0.22 }
       },
       "gradient": {
         "paneFill": {
           "angle": 160,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.04, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.04, "at": 0.4 },
-            { "hex": "#ffffff", "alpha": 0.04, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.06, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.06, "at": 0.4 },
+            { "hex": "#ffffff", "alpha": 0.06, "at": 1 }
           ]
         },
         "cardFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.08, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.08, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.3, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.3, "at": 1 }
           ]
         },
         "cardFillQuiet": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.06, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.06, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.22, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.22, "at": 1 }
           ]
         },
         "controlFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#0a0e24", "alpha": 0.24, "at": 0 },
-            { "hex": "#0a0e24", "alpha": 0.24, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.5, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.5, "at": 1 }
           ]
         },
         "ctaFill": {
@@ -400,47 +386,47 @@
       },
       "shadow": {
         "paneEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true },
-          { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+          { "hex": "#000000", "alpha": 0.08, "inset": true },
+          { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "cardEdge": [
-          { "hex": "#ffffff", "alpha": 0.08, "inset": true }
+          { "hex": "#000000", "alpha": 0.06, "inset": true }
         ],
         "cardEdgeQuiet": [
-          { "hex": "#ffffff", "alpha": 0.06, "inset": true }
+          { "hex": "#000000", "alpha": 0.05, "inset": true }
         ],
         "wellEdge": [
-          { "hex": "#ffffff", "alpha": 0.16, "inset": true }
+          { "hex": "#000000", "alpha": 0.08, "inset": true }
         ],
         "controlEdge": [
-          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
+          { "hex": "#000000", "alpha": 0.08, "inset": true }
         ],
         "controlSelectedEdge": [],
         "popoverEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true },
-          { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+          { "hex": "#000000", "alpha": 0.08, "inset": true },
+          { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "menuEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true },
-          { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+          { "hex": "#000000", "alpha": 0.08, "inset": true },
+          { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "nodeCardEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true },
-          { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+          { "hex": "#000000", "alpha": 0.08, "inset": true },
+          { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "mapEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true },
-          { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+          { "hex": "#000000", "alpha": 0.08, "inset": true },
+          { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "ctaEdge": [],
         "ctaSecondaryEdge": [
-          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
+          { "hex": "#000000", "alpha": 0.08, "inset": true }
         ],
         "checkboxEdge": [
-          { "hex": "#ffffff", "alpha": 0.2, "inset": true }
+          { "hex": "#000000", "alpha": 0.2, "inset": true }
         ],
         "barTrackEdge": [
-          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
+          { "hex": "#000000", "alpha": 0.06, "inset": true }
         ],
         "consentEdge": []
       },
@@ -485,7 +471,8 @@
         "inactiveDim": { "hex": "#070a1a", "alpha": 0.14 },
         "statusOutsideText": { "hex": "#ffd3d3" },
         "destructiveText": { "hex": "#ffd0d0" },
-        "placeholder": { "hex": "#ffffff", "alpha": 0.8 }
+        "placeholder": { "hex": "#ffffff", "alpha": 0.8 },
+        "textOnSelected": { "hex": "#ffffff" }
       },
       "gradient": {
         "paneFill": {
