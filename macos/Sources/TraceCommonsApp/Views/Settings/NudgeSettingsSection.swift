@@ -37,6 +37,10 @@ final class NudgeSettingsStore {
 
     var rows: [NudgeSettings.Row] { NudgeSettings.rows(settings, copy: copy) }
     var offers: [NudgeSettings.Offer] { NudgeSettings.offers(settings, copy: copy) }
+    /// The offer `place` draws (`NudgeSettings.offers(_:copy:on:)`).
+    func offers(on place: NudgeSurface.Place) -> [NudgeSettings.Offer] {
+        NudgeSettings.offers(settings, copy: copy, on: place)
+    }
     var footnote: String? { rows.isEmpty ? nil : NudgeSettings.footnote(copy: copy) }
 
     func load() async {
@@ -122,23 +126,7 @@ struct NudgeSettingsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
             ForEach(Array(store.offers.enumerated()), id: \.offset) { _, offer in
-                GlassCard(quiet: true) {
-                    VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        Text(offer.text)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textPrimary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        HStack(spacing: GlassTokens.Space.s3) {
-                            Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                            Button(offer.accept) {
-                                Task { await store.accept(offer) { await requestAuthorization() } }
-                            }
-                            .buttonStyle(GlassButtonStyle(.glass))
-                        }
-                        .disabled(store.writing)
-                    }
-                }
+                NudgeOfferCard(offer: offer, store: store, requestAuthorization: requestAuthorization)
             }
             ForEach(store.rows, id: \.id) { row in
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
@@ -177,6 +165,63 @@ struct NudgeSettingsSection: View {
         switch id {
         case .suggestions, .notifications: 0
         case .menuBarMark, .notify: GlassTokens.Space.s6
+        }
+    }
+}
+
+/// One one-time offer: the core's sentence and its two answers. Turn on
+/// asks for the system's permission afterwards, only once the daemon took
+/// the write.
+struct NudgeOfferCard: View {
+    let offer: NudgeSettings.Offer
+    let store: NudgeSettingsStore
+    var requestAuthorization: () async -> Void
+
+    var body: some View {
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Text(offer.text)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: GlassTokens.Space.s3) {
+                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
+                        .buttonStyle(GlassButtonStyle(.glass))
+                    Button(offer.accept) {
+                        Task { await store.accept(offer) { await requestAuthorization() } }
+                    }
+                    .buttonStyle(GlassButtonStyle(.glass))
+                }
+                .disabled(store.writing)
+            }
+        }
+    }
+}
+
+/// The one-time offer for a page's own kind -- the verdicts offer on
+/// History, the idle one on Traces -- for an install that existed before
+/// the two kinds. The same settings, words and answers as Settings; once
+/// answered either way the daemon clears it and it is not drawn again. A
+/// refused answer is said under it, in the core's line.
+struct NudgeOfferCards: View {
+    let place: NudgeSurface.Place
+    @EnvironmentObject private var model: AppModel
+    @State private var store = NudgeSettingsStore(client: nil)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+            ForEach(Array(store.offers(on: place).enumerated()), id: \.offset) { _, offer in
+                NudgeOfferCard(offer: offer, store: store) {
+                    _ = await Notifier.shared.requestAuthorizationIfNeverAsked()
+                }
+            }
+            if let error = store.writeError, let line = MonitorWords.table?.line(for: error) {
+                GlassAlert(line)
+            }
+        }
+        .task(id: model.liveData.map(ObjectIdentifier.init)) {
+            store.attach(model.daemonData)
+            await store.load()
         }
     }
 }

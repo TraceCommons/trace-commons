@@ -425,6 +425,8 @@ private struct HistoryPage: View {
                         refusal: store.nudgeError.flatMap { MonitorWords.table?.line(for: $0) }
                     ) { intent in Task { await store.perform(intent) } }
                 }
+                // The one-time offer to turn verdict notifications on.
+                NudgeOfferCards(place: .history)
                 HistoryStats(store: store)
                 HistoryCommunityCard(store: store)
                 GlassCard {

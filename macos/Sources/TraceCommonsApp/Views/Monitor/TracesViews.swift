@@ -391,6 +391,8 @@ struct TracesTreeView: View {
                     refusal: store.nudgeError.flatMap { store.words?.line(for: $0) }
                 ) { intent in Task { await store.perform(intent) } }
             }
+            // The one-time offer to turn idle-session notifications on.
+            NudgeOfferCards(place: .traces)
         }
     }
 

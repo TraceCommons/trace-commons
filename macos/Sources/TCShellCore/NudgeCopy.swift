@@ -229,6 +229,18 @@ public enum NudgeSettings {
         return offers
     }
 
+    /// The pending offer `place` draws: the verdicts offer on History, the
+    /// idle one on Traces. The contract places these one-time offers on the
+    /// History and Traces cards, so an upgraded install that never opens
+    /// Settings still meets them; Settings draws both as well.
+    public static func offers(_ settings: DaemonData.Settings?, copy: NudgeCopy?, on place: NudgeSurface.Place) -> [Offer] {
+        let kind = switch place {
+        case .history: "verdicts_landed"
+        case .traces: "idle_sessions"
+        }
+        return offers(settings, copy: copy).filter { $0.kind == kind }
+    }
+
     /// The line under the kinds: the caps and quiet hours, in the core's
     /// words.
     public static func footnote(copy: NudgeCopy?) -> String? {

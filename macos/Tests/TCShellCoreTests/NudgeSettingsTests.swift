@@ -117,6 +117,18 @@ final class NudgeSettingsTests: XCTestCase {
         XCTAssertEqual(NudgeSettings.offers(pending, copy: nil), [])
     }
 
+    /// Each kind's offer also has a page of its own: the verdicts offer on
+    /// History, the idle one on Traces, where an upgraded install that never
+    /// opens Settings still meets it.
+    func testEachPageDrawsItsOwnKindsOffer() throws {
+        let pending = try settings(#"{"verdicts_offer_pending":true,"idle_offer_pending":true}"#)
+        XCTAssertEqual(NudgeSettings.offers(pending, copy: Self.copy, on: .history).map(\.kind), ["verdicts_landed"])
+        XCTAssertEqual(NudgeSettings.offers(pending, copy: Self.copy, on: .traces).map(\.kind), ["idle_sessions"])
+        let idleOnly = try settings(#"{"idle_offer_pending":true}"#)
+        XCTAssertEqual(NudgeSettings.offers(idleOnly, copy: Self.copy, on: .history), [])
+        XCTAssertEqual(NudgeSettings.offers(nil, copy: Self.copy, on: .traces), [])
+    }
+
     func testTheFootnoteIsTheCoresBudgetLine() {
         XCTAssertEqual(NudgeSettings.footnote(copy: Self.copy), "At most one a day.")
         XCTAssertNil(NudgeSettings.footnote(copy: nil))

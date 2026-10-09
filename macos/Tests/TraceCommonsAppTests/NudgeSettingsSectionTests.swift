@@ -79,6 +79,23 @@ final class NudgeSettingsSectionTests: XCTestCase {
         XCTAssertEqual(asked, 1)
     }
 
+    /// History and Traces each draw their own kind's offer, through the
+    /// same store and words as Settings.
+    func test_thePagesDrawTheirOwnOffers() async throws {
+        let store = NudgeSettingsStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        XCTAssertEqual(store.offers(on: .history), NudgeSettings.offers(store.settings, copy: store.copy, on: .history))
+        XCTAssertEqual(store.offers(on: .traces), NudgeSettings.offers(store.settings, copy: store.copy, on: .traces))
+
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let monitor = root.appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor")
+        let history = try String(contentsOf: monitor.appendingPathComponent("HomeViews.swift"), encoding: .utf8)
+        let traces = try String(contentsOf: monitor.appendingPathComponent("TracesViews.swift"), encoding: .utf8)
+        XCTAssertTrue(history.contains("NudgeOfferCards(place: .history)"), "History draws no offer")
+        XCTAssertTrue(traces.contains("NudgeOfferCards(place: .traces)"), "Traces draws no offer")
+    }
+
     func test_aRefusedWriteIsKept() async {
         let store = NudgeSettingsStore(client: SampleDaemonClient(.coreDown))
         await store.set(.suggestions, on: false)
