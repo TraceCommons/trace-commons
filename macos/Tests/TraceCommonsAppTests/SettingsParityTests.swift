@@ -209,7 +209,7 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
         XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
         XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
-        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A session counts as finished after 30 seconds of quiet.")
+        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
                        "Automatic contributing turned on for demo")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")

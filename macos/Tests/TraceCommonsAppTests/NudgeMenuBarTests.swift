@@ -13,7 +13,7 @@ final class NudgeMenuBarTests: XCTestCase {
         let store = MenuPanelStore(client: client)
         await store.load()
         let row = store.nudgeRow
-        XCTAssertEqual(row?.text, "Some sessions have been idle for 3 days or more")
+        XCTAssertEqual(row?.text, "Some traces have been idle for 3 days or more")
         let destination = await store.open(try XCTUnwrap(row))
         XCTAssertEqual(client.nudgeCalls, ["nudge_opened idle_sessions"])
         XCTAssertEqual(destination, .idleSessions)

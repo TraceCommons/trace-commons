@@ -125,9 +125,9 @@ final class FlowMapSceneTests: XCTestCase {
         XCTAssertEqual(words.tool(.unknown, waiting: 0), words.toolNothingWaiting)
         XCTAssertNotEqual(words.tool(.unset, waiting: 0), words.toolOff)
         XCTAssertEqual(words.folder(path: "/a", rule: "Ask me", waiting: 1, contributed: 2),
-                       "/a. Rule: Ask me. 1 session waiting, 2 contributed.")
+                       "/a. Rule: Ask me. 1 trace waiting, 2 contributed.")
         XCTAssertEqual(words.folder(path: nil, rule: nil, waiting: 3, contributed: nil),
-                       "Rule: not set. 3 sessions waiting, \u{2014} contributed.")
+                       "Rule: not set. 3 traces waiting, \u{2014} contributed.")
         XCTAssertNil(FlowMapView.hint(pinned: true))
         XCTAssertEqual(FlowMapView.hint(pinned: false), words.hint)
     }

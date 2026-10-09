@@ -14,7 +14,7 @@ final class NudgeWordingTests: XCTestCase {
     /// Fragments of the core's nudge sentences and fixed words
     /// (`nudge_copy.rs`), each specific enough that no other surface says it.
     static let fragments = [
-        "idle for", "have been idle", "has been idle", "traces from", "trace from",
+        "idle for", "have been idle", "has been idle",
         "credit is now final", "held for privacy review", "Verdicts are in", "previewed trace",
         "traces to review", "fit a mission", "fits a mission", "Fits a mission",
         "Estimate: about", "Estimated credit", "Higher estimate", "Typical estimate", "Lower estimate",

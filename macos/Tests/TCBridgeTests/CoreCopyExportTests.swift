@@ -107,9 +107,9 @@ final class CoreCopyExportTests: XCTestCase {
     func testTheArmingBodyIsTheAgreedWording() throws {
         XCTAssertEqual(
             try armingCopy(0).body,
-            "Sessions from this project will be scrubbed and contributed without asking "
-                + "you, from now on. You won't review them first. Sessions already on this Mac "
-                + "keep waiting for you to pick them.\n\nNo session is sent until it has been "
+            "Traces from this project will be scrubbed and contributed without asking "
+                + "you, from now on. You won't review them first. Traces already on this Mac "
+                + "keep waiting for you to pick them.\n\nNo trace is sent until it has been "
                 + "quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't "
                 + "sent yet goes back to waiting for you, and anything already sent stays sent."
         )

@@ -445,21 +445,21 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(QueueLegacyWords.nothingWaiting, "Nothing is waiting.")
         XCTAssertEqual(
             QueueLegacyWords.nothingWaitingDetail,
-            "When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
+            "When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
         XCTAssertEqual(
             QueueLegacyWords.undoWillSend,
-            "Approved sessions will send automatically. You can undo until uploading starts.")
+            "Approved traces will send automatically. You can undo until uploading starts.")
         XCTAssertEqual(
             QueueLegacyWords.closeNoticeStillSends,
-            "Close this notice. Approved sessions will still send automatically.")
+            "Close this notice. Approved traces will still send automatically.")
         XCTAssertEqual(QueueLegacyWords.closeNotice, "Close this notice.")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(7), "Approved 7s ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(AppModel.Undo.tickCeiling), "Approved 120s+ ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(500), "Approved 120s+ ago")
-        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Sessions no longer waiting (3)")
+        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Traces no longer waiting (3)")
         XCTAssertEqual(
             QueueLegacyWords.notOfferedScope,
-            "This covers sessions that reached the queue. Sessions that were never queued at all are not counted here.")
+            "This covers traces that reached the queue. Traces that were never queued at all are not counted here.")
     }
 
     /// The accept comes first as a glass button and the decline after it as

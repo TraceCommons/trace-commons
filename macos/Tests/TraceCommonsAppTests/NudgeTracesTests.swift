@@ -65,7 +65,7 @@ final class NudgeTracesTests: XCTestCase {
         await store.load()
         let card = store.nudgeCard
         XCTAssertEqual(card?.kind, .idleSessions)
-        XCTAssertEqual(card?.title, "2 sessions from Claude Code have been idle for 3 days or more")
+        XCTAssertEqual(card?.title, "2 traces from Claude Code have been idle for 3 days or more")
         XCTAssertEqual(card?.actions.map(\.label), ["Review", "Not now"])
         // Nothing to say, nothing drawn.
         let quiet = TracesStore(client: SampleDaemonClient(.empty))
