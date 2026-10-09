@@ -1460,7 +1460,7 @@ pub fn credential_action(label: &str) -> CredentialAction {
 /// sent, and the server decides. A sentence promising acceptance would be
 /// making a claim this side is not in a position to make, and would be read
 /// as one on the day the server says no.
-pub const ELIGIBILITY_ELIGIBLE: &str = "This session has what a contribution needs. The last checks happen when \
+pub const ELIGIBILITY_ELIGIBLE: &str = "This trace has what a contribution needs. The last checks happen when \
      you send it.";
 
 /// `ineligible_permanent`.
@@ -1468,7 +1468,7 @@ pub const ELIGIBILITY_ELIGIBLE: &str = "This session has what a contribution nee
 /// Says the second half out loud. Somebody who is told only "this cannot be
 /// sent" tries again, and again, and the surface owes them the fact that
 /// trying is wasted work on their own finished session.
-pub const ELIGIBILITY_INELIGIBLE_PERMANENT: &str = "This session cannot be sent, and nothing you change will alter that. \
+pub const ELIGIBILITY_INELIGIBLE_PERMANENT: &str = "This trace cannot be sent, and nothing you change will alter that. \
      Trying again will not help.";
 
 /// `ineligible_configuration`.
@@ -1477,7 +1477,7 @@ pub const ELIGIBILITY_INELIGIBLE_PERMANENT: &str = "This session cannot be sent,
 /// one where changing something helps. The row stays about its own session:
 /// what the setting changes is the sessions recorded from now on, and the
 /// sentence says exactly that rather than implying this one can be rescued.
-pub const ELIGIBILITY_INELIGIBLE_CONFIGURATION: &str = "This session cannot be sent. A setting decides whether the ones you \
+pub const ELIGIBILITY_INELIGIBLE_CONFIGURATION: &str = "This trace cannot be sent. A setting decides whether the ones you \
      record from now on can be.";
 
 /// `unknown`, and any state label this build has never heard of.
@@ -1487,54 +1487,54 @@ pub const ELIGIBILITY_INELIGIBLE_CONFIGURATION: &str = "This session cannot be s
 /// work and to stop offering it. The same tri-state rule
 /// [`CREDENTIAL_UNKNOWN`] follows, and for the same reason: an unread fact
 /// gets its own sentence rather than borrowing a known one.
-pub const ELIGIBILITY_UNKNOWN: &str = "Whether this session can be sent has not been worked out. That is not \
+pub const ELIGIBILITY_UNKNOWN: &str = "Whether this trace can be sent has not been worked out. That is not \
      the same as a no.";
 
 /// `no_inference_call`.
 ///
 /// The case the whole surface exists for: everything a contributor recorded
 /// before they started having their model calls answered here.
-pub const ELIGIBILITY_REASON_NO_CALL: &str = "No model call was answered on this computer while this session ran, so \
+pub const ELIGIBILITY_REASON_NO_CALL: &str = "No model call was answered on this computer while this trace ran, so \
      there is nothing recorded to send with it.";
 
 /// `capture_off`.
-pub const ELIGIBILITY_REASON_CAPTURE_OFF: &str = "The last model call in this session was answered without keeping a copy \
-     of it. Whether copies are kept is a setting, and it decides the sessions \
+pub const ELIGIBILITY_REASON_CAPTURE_OFF: &str = "The last model call in this trace was answered without keeping a copy \
+     of it. Whether copies are kept is a setting, and it decides the traces \
      you record from now on.";
 
 /// `digest_absent`.
-pub const ELIGIBILITY_REASON_DIGEST_ABSENT: &str = "The last model call in this session did not finish cleanly, so what was \
+pub const ELIGIBILITY_REASON_DIGEST_ABSENT: &str = "The last model call in this trace did not finish cleanly, so what was \
      kept of it is incomplete.";
 
 /// `upstream_id_absent`.
-pub const ELIGIBILITY_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this session that \
+pub const ELIGIBILITY_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this trace that \
      would let anyone check it afterwards.";
 
 /// `digest_mismatch`.
-pub const ELIGIBILITY_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this session does not match what \
+pub const ELIGIBILITY_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this trace does not match what \
      was written down about it, so it cannot be sent as it stands.";
 
 /// `reference_malformed`.
-pub const ELIGIBILITY_REASON_REFERENCE_MALFORMED: &str = "The note saying where this session's kept copy lives is not one this \
+pub const ELIGIBILITY_REASON_REFERENCE_MALFORMED: &str = "The note saying where this trace's kept copy lives is not one this \
      computer could have written.";
 
 /// `bodies_unreadable`.
-pub const ELIGIBILITY_REASON_BODIES_UNREADABLE: &str = "The kept copy of this session's last model call could not be read back \
+pub const ELIGIBILITY_REASON_BODIES_UNREADABLE: &str = "The kept copy of this trace's last model call could not be read back \
      from this computer.";
 
 /// `body_not_utf8`.
-pub const ELIGIBILITY_REASON_BODY_NOT_UTF8: &str = "The kept copy of this session's last model call is not text this app can \
+pub const ELIGIBILITY_REASON_BODY_NOT_UTF8: &str = "The kept copy of this trace's last model call is not text this app can \
      carry without changing it, and changing it would make it worthless.";
 
 /// `body_too_large`.
 pub const ELIGIBILITY_REASON_BODY_TOO_LARGE: &str =
-    "The kept copy of this session's last model call is too large to send.";
+    "The kept copy of this trace's last model call is too large to send.";
 
 /// `evidence_capture_off`.
 ///
 /// The one reason that is about the machine rather than about this session,
 /// and it names the setting for the same reason `capture_off` does.
-pub const ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no session \
+pub const ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no trace \
      recorded here has one to send. That is a setting you can change.";
 
 /// `marker_absent`.
@@ -1542,12 +1542,12 @@ pub const ELIGIBILITY_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps n
 /// Names both ways it happens, because they land on different people: work
 /// finished before the mark existed, and work done through a tool that does
 /// not add it. Neither is a mistake the contributor made.
-pub const ELIGIBILITY_REASON_MARKER_ABSENT: &str = "The last model call in this session went out without the mark a \
+pub const ELIGIBILITY_REASON_MARKER_ABSENT: &str = "The last model call in this trace went out without the mark a \
      contribution is accepted on. It was made before that was set up, or by \
      a tool that does not add it.";
 
 /// `request_malformed`.
-pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in this session was not written down in a shape this \
+pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in this trace was not written down in a shape this \
      app can read, so the mark cannot be found in it.";
 
 /// `receipt_unavailable`.
@@ -1555,7 +1555,7 @@ pub const ELIGIBILITY_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 /// The one reason that is about right now rather than about this session,
 /// which is why the state beside it is `unknown` and why this sentence is
 /// the only one here that suggests trying later.
-pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
+pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this trace's last model call could not be \
      fetched just now. It may work later.";
 
 /// `receipt_not_issued`.
@@ -1564,7 +1564,7 @@ pub const ELIGIBILITY_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes wi
 /// session does not issue the proof a contribution is accepted on. A call to
 /// a model the provider runs itself can carry that proof; one the provider
 /// only passes along to someone else cannot, and no setting changes that.
-pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide the proof a \
+pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this trace does not provide the proof a \
      contribution is accepted on. Using a model the provider runs itself, \
      rather than one it only passes along, is what produces that proof.";
 
@@ -1593,8 +1593,8 @@ pub const ELIGIBILITY_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered
 pub fn group_withheld_line(withheld: u64) -> String {
     match withheld {
         0 => String::new(),
-        1 => "1 session here cannot be sent, so it is not included.".to_string(),
-        n => format!("{n} sessions here cannot be sent, so they are not included."),
+        1 => "1 trace here cannot be sent, so it is not included.".to_string(),
+        n => format!("{n} traces here cannot be sent, so they are not included."),
     }
 }
 
@@ -2479,20 +2479,20 @@ pub fn certificate_list_empty() -> &'static str {
 }
 
 pub const CERTIFICATE_ROW_CANDIDATE: &str =
-    "A witness certificate is held for this session, so it can be put forward.";
+    "A witness certificate is held for this trace, so it can be put forward.";
 
 /// The same row, read by a contributor with an invite.
 ///
 /// They are not deciding whether to put it forward -- they already may -- so
 /// the useful fact is what the certificate is: signed proof of the bytes
 /// that were reviewed, travelling with the contribution.
-pub const CERTIFICATE_ROW_ATTESTED: &str = "A witness certificate is held for this session, so what you send carries signed proof of the reviewed bytes.";
+pub const CERTIFICATE_ROW_ATTESTED: &str = "A witness certificate is held for this trace, so what you send carries signed proof of the reviewed bytes.";
 
 /// The list's heading, without an invite.
-pub const CERTIFICATE_LIST_CANDIDATE: &str = "Sessions you can put forward";
+pub const CERTIFICATE_LIST_CANDIDATE: &str = "Traces you can put forward";
 
 /// The list's heading, with one.
-pub const CERTIFICATE_LIST_ATTESTED: &str = "Sessions carrying a witness certificate";
+pub const CERTIFICATE_LIST_ATTESTED: &str = "Traces carrying a witness certificate";
 
 /// The list with nothing in it.
 ///
@@ -2500,10 +2500,10 @@ pub const CERTIFICATE_LIST_ATTESTED: &str = "Sessions carrying a witness certifi
 /// empty, and the contributor is left without the one thing that would
 /// change it. Says what puts a session in the list instead.
 pub const CERTIFICATE_LIST_EMPTY: &str =
-    "Nothing here yet. A session joins this list once your witness has reviewed it.";
+    "Nothing here yet. A trace joins this list once your witness has reviewed it.";
 
 pub const ATTESTATION_ATTESTED: &str =
-    "This session carries a checkable copy of its last model call.";
+    "This trace carries a checkable copy of its last model call.";
 
 /// `unattested_permanent`.
 ///
@@ -2513,7 +2513,7 @@ pub const ATTESTATION_ATTESTED: &str =
 /// eligibility twin does -- somebody told only "there is no copy" tries to
 /// make one -- without the eligibility sentence's "cannot be sent", which is
 /// simply untrue for an invited contributor.
-pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy of its last model call, and \
+pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This trace carries no copy of its last model call, and \
      nothing you change now will add one to work already finished.";
 
 /// `unattested_configuration`.
@@ -2521,7 +2521,7 @@ pub const ATTESTATION_UNATTESTED_PERMANENT: &str = "This session carries no copy
 /// **The only mark whose sentence names a setting**, because it is the only
 /// one where changing something helps. The row stays about its own session:
 /// what the setting changes is the sessions recorded from now on.
-pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no copy of its last model call. A setting \
+pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This trace carries no copy of its last model call. A setting \
      decides whether the ones you record from now on will.";
 
 /// `unknown`, and any mark label this build has never heard of.
@@ -2531,7 +2531,7 @@ pub const ATTESTATION_UNATTESTED_CONFIGURATION: &str = "This session carries no 
 /// gets its own sentence rather than borrowing a known one, because a
 /// contributor told "no copy" about a session that has one will stop offering
 /// work that is fine.
-pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of its last model call has \
+pub const ATTESTATION_UNKNOWN: &str = "Whether this trace carries a copy of its last model call has \
      not been worked out. That is not the same as a no.";
 
 /// `no_inference_call`.
@@ -2539,50 +2539,50 @@ pub const ATTESTATION_UNKNOWN: &str = "Whether this session carries a copy of it
 /// The commonest answer by far, and the one the mark exists to say kindly:
 /// everything recorded before the contributor started having their model
 /// calls answered here.
-pub const ATTESTATION_REASON_NO_CALL: &str = "No model call was answered on this computer while this session ran, so \
+pub const ATTESTATION_REASON_NO_CALL: &str = "No model call was answered on this computer while this trace ran, so \
      there is nothing to attach to it.";
 
 /// `capture_off`.
-pub const ATTESTATION_REASON_CAPTURE_OFF: &str = "The last model call in this session was answered without keeping a copy \
-     of it. Whether copies are kept is a setting, and it decides the sessions \
+pub const ATTESTATION_REASON_CAPTURE_OFF: &str = "The last model call in this trace was answered without keeping a copy \
+     of it. Whether copies are kept is a setting, and it decides the traces \
      you record from now on.";
 
 /// `digest_absent`.
-pub const ATTESTATION_REASON_DIGEST_ABSENT: &str = "The last model call in this session did not finish cleanly, so what was \
+pub const ATTESTATION_REASON_DIGEST_ABSENT: &str = "The last model call in this trace did not finish cleanly, so what was \
      kept of it is incomplete.";
 
 /// `upstream_id_absent`.
-pub const ATTESTATION_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this session that \
+pub const ATTESTATION_REASON_UPSTREAM_ID_ABSENT: &str = "Nothing was written down for the last model call in this trace that \
      would let anyone check it afterwards.";
 
 /// `digest_mismatch`.
-pub const ATTESTATION_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this session does not match what \
+pub const ATTESTATION_REASON_DIGEST_MISMATCH: &str = "What was kept of the last model call in this trace does not match what \
      was written down about it, so nothing can be checked against it.";
 
 /// `reference_malformed`.
-pub const ATTESTATION_REASON_REFERENCE_MALFORMED: &str = "The note saying where this session's kept copy lives is not one this \
+pub const ATTESTATION_REASON_REFERENCE_MALFORMED: &str = "The note saying where this trace's kept copy lives is not one this \
      computer could have written.";
 
 /// `bodies_unreadable`.
-pub const ATTESTATION_REASON_BODIES_UNREADABLE: &str = "The kept copy of this session's last model call could not be read back \
+pub const ATTESTATION_REASON_BODIES_UNREADABLE: &str = "The kept copy of this trace's last model call could not be read back \
      from this computer.";
 
 /// `body_not_utf8`.
-pub const ATTESTATION_REASON_BODY_NOT_UTF8: &str = "The kept copy of this session's last model call is not text this app can \
+pub const ATTESTATION_REASON_BODY_NOT_UTF8: &str = "The kept copy of this trace's last model call is not text this app can \
      carry without changing it, and changing it would make it worthless.";
 
 /// `body_too_large`.
 ///
 /// "Larger than this app will carry", not "too large to send": the session
 /// itself sends perfectly well, and only the copy of the call is left behind.
-pub const ATTESTATION_REASON_BODY_TOO_LARGE: &str = "The kept copy of this session's last model call is larger than this app \
+pub const ATTESTATION_REASON_BODY_TOO_LARGE: &str = "The kept copy of this trace's last model call is larger than this app \
      will carry.";
 
 /// `evidence_capture_off`.
 ///
 /// The one reason about the machine rather than about this session, and it
 /// names the setting for the same reason `capture_off` does.
-pub const ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no session \
+pub const ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps no copy of the model calls it answers, so no trace \
      recorded here has one to carry. That is a setting you can change.";
 
 /// `marker_absent`.
@@ -2590,12 +2590,12 @@ pub const ATTESTATION_REASON_EVIDENCE_CAPTURE_OFF: &str = "This computer keeps n
 /// Names both ways it happens, because they land on different people: work
 /// finished before the mark existed, and work done through a tool that does
 /// not add it. Neither is a mistake the contributor made.
-pub const ATTESTATION_REASON_MARKER_ABSENT: &str = "The last model call in this session went out without the mark a kept \
+pub const ATTESTATION_REASON_MARKER_ABSENT: &str = "The last model call in this trace went out without the mark a kept \
      copy is checked against. It was made before that was set up, or by a \
      tool that does not add it.";
 
 /// `request_malformed`.
-pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in this session was not written down in a shape this \
+pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in this trace was not written down in a shape this \
      app can read, so the mark cannot be found in it.";
 
 /// `receipt_unavailable`.
@@ -2603,7 +2603,7 @@ pub const ATTESTATION_REASON_REQUEST_MALFORMED: &str = "The last model call in t
 /// The one reason about right now rather than about this session, which is
 /// why the mark beside it is `unknown` and why this is the only sentence here
 /// that suggests trying later.
-pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this session's last model call could not be \
+pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes with this trace's last model call could not be \
      fetched just now. It may work later.";
 
 /// `receipt_not_issued`.
@@ -2612,7 +2612,7 @@ pub const ATTESTATION_REASON_RECEIPT_UNAVAILABLE: &str = "The proof that goes wi
 /// an attested contribution carries -- a model the provider only passes along
 /// to someone else cannot be attested by the provider, and no setting reaches
 /// back to change where the call went.
-pub const ATTESTATION_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this session does not provide a copy-of-call \
+pub const ATTESTATION_REASON_RECEIPT_NOT_ISSUED: &str = "The model that answered this trace does not provide a copy-of-call \
      proof. A model the provider runs itself can; one it only passes along \
      cannot.";
 
@@ -2713,7 +2713,7 @@ pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
 
 /// After it lands.
 pub const NEAR_AI_ENROLL_DONE: &str =
-    "This device is joined. Check your contribution status before sending sessions.";
+    "This device is joined. Check your contribution status before sending traces.";
 
 /// `already_enrolled`. Not a failure a contributor caused or can fix by
 /// retrying, and it must not read as one.
@@ -2858,7 +2858,7 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         | crate::daemon::second_look::REASON_SCRUB_CHECK_MANUAL => "Waiting for review; not sent",
         queue::REASON_DISMISSED => "Skipped; not sent",
         queue::REASON_EXPIRED => "Expired without a decision; not sent",
-        queue::REASON_CHANGED => "Session changed; review it again before sending",
+        queue::REASON_CHANGED => "Trace changed; review it again before sending",
         queue::REASON_SCOPES_CHANGED => "Permissions changed; review again before sending",
         preview::REASON_INPUTS_CHANGED | "envelope-changed-after-approval" => {
             "Content changed; review again before sending"
@@ -2896,7 +2896,7 @@ pub const OUTCOME_ACCOUNT_LIMIT_REACHED: &str =
 /// Another attempt at the same submission holds the lease, which the next
 /// retry resolves on its own.
 pub const OUTCOME_ADMISSION_IN_PROGRESS: &str =
-    "Sent, and waiting on another attempt at the same session";
+    "Sent, and waiting on another attempt at the same trace";
 
 /// `admission_identity_conflict`. The submission id is already bound to
 /// different bytes or a different account.
@@ -4036,9 +4036,9 @@ mod tests {
     #[test]
     fn the_withheld_line_counts_without_explaining() {
         assert_eq!(group_withheld_line(0), "");
-        assert!(group_withheld_line(1).starts_with("1 session "));
-        assert!(group_withheld_line(2).starts_with("2 sessions "));
-        assert!(group_withheld_line(114).starts_with("114 sessions "));
+        assert!(group_withheld_line(1).starts_with("1 trace "));
+        assert!(group_withheld_line(2).starts_with("2 traces "));
+        assert!(group_withheld_line(114).starts_with("114 traces "));
 
         // Not one reason label's sentence, nor any word from one. The line
         // stands for a set, and a set has no reason.

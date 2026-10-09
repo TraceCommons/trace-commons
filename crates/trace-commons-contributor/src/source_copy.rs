@@ -163,19 +163,19 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
     if tool == SourceTool::OpenCode {
         return match source_mode {
             "watch" => "OpenCode export folder selected; only saved exports are read",
-            "off" => "OpenCode exports turned off. Previously queued sessions are not removed",
+            "off" => "OpenCode exports turned off. Previously queued traces are not removed",
             "unset" => "No OpenCode export folder selected; no exports are read",
             _ => "OpenCode export-folder settings could not be confirmed",
         }
         .into();
     }
     match source_mode {
-        "watch" => format!("{name} sessions folder set"),
+        "watch" => format!("{name} traces folder set"),
         "off" => format!(
-            "{name} marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "{name} marked not used, so nothing is opened for it. Previously queued traces are not removed"
         ),
         _ if undeclared_scans_conventional(tool.adapter_name()) => {
-            format!("{name} sessions read from the usual place")
+            format!("{name} traces read from the usual place")
         }
         _ => format!("{name} is not set up, so nothing is opened for it"),
     }
@@ -183,7 +183,7 @@ pub fn source_check_line(tool: SourceTool, source_mode: &str) -> String {
 
 /// Export-only importer refusal, shared by all native health surfaces.
 pub const OPENCODE_VERSION_TITLE: &str = "This OpenCode export version isn't supported.";
-pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports sessions created with OpenCode 1.18.29. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
+pub const OPENCODE_VERSION_DETAIL: &str = "This importer supports traces created with OpenCode 1.18.29. For other versions, wait for an importer update. Choose the folder containing opencode export SESSION_ID JSON files; the live session store is not read.";
 
 /// Shared copy and source-policy metadata for editable native settings rows.
 #[derive(serde::Serialize)]
@@ -271,7 +271,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         opencode_version_title: OPENCODE_VERSION_TITLE,
         opencode_version_detail: OPENCODE_VERSION_DETAIL,
         heading: "Watched folders",
-        explanation: "Source settings control future discovery. Turning a source off does not remove sessions already queued.",
+        explanation: "Source settings control future discovery. Turning a source off does not remove traces already queued.",
         save_failed: "Couldn't confirm that folder change. The last available settings are shown; retry to check the current state.",
         consent_save_failed: "Couldn't confirm that permission change. The last available permissions are shown; retry to check the current state.",
         unavailable: "Current folder settings aren't available.",
@@ -323,7 +323,7 @@ mod tests {
         let payload = serde_json::to_value(source_settings_copy()).unwrap();
         assert_eq!(payload["opencode_version_title"], OPENCODE_VERSION_TITLE);
         assert_eq!(payload["opencode_version_detail"], OPENCODE_VERSION_DETAIL);
-        assert!(OPENCODE_VERSION_DETAIL.contains("sessions created with OpenCode 1.18.29"));
+        assert!(OPENCODE_VERSION_DETAIL.contains("traces created with OpenCode 1.18.29"));
         assert!(OPENCODE_VERSION_DETAIL.contains("live session store is not read"));
     }
 
@@ -339,7 +339,7 @@ mod tests {
             let source = SourceTool::from_key(tool.key).expect("known source");
             assert!(
                 source_check_line(source, "off")
-                    .contains("Previously queued sessions are not removed")
+                    .contains("Previously queued traces are not removed")
             );
             if source == SourceTool::OpenCode {
                 assert_eq!(tool.decline, "Don't read");
@@ -382,19 +382,19 @@ mod tests {
     fn each_mode_gets_its_own_sentence() {
         assert_eq!(
             source_check_line(SourceTool::Claude, "watch"),
-            "Claude Code sessions folder set"
+            "Claude Code traces folder set"
         );
         assert_eq!(
             source_check_line(SourceTool::Claude, "unset"),
-            "Claude Code sessions read from the usual place"
+            "Claude Code traces read from the usual place"
         );
         assert_eq!(
             source_check_line(SourceTool::Claude, "off"),
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         assert_eq!(
             source_check_line(SourceTool::Codex, "off"),
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         // Gemini CLI and Cline construct no adapter when undeclared, so the
         // scan sentence would be false for them in the fail-open direction.
@@ -404,7 +404,7 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "watch"),
-            "Cline sessions folder set"
+            "Cline traces folder set"
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "unset"),
@@ -412,7 +412,7 @@ mod tests {
         );
         assert_eq!(
             source_check_line(SourceTool::Cline, "off"),
-            "Cline marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Cline marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
     }
 

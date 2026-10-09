@@ -170,7 +170,7 @@ pub fn withdrawal_words() -> WithdrawalWords {
         not_found_labels: &["not-found", "not_found", "submission-not-found"],
         failed: "Withdrawal failed. Nothing was withdrawn and nothing was deleted.",
         try_again: "Try again",
-        no_bulk_action: "Withdraw sessions individually to see the result for each one.",
+        no_bulk_action: "Withdraw traces individually to see the result for each one.",
         wording_defect: "Do not trust the withdrawal wording on this screen.",
     }
 }
@@ -249,8 +249,8 @@ pub fn public_profile_words() -> PublicProfileWords {
         on_roster_since: "On the roster since {date}",
         go_public_headline: "Put your handle on the public roster?",
         go_public_description: concat!(
-            "Public attribution changes identity metadata only. It grants no trace or ",
-            "session data use."
+            "Public attribution changes identity metadata only. It grants no use of ",
+            "trace data."
         ),
         go_public: "Go public",
         going_public: "Going public\u{2026}",
@@ -259,7 +259,7 @@ pub fn public_profile_words() -> PublicProfileWords {
         published_lines: &["Your handle, aggregate counts, public date, and bio if provided."],
         never_heading: "What never does",
         never_lines: &[
-            "Traces, trace contents, per-trace data, or anything about sessions you did not send.",
+            "Traces, trace contents, per-trace data, or anything about traces you did not send.",
         ],
         acknowledgement: concat!(
             "I understand my handle and aggregate counts become public. Leaving the roster ",
@@ -351,21 +351,21 @@ pub fn queue_words() -> QueueWords {
     QueueWords {
         nothing_waiting: "Nothing is waiting.",
         nothing_waiting_detail: concat!(
-            "When a session finishes and goes quiet, it shows up here. Nothing is sent unless ",
+            "When a trace finishes and goes quiet, it shows up here. Nothing is sent unless ",
             "you say so."
         ),
-        undo_will_send: "Approved sessions will send automatically. You can undo until uploading starts.",
-        close_notice_still_sends: "Close this notice. Approved sessions will still send automatically.",
+        undo_will_send: "Approved traces will send automatically. You can undo until uploading starts.",
+        close_notice_still_sends: "Close this notice. Approved traces will still send automatically.",
         close_notice: "Close this notice.",
         not_offered_scope: concat!(
-            "This covers sessions that reached the queue. Sessions that were never queued at ",
+            "This covers traces that reached the queue. Traces that were never queued at ",
             "all are not counted here."
         ),
         undo: "Undo",
         agent_setup: "Agent setup",
         approved_ago: "Approved {seconds}s ago",
         approved_ago_ceiling: "Approved {seconds}s+ ago",
-        no_longer_waiting: "Sessions no longer waiting ({count})",
+        no_longer_waiting: "Traces no longer waiting ({count})",
     }
 }
 
@@ -472,13 +472,13 @@ pub fn settings_words() -> SettingsWords {
         connected: "Connected",
         not_connected: "Not connected",
         queued_nothing_sent: concat!(
-            "Sessions may stay queued locally, but nothing can be sent until this device is ",
+            "Traces may stay queued locally, but nothing can be sent until this device is ",
             "enrolled."
         ),
         extra_scan_configured: "Extra privacy scan configured",
-        session_finished_after: "A session counts as finished after {seconds} seconds of quiet.",
+        session_finished_after: "A trace counts as finished after {seconds} seconds of quiet.",
         at_most_one_notification: "At most one notification every {hours} hours, and none when nothing is waiting.",
-        undecided_dropped: "Undecided sessions are dropped after {days} days. Dropped means never sent.",
+        undecided_dropped: "Undecided traces are dropped after {days} days. Dropped means never sent.",
         state_yes: "{title}: yes",
         state_no: "{title}: no",
         waiting_on_approval: "Waiting on approval in System Settings.",

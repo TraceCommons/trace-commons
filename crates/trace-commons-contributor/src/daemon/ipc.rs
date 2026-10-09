@@ -3620,7 +3620,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "list_audit" => handle_list_audit(shared, req),
         // Resolved outcomes only. Pending review holds and approved/uploading
         // entries are still waiting, and must not appear in the shells'
-        // "Sessions no longer waiting" group.
+        // "Traces no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -8160,7 +8160,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // `*_root_configured` stays true only for a source pointed at a
         // folder. A source declared OFF is answered but has no folder, so
         // reporting it as configured would tell a settings screen to print
-        // "sessions folder set" about an agent the contributor said they do
+        // "traces folder set" about an agent the contributor said they do
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");

@@ -255,7 +255,7 @@ pub const IRONWIRE_PROBE_REACHABLE: &str =
     concat!(crate::app_name!(), " can read the local record.");
 
 /// The reported origin is independent of whether the reader is succeeding.
-pub const IRONWIRE_DERIVED_ORIGIN: &str = "The local record is selected from this app's model-call service. This does not enable reading session bodies.";
+pub const IRONWIRE_DERIVED_ORIGIN: &str = "The local record is selected from this app's model-call service. This does not enable reading trace bodies.";
 /// Unknown internal state is not evidence of an Off declaration or a bad token.
 pub const IRONWIRE_STATE_UNKNOWN: &str =
     "The local-record state is unavailable. Check again before relying on it.";
