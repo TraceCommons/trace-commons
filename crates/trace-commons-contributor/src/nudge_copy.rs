@@ -91,10 +91,10 @@ pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
     "{n} traces from {tool} have been idle for {x} days or more. Review them to send or keep.";
-/// The N1 notification body. Owner decision 28 picks between the owner's
-/// draft and the alternative; this selects the alternative the spec
-/// recommends until it is ruled, and changing the pick is this one line.
-/// DRAFT, NEEDS APPROVAL.
+/// The N1 notification body: the alternative. Owner decision 28 first
+/// picked the owner's draft; Ron's #1303 design review (2026-10-09,
+/// adopted by the owner) reversed that, because the notification's one
+/// action opens Review. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
@@ -673,6 +673,14 @@ mod tests {
                 .replace("{x}", "3"),
             "2 traces from Claude Code have been idle for 3 days or more"
         );
+    }
+
+    /// Ron's #1303 design review, item 10, reversing owner decision 28:
+    /// the idle notification names what Review offers.
+    #[test]
+    fn the_idle_notification_uses_the_alternative() {
+        assert_eq!(NOTIFY_IDLE_BODY, NOTIFY_IDLE_BODY_ALTERNATIVE);
+        assert!(NOTIFY_IDLE_BODY.ends_with("Review them to send or keep."));
     }
 
     /// No path, folder label or title placeholder can reach a nudge.
