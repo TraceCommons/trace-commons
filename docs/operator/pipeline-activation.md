@@ -667,7 +667,8 @@ not such a digest refuses to start: `pipeline_code_revision_invalid`. `GET
 (`pipeline_code_revision_configured`).
 
 `cloudbuild.yaml` takes the value as the `_CODE_REVISION_HASH` substitution
-("Build and install" in [deployment.md](deployment.md)); any other build must
+("Build and install" in [deployment.md](deployment.md)), and fails on an empty
+one: a binary with no revision needs the explicit value `none`. Any other build must
 pass `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` itself, with the value that
 `pipeline.py revision` printed in a checkout of the tree it compiles. Compute it
 before uploading: this repository's `.gcloudignore` drops `.git/` (and `docs/`)

@@ -14,23 +14,30 @@
 # (ort/fastembed, ingest only) is statically linked.
 #
 # Run:
+#   REV=$(python3 scripts/operator/pipeline.py revision) && \
 #   gcloud builds submit --config cloudbuild.yaml \
 #     --project tracecommons-pilot-2026 \
-#     --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH=$(python3 scripts/operator/pipeline.py revision)
+#     --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH="$REV"
 #
 # _CODE_REVISION_HASH is the versioned pipeline's code revision, which a
 # qualification and an activation compare against the binary's (see
 # docs/operator/pipeline-activation.md). It must be computed on the checkout
 # being uploaded, before the upload: `pipeline.py revision` hashes the git tree,
 # including docs/ and community/, which .gcloudignore leaves out of the upload,
-# so the build cannot compute it. Left empty, the binary has no revision and
-# refuses every qualification and activation (bundle_runtime_revision_unknown);
-# the legacy path is unaffected.
+# so the build cannot compute it. Computing it first, as above, keeps a failed
+# `pipeline.py revision` from reaching the upload.
+#
+# Empty or left out fails the build, so a command substitution that printed
+# nothing cannot pass for a deliberate choice. To build a binary with no
+# revision, pass the literal `none`. Such a binary refuses every pipeline
+# qualification, activation and rollback once a pipeline runtime is configured
+# (bundle_runtime_revision_unknown), and a start that emits the production
+# adapters check refuses (pipeline_check_revision_mismatch).
 
 substitutions:
   _TAG: 'manual'            # short SHA or tag; defaults to BUILD_ID below if 'manual'
   _BUCKET: 'tc-pilot-artifacts-20260518'
-  _CODE_REVISION_HASH: ''   # `pipeline.py revision` of the uploaded checkout; empty = none
+  _CODE_REVISION_HASH: ''   # `pipeline.py revision` of the uploaded checkout, or `none`; empty fails
 
 steps:
   - name: 'ubuntu:24.04'
@@ -56,12 +63,13 @@ steps:
         export TRACE_COMMONS_BUILD_COMMIT="${_TAG}"
         [ "$$TRACE_COMMONS_BUILD_COMMIT" = "manual" ] \
           && export TRACE_COMMONS_BUILD_COMMIT="${BUILD_ID}"
-        # The pipeline's code revision (see the header). A value that is not
-        # a sha256: digest fails the build rather than producing a binary
-        # whose qualifications could never match.
-        if [ -n "${_CODE_REVISION_HASH}" ]; then
+        # The pipeline's code revision (see the header). Only a sha256:
+        # digest or the literal `none` builds; anything else, empty included,
+        # fails the build rather than producing a binary whose qualifications
+        # could never match.
+        if [ "${_CODE_REVISION_HASH}" != "none" ]; then
           printf '%s' "${_CODE_REVISION_HASH}" | grep -Eqx 'sha256:[0-9a-f]{64}' \
-            || { echo "_CODE_REVISION_HASH is not a sha256: digest" >&2; exit 1; }
+            || { echo "_CODE_REVISION_HASH is not a sha256: digest or none" >&2; exit 1; }
           export TRACE_COMMONS_BUILD_CODE_REVISION_HASH="${_CODE_REVISION_HASH}"
         fi
         # near-attestation-collateral compiles the Intel DCAP collateral
