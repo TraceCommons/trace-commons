@@ -489,16 +489,23 @@ results, and its restore drill carries the blocker
 `filesystem_restore_local_only`.
 
 The production run's four package-bearing results must come from the
-production assembly. `assemble_production_pipeline`
-(`trace_commons_server::versioned_pipeline_production`) is library code, so
-the integration targets that emit them can build it
-(`production_assembly_is_constructible_from_the_library`), but today
-`pipeline_bundle_qualification` still qualifies the reference candidate: it
-asserts that the candidate's scorer and embedder are the reference ones, that
-neither is production-qualified, and that its configuration is not
-qualifiable. All five assertions flip in production mode. Switching the check
-onto the production assembly is Slice B-2; until then `promote package-checks`
-refuses with `harness_production_assembly_unavailable`.
+production assembly. The four harnesses that emit them (the bundle
+qualification test, the corpus harness, and the restore seed and resume)
+read `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY`: unset or `reference`, they
+build the reference assembly exactly as `qualify` always has; `production`,
+they build the service through the production builder
+(`trace_commons_server::versioned_pipeline_production`) over the signed
+production package, the real NEAR AI scorer, the fastembed embedder and a
+usearch index, and refuse unless the service serves exactly that package.
+Production mode exists only in a `near-ai-scorer` build; any other build
+refuses it with `harness_production_assembly_unavailable`. In production mode
+`pipeline_bundle_qualification`'s five reference assertions flip (scorer and
+embedder identities are `near_ai_perplexity_scorer` and
+`fastembed_text_embedder`, both production-qualified, configuration
+qualifiable), the corpus check compares only the fields real scoring cannot
+move, and every one of the four results' evidence says
+`"harness_assembly": "production"`. A reference result never carries that
+field. `promote package-checks` (below) runs the four in this mode.
 
 ## The production run: `pipeline.py promote`
 
@@ -511,13 +518,29 @@ record` refuses to start when `CI` is set (`promote_refused_in_ci`).
 | Command | What it does |
 |---|---|
 | `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
-| `promote package-checks --run-id R` | Refuses with `harness_production_assembly_unavailable` until the qualification harness can run on the production assembly. |
+| `promote package-checks --run-id R --env-file ENV [--pin PATH]` | The four package checks (`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`) on the production assembly, on the pilot's feature set, over the run's package. From `ENV` (the deployment's env file) it passes on only the NEAR AI endpoint, key and timeout and the embedder cache directory, and refuses (`promote_env_file_incomplete`) without the endpoint and key. The HF corpus comes from the network pin (default `pin-network.json`, `hf_network_pin_missing` until `hf-pin record` has made one). Each check gets a fresh usearch index under the run's `indexes/`. Refuses any result that does not name the run's package or whose evidence does not say `harness_assembly: production` (`promote_harness_assembly_not_production:<id>`); `sign` refuses the same. |
 | `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). |
 | `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
 | `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
 | `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
 | `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. |
 | `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
+
+In order, on the operator host, from a checkout of the deployed revision:
+
+```bash
+python3 scripts/operator/pipeline.py package --bundle production \
+  --env-file /etc/tracecommons/ingest.env \
+  --signing-key PACKAGE-KEY.der --key-id PACKAGE_KEY_ID \
+  --output PKG.json --public-key-output PKG-KEY.json
+python3 scripts/operator/pipeline.py promote init --package PKG.json --trusted-key PKG-KEY.json
+python3 scripts/operator/pipeline.py promote package-checks --run-id R --env-file /etc/tracecommons/ingest.env
+python3 scripts/operator/pipeline.py promote hf-canary --run-id R
+python3 scripts/operator/pipeline.py promote remote-restore --run-id R --source-store B --scratch-store S
+python3 scripts/operator/pipeline.py promote adapters --run-id R
+python3 scripts/operator/pipeline.py promote sign --run-id R --signing-key KEY --signing-key-id ID
+python3 scripts/operator/pipeline.py promote assemble --run-id R --mechanics-run-id M --output DIR
+```
 
 `evaluate_promotion` discharges exactly one blocker on a production run's
 evidence: `filesystem_restore_local_only` on `pipeline_restore_drill` is not a
