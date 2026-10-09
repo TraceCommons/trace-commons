@@ -323,7 +323,7 @@ impl VerdictDelta {
     #[must_use]
     pub fn credit_final_tenths(&self) -> Option<u64> {
         let tenths = (f64::from(self.credit_final_delta) * 10.0).round();
-        (tenths >= 1.0).then(|| tenths as u64)
+        (tenths >= 1.0).then_some(tenths as u64)
     }
 
     /// Add a later delta to this one: counts add, `since` keeps the
