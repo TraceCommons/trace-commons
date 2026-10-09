@@ -40873,7 +40873,8 @@ async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runt
 fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
     use pipeline_runtime::pipeline_index_rebuild_error;
     use trace_commons_server::versioned_pipeline::{
-        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
     };
     for (label, status) in [
         (
@@ -40882,6 +40883,10 @@ fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
         ),
         (
             PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL,
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         ("index_command_invalid", StatusCode::CONFLICT),

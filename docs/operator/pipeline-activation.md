@@ -1736,7 +1736,7 @@ not the trace's fault:
   configuration fault (a root that is not mounted, a wrong
   `TRACE_COMMONS_ARTIFACT_KEY_HEX`, a wrong bucket) looks like an integrity
   failure, so correct the store within that time; a run that fails is not
-  put back. This time holds for a run in Review or Score only.
+  put back. This time holds for a run in Review or Score.
   Any other Google Cloud Storage fetch failure (credentials, network, 429,
   5xx), a key-wrap service call that fails, and a record wrapped by another
   kind of key wrapper (what a key-provider migration shows) wait here,
@@ -1744,10 +1744,11 @@ not the trace's fault:
   corrupt wrapped key answers through that same call, so on a cloud KMS
   that case waits uncharged too: the client cannot tell a refusal from an
   outage.
-  Settle's read of the stored index command is always charged
-  (`index_command_invalid`), a store failure of that read included, with
-  the short backoff: a run in Settle can fail about one second after such a
-  fault, and its open legs are then forfeited.
+  A failed store call of Settle's read of the stored index command is
+  charged under `index_command_unreadable`, with one hour between attempts.
+  The run fails about four hours after the first failure, and its open legs
+  are then forfeited. A stored command with wrong content keeps
+  `index_command_invalid` and the short backoff.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
   rule, under the store's own label -- a store that cannot derive an object
@@ -2249,7 +2250,11 @@ A Score that cannot read one of those unapplied index commands fails closed:
 its run waits in `retry`, uncharged, as `index_unavailable`, since leaving
 the command out could credit a near-duplicate twice. Until that command can
 be read, or its run settles or fails, every compatibility Score of the tenant
-waits the same way. The read never selects a run whose command was removed on
+waits the same way. While such a command cannot be read, the compatibility
+Scores of the tenant wait, uncharged, for up to about five hours: four
+hours until the run fails, then up to one hour until the next attempt of
+each Score. After the operator corrects the store, each Score continues at
+its next attempt. The read never selects a run whose command was removed on
 purpose (its submission withdrawn, revoked, purged or expired, its revision's
 invalidation queued, or the run failed for good). The worker logs
 `pipeline_unapplied_index_command_unreadable` with `run_ref_hash`, the

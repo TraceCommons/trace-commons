@@ -265,6 +265,11 @@ pub(crate) const PIPELINE_ADMIN_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout
 pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
     "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// Settle's read of the stored index command failed in the artifact store
+/// call. The attempt is charged and the next one waits an hour, as for
+/// `artifact_integrity_failed`. A command that is read but wrong stays
+/// `index_command_invalid`.
+pub const PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL: &str = "index_command_unreadable";
 /// An index rebuild whose committed fence (V113,
 /// `PgPipelineStore::set_index_rebuild_fence`) could not be written before a
 /// run's writes: the rebuild stops before that run's first write
@@ -5054,7 +5059,8 @@ impl PgPipelineStore {
         let exponent = run.attempt_count.saturating_sub(1).min(9);
         let multiplier = 1_i64 << exponent;
         let delay_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(multiplier);
-        let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL;
+        let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL
+            || error_label == PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL;
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         let row = tx
@@ -10350,8 +10356,9 @@ impl PipelineService {
 
     /// Reads the index command a run committed at Score from its stored ref
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
-    /// `command_hash` and names `revision_id`. Any failure, the store read's
-    /// included, is the safe label `index_command_invalid`.
+    /// `command_hash` and names `revision_id`. A failed store call is the safe
+    /// label `index_command_unreadable`; any other failure is
+    /// `index_command_invalid`.
     async fn read_index_command(
         &self,
         tenant_id: &str,
@@ -10366,14 +10373,13 @@ impl PipelineService {
         let store = self.artifact_store.clone();
         let (object_key, ciphertext_sha256) =
             (object_key.to_string(), ciphertext_sha256.to_string());
-        // Not `artifact_store_call`: a stored command that cannot be read
-        // stays the charged `index_command_invalid`, whatever the store's
-        // error -- a transport failure too (ruling RB-35 on multi-lens
-        // review L2-2, kept when the store's errors were typed, ZA-2). A
-        // Settle run suspended on an unreadable command for good would keep
-        // it in every compatibility Score's unapplied set, which fails each
-        // of them closed (`index_unavailable`), while a charged failure ends
-        // the run after its Settle budget and the tenant recovers.
+        // Not `artifact_store_call`: a stored command that cannot be read is
+        // a charged failure, not an uncharged suspension. A suspended Settle
+        // run would keep the command in every compatibility Score's
+        // unapplied set, which fails each of them closed
+        // (`index_unavailable`), while a charged failure ends the run after
+        // its Settle budget and the tenant recovers. The wait between
+        // charged attempts is one hour (`mark_retry`).
         let wrapper = on_blocking_pool(move || {
             store.read_json_by_object_key(
                 tenant.as_str(),
@@ -10383,7 +10389,7 @@ impl PipelineService {
             )
         })
         .await
-        .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL))?;
         let bytes = decode_pipeline_artifact_bytes(&wrapper)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
@@ -10929,6 +10935,7 @@ impl PipelineService {
                 // the raw message itself.
                 let retry_label = match label.as_str() {
                     "index_command_invalid"
+                    | PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL
                     | "artifact_integrity_failed"
                     | "approved_content_mismatch"
                     | "score_outcome_invalid"

@@ -348,7 +348,9 @@ answers `404` there. Do these steps in this order:
    run whose writes take longer than that deadline fails on every rerun. A
    fence that cannot be written (a database fault) stops the rebuild before
    that run's first write with `503` `index_rebuild_fence_unavailable`. Rerun
-   once the database is healthy.
+   once the database is healthy. When the store call for a stored command
+   fails, the rebuild stops with `503` `index_command_unreadable`. A second
+   run helps only when the store was at fault.
 
    A withdrawal during the rebuild is safe because of the rebuild's fence, not
    because no withdrawal happens: withdrawals come from clients, from `main`'s

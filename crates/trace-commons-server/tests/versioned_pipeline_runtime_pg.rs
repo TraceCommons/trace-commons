@@ -8202,25 +8202,29 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
 /// bound to another tenant, or bound to another run of the same tenant
-/// makes Settle fail closed with the safe label `index_command_invalid`,
-/// without completing the run or writing a Settle outcome.
+/// makes Settle fail closed, without completing the run or writing a Settle
+/// outcome. A failed store call (cases a to c) is `index_command_unreadable`;
+/// a command that is read but belongs to another run (case d) is
+/// `index_command_invalid`.
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
 
-    async fn assert_fails_closed(service: &PipelineService, tenant: &str, run_id: uuid::Uuid) {
+    async fn assert_fails_closed(
+        service: &PipelineService,
+        tenant: &str,
+        run_id: uuid::Uuid,
+        label: &str,
+    ) {
         let processed = service
             .process_run(tenant, run_id)
             .await
             .unwrap()
             .expect("the Settle attempt runs and fails closed rather than erroring out");
         assert_ne!(processed.state, PipelineRunState::Complete);
-        assert_eq!(
-            processed.last_error_label.as_deref(),
-            Some("index_command_invalid")
-        );
+        assert_eq!(processed.last_error_label.as_deref(), Some(label));
         assert!(
             !service
                 .store()
@@ -8262,7 +8266,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::remove_file(&path).unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (b) overwrite the file with other bytes.
@@ -8290,7 +8294,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (c) point index_command_ref at another tenant's stored command.
@@ -8324,7 +8328,13 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant_a, run_a.run_id).await;
+        assert_fails_closed(
+            &service,
+            &tenant_a,
+            run_a.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 
     // (d) point it at another run's command of the same tenant.
@@ -8353,7 +8363,7 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant, run_1.run_id).await;
+        assert_fails_closed(&service, &tenant, run_1.run_id, "index_command_invalid").await;
     }
 }
 
@@ -30006,6 +30016,102 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
             Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
         ),
         "the attempt budget ends the run"
+    );
+}
+
+/// Multi-lens review C5, residual: a failed store call of Settle's read of
+/// the stored index command is charged as `index_command_unreadable`, one
+/// hour between attempts, so a store fault spans hours in which an operator
+/// can correct it. The run fails only after its last attempt, and its open
+/// legs are forfeited. (A command that is read but wrong keeps
+/// `index_command_invalid` and the short backoff:
+/// `stored_command_binding_failures_fail_closed`.)
+#[tokio::test]
+async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("unreadable-command-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let (object_key, _) = run
+        .index_command_ref
+        .as_deref()
+        .unwrap()
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        pipeline_tenant_storage_ref(&tenant).as_str(),
+        object_key,
+    ))
+    .unwrap();
+
+    let first = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some("index_command_unreadable"),
+            first.attempt_count
+        ),
+        "an unreadable command is charged"
+    );
+    assert_integrity_retry_waits_an_hour(&first);
+    let charged = first.attempt_count;
+    let mut last = first;
+    while last.attempt_count < last.max_attempts {
+        force_due(&backend, &tenant, run.run_id).await;
+        last = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs again");
+        assert!(last.attempt_count > charged, "each attempt is charged");
+        if last.attempt_count < last.max_attempts {
+            assert_eq!(
+                (last.state, last.last_error_label.as_deref()),
+                (PipelineRunState::Retry, Some("index_command_unreadable")),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    // Settle reads the command before it creates any leg, so a run that
+    // failed here has none; a leg that did exist would be forfeited.
+    assert!(
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "no leg is left open: {settlements:?}"
     );
 }
 

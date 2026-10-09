@@ -706,7 +706,8 @@ async fn rebuild_index_and_audit(
 /// back to the generic hash-only internal error.
 pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     use trace_commons_server::versioned_pipeline::{
-        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
     };
     if error.to_string() == "index_command_invalid" {
         return api_error(StatusCode::CONFLICT, "index_command_invalid");
@@ -717,6 +718,7 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
     // a rerun is safe too.
     for label in [
         PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL,
         PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
     ] {
         if error.to_string() == label {
