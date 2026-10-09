@@ -16,3 +16,13 @@ three parts (`session_drill_claude.json` `markers`, `patterns.json`
 `DrillMarker`, `RereadRow` and `PatternSession` values, serialized by serde.
 
 Nothing here holds a path, a message or tool ID, or session text.
+
+`insights_week_routed.json` is the daemon's `insights_week` answer with the
+route fold on (design part B), as the contributor crate's
+`daemon::insights_week::tests::a_routed_week_answer_for_shell_fixtures`
+prints it between its `BEGIN insights_week` and `END insights_week` lines
+under `--nocapture`. That test also compares its answer to this file, so a
+wire change fails there until the file is re-recorded. One session has no
+proxy record (`unobserved`); the other's calls went both through the route
+and outside it (`mixed`), with one call whose counters are unknown, so its
+`outside` tokens are `null`. The macOS decode and Overview tests read it.

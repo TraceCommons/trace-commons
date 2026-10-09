@@ -2240,6 +2240,17 @@ mod tests {
             .collect();
         categories.sort();
         assert_eq!(categories, ["mixed", "unobserved"]);
+        // The shells decode this answer from the committed fixture, so the
+        // fixture is this answer: a change to the wire fails here first.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/insights-analytics/insights_week_routed.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            value, fixture,
+            "re-record tests/fixtures/insights-analytics/insights_week_routed.json \
+             from this test's --nocapture output"
+        );
         println!("BEGIN insights_week");
         println!("{}", serde_json::to_string_pretty(&value).unwrap());
         println!("END insights_week");
