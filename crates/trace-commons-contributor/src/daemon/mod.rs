@@ -650,6 +650,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                     // ticks find it not due and return at once.
                     refresh_estimate_table(shared, now, &mut table_schedule).await;
                 }
+                // Last, after every pass that announces its own changes: what
+                // the clock alone moved in `status` this tick. Outside the
+                // `!dry_run` block, since the clock moves in a dry run too.
+                shared.publish_time_driven_status(now);
             }
             _ = &mut sigterm => {
                 tracing::info!("daemon stopping on signal");
@@ -1797,9 +1801,11 @@ async fn refresh_history(
 /// cache too, so a verdict can already be in it, and it must still be news
 /// once. The first poll after an upgrade or `unenroll` seeds the marks
 /// silently. What lands is added to `verdicts_pending` and published as
-/// `history_changed` (counts only), then `status_changed`. `status_changed`
-/// also goes out when the previous poll was stale, because `status.nudge`
-/// reads the poll's age; a routine poll publishes nothing.
+/// `history_changed` (counts only), then `status_changed`. What was pending
+/// and has since been taken back, or whose folder is now Never, leaves
+/// `verdicts_pending`, which publishes `status_changed` too. So does a poll
+/// after a stale one, because `status.nudge` reads the poll's age; a routine
+/// poll publishes nothing.
 ///
 /// Locks: policy then queue, for the Never set, released; then settings
 /// alone; then state alone. Logs nothing.
@@ -1823,6 +1829,7 @@ fn record_history_poll(
     // Whether `status.nudge` could read U2 before this poll; if not, this
     // poll changes what it says even when nothing lands.
     let was_fresh = nudge::history_is_fresh(state.last_history_poll_at, history_poll_secs, now);
+    let pending_before = state.verdicts_pending.clone();
     let poll = nudge::after_history_poll(
         state.verdict_marks_seeded,
         &state.verdict_marks,
@@ -1833,6 +1840,9 @@ fn record_history_poll(
     );
     state.verdict_marks = poll.marks;
     state.verdict_marks_seeded = true;
+    // News that was taken back since (or whose folder is now Never) left
+    // `pending` here, which changes `status.nudge` as surely as news landing.
+    let pending_changed = poll.pending != pending_before;
     state.verdicts_pending = poll.pending;
     state.last_history_poll_at = Some(now);
     // In memory first, which is what every reader consults; a failed save is
@@ -1851,10 +1861,11 @@ fn record_history_poll(
             }),
         );
     }
-    // News changes `status.nudge`, and so does a poll that turns a stale
-    // (`unknown`) one readable. A routine poll changes neither, and stays
-    // silent, so a shell that predates this sees no new events from it.
-    if landed_any || !was_fresh {
+    // News changes `status.nudge`, whether it lands or is taken back, and so
+    // does a poll that turns a stale (`unknown`) one readable. A routine poll
+    // changes none of these, and stays silent, so a shell that predates this
+    // sees no new events from it.
+    if landed_any || pending_changed || !was_fresh {
         shared.publish(ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
     saved
@@ -2263,6 +2274,71 @@ mod tests {
             assert!(
                 state.verdict_marks[&uuid::Uuid::from_bytes([1; 16]).to_string()].accepted,
                 "the Never record's mark advanced silently"
+            );
+        }
+
+        /// Pending news shrinks when a poll finds a submission withdrawn or
+        /// its folder set to Never, and the poll that shrinks it publishes
+        /// `status_changed`, since `status.nudge` changed; when nothing is
+        /// left, nothing is pending.
+        #[test]
+        fn news_taken_back_leaves_pending_and_publishes_status_changed() {
+            let (_d, s) = fixture();
+            let submitted = [
+                rec(1, ASK, STATUS_SUBMITTED),
+                rec(2, NEVER, STATUS_SUBMITTED),
+            ];
+            record_history_poll(&s, &submitted, at(0)).unwrap();
+            let accepted = [rec(1, ASK, STATUS_ACCEPTED), rec(2, NEVER, STATUS_ACCEPTED)];
+            record_history_poll(&s, &accepted, at(30)).unwrap();
+            assert_eq!(
+                s.state
+                    .lock()
+                    .unwrap()
+                    .verdicts_pending
+                    .as_ref()
+                    .map(|d| d.total()),
+                Some(2)
+            );
+
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(NEVER, policy::ProjectMode::Ignore, at(40))
+                .unwrap();
+            let mut rx = s.events.subscribe();
+            record_history_poll(&s, &accepted, at(60)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED),
+                "the Never folder's verdict left the news"
+            );
+            assert_eq!(
+                s.state
+                    .lock()
+                    .unwrap()
+                    .verdicts_pending
+                    .as_ref()
+                    .map(|d| d.total()),
+                Some(1)
+            );
+
+            let withdrawn = HistoryRecord {
+                withdrawn_at: Some(at(70)),
+                ..rec(1, ASK, STATUS_ACCEPTED)
+            };
+            record_history_poll(&s, &[withdrawn, rec(2, NEVER, STATUS_ACCEPTED)], at(90)).unwrap();
+            assert!(
+                drain(&mut rx)
+                    .iter()
+                    .any(|(n, _)| n == ipc::EVENT_STATUS_CHANGED)
+            );
+            assert_eq!(s.state.lock().unwrap().verdicts_pending, None);
+            assert_eq!(
+                state::DaemonState::load(&s.store).unwrap().verdicts_pending,
+                None,
+                "persisted"
             );
         }
 

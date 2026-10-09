@@ -223,10 +223,6 @@ pub struct DaemonState {
     /// only. Cleared by `nudge_opened {kind: "verdicts_landed"}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdicts_pending: Option<super::nudge::VerdictDelta>,
-    /// Nudge U2: the `newest_at` of the last delta acknowledged by
-    /// `nudge_opened {kind: "verdicts_landed"}`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verdicts_acked_through: Option<DateTime<Utc>>,
     /// Nudge U4: the idle candidates an announcement (folded into a digest
     /// or standalone) has already named, by queue entry id (opaque), so the
     /// next batch names only new ones and never one session at a time.
@@ -287,7 +283,6 @@ impl DaemonState {
             verdict_marks: BTreeMap::new(),
             verdict_marks_seeded: false,
             verdicts_pending: None,
-            verdicts_acked_through: None,
             idle_announced: BTreeSet::new(),
             attention_log: Vec::new(),
             last_notified_at: None,
@@ -342,7 +337,6 @@ impl DaemonState {
             || !self.verdict_marks.is_empty()
             || self.verdict_marks_seeded
             || self.verdicts_pending.is_some()
-            || self.verdicts_acked_through.is_some()
             || !self.idle_announced.is_empty()
             || !self.attention_log.is_empty()
             || self.last_notified_at.is_some();
@@ -350,7 +344,6 @@ impl DaemonState {
         self.verdict_marks.clear();
         self.verdict_marks_seeded = false;
         self.verdicts_pending = None;
-        self.verdicts_acked_through = None;
         self.idle_announced.clear();
         self.attention_log.clear();
         self.last_notified_at = None;
@@ -690,6 +683,26 @@ mod tests {
         );
     }
 
+    /// A state file from a build that kept `verdicts_acked_through` still
+    /// loads, and the next save drops the key: nothing ever read it.
+    #[test]
+    fn a_state_file_with_verdicts_acked_through_loads_and_drops_it() {
+        let (_d, store) = temp_store();
+        let mut body = serde_json::to_value(DaemonState::new()).unwrap();
+        body["verdicts_acked_through"] = serde_json::json!("2026-10-01T00:00:00Z");
+        std::fs::write(
+            store.daemon_path(DAEMON_STATE_FILE),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+        let mut loaded = DaemonState::load(&store).unwrap();
+        loaded.save(&store).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(store.daemon_path(DAEMON_STATE_FILE)).unwrap())
+                .unwrap();
+        assert!(written.get("verdicts_acked_through").is_none(), "{written}");
+    }
+
     /// Nudge S3: a state file written before the nudge ledger existed loads
     /// with an empty one, and an empty ledger adds nothing to the file, so
     /// an install that never saw a suggestion writes the bytes it always did.
@@ -717,7 +730,6 @@ mod tests {
         assert!(loaded.verdict_marks.is_empty());
         assert!(!loaded.verdict_marks_seeded);
         assert_eq!(loaded.verdicts_pending, None);
-        assert_eq!(loaded.verdicts_acked_through, None);
         // Nudge U4: the idle batching set loads empty too.
         assert!(loaded.idle_announced.is_empty());
         let written = serde_json::to_value(DaemonState::new()).unwrap();
@@ -726,7 +738,6 @@ mod tests {
             "verdict_marks",
             "verdict_marks_seeded",
             "verdicts_pending",
-            "verdicts_acked_through",
             "idle_announced",
             "attention_log",
             "last_notified_at",
