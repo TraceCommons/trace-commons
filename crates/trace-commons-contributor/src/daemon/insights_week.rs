@@ -40,8 +40,13 @@
 //! # What crosses the socket
 //!
 //! The week's rollup: counts, dates, coverage reasons, declared model labels
-//! and fixed labels. Never a session or project digest, a path, a message or
-//! session ID. Nothing here is logged except fixed labels.
+//! and fixed labels. Each session row also carries its first recorded
+//! event's time (owner question Q1, default taken) and, while the ledger
+//! feed is on and a proxy ledger is declared, its route tally as fixed
+//! labels and counts, joined here by the keyed harness-session digest
+//! (owner decision D15, extended to feed T). Never a session or project
+//! digest, a path, a message or session ID, a backend or model name, a price
+//! or a title. Nothing here is logged except fixed labels.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -58,7 +63,7 @@ use trace_commons_protocol::insights_usage_series::{
 
 use super::inference_map::Speakers;
 use super::insights_route_tally::{
-    FoldCursor, FoldSummary, RouteTally, fold_into, fold_plan, prune,
+    FoldCursor, FoldSummary, RouteTally, fold_into, fold_plan, prune, routing_value,
 };
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
@@ -106,6 +111,12 @@ pub const UNREADABLE_STORE: &str = "store_unreadable";
 /// The folder rules could not be read, so the Never folders are unknown;
 /// nothing is shown in their place.
 pub const UNREADABLE_POLICY: &str = "policy_unreadable";
+/// `routing_unavailable`: the `insights_ledger_feed` setting is off (owner
+/// decision D3, open), so no row carries a route.
+pub const ROUTING_LEDGER_FEED_OFF: &str = "ledger_feed_off";
+/// `routing_unavailable`: no proxy ledger is declared, so no row carries a
+/// route.
+pub const ROUTING_NO_LEDGER: &str = "no_ledger";
 /// The store could not be written; the rows stay as they were.
 pub const STORE_WRITE_FAILED: &str = "store_write_failed";
 /// The store could not be removed on unenroll.
@@ -149,7 +160,8 @@ struct CounterRow {
     /// the daemon (owner decision D15, extended to feed T: the keyed
     /// harness-session digest under the counter key is feed T's join key).
     /// `None` when the file records none, more than one, or could not be
-    /// read. Stored only; never on the wire, and never the engine's
+    /// read. Stored only; never on the wire (only the tally it joins to
+    /// crosses, as counts), and never the engine's
     /// `SessionInput::harness_session`, so the overlap rule is unchanged.
     #[serde(default)]
     harness_session: Option<KeyedDigest>,
@@ -286,6 +298,11 @@ pub(crate) struct WeekOptions {
     pub recap_card_enabled: bool,
     /// `insights_context_threshold`; unset, nothing is counted against one.
     pub context_threshold: Option<u32>,
+    /// `insights_ledger_feed` (owner decision D3, open). Off, no row carries
+    /// a route.
+    pub ledger_feed: bool,
+    /// Whether a proxy ledger is declared. Absent, no row carries a route.
+    pub ledger_present: bool,
 }
 
 impl Default for WeekOptions {
@@ -293,6 +310,8 @@ impl Default for WeekOptions {
         Self {
             recap_card_enabled: crate::insights::analytics_constants::RECAP_CARD_DEFAULT_ON,
             context_threshold: None,
+            ledger_feed: crate::insights::analytics_constants::LEDGER_FEED_DEFAULT_ON,
+            ledger_present: false,
         }
     }
 }
@@ -533,6 +552,22 @@ impl CounterPass {
             Ok(store) => store,
             Err(label) => return unreadable(label),
         };
+        // Owner decision D3, open: with the ledger feed off no route is
+        // shown, not even a tally folded while it was on. With no proxy
+        // ledger a stored tally may lack every call since, so none is shown
+        // either.
+        let routing_unavailable = if !options.ledger_feed {
+            Some(ROUTING_LEDGER_FEED_OFF)
+        } else if !options.ledger_present {
+            Some(ROUTING_NO_LEDGER)
+        } else {
+            None
+        };
+        // The answer-time join (design part B; the engine never sees it):
+        // each row's engine reference to its first-event time and its
+        // session's route tally, by the keyed harness-session digest under
+        // the counter key (owner decision D15, extended to feed T).
+        let mut joined: BTreeMap<String, RowJoin<'_>> = BTreeMap::new();
         let inputs: Vec<SessionInput> = match (&key, &store) {
             (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
                 let never = never_digests(key, never_project_keys);
@@ -540,7 +575,21 @@ impl CounterPass {
                     .rows
                     .values()
                     .filter(|row| !never.contains(&row.project))
-                    .map(CounterRow::session_input)
+                    .map(|row| {
+                        let input = row.session_input();
+                        let tally = row
+                            .harness_session
+                            .as_ref()
+                            .and_then(|digest| store.routing.get(digest));
+                        joined.insert(
+                            input.session_ref.clone(),
+                            RowJoin {
+                                started_at: row.placed_at,
+                                tally,
+                            },
+                        );
+                        input
+                    })
                     .collect()
             }
             // Rows made under another key are not this key's; the next
@@ -630,7 +679,9 @@ impl CounterPass {
             "comparable": comparable.is_ok(),
             "unavailable": comparable.err(),
             "change_vs_last_week": changes,
-            "rollup": rollup_value(&this),
+            "rollup": rollup_value(&this, &joined, routing_unavailable.is_none()),
+            "routing_available": routing_unavailable.is_none(),
+            "routing_unavailable": routing_unavailable,
             "overview": overview,
             "patterns": patterns,
             "history": history,
@@ -1113,14 +1164,45 @@ fn parse_iso_week(text: &str) -> Option<NaiveDate> {
     NaiveDate::from_isoywd_opt(year, week, Weekday::Mon)
 }
 
+/// What the answer joins to one engine row, by its `t{seq}` reference.
+struct RowJoin<'a> {
+    started_at: Option<DateTime<Utc>>,
+    tally: Option<&'a RouteTally>,
+}
+
 /// The rollup as it crosses the socket: the per-session rows keep their
-/// figures and coverage, and lose the opaque reference.
-fn rollup_value(rollup: &WeekRollup) -> serde_json::Value {
+/// figures and coverage, gain `started_at` and `routing`, and lose the
+/// opaque reference.
+///
+/// - `started_at` is the session's first recorded event, RFC 3339, or
+///   `null` (owner question Q1, default taken: a row may carry it; it is
+///   joinable to a queue entry's `started_at`, which is the point).
+/// - `routing` is the session's route tally in fixed labels and counts
+///   (`insights_route_tally::routing_value`), or `null` on every row while
+///   routing is unavailable.
+/// - Never an id, a digest, a path, a backend, a model, a price or a title.
+fn rollup_value(
+    rollup: &WeekRollup,
+    joined: &BTreeMap<String, RowJoin<'_>>,
+    routing_available: bool,
+) -> serde_json::Value {
     let mut value = serde_json::to_value(rollup).unwrap_or(serde_json::Value::Null);
     if let Some(sessions) = value.get_mut("sessions").and_then(|s| s.as_array_mut()) {
         for session in sessions {
             if let Some(object) = session.as_object_mut() {
-                object.remove("session_ref");
+                let join = object
+                    .remove("session_ref")
+                    .and_then(|reference| reference.as_str().and_then(|r| joined.get(r)));
+                let started_at = join
+                    .and_then(|join| join.started_at)
+                    .map(|at| at.to_rfc3339());
+                object.insert("started_at".to_string(), serde_json::json!(started_at));
+                let routing = if routing_available {
+                    routing_value(join.and_then(|join| join.tally))
+                } else {
+                    serde_json::Value::Null
+                };
+                object.insert("routing".to_string(), routing);
             }
         }
     }
@@ -1165,16 +1247,21 @@ pub fn handle_week(shared: &DaemonShared, req: &Request) -> Response {
         },
     };
     // A poisoned lock reads as off: fail closed, never a guess.
-    let (enabled, options) = match shared.settings.lock() {
+    let (enabled, mut options) = match shared.settings.lock() {
         Ok(settings) => (
             settings.insights_counter_pass,
             WeekOptions {
                 recap_card_enabled: settings.insights_recap_card_enabled,
                 context_threshold: settings.insights_context_threshold,
+                ledger_feed: settings.insights_ledger_feed,
+                ledger_present: false,
             },
         ),
         Err(_) => (false, WeekOptions::default()),
     };
+    // Asked after the settings lock is let go. Only whether a ledger is
+    // declared: the answer never reads the ledger itself.
+    options.ledger_present = options.ledger_feed && shared.routing_ledger().is_some();
     let never = if enabled {
         match never_project_keys(shared) {
             Some(keys) => keys,
@@ -1221,6 +1308,11 @@ mod tests {
     /// One Codex session on Monday 2026-09-14: 80 input (40 cached) and 30
     /// output between the first and last counter, after a nonzero baseline.
     fn codex_bytes() -> Vec<u8> {
+        codex_bytes_for("PRIVATE-CODEX-ID")
+    }
+
+    /// `codex_bytes` for the session ID `id`.
+    fn codex_bytes_for(id: &str) -> Vec<u8> {
         let usage = |at: &str, input: u64, cached: u64, output: u64| {
             serde_json::json!({
                 "type": "event_msg",
@@ -1233,7 +1325,7 @@ mod tests {
             })
         };
         [
-            serde_json::json!({"type": "session_meta", "payload": {"id": "PRIVATE-CODEX-ID", "model_provider": "openai"}}),
+            serde_json::json!({"type": "session_meta", "payload": {"id": id, "model_provider": "openai"}}),
             serde_json::json!({"type": "turn_context", "payload": {"model": "gpt-6"}}),
             usage("2026-09-14T09:00:00Z", 100, 60, 20),
             serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": []}}),
@@ -1329,6 +1421,23 @@ mod tests {
             self.pass
                 .week_value(true, week, utc(), now(), never, options)
         }
+
+        /// The week with the ledger feed on and a proxy ledger declared.
+        fn week_routed(&self) -> serde_json::Value {
+            self.week_with(Some(monday()), &[], routed())
+        }
+    }
+
+    fn routed() -> WeekOptions {
+        WeekOptions {
+            ledger_feed: true,
+            ledger_present: true,
+            ..WeekOptions::default()
+        }
+    }
+
+    fn sessions_of(value: &serde_json::Value) -> Vec<serde_json::Value> {
+        value["rollup"]["sessions"].as_array().unwrap().clone()
     }
 
     fn run_with(
@@ -1979,12 +2088,41 @@ mod tests {
     fn nothing_identifying_crosses() {
         let f = Fixture::new();
         let path = f.write("PRIVATE-SESSION.jsonl", &claude_bytes());
-        f.run(&[candidate(SOURCE_CLAUDE_CODE, &path)]);
+        // A Codex session whose ID the proxy ledger also records, with a
+        // backend name and a price, folded so its tally crosses.
+        let codex = f.write("PRIVATE-CODEX.jsonl", &codex_bytes_for("SESSION-SECRET"));
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &path),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        let mut priced = ledger_call(1, 30, "SESSION-SECRET");
+        priced.cost_usd = Some(4.25);
+        assert_eq!(fold_with(&f.pass, true, vec![priced]).unwrap().folded, 1);
         let key = f.pass.keys.load().unwrap().unwrap();
         let session = hex::encode(session_key(&key, SOURCE_CLAUDE_CODE, &path.to_string_lossy()).0);
         let project = hex::encode(project_digest(&key, PROJECT).0);
-        let text = f.week(&[]).to_string();
+        let harness = hex::encode(harness_session_digest(&key, SOURCE_CODEX, "SESSION-SECRET").0);
+        let value = f.week_routed();
+        // Not vacuous: the tally reached the answer.
+        assert_eq!(value["routing_available"], true);
+        assert!(
+            sessions_of(&value)
+                .iter()
+                .any(|row| row["routing"]["category"] == "routed_verified"),
+            "{value}"
+        );
+        let text = value.to_string();
         for forbidden in [
+            "SESSION-SECRET",
+            harness.as_str(),
+            &harness[..16],
+            "cost",
+            "4.25",
+            "SECRET-BACKEND",
+            "openai",
+            "/v1/responses",
+            "last_call_at",
+            codex.to_str().unwrap(),
             "PRIVATE",
             "/Users",
             "session_ref",
@@ -1996,6 +2134,164 @@ mod tests {
             path.to_str().unwrap(),
         ] {
             assert!(!text.contains(forbidden), "{forbidden} crossed: {text}");
+        }
+    }
+
+    /// Design section 6, part B item 5: each row carries its first-event
+    /// time and its route tally, joined in the daemon by the keyed
+    /// harness-session digest.
+    #[test]
+    fn each_row_carries_its_first_event_time_and_routing() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let mut outside = ledger_call(2, 20, "PRIVATE-CODEX-ID");
+        outside.proof = Some(crate::routing::ProofStatus::Outside);
+        outside.output_tokens = None;
+        fold_with(
+            &f.pass,
+            true,
+            vec![ledger_call(1, 30, "PRIVATE-CODEX-ID"), outside],
+        )
+        .unwrap();
+        let value = f.week_routed();
+        assert_eq!(value["routing_available"], true);
+        assert_eq!(value["routing_unavailable"], serde_json::Value::Null);
+        let rows = sessions_of(&value);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0]["started_at"],
+            (written() - Duration::hours(1)).to_rfc3339()
+        );
+        assert_eq!(
+            rows[0]["routing"],
+            serde_json::json!({
+                "category": "mixed",
+                "reasons": [],
+                "tokens": {
+                    "verified": 110,
+                    "routed_unverified": 0,
+                    "check_failed": 0,
+                    "outside": null,
+                    "unrecorded": 0,
+                },
+                "calls": 2,
+                "calls_without_counts": 1,
+            })
+        );
+        assert!(rows[0].get("session_ref").is_none());
+    }
+
+    #[test]
+    fn a_row_with_no_tally_is_unobserved_never_outside() {
+        let f = Fixture::new();
+        let path = f.write("s.jsonl", &claude_bytes());
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CLAUDE_CODE, &path),
+            candidate(SOURCE_CODEX, &codex),
+        ]);
+        // A call for some other session: no row's tally.
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "ANOTHER-SESSION")]).unwrap();
+        let value = f.week_routed();
+        assert_eq!(value["routing_available"], true);
+        let rows = sessions_of(&value);
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            assert_eq!(
+                row["routing"],
+                serde_json::json!({
+                    "category": "unobserved",
+                    "reasons": [],
+                    "tokens": null,
+                    "calls": null,
+                    "calls_without_counts": null,
+                }),
+                "{row}"
+            );
+        }
+    }
+
+    /// Owner decision D3, open: with the ledger feed off no row carries a
+    /// route, even one folded while it was on; nor with no proxy ledger,
+    /// where a stored tally may be missing every call since. The
+    /// first-event time (owner question Q1) does not depend on either.
+    #[test]
+    fn with_the_feed_off_or_no_ledger_no_row_carries_a_route() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        for (feed, present, reason) in [
+            (false, true, "ledger_feed_off"),
+            (false, false, "ledger_feed_off"),
+            (true, false, "no_ledger"),
+        ] {
+            let value = f.week_with(
+                Some(monday()),
+                &[],
+                WeekOptions {
+                    ledger_feed: feed,
+                    ledger_present: present,
+                    ..WeekOptions::default()
+                },
+            );
+            assert_eq!(value["routing_available"], false, "{reason}");
+            assert_eq!(value["routing_unavailable"], reason);
+            let rows = sessions_of(&value);
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["routing"], serde_json::Value::Null, "{reason}");
+            assert_eq!(
+                rows[0]["started_at"],
+                (written() - Duration::hours(1)).to_rfc3339()
+            );
+        }
+        // The default is the feed's default: off.
+        assert_eq!(f.week(&[])["routing_unavailable"], "ledger_feed_off");
+    }
+
+    /// The join happens at answer time and never in the engine, so the
+    /// week's figures, coverage and overlap rule are exactly what they were
+    /// without it: two rollouts recording one session ID stay two rows,
+    /// each showing that session's tally.
+    #[test]
+    fn routing_leaves_the_weeks_figures_and_overlap_rule_unchanged() {
+        let f = Fixture::new();
+        let first = f.write("a.jsonl", &codex_bytes());
+        let second = f.write("b.jsonl", &codex_bytes());
+        f.run(&[
+            candidate(SOURCE_CODEX, &first),
+            candidate(SOURCE_CODEX, &second),
+        ]);
+        assert!(
+            stored_rows(&f.pass)
+                .iter()
+                .all(|row| row.session_input().harness_session.is_none())
+        );
+        let figures = |value: &serde_json::Value| {
+            let rows: Vec<serde_json::Value> = sessions_of(value)
+                .into_iter()
+                .map(|mut row| {
+                    let object = row.as_object_mut().unwrap();
+                    object.remove("routing");
+                    object.remove("started_at");
+                    row
+                })
+                .collect();
+            (
+                value["rollup"]["coverage"].clone(),
+                value["rollup"]["sources"].clone(),
+                rows,
+            )
+        };
+        let before = figures(&f.week(&[]));
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        let after = f.week_routed();
+        assert_eq!(figures(&after), before);
+        assert_eq!(before.2.len(), 2);
+        for row in sessions_of(&after) {
+            assert_eq!(row["routing"]["category"], "routed_verified");
+            assert_eq!(row["routing"]["calls"], 1);
         }
     }
 
@@ -2062,6 +2358,7 @@ mod tests {
             WeekOptions {
                 recap_card_enabled: false,
                 context_threshold: Some(12_000),
+                ..WeekOptions::default()
             },
         );
         assert_eq!(value["recap_card_enabled"], false);
@@ -2075,6 +2372,7 @@ mod tests {
             WeekOptions {
                 recap_card_enabled: true,
                 context_threshold: Some(1_000_000),
+                ..WeekOptions::default()
             },
         );
         assert_eq!(
@@ -2157,6 +2455,37 @@ mod tests {
         .unwrap();
         assert_eq!(on["readable"], true);
         assert_eq!(on["week_start"], "2026-09-14");
+    }
+
+    #[test]
+    fn the_method_says_why_routing_is_unavailable() {
+        let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = true;
+        let ask = || {
+            handle_week(
+                &s,
+                &call(serde_json::json!({"iso_week": "2026-W38", "tz": 0})),
+            )
+            .result
+            .unwrap()
+        };
+        let off = ask();
+        assert_eq!(off["routing_available"], false);
+        assert_eq!(off["routing_unavailable"], "ledger_feed_off");
+        s.settings.lock().unwrap().insights_ledger_feed = true;
+        assert!(s.routing_ledger().is_none());
+        let none = ask();
+        assert_eq!(none["routing_available"], false);
+        assert_eq!(none["routing_unavailable"], "no_ledger");
+        s.install_routing_ledger_for_test(
+            crate::routing::ironwire::IronWireLedger::with_rows_for_test(Vec::new()),
+        );
+        let on = ask();
+        assert_eq!(on["routing_available"], true);
+        assert_eq!(on["routing_unavailable"], serde_json::Value::Null);
+        // The feed off wins over a declared ledger.
+        s.settings.lock().unwrap().insights_ledger_feed = false;
+        assert_eq!(ask()["routing_unavailable"], "ledger_feed_off");
     }
 
     /// The Never folders cannot be read, so nothing is shown: a poisoned

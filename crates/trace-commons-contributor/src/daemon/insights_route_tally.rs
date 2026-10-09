@@ -94,9 +94,10 @@ pub(crate) struct RouteTally {
     /// uncached input, cache reads, cache writes and output, normalized per
     /// facade as feed L does.
     pub tokens: RouteBuckets,
-    /// Calls counted in `calls` whose tokens are unknown, and so in no token
-    /// bucket. Never read as zero tokens.
-    pub calls_without_counts: u64,
+    /// Calls counted in `calls` whose tokens are unknown, per bucket, and so
+    /// in no token figure. Per bucket so the answer can mark exactly the
+    /// token figures they leave unknown, and never read one as zero.
+    pub calls_without_counts: RouteBuckets,
     /// The latest call folded, for ageing the tally out.
     pub last_call_at: DateTime<Utc>,
 }
@@ -122,13 +123,6 @@ pub(crate) enum RouteCategory {
 
 impl RouteCategory {
     /// The wire spelling. None of them says "private".
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the insights_week answer's routing field, the next step"
-        )
-    )]
     #[must_use]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -152,13 +146,6 @@ pub(crate) enum RouteReason {
 }
 
 impl RouteReason {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "read by the insights_week answer's routing field, the next step"
-        )
-    )]
     #[must_use]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -167,13 +154,6 @@ impl RouteReason {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the insights_week answer's routing field, the next step"
-    )
-)]
 /// A session's category, and its reason when some calls are unrecorded.
 #[must_use]
 pub(crate) fn route_category(tally: Option<&RouteTally>) -> (RouteCategory, Option<RouteReason>) {
@@ -199,6 +179,47 @@ pub(crate) fn route_category(tally: Option<&RouteTally>) -> (RouteCategory, Opti
         RouteCategory::RoutedUnverified
     };
     (category, reason)
+}
+
+/// One session's `routing` as it crosses the socket, in `insights_week`'s
+/// `rollup.sessions[]`: the category, its reasons, tokens per bucket, calls
+/// and calls without counts. Counts and fixed labels only: never an id, a
+/// digest, a backend, a model, a price or a time.
+///
+/// - No tally (or one with no calls) is `unobserved` with every figure
+///   `null`: no proxy record is not zero calls.
+/// - A bucket's token figure is `null` while any call in it has unknown
+///   counters, so a figure is never the zero or the part its counted calls
+///   happen to sum to. A bucket with no calls is a true 0.
+/// - `calls` and `calls_without_counts` are totals over every bucket.
+#[must_use]
+pub(crate) fn routing_value(tally: Option<&RouteTally>) -> serde_json::Value {
+    let (category, reason) = route_category(tally);
+    let reasons: Vec<&str> = reason.map(RouteReason::as_str).into_iter().collect();
+    let Some(tally) = tally.filter(|_| category != RouteCategory::Unobserved) else {
+        return serde_json::json!({
+            "category": category.as_str(),
+            "reasons": reasons,
+            "tokens": null,
+            "calls": null,
+            "calls_without_counts": null,
+        });
+    };
+    let figure = |tokens: u64, uncounted: u64| (uncounted == 0).then_some(tokens);
+    let (tokens, uncounted) = (&tally.tokens, &tally.calls_without_counts);
+    serde_json::json!({
+        "category": category.as_str(),
+        "reasons": reasons,
+        "tokens": {
+            "verified": figure(tokens.verified, uncounted.verified),
+            "routed_unverified": figure(tokens.routed_unverified, uncounted.routed_unverified),
+            "check_failed": figure(tokens.check_failed, uncounted.check_failed),
+            "outside": figure(tokens.outside, uncounted.outside),
+            "unrecorded": figure(tokens.unrecorded, uncounted.unrecorded),
+        },
+        "calls": tally.calls.total(),
+        "calls_without_counts": uncounted.total(),
+    })
 }
 
 /// Where the folds have reached in the proxy's ledger: the highest row id
@@ -311,7 +332,7 @@ pub(crate) fn fold_into(
         let tally = routing.entry(digest).or_insert_with(|| RouteTally {
             calls: RouteBuckets::default(),
             tokens: RouteBuckets::default(),
-            calls_without_counts: 0,
+            calls_without_counts: RouteBuckets::default(),
             last_call_at: row.started_at,
         });
         let calls = tally.calls.slot(row.proof);
@@ -321,7 +342,10 @@ pub(crate) fn fold_into(
                 let bucket = tally.tokens.slot(row.proof);
                 *bucket = bucket.saturating_add(tokens);
             }
-            None => tally.calls_without_counts = tally.calls_without_counts.saturating_add(1),
+            None => {
+                let bucket = tally.calls_without_counts.slot(row.proof);
+                *bucket = bucket.saturating_add(1);
+            }
         }
         tally.last_call_at = tally.last_call_at.max(row.started_at);
         summary.folded += 1;
@@ -451,7 +475,7 @@ mod tests {
             // OpenAI's cached input is inside input: 60 + 40 + 0 + 10.
             assert_eq!(bucket(&tally.tokens), 110, "{proof:?}");
             assert_eq!(tally.tokens.total(), 110, "{proof:?}");
-            assert_eq!(tally.calls_without_counts, 0);
+            assert_eq!(tally.calls_without_counts.total(), 0);
             assert_eq!(tally.last_call_at, at(1));
         }
     }
@@ -488,7 +512,8 @@ mod tests {
         let tally = only(&routing);
         assert_eq!(tally.calls.verified, 1);
         assert_eq!(tally.tokens.verified, 0);
-        assert_eq!(tally.calls_without_counts, 1);
+        assert_eq!(tally.calls_without_counts.verified, 1);
+        assert_eq!(tally.calls_without_counts.total(), 1);
         assert_eq!(route_category(Some(tally)).0, RouteCategory::Mixed);
     }
 
@@ -648,7 +673,7 @@ mod tests {
         RouteTally {
             calls,
             tokens: RouteBuckets::default(),
-            calls_without_counts: 0,
+            calls_without_counts: RouteBuckets::default(),
             last_call_at: at(0),
         }
     }
@@ -731,6 +756,77 @@ mod tests {
         );
         let text = serde_json::to_string(only(&routing)).unwrap();
         for leak in [SESSION, "SECRET-BACKEND", "cost", "1.0"] {
+            assert!(!text.contains(leak), "{leak} in {text}");
+        }
+    }
+
+    #[test]
+    fn no_tally_crosses_as_unobserved_with_no_figure() {
+        let empty = tally(RouteBuckets::default());
+        for tally in [None, Some(&empty)] {
+            assert_eq!(
+                routing_value(tally),
+                serde_json::json!({
+                    "category": "unobserved",
+                    "reasons": [],
+                    "tokens": null,
+                    "calls": null,
+                    "calls_without_counts": null,
+                })
+            );
+        }
+    }
+
+    /// A bucket holding a call whose counters are unknown has an unknown
+    /// token figure: never the zero its counted calls happen to sum to.
+    #[test]
+    fn a_bucket_with_an_uncounted_call_reads_unknown_never_zero() {
+        let mut uncounted = codex(2, Some(ProofStatus::Verified));
+        uncounted.output_tokens = None;
+        let mut routing = BTreeMap::new();
+        fold(
+            &mut routing,
+            &mut FoldCursor::default(),
+            &[codex(1, Some(ProofStatus::Outside)), uncounted],
+        );
+        assert_eq!(
+            routing_value(Some(only(&routing))),
+            serde_json::json!({
+                "category": "mixed",
+                "reasons": [],
+                "tokens": {
+                    "verified": null,
+                    "routed_unverified": 0,
+                    "check_failed": 0,
+                    "outside": 110,
+                    "unrecorded": 0,
+                },
+                "calls": 2,
+                "calls_without_counts": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_with_some_unrecorded_calls_says_so() {
+        let mut routing = BTreeMap::new();
+        fold(
+            &mut routing,
+            &mut FoldCursor::default(),
+            &[codex(1, Some(ProofStatus::Verified)), codex(2, None)],
+        );
+        let value = routing_value(Some(only(&routing)));
+        assert_eq!(value["category"], "routed_verified");
+        assert_eq!(
+            value["reasons"],
+            serde_json::json!(["some_calls_unrecorded"])
+        );
+        assert_eq!(value["tokens"]["verified"], 110);
+        assert_eq!(value["tokens"]["unrecorded"], 110);
+        assert_eq!(value["calls"], 2);
+        assert_eq!(value["calls_without_counts"], 0);
+        let text = value.to_string();
+        for leak in [SESSION, "SECRET-BACKEND", "cost", "last_call_at", "private"] {
             assert!(!text.contains(leak), "{leak} in {text}");
         }
     }
