@@ -14,7 +14,8 @@ struct InsightsOverviewTab: View {
     let comparisons: InsightsComparisonsModel
     let copy: [String: String]
     /// Saved snapshots, so a drill-down row reads as its session's label.
-    var snapshots: [LocalInsight] = []
+    /// No default: a caller that forgets them would show every row as the dash.
+    let snapshots: [LocalInsight]
     /// "Watched-folder counting is unavailable right now", shown with feed S
     /// when feed T is switched on but could not be read.
     var notice: String?
