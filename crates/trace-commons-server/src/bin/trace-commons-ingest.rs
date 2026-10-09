@@ -2675,6 +2675,30 @@ impl ConfiguredTraceArtifactStore {
         Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
     }
 
+    /// A service-owned remote store as `remote_gcs` configures one (no
+    /// plaintext compatibility, the provider's label, the key wrapper's
+    /// status), over a store the caller built: the remote restore drill's
+    /// seed and resume build theirs over a bucket prefix
+    /// (`pipeline_restore_pg_tests`). Versioning is not claimed: the drill
+    /// reads the bucket's own policy instead.
+    #[cfg(test)]
+    fn service_remote_for_test(
+        store: Arc<dyn TraceArtifactStore>,
+        provider_label: &'static str,
+        kek_status: KekWrapperStatus,
+    ) -> Self {
+        Self {
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
+            store,
+            object_io_enabled: true,
+            plaintext_compatibility_allowed: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
+            provider_label: Some(provider_label),
+            kek_status: Some(kek_status),
+        }
+    }
+
     fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
         let provider_label = Some(config.provider.label());
         Self {
