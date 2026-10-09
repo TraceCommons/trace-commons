@@ -12,8 +12,13 @@ Subcommands, each re-runnable alone into the run `init` created:
 
 - `init`: records the run id, start time, code revision and the package's
   three digests (`promote-run.json`), and keeps a copy of the package.
-- `package-checks`: refuses (`harness_production_assembly_unavailable`) until
-  the qualification harness can run on the production assembly (B-2).
+- `package-checks`: the four package checks re-run with the harness switched
+  to the production assembly (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=
+  production`, B-2), over the run's package, the NEAR AI endpoint and
+  embedder cache from the deployment's env file (`--env-file`; only
+  `envfile.PACKAGE_CHECK_VARIABLES` is read), a fresh usearch index per check
+  inside the run, and the HF network pin. Each result must name the run's
+  package and its evidence must say `harness_assembly: production`.
 - `hf-canary`: `pipeline_hf_network_canary`, a fresh download of the network
   pin, every digest compared.
 - `remote-restore`: `pipeline_remote_restore`, from a measurement the remote
@@ -41,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from . import checks, environment
+from . import checks, envfile, environment
 from .corpus import PIN_SCHEMA, export_command, validate_hf_manifest
 from .environment import Run, child_environment, run_child
 from .errors import ToolingError, require
@@ -94,6 +99,19 @@ REMOTE_RESTORE_REPORT_SCHEMA = "trace_commons.pipeline_remote_restore_report.v1"
 # local restore drill already proves.
 REMOTE_STORE_KINDS = frozenset({"gcs"})
 
+# The harness variables `package-checks` sets (`versioned_pipeline_harness.rs`).
+HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
+HARNESS_PACKAGE_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH"
+HARNESS_TRUSTED_KEY_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"
+HARNESS_INDEX_ROOT_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_INDEX_ROOT"
+# The env file variables without which the real scorer cannot start
+# (`harness_dependencies_from_env`); the timeout and the embedder cache have
+# defaults there.
+PACKAGE_CHECK_REQUIRED_VARIABLES = ("TRACE_COMMONS_NEAR_AI_BASE_URL", "TRACE_COMMONS_NEAR_AI_API_KEY")
+# Where the run keeps the production harness's usearch indexes, one
+# directory per check, emptied at the start of every `package-checks`.
+INDEX_DIR = "indexes"
+
 _RUN_ID = re.compile(r"q[0-9a-f]{8}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
@@ -107,12 +125,16 @@ _PHASES = ("admission", "review", "score", "settle")
 
 class Hooks(NamedTuple):
     """What `pipeline.py` lends the subcommands: its signing-flag parser
-    (`signing_options`) and its signing step (`sign(run, accepted,
+    (`signing_options`), its signing step (`sign(run, accepted,
     signing, cargo_args)`, which signs, publishes, and removes what it signed
-    on failure; returns the count)."""
+    on failure; returns the count), and the runner of the four package checks
+    (`package_checks(run, *, harness_env, cargo_features, network_pin,
+    postgres_admin_url)`, the runners `qualify` uses with the production
+    harness variables added)."""
 
     signing_options: Callable
     sign: Callable
+    package_checks: Callable
 
 
 # ---------------------------------------------------------------------------
@@ -430,13 +452,79 @@ def init(args, run):
     )
 
 
-def package_checks(args, run):
-    """The four package checks on the production assembly. The harness that
-    can run them there is B-2's (spec B-D1, plan B3): until it lands, a run
-    would quietly test the reference package, so this refuses first."""
-    refuse_in_ci()
-    open_run(args.run_id)
-    raise ToolingError("harness_production_assembly_unavailable")
+def require_production_assembly(production, loaded):
+    """Each package check's result in `loaded` came from the production
+    assembly: its evidence says `harness_assembly: production`
+    (`promote_harness_assembly_not_production:<id>` otherwise). The package
+    triple alone does not show it: a reference-assembly harness given the
+    production package would name the same triple over reference doubles."""
+    for check_id in package_check_ids():
+        require(check_id in loaded, f"check_result_missing:{check_id}")
+        evidence = _read_json_file(
+            production.run.results_dir / f"{check_id}.evidence.json", "check_evidence_malformed"
+        )
+        require(
+            isinstance(evidence, dict) and evidence.get("harness_assembly") == "production",
+            f"promote_harness_assembly_not_production:{check_id}",
+        )
+
+
+def make_package_checks(hooks):
+    def package_checks(args, run):
+        """The four package checks on the production assembly (spec B-D1).
+        Refused before anything starts when the network pin is missing or
+        the env file lacks the NEAR AI endpoint or key; the env file's other
+        variables never reach a child. A re-run replaces the four results
+        and removes every attestation of the run."""
+        refuse_in_ci()
+        production = open_run(args.run_id)
+        pin_path = Path(args.pin).resolve()
+        _load_network_pin(pin_path)
+        variables = envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_CHECK_VARIABLES)
+        require(
+            all(variables.get(name, "").strip() for name in PACKAGE_CHECK_REQUIRED_VARIABLES),
+            "promote_env_file_incomplete",
+        )
+        run_dir = production.run.run_dir
+        index_root = run_dir / INDEX_DIR
+        shutil.rmtree(index_root, ignore_errors=True)
+        results_dir = production.run.results_dir
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for path in results_dir.glob("*.attestation.json"):
+            path.unlink()
+        for check_id in package_check_ids():
+            for suffix in ("result", "evidence"):
+                (results_dir / f"{check_id}.{suffix}.json").unlink(missing_ok=True)
+        harness_env = {
+            **variables,
+            HARNESS_ASSEMBLY_VAR: "production",
+            HARNESS_PACKAGE_PATH_VAR: str(run_dir / PACKAGE_FILE),
+            HARNESS_TRUSTED_KEY_PATH_VAR: str(run_dir / TRUSTED_KEY_FILE),
+            HARNESS_INDEX_ROOT_VAR: str(index_root),
+        }
+        hooks.package_checks(
+            production.run,
+            harness_env=harness_env,
+            cargo_features=PROMOTE_FEATURES,
+            network_pin=pin_path,
+            postgres_admin_url=args.postgres_admin_url,
+        )
+        loaded = load_results(production.run)
+        wanted = package_check_ids()
+        require_current_pass_results(
+            production.run, loaded, {check_id: checks.CheckSpec(check_id, True) for check_id in wanted}
+        )
+        for check_id in wanted:
+            result = loaded[check_id]
+            require(
+                (result.package_hash, result.configuration_digest, result.dependency_digest) == production.package,
+                "promote_package_mismatch",
+            )
+        require_production_assembly(production, loaded)
+        production.run.require_code_revision_unchanged()
+        print(f"PipelinePromotePackageChecksOK: checks={','.join(wanted)} package_hash={production.package[0]}")
+
+    return package_checks
 
 
 def run_hf_export(run, step, fields, output_dir, cache_dir):
@@ -697,6 +785,7 @@ def _accepted_production_results(production):
             (result.package_hash, result.configuration_digest, result.dependency_digest) == production.package,
             "promote_package_mismatch",
         )
+    require_production_assembly(production, loaded)
     return {check_id: loaded[check_id] for check_id in wanted}
 
 
@@ -813,7 +902,22 @@ def add_parsers(subparsers, hooks):
         parser.set_defaults(handler=handler, run_dir_mode=NEVER_USED)
         return parser
 
-    run_parser("package-checks", package_checks, "The package checks on the production assembly (not yet available)")
+    package = run_parser(
+        "package-checks", make_package_checks(hooks), "The four package checks on the production assembly"
+    )
+    package.add_argument(
+        "--env-file",
+        dest="env_file",
+        required=True,
+        help="The deployment's env file; only the NEAR AI endpoint, key, timeout and embedder cache are read.",
+    )
+    package.add_argument("--pin", default=str(HF_NETWORK_PIN), help="The network pin (default: pin-network.json).")
+    package.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
     canary = run_parser("hf-canary", hf_canary, "pipeline_hf_network_canary: download the network pin and compare it")
     canary.add_argument("--pin", default=str(HF_NETWORK_PIN), help="The network pin (default: pin-network.json).")
     restore = run_parser("remote-restore", remote_restore, "pipeline_remote_restore: the remote-store restore drill")
