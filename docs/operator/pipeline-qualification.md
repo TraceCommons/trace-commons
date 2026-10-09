@@ -477,10 +477,39 @@ Closing these is promotion work, not part of `qualify`:
 `evaluate_promotion` also requires three promotion-only checks:
 `pipeline_production_adapters`, `pipeline_remote_restore`, and
 `pipeline_hf_network_canary`. Their results come from a production run, not a
-local one. No code in this repository emits them, and no local or CI run passes
-them. So a decision over the results of a local `qualify` run is never ready: it
-lacks these three results, and its restore drill carries the blocker
-`filesystem_restore_local_only`.
+local one: `pipeline.py promote` (below) writes the last two on the operator
+host, and no local or CI run passes any of them. So a decision over the results
+of a local `qualify` run is never ready: it lacks these three results, and its
+restore drill carries the blocker `filesystem_restore_local_only`.
+
+## The production run: `pipeline.py promote`
+
+Spec: `docs/superpowers/specs/2026-10-08-pipeline-production-assembly-design.md`
+(Slice B). Qualification is two runs of one code revision: the mechanics run
+(`qualify`, above) and a production run on the operator host, against the
+production package, with network. Every `promote` subcommand and `hf-pin
+record` refuses to start when `CI` is set (`promote_refused_in_ci`).
+
+| Command | What it does |
+|---|---|
+| `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
+| `promote package-checks --run-id R` | Refuses with `harness_production_assembly_unavailable` until the qualification harness can run on the production assembly. |
+| `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). |
+| `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
+| `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
+| `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
+| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. |
+| `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
+
+`evaluate_promotion` discharges exactly one blocker on a production run's
+evidence: `filesystem_restore_local_only` on `pipeline_restore_drill` is not a
+blocker when the set holds a passing `pipeline_remote_restore` with no blocker of
+its own, from the same code revision, naming the same package. Every other
+blocker still blocks.
+
+The child processes `promote` starts see only the allowlisted environment
+(`child_environment`): no cloud credential variable reaches them. On the pilot
+host, Application Default Credentials come from the metadata server.
 
 ## Package trust and `qualify_bundle`
 

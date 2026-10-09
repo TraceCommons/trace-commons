@@ -6971,6 +6971,12 @@ impl TraceCorpusStore for PgBackend {
         // `gate_policy_version` / `gate_version_hash`. Novelty, tail-fraction,
         // vector-entry, gate status, credit, and all other columns are left
         // exactly as-is — the re-score maintenance path must never touch them.
+        //
+        // A submission the pipeline's Settle wrote a row for is left alone
+        // entirely: that row's verdict is what its Score awarded credit on
+        // and what its attestation_chain_hash covers (spec 2026-10-08,
+        // Slice C, O-C3). The enumeration already leaves such submissions
+        // out; this guards a re-score enumerated before Settle committed.
         tx.execute(
             "UPDATE trace_gate_decisions
                 SET perplexity_micros = $3,
@@ -6979,7 +6985,11 @@ impl TraceCorpusStore for PgBackend {
              WHERE tenant_id = $1 AND decision_id = (
                  SELECT decision_id FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
-                  ORDER BY decided_at DESC LIMIT 1)",
+                  ORDER BY decided_at DESC LIMIT 1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle')",
             &[
                 &tenant_id,
                 &submission_id,
@@ -7009,6 +7019,8 @@ impl TraceCorpusStore for PgBackend {
         // gate version stamp. Leaving `perplexity_micros` /
         // `perplexity_passed` alone is the point: a backfill scored by a
         // different model must not rewrite what the row was gated on.
+        // A pipeline submission is skipped, as there: its per-author columns
+        // stay NULL until the compatibility Score computes them (O-C2).
         tx.execute(
             "UPDATE trace_gate_decisions
                 SET agent_prose_perplexity_micros = $3,
@@ -7019,7 +7031,11 @@ impl TraceCorpusStore for PgBackend {
              WHERE tenant_id = $1 AND decision_id = (
                  SELECT decision_id FROM trace_gate_decisions
                   WHERE tenant_id = $1 AND submission_id = $2
-                  ORDER BY decided_at DESC LIMIT 1)",
+                  ORDER BY decided_at DESC LIMIT 1)
+               AND NOT EXISTS (
+                 SELECT 1 FROM trace_gate_decisions
+                  WHERE tenant_id = $1 AND submission_id = $2
+                    AND source = 'pipeline_settle')",
             &[
                 &tenant_id,
                 &submission_id,

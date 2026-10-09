@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+from pipeline_tooling import promote
 from pipeline_tooling.cargo import cargo_test
 from pipeline_tooling.catalog import CATALOG_NAME, update_catalog
 from pipeline_tooling.checks import (
@@ -286,6 +287,9 @@ def build_parser():
         "revision", help="Print the code revision hash of the working tree (the one a qualification run records)"
     )
     revision_parser.set_defaults(handler=revision)
+
+    # Spec 2026-10-08 Slice B: the operator-run production checks.
+    promote.add_parsers(subparsers, promote.Hooks(signing_options=signing_options, sign=sign_promoted_results))
 
     return parser
 
@@ -967,7 +971,7 @@ def _fail_closed(run, inputs, label):
     _write_failed_report(run, inputs, label)
 
 
-def attest_results(run, accepted, signing):
+def attest_results(run, accepted, signing, cargo_args=INGEST_TEST_ARGS):
     """The signing step: starts the ignored test
     `pipeline_check_attestations_write`, which signs the result file of each
     accepted check (`accepted`: check id to the `CheckResult` that
@@ -991,7 +995,7 @@ def attest_results(run, accepted, signing):
         "TRACE_COMMONS_PIPELINE_CHECK_MAX_AGE_SECONDS": str(signing.maximum_age_seconds),
     }
     cargo_test(
-        run, "check_attestations", INGEST_TEST_ARGS, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
+        run, "check_attestations", cargo_args, ATTESTATION_WRITER, child_environment(extra), exact=True, ignored=True
     )
     return require_attestations(run, accepted, signing.key_id, signing.maximum_age_seconds, staging)
 
@@ -1015,6 +1019,25 @@ def publish_attestations(run, accepted):
         staging.rmdir()
     except OSError as error:
         raise ToolingError("check_attestation_publish_failed") from error
+
+
+def sign_promoted_results(run, accepted, signing, cargo_args):
+    """`promote sign`'s signing step: `attest_results` on `cargo_args`, then
+    `publish_attestations`. Anything that fails after signing started
+    removes what was signed before the failure is raised, so a failed sign
+    leaves no attestation in the run (or says
+    `check_attestation_discard_failed` beside the original label)."""
+    try:
+        attested = attest_results(run, accepted, signing, cargo_args)
+        run.require_code_revision_unchanged()
+        publish_attestations(run, accepted)
+    except BaseException as error:
+        if not discard_attestations(run):
+            print(f"PipelineFailure: {DISCARD_FAILED_LABEL}", file=sys.stderr)
+            if isinstance(error, ToolingError) and not isinstance(error, StepFailed):
+                raise ToolingError(f"{error}.{DISCARD_FAILED_LABEL}") from error
+        raise
+    return attested
 
 
 def qualify(args, run):
@@ -1096,6 +1119,12 @@ def qualify(args, run):
     )
 
 
+def _wrote_anything(run):
+    """Whether any file is in the run directory (`Run.create` makes only
+    empty directories)."""
+    return any(path.is_file() for path in run.run_dir.rglob("*"))
+
+
 def main(argv=None):
     args = parse_args(argv)
     run = Run.create()
@@ -1116,7 +1145,16 @@ def main(argv=None):
         primary_label = str(error)
     except KeyboardInterrupt:
         primary = 130
-    if getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or not any(run.run_dir.rglob("*.log"))):
+    no_logs = not any(run.run_dir.rglob("*.log"))
+    mode = getattr(args, "run_dir_mode", None)
+    if (
+        (getattr(args, "command", None) in EPHEMERAL_COMMANDS and (primary == 0 or no_logs))
+        # `promote` subcommands after `init` work in the run `init` made.
+        or mode == promote.NEVER_USED
+        # `promote init` and `hf-pin record` keep their run unless refused
+        # before they wrote anything.
+        or (mode == promote.KEEP_UNLESS_REFUSED and primary != 0 and no_logs and not _wrote_anything(run))
+    ):
         # `revision` and `keygen` keep nothing: no empty run directory is left
         # behind. A failed step keeps its log, and the failure line names it.
         shutil.rmtree(run.run_dir, ignore_errors=True)

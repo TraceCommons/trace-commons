@@ -1578,7 +1578,10 @@ committed result (the lease token, the assessment id), and logs
 `pipeline_review_audit_append_failed` with the tenant's storage reference, a
 hash of the run id and the route (`claim` or `assessment`). The audit trail
 then has no row for that claim or decision; the decision itself is in
-`pipeline_review_assessments`.
+`pipeline_review_assessments`. Unlike a CreditMutate event, no repair pass
+adds the missing row later, also with `require_db_mirror_writes`: each
+`pipeline_review_audit_append_failed` line is a permanent gap in the audit
+log until an operator records it (an open item in #1185).
 
 Two other events release a parked run to `pending`:
 
@@ -1610,7 +1613,8 @@ not the trace's fault:
   derivation, or its object writes. When the store reached the object and
   found it missing (a missing file on the local and file stores, a 404 from
   Google Cloud Storage) or not what its receipt names (a hash or reference
-  mismatch, a decode or decrypt failure), the attempt is charged instead, as
+  mismatch, a decode or decrypt failure, a wrapped data key the key wrapper
+  cannot decode, size or authenticate), the attempt is charged instead, as
   `artifact_integrity_failed`, and the phase's attempt budget ends the run.
   Charged attempts under this label are one hour apart, not the short
   backoff of the other charged labels: with the default budget of 5
@@ -1620,8 +1624,12 @@ not the trace's fault:
   failure, so correct the store within that time; a run that fails is not
   put back. This time holds for a run in Review or Score only.
   Any other Google Cloud Storage fetch failure (credentials, network, 429,
-  5xx) and a KMS unwrap failure wait here, uncharged, retried at most once
-  an hour.
+  5xx), a key-wrap service call that fails, and a record wrapped by another
+  kind of key wrapper (what a key-provider migration shows) wait here,
+  uncharged, retried at most once an hour. A cloud KMS that refuses a
+  corrupt wrapped key answers through that same call, so on a cloud KMS
+  that case waits uncharged too: the client cannot tell a refusal from an
+  outage.
   Settle's read of the stored index command is always charged
   (`index_command_invalid`), a store failure of that read included, with
   the short backoff: a run in Settle can fail about one second after such a
@@ -1806,7 +1814,10 @@ the content first would leave a failed follow-up with no retry.
 another, so a process that stops between the two loses the follow-up. The
 worker recovers it: once a minute for each tenant (and on the tenant's
 first pass after a start), it finds up to 32 of the tenant's revoked or
-withdrawn submissions with a run whose index write started and no queued
+withdrawn submissions, in submission id order starting just after the last
+one the previous run read and wrapping round to the lowest (the position is
+kept in memory, so a restart begins at the lowest), with a run whose index
+write started and no queued
 invalidation, or with an export snapshot item that is not invalidated (a
 run that Settle keeps out of the index has no index work, and a snapshot
 can still hold it). It makes the follow-up for each (reason `withdrawn`
@@ -1819,7 +1830,9 @@ invalidation step. A listed tenant that has no pipeline run is answered from
 one read of `pipeline_runs`; its submissions are not read. One follow-up that fails is logged as
 `pipeline_lost_follow_up_failed` (with the tenant's `tenant_storage_ref`
 and a hash of the submission id), does not stop the others of the pass,
-and is retried a minute later. A recovery that recovers nothing because
+and is retried when a later run wraps round to it. Because each run starts
+after the last one, 32 or more follow-ups that fail every time cannot hold
+the window: the submissions after them are reached on the next run. A recovery that recovers nothing because
 of a failure is logged as `pipeline_worker_lost_follow_up_recovery_failed`
 and retried a minute later.
 
@@ -1907,7 +1920,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | refuses an enabled payout | `credit_settlement_account_cap_unsupported`. `main` keeps an account's line under the cap by leaving events for a later run; a pipeline leg settles its own event in one batch. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE` | refuses an enabled payout | Ingest does not start while the profile is incomplete (`credit_settlement_central_issuer_profile_incomplete` in the drill). A complete profile sets `..._REQUIRE_ISSUER_APPROVAL`, `..._MAX_POINTS_PER_ACCOUNT` and `..._REQUIRE_ROLLOUT_SMOKE_READY`, so the rows above refuse. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
-  | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. A leg `dry_run` confirms ends `confirmed` for good, as on `main`: a later switch to `http` does not pay it, because the payout skips a `confirmed` leg. Use `dry_run` only for legs that need no real payment. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. A `submitted` line with no recorded mode (code from before this rule submitted it) reads as `http`: `http` confirms it, and `dry_run` leaves it `submitted`. A build of `main` from before this rule also submits lines with no recorded mode. Such a line that `dry_run` submitted there stays `submitted` after the upgrade and is not confirmed; it never reached NEAR, so no money moves. Before a change between `http` and `dry_run`, stop the worker and check that no pipeline outbox line is `pending` or `failed`: the mode is recorded only after the submit, so a line in those states may have reached NEAR, and the other mode would submit it again as its own. |
+  | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. A leg `dry_run` confirms ends `confirmed` for good, as on `main`: a later switch to `http` does not pay it, because the payout skips a `confirmed` leg. Use `dry_run` only for legs that need no real payment. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. A `submitted` line with no recorded mode (code from before this rule submitted it) reads as `http`: `http` confirms it, and `dry_run` leaves it `submitted`. A build of `main` from before this rule also submits lines with no recorded mode. Such a line that `dry_run` submitted there stays `submitted` after the upgrade and is not confirmed; it never reached NEAR, so no money moves. Before a change between `http` and `dry_run`, stop the worker and check that no pipeline outbox line is `pending` or `failed`: the mode is recorded only after the submit, so a line in those states may have reached NEAR, and the other mode would submit it again as its own. A `failed` line needs the same care as a `pending` one: an `http` submit that errors ambiguously (a timeout after the transaction was broadcast) marks the line `failed`, and a direct `process_payout` with `retry_failed` under `dry_run` would submit it again, confirm it synthetically and overwrite its recorded mode. Resolve each such line against NEAR before the change. Both windows are open items in #1185. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
   | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
@@ -1981,7 +1994,8 @@ policy, that no other permissive policy applies to the reading role (one
 for another role, such as `trace_gate_driver`'s, does not), and that the
 role cannot bypass row-level security. `audit_immutability_control_passed`
 checks that both of `phase_outcomes`' immutability triggers exist, fire for
-ordinary sessions as row triggers before the update or delete, and call
+ordinary sessions as row triggers before the update or delete, on every
+column and with no `WHEN` condition, and call
 `reject_phase_outcome_mutation`. Neither checks a function's body: the
 database owner can replace any function, so a replaced body is outside what
 a health check can show.
@@ -2288,6 +2302,59 @@ while a tenant can still run the old one. For each such tenant:
 
 A tenant left on the drain list for good keeps no active bundle and runs no
 new receipt, so step 3 may leave it on the drain list.
+
+## Gate decision rows from Settle
+
+A run under a compatibility bundle writes one `trace_gate_decisions` row for
+its submission when its Settle commits, in the same transaction, so the
+features that read that table see pipeline traffic: duplicate clustering, the
+contributor cap, the score listings and account trust. A run under any other
+bundle, a run rejected before Settle, and a Settle commit refused for a stale
+lease or a suspended policy write none. The row is marked `source =
+'pipeline_settle'` and names its run in `pipeline_run_id` (V116); `main`'s own
+rows read `legacy_gate`. V116 allows one pipeline row per submission.
+
+What the row holds:
+
+- the Score evidence: perplexity, tail fraction, novelty, their peaks, the
+  two pass flags, the nearest-neighbour hash, chunk counts, the index
+  cardinality, and the credit quality and its calibration version;
+- `gate_policy_version` = `pipeline:<bundle_id>` and `gate_version_hash` =
+  the bundle's Score configuration hash;
+- `embedding_evidence_hash` = the sealed index command's hash, or the hash of
+  `pipeline_no_index_command` when the Score sealed none;
+- `attestation_chain_hash` = the SHA-256 of the Score outcome's canonical
+  JSON;
+- `credit_withheld_reason` = the Trace Credit leg's label when one of
+  `main`'s NoveltyUtility checks withheld the award.
+
+The vector entry and snapshot ids, the per-author columns and every column a
+sweep fills (dedup, contributor cap, correction, composite score) start
+NULL. Dedup is not filled by a periodic pass: the recluster pass skips rows
+with no `dedup_simhash`, and only the operator-run re-derivation
+(`POST /v1/admin/rederive-dedup`) computes one for a row that has none. Until
+an operator runs it, pipeline rows are not clustered and their
+`dedup_cluster_size` stays NULL for the contributor cap. The credit-quality sweep
+(`POST /v1/admin/score-credit-quality`) skips pipeline rows, since the Score
+already computed their credit quality under the bundle. The perplexity
+re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
+submission with a pipeline row: rewriting its perplexity would leave the
+row's verdict disagreeing with the Score that awarded the credit and with
+its `attestation_chain_hash`, and its per-author columns stay NULL.
+
+Settle checks a compatibility run's Score evidence before the index write or
+any settlement leg. Evidence that lacks a field the row needs fails the run
+terminally with `pipeline_gate_decision_evidence_incomplete`, with nothing
+paid and no row written; it is deterministic, so the run is not retried. A
+value too large for its column (the chunk aggregate saturates a perplexity
+on purpose) is stored saturated, as `main`'s gate writer stores it. If the
+submission already has a pipeline row naming another run, the commit fails
+the run terminally with `pipeline_gate_decision_conflict` and leaves that
+row as it is; a completed leg stays complete.
+
+A withdrawal, a revocation follow-up and a retention follow-up clear the
+row's dedup columns, as `main`'s withdrawal does for its rows, and change
+nothing else on it; the row stays as the history account trust reads.
 
 ## Retention of pipeline submissions
 
