@@ -17,7 +17,7 @@ Subcommands, each re-runnable alone into the run `init` created:
   production`, B-2), over the run's package, the NEAR AI endpoint and
   embedder cache from the deployment's env file (`--env-file`; only
   `envfile.PACKAGE_CHECK_VARIABLES` is read), a fresh usearch index per check
-  inside the run, and the HF network pin. Each result must name the run's
+  inside the run, and the committed HF network pin. Each result must name the run's
   package and its evidence must say `harness_assembly: production`.
 - `hf-canary`: `pipeline_hf_network_canary`, a fresh download of the network
   pin, every digest compared.
@@ -82,6 +82,9 @@ PROMOTION_ONLY_CHECK_IDS = (ADAPTERS_CHECK_ID, REMOTE_RESTORE_CHECK_ID, HF_CANAR
 _PIN_DIR = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
 HF_LOCAL_PIN = _PIN_DIR / "pin-local.json"
 HF_NETWORK_PIN = _PIN_DIR / "pin-network.json"
+# The committed network pin, relative to the repository root: the only pin
+# `package-checks` accepts.
+HF_NETWORK_PIN_PATH = Path("crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json")
 # Every digest a network pin carries, each compared by the canary.
 HF_PIN_DIGEST_FIELDS = (
     "source_digest",
@@ -469,6 +472,21 @@ def require_production_assembly(production, loaded):
         )
 
 
+def committed_network_pin(given):
+    """The committed `pin-network.json`, which the run's code revision
+    covers, validated. `given` (`--pin`), when set, must hold its exact bytes
+    (`hf_network_pin_not_committed`): a pin `hf-pin record` wrote for another
+    revision is internally consistent, and the HF corpus check would then
+    test a corpus nobody reviewed."""
+    pin_path = environment.ROOT / HF_NETWORK_PIN_PATH
+    _load_network_pin(pin_path)
+    if given is not None:
+        given = Path(given).resolve()
+        require(given.is_file(), "hf_network_pin_not_committed")
+        require(sha256_digest(given.read_bytes()) == sha256_digest(pin_path.read_bytes()), "hf_network_pin_not_committed")
+    return pin_path
+
+
 def make_package_checks(hooks):
     def package_checks(args, run):
         """The four package checks on the production assembly (spec B-D1).
@@ -478,8 +496,7 @@ def make_package_checks(hooks):
         and removes every attestation of the run."""
         refuse_in_ci()
         production = open_run(args.run_id)
-        pin_path = Path(args.pin).resolve()
-        _load_network_pin(pin_path)
+        pin_path = committed_network_pin(args.pin)
         variables = envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_CHECK_VARIABLES)
         require(
             all(variables.get(name, "").strip() for name in PACKAGE_CHECK_REQUIRED_VARIABLES),
@@ -911,7 +928,9 @@ def add_parsers(subparsers, hooks):
         required=True,
         help="The deployment's env file; only the NEAR AI endpoint, key, timeout and embedder cache are read.",
     )
-    package.add_argument("--pin", default=str(HF_NETWORK_PIN), help="The network pin (default: pin-network.json).")
+    package.add_argument(
+        "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
+    )
     package.add_argument(
         "--postgres-admin-url",
         dest="postgres_admin_url",

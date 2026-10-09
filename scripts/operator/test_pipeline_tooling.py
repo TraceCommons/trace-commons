@@ -5217,7 +5217,9 @@ class PromotePackageChecksTests(_PromoteCase):
 
     def setUp(self):
         super().setUp()
-        self.pin_path = self.root / "pin-network.json"
+        # The committed pin, where `promote` looks for it under the scratch root.
+        self.pin_path = self.root / promote.HF_NETWORK_PIN_PATH
+        self.pin_path.parent.mkdir(parents=True, exist_ok=True)
         self.pin_path.write_text(json.dumps(_network_pin(self.manifest)))
         self.hook_calls = []
         self.hook_evidence = {}
@@ -5243,8 +5245,6 @@ class PromotePackageChecksTests(_PromoteCase):
 
     def _package_checks(self, run_id, *extra, env_file=None):
         argv = ["promote", "package-checks", "--run-id", run_id, "--env-file", str(env_file or self.env_path)]
-        if "--pin" not in extra:
-            argv += ["--pin", str(self.pin_path)]
         with mock.patch.object(pipeline, "run_package_checks", self._fake_package_checks):
             return self._main([*argv, *extra])
 
@@ -5322,17 +5322,35 @@ class PromotePackageChecksTests(_PromoteCase):
         self.assertEqual(self.hook_calls, [])
         self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
 
-    def test_package_checks_refuse_without_the_network_pin(self):
+    def test_package_checks_take_only_the_committed_network_pin(self):
         run_id = self._init()
-        self.assertEqual(self._package_checks(run_id, "--pin", str(self.root / "absent.json")), 1)
-        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_missing")
-        local_pin = self.root / "pin-local.json"
-        local_pin.write_text(json.dumps({**_network_pin(self.manifest), "local_jsonl_dir": "fixtures"}))
-        self.stderr.seek(0)
-        self.stderr.truncate()
-        self.assertEqual(self._package_checks(run_id, "--pin", str(local_pin)), 1)
-        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_has_local_dir")
-        self.assertEqual(self.hook_calls, [])
+        committed = self.pin_path.read_text()
+
+        def refused(label, *extra):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._package_checks(run_id, *extra), 1)
+            self.assertEqual(self._failure(), f"PipelineFailure: {label}")
+
+        # The same bytes elsewhere are the committed pin.
+        copy = self.root / "scratch" / "pin-network.json"
+        copy.parent.mkdir()
+        copy.write_text(committed)
+        self.assertEqual(self._package_checks(run_id, "--pin", str(copy)), 0, self.stderr.getvalue())
+        self.assertEqual(self.hook_calls[-1]["network_pin"].resolve(), self.pin_path.resolve())
+        calls = len(self.hook_calls)
+        # A pin for another revision, or none at the path given.
+        other = dict(_network_pin(self.manifest), revision="f" * 40)
+        copy.write_text(json.dumps(other))
+        refused("hf_network_pin_not_committed", "--pin", str(copy))
+        refused("hf_network_pin_not_committed", "--pin", str(self.root / "absent.json"))
+        # The committed pin itself must be a network pin, and must exist.
+        self.pin_path.write_text(json.dumps({**_network_pin(self.manifest), "local_jsonl_dir": "fixtures"}))
+        refused("hf_network_pin_has_local_dir")
+        self.pin_path.unlink()
+        refused("hf_network_pin_missing")
+        refused("hf_network_pin_missing", "--pin", str(copy))
+        self.assertEqual(len(self.hook_calls), calls)
 
     def test_package_checks_refuse_a_result_not_from_the_production_assembly(self):
         run_id = self._init()
