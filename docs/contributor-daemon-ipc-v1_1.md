@@ -1090,7 +1090,7 @@ folder label, an id or a title.
 ```json
 "nudge": { "state": "armed", "lead": "idle_sessions", "count": 2, "mark": "ready", "mark_kinds": ["idle_sessions"] }
 "nudge": { "state": "armed", "lead": "review_backlog", "count": 6, "mark": "none", "mark_kinds": [] }
-"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 0, "since": "2026-10-07T09:30:00Z", "mark": "news", "mark_kinds": ["verdicts_landed"] }
+"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 1, "credit_final": 2.5, "since": "2026-10-07T09:30:00Z", "mark": "news", "mark_kinds": ["verdicts_landed"] }
 "nudge": { "state": "none", "lead": null, "mark": "none", "mark_kinds": [] }
 "nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z", "mark": "none", "mark_kinds": [] }
 "nudge": { "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": [] }
@@ -1124,8 +1124,13 @@ folder label, an id or a title.
   `verdicts_landed`: how many submissions newly reached `accepted`, newly
   reached `quarantined` (held for privacy review; reported beside accepted
   ones, DRAFT, owner decision 2), and newly carry a final credit figure, and
-  when the first of that news was found. Counts and a time only: no credit
-  figure, no label, no submission id.
+  when the first of that news was found. No label and no submission id.
+- `credit_final` is the credit that newly became final, summed, to one
+  decimal (half away from zero). It is present only beside the fields above
+  and only when it rounds to at least 0.1: absent, never 0. Credit becoming
+  final with nothing to say is not news at all: finals whose credit rounds
+  to zero add nothing to `count` and arm nothing on their own. It is never
+  logged.
 - `cooldown_until` is present only while an in-app "Not now" silences a kind
   that would otherwise lead and nothing else leads, and says when that
   lapses.
@@ -7041,8 +7046,8 @@ no poll of its own, so a call is announced on the first tick after it lands
 `history_changed` is published by the daemon's own history poll, which runs
 on `history_poll_secs` and about a minute and a half after an upload. Its
 counts are what that one poll found, by the same rule as
-`status.nudge`'s `verdicts_landed` (see "`status.nudge`"): no credit figure,
-no label, no submission id. A shell that shows history should re-read
+`status.nudge`'s `verdicts_landed` (see "`status.nudge`"), but counts only:
+no credit figure, no label, no submission id. A shell that shows history should re-read
 `list_history`; one that shows the suggestion re-reads `status`, which the
 `status_changed` that follows tells it to do. A shell that does not know the
 event ignores it, as with every event it does not know.

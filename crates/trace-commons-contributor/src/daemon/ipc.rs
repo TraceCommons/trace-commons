@@ -5379,13 +5379,16 @@ fn nudge_value(lead: &super::nudge::NudgeLead, mark: &super::nudge::Mark) -> ser
     if let Some(until) = lead.cooldown_until {
         value["cooldown_until"] = serde_json::json!(until);
     }
-    // U2's breakdown: counts and the time the news began, never a credit
-    // figure.
+    // U2's breakdown: counts, the time the news began, and the final credit
+    // to one decimal when it is not zero.
     if let Some(v) = lead.verdicts {
         value["accepted"] = serde_json::Value::from(v.accepted);
         value["held"] = serde_json::Value::from(v.held);
         value["final"] = serde_json::Value::from(v.final_credit);
         value["since"] = serde_json::json!(v.since);
+        if let Some(tenths) = v.credit_final_tenths {
+            value["credit_final"] = serde_json::json!(tenths as f64 / 10.0);
+        }
     }
     value
 }
@@ -17815,7 +17818,8 @@ mod tests {
         }
 
         /// U2 on `status.nudge`: the lead, a total count, the breakdown and
-        /// `since`; never a credit figure, a label or an id.
+        /// `since`, and `credit_final` only when the final credit is not
+        /// zero; never a label or an id.
         #[test]
         fn landed_verdicts_lead_on_status_with_counts_only() {
             let s = live();
@@ -17853,6 +17857,20 @@ mod tests {
             assert_eq!(nudge["accepted"], 2);
             assert_eq!(nudge["held"], 1);
             assert_eq!(nudge["final"], 0);
+            assert!(nudge.get("credit_final").is_none(), "no figure: {nudge}");
+
+            // A final credit figure is on the wire to one decimal.
+            s.state.lock().unwrap().verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+                newly_accepted: 2,
+                newly_held: 1,
+                newly_final: 2,
+                credit_final_delta: 4.25,
+                since: at,
+                newest_at: at,
+            });
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["final"], 2);
+            assert_eq!(nudge["credit_final"], serde_json::json!(4.3));
 
             // The backlog leads first, and the breakdown goes with U2.
             seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);

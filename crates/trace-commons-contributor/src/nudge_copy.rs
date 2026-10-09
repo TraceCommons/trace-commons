@@ -171,10 +171,17 @@ pub const NUDGE_VERDICTS_TITLE: &str = "Since {date}: {a} accepted, {h} held for
 /// "settled"; owner decision 12 asks whether "final" itself reads as
 /// settled. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_FINAL_CLAUSE: &str = "{x} credit is now final.";
+/// The History card's title when the only news is credit becoming final:
+/// with no accepted and no held, [`NUDGE_VERDICTS_TITLE`] would be empty
+/// after its date. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_VERDICTS_TITLE_FINAL_ONLY: &str = "Since {date}: {x} credit is now final";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_SEE: &str = "See history";
 /// The panel row for U2. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_PANEL_VERDICTS: &str = "{a} accepted, {h} held since {date}";
+/// The panel row when the only news is credit becoming final. DRAFT, NEEDS
+/// APPROVAL.
+pub const NUDGE_PANEL_VERDICTS_FINAL_ONLY: &str = "{x} credit is now final";
 /// The N2 notification body, followed by [`NUDGE_VERDICTS_FINAL_CLAUSE`]
 /// when the credit is non-zero. Never reports accepted sessions without
 /// the held count. DRAFT, NEEDS APPROVAL.
@@ -197,6 +204,9 @@ pub const DIGEST_VERDICT_SENTENCE_ONE: &str =
 
 /// DRAFT, NEEDS APPROVAL.
 pub const MARK_A11Y_VERDICTS: &str = "New: {a} accepted and {h} held for privacy review.";
+/// [`MARK_A11Y_VERDICTS`] when the only news is credit becoming final.
+/// DRAFT, NEEDS APPROVAL.
+pub const MARK_A11Y_VERDICTS_FINAL_ONLY: &str = "New: {x} credit is now final.";
 /// Held with the weekly recap (owner decision 1). DRAFT, NEEDS APPROVAL.
 pub const MARK_A11Y_RECAP: &str = "New: last week's summary.";
 /// The Windows tooltip clause. DRAFT, NEEDS APPROVAL.
@@ -449,13 +459,25 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("TOOL_LIST_MANY", TOOL_LIST_MANY),
     ("NUDGE_VERDICTS_TITLE", NUDGE_VERDICTS_TITLE),
     ("NUDGE_VERDICTS_FINAL_CLAUSE", NUDGE_VERDICTS_FINAL_CLAUSE),
+    (
+        "NUDGE_VERDICTS_TITLE_FINAL_ONLY",
+        NUDGE_VERDICTS_TITLE_FINAL_ONLY,
+    ),
     ("NUDGE_VERDICTS_SEE", NUDGE_VERDICTS_SEE),
     ("NUDGE_PANEL_VERDICTS", NUDGE_PANEL_VERDICTS),
+    (
+        "NUDGE_PANEL_VERDICTS_FINAL_ONLY",
+        NUDGE_PANEL_VERDICTS_FINAL_ONLY,
+    ),
     ("NOTIFY_VERDICTS_BODY", NOTIFY_VERDICTS_BODY),
     ("NOTIFY_VERDICTS_BODY_ONE", NOTIFY_VERDICTS_BODY_ONE),
     ("DIGEST_VERDICT_SENTENCE", DIGEST_VERDICT_SENTENCE),
     ("DIGEST_VERDICT_SENTENCE_ONE", DIGEST_VERDICT_SENTENCE_ONE),
     ("MARK_A11Y_VERDICTS", MARK_A11Y_VERDICTS),
+    (
+        "MARK_A11Y_VERDICTS_FINAL_ONLY",
+        MARK_A11Y_VERDICTS_FINAL_ONLY,
+    ),
     ("MARK_A11Y_RECAP", MARK_A11Y_RECAP),
     ("MARK_TOOLTIP_VERDICTS", MARK_TOOLTIP_VERDICTS),
     ("NOTIFY_TITLE", NOTIFY_TITLE),
@@ -830,6 +852,17 @@ mod tests {
             format!("{NOTIFY_VERDICTS_BODY} {NUDGE_VERDICTS_FINAL_CLAUSE}")
         );
         assert_eq!(DIGEST_RECAP_SENTENCE, NOTIFY_RECAP_BODY);
+        // The finals-only strings say the final clause's words.
+        for text in [
+            NUDGE_VERDICTS_TITLE_FINAL_ONLY,
+            NUDGE_PANEL_VERDICTS_FINAL_ONLY,
+            MARK_A11Y_VERDICTS_FINAL_ONLY,
+        ] {
+            assert!(
+                text.contains("{x} credit is now final"),
+                "{text} must match {NUDGE_VERDICTS_FINAL_CLAUSE}"
+            );
+        }
         assert_eq!(
             SETTING_DIGEST_HELP_INTERVAL,
             crate::shell_words_copy::settings_words().at_most_one_notification

@@ -290,9 +290,9 @@ pub struct VerdictDelta {
     /// Submissions whose credit newly became final.
     #[serde(default)]
     pub newly_final: u32,
-    /// The final credit those submissions carry. Kept in the state file for
-    /// the later slice that may word it (owner decision 12); never on the
-    /// wire from this slice.
+    /// The final credit those submissions carry. On the wire as
+    /// `status.nudge.credit_final`, through [`Self::credit_final_tenths`];
+    /// never in a log line.
     #[serde(default)]
     pub credit_final_delta: f32,
     /// The poll that first saw a verdict in this delta: `status.nudge.since`.
@@ -303,12 +303,27 @@ pub struct VerdictDelta {
 }
 
 impl VerdictDelta {
-    /// Every verdict in the delta, of whatever kind.
+    /// Every verdict in the delta that is news. Credit becoming final is
+    /// news only when there is a figure to say: finals whose credit rounds
+    /// to zero would otherwise arm a card with nothing in it.
     #[must_use]
     pub fn total(&self) -> u32 {
+        let finals = if self.credit_final_tenths().is_some() {
+            self.newly_final
+        } else {
+            0
+        };
         self.newly_accepted
             .saturating_add(self.newly_held)
-            .saturating_add(self.newly_final)
+            .saturating_add(finals)
+    }
+
+    /// The final credit in tenths, rounded half away from zero, or `None`
+    /// when it rounds to zero: absent, never 0.
+    #[must_use]
+    pub fn credit_final_tenths(&self) -> Option<u64> {
+        let tenths = (f64::from(self.credit_final_delta) * 10.0).round();
+        (tenths >= 1.0).then(|| tenths as u64)
     }
 
     /// Add a later delta to this one: counts add, `since` keeps the
@@ -549,12 +564,15 @@ pub struct NudgeLead {
     pub verdicts: Option<VerdictSummary>,
 }
 
-/// U2's counts for the card and the panel row: no credit figure.
+/// U2's counts for the card and the panel row, and the final credit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerdictSummary {
     pub accepted: u32,
     pub held: u32,
+    /// How many submissions' credit became final.
     pub final_credit: u32,
+    /// [`VerdictDelta::credit_final_tenths`].
+    pub credit_final_tenths: Option<u64>,
     /// [`VerdictDelta::since`].
     pub since: DateTime<Utc>,
 }
@@ -638,6 +656,7 @@ pub fn lead(
                 accepted: news.newly_accepted,
                 held: news.newly_held,
                 final_credit: news.newly_final,
+                credit_final_tenths: news.credit_final_tenths(),
                 since: news.since,
             }),
         },
@@ -1361,7 +1380,11 @@ mod tests {
     #[test]
     fn verdicts_lead_when_the_backlog_does_not() {
         let at = now() - Duration::hours(1);
-        let got = lead(&with_verdicts(delta(2, 1, 1, at)), &empty(), now());
+        let news = VerdictDelta {
+            credit_final_delta: 2.25,
+            ..delta(2, 1, 1, at)
+        };
+        let got = lead(&with_verdicts(news), &empty(), now());
         assert_eq!(got.state, NudgeState::Armed);
         assert_eq!(got.lead, Some(NudgeKind::VerdictsLanded));
         assert_eq!(got.count, Some(4));
@@ -1371,10 +1394,73 @@ mod tests {
                 accepted: 2,
                 held: 1,
                 final_credit: 1,
+                credit_final_tenths: Some(23),
                 since: at,
             })
         );
         assert_eq!(got.cooldown_until, None);
+    }
+
+    /// The final credit is reported to one decimal, half away from zero,
+    /// and only when it says something: under 0.05 it is absent, never 0.
+    #[test]
+    fn the_final_credit_is_tenths_and_absent_when_it_rounds_to_zero() {
+        let at = now() - Duration::hours(1);
+        for (credit, want) in [
+            (0.0, None),
+            (0.04, None),
+            (0.05, Some(1)),
+            (1.0, Some(10)),
+            (2.25, Some(23)),
+        ] {
+            let news = VerdictDelta {
+                credit_final_delta: credit,
+                ..delta(1, 0, 1, at)
+            };
+            let got = lead(&with_verdicts(news), &empty(), now());
+            assert_eq!(
+                got.verdicts.map(|v| v.credit_final_tenths),
+                Some(want),
+                "{credit}"
+            );
+        }
+    }
+
+    /// Credit becoming final with nothing to say is not news: a delta of
+    /// finals only, whose credit rounds to zero, arms nothing and lights
+    /// nothing. Accepted or held beside it still is news, and the zero
+    /// finals do not add to the count.
+    #[test]
+    fn finals_with_no_credit_are_not_news() {
+        let at = now() - Duration::hours(1);
+        let empty_finals = delta(0, 0, 2, at);
+        assert_eq!(empty_finals.total(), 0);
+        let got = lead(&with_verdicts(empty_finals.clone()), &empty(), now());
+        assert_eq!(got.lead, None);
+        let mut news = news_inputs(at);
+        news.lead.verdicts_pending = Some(empty_finals);
+        assert_eq!(mark(&news, &empty(), now()).state, MarkState::None);
+
+        let with_accepted = delta(1, 0, 2, at);
+        assert_eq!(with_accepted.total(), 1);
+        let paid = VerdictDelta {
+            credit_final_delta: 3.0,
+            ..delta(0, 0, 2, at)
+        };
+        assert_eq!(paid.total(), 2, "finals with credit are news");
+    }
+
+    /// A zero-credit final seen by the poll advances the marks but is not
+    /// reported.
+    #[test]
+    fn a_zero_credit_final_alone_is_not_a_delta() {
+        let marks = BTreeMap::new();
+        let first = [rec(1, STATUS_ACCEPTED)];
+        let (_, marks) = verdict_delta(&marks, &first, &no_never(), now());
+        let later = [final_rec(1, STATUS_ACCEPTED, 0.0)];
+        let (got, next) = verdict_delta(&marks, &later, &no_never(), now());
+        assert_eq!(got, None);
+        assert_ne!(next, marks, "the final is still marked as seen");
     }
 
     /// Precedence: U1 first. U2 leads behind a declined backlog, and then
