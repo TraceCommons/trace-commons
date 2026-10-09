@@ -63,7 +63,9 @@ final class NudgeSettingsStore {
 
     /// A one-time offer. Turn on writes the kind on, which also ends the
     /// offer; No thanks clears the offer's marker and changes nothing else.
-    func answer(_ offer: NudgeSettings.Offer, accept: Bool) async {
+    /// Answers whether the daemon took the write.
+    @discardableResult
+    func answer(_ offer: NudgeSettings.Offer, accept: Bool) async -> Bool {
         await write { client in
             if accept {
                 try await client.setNotifyKind(offer.kind, on: true)
@@ -73,22 +75,36 @@ final class NudgeSettingsStore {
         }
     }
 
-    private func write(_ body: (any DaemonDataClient) async throws -> Void) async {
-        guard !writing else { return }
+    /// Turn on, then `prompt` -- the system's permission prompt -- only if
+    /// the daemon took the write: a refused one leaves the kind off, and a
+    /// prompt for it would ask permission for nothing. Answers whether the
+    /// write was taken.
+    @discardableResult
+    func accept(_ offer: NudgeSettings.Offer, then prompt: () async -> Void) async -> Bool {
+        guard await answer(offer, accept: true) else { return false }
+        await prompt()
+        return true
+    }
+
+    /// Answers whether the write was sent and taken.
+    @discardableResult
+    private func write(_ body: (any DaemonDataClient) async throws -> Void) async -> Bool {
+        guard !writing else { return false }
         writing = true
         defer { writing = false }
         writeError = nil
         guard let client else {
             writeError = .unreachable
-            return
+            return false
         }
         do {
             try await body(client)
         } catch {
             writeError = error as? DaemonDataError ?? .undecodable(method: "set_settings")
-            return
+            return false
         }
         await load()
+        return true
     }
 }
 
@@ -116,10 +132,7 @@ struct NudgeSettingsSection: View {
                             Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
                                 .buttonStyle(GlassButtonStyle(.glass))
                             Button(offer.accept) {
-                                Task {
-                                    await store.answer(offer, accept: true)
-                                    await requestAuthorization()
-                                }
+                                Task { await store.accept(offer) { await requestAuthorization() } }
                             }
                             .buttonStyle(GlassButtonStyle(.glass))
                         }

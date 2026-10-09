@@ -55,6 +55,30 @@ final class NudgeSettingsSectionTests: XCTestCase {
         XCTAssertEqual(client.nudgeCalls, ["set_notify_kind verdicts_landed true", "set_settings idle_offer_pending false"])
     }
 
+    /// The system's permission prompt follows an accepted offer only when
+    /// the daemon took the write: a refused one leaves the kind off, and a
+    /// prompt for it would ask permission for nothing.
+    func test_thePromptFollowsOnlyAnAcceptedWrite() async {
+        let offer = NudgeSettings.Offer(kind: "verdicts_landed", text: "t", accept: "a", decline: "d")
+        var asked = 0
+
+        let refused = NudgeSettingsStore(client: SampleDaemonClient(.coreDown))
+        let refusedTook = await refused.accept(offer) { asked += 1 }
+        XCTAssertFalse(refusedTook)
+        XCTAssertEqual(refused.writeError, .unreachable)
+        XCTAssertEqual(asked, 0, "prompted after a refused write")
+
+        let took = NudgeSettingsStore(client: SampleDaemonClient(.normalDay))
+        let tookTook = await took.accept(offer) { asked += 1 }
+        XCTAssertTrue(tookTook)
+        XCTAssertEqual(asked, 1)
+
+        // No thanks never prompts.
+        let declined = await took.answer(offer, accept: false)
+        XCTAssertTrue(declined)
+        XCTAssertEqual(asked, 1)
+    }
+
     func test_aRefusedWriteIsKept() async {
         let store = NudgeSettingsStore(client: SampleDaemonClient(.coreDown))
         await store.set(.suggestions, on: false)
