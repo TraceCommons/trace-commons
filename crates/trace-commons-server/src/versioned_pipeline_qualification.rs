@@ -436,7 +436,12 @@ impl PipelineCheckEmitter {
             .write(true)
             .create_new(true)
             .open(&result_path)
-            .map_err(|_| "pipeline_check_already_emitted".to_string())?;
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => "pipeline_check_already_emitted".to_string(),
+                // A directory that is missing or not writable (a read-only
+                // path under the unit's sandbox) is not a repeat.
+                _ => "pipeline_check_write_failed".to_string(),
+            })?;
 
         let evidence_bytes = serde_json::to_vec(&observed)
             .map_err(|_| "pipeline_check_evidence_invalid".to_string())?;
@@ -2180,6 +2185,30 @@ mod tests {
             evidence_hash(&float_value),
             Err("evidence_value_invalid".to_string())
         );
+    }
+
+    /// A result path that cannot be created is a write failure, not a repeat.
+    /// On the pilot a `ProtectSystem=strict` unit made the result directory
+    /// read-only, and the start was refused as `pipeline_check_already_emitted`
+    /// with no result file anywhere (2026-10-09).
+    #[test]
+    fn emitter_reports_an_unwritable_directory_as_a_write_failure() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let missing = dir.path().join("not-created");
+        let code_hash = sha256_prefixed(b"code-revision");
+        let emitter = PipelineCheckEmitter::new(missing.clone(), "q0123abcd", &code_hash)
+            .expect("emitter builds");
+
+        let emitted = emitter.emit(
+            "pipeline_crash_matrix",
+            PipelineCheckStatus::Pass,
+            Some(&minimal_test_package()),
+            &[],
+            serde_json::json!({"runs": 3}),
+        );
+
+        assert_eq!(emitted, Err("pipeline_check_write_failed".to_string()));
+        assert!(!missing.exists());
     }
 
     #[test]

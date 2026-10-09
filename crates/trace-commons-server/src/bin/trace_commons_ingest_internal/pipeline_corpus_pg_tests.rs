@@ -3343,6 +3343,12 @@ fn production_corpus_mode_compares_only_deterministic_fields() {
 /// gate settings (`deploy/pilot-gcp/ingest.env.template`'s floors), built
 /// the way `pipeline.py package --bundle production` builds one.
 pub(super) fn production_test_package() -> BundlePackage {
+    production_test_package_awarding(COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS)
+}
+
+/// [`production_test_package`] with `main`'s `NoveltyUtility` delta set to
+/// `microcredits`: `0` is the pilot's, under which Score awards nothing.
+pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePackage {
     use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
     use trace_commons_server::versioned_pipeline_production::{
         FastEmbedDescriptor, NearAiScorerDescriptor, production_compatibility_package,
@@ -3369,7 +3375,7 @@ pub(super) fn production_test_package() -> BundlePackage {
             chunk_max_tokens: 3072,
             chunk_cap: 16,
             chunk_min_tokens: 64,
-            novelty_utility_microcredits: COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+            novelty_utility_microcredits: microcredits,
         },
     )
     .expect("the production test package builds")

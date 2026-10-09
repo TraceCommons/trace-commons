@@ -2,9 +2,11 @@ import TCBridge
 import TCShellCore
 
 /// The Settings window's sections (spec, "Settings navigation"; R11 of
-/// #1173), in the order #1146's settings modal lists them, plus Compute.
+/// #1173), in the order #1146's settings modal lists them, after General
+/// (the appearance choice, design exploration) and plus Compute.
 /// Each names the section `GlassSettingsContent` draws for it.
 enum SettingsSection: String, CaseIterable, Identifiable {
+    case general
     case connection
     case startup
     case notifications
@@ -29,7 +31,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// wait for first run, so no write surface exists outside it.
     var availableBeforeOnboarding: Bool {
         switch self {
-        case .connection, .startup, .notifications, .updates, .privateAI, .compute: true
+        case .general, .connection, .startup, .notifications, .updates, .privateAI, .compute: true
         case .watching, .consent, .publicProfile, .watchedFolders, .tools, .witness, .projects, .changes: false
         }
     }
@@ -51,6 +53,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     func navName(_ nav: MonitorSettingsNavCopy?) -> String? {
         guard let nav else { return nil }
         switch self {
+        // Not in the core's table yet: a single word, as the others below.
+        case .general: return SettingsWords.general
         case .connection: return nav.connection
         case .startup: return nav.startup
         case .notifications, .updates: return nil
@@ -89,6 +93,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// An SF Symbol for the row.
     var symbol: String {
         switch self {
+        case .general: "gearshape"
         case .connection: "link"
         case .startup: "power"
         case .notifications: "bell"
@@ -110,6 +115,11 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 /// The single words the section list shows for sections whose heading is
 /// a single word on the section itself too.
 enum SettingsWords {
+    static let general = "General"
+    static let appearance = "Appearance"
+    static let light = "Light"
+    static let dark = "Dark"
+    static let system = "System"
     static let connection = "Connection"
     static let startup = "Startup"
     static let updates = "Updates"

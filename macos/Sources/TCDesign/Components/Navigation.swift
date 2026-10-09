@@ -128,7 +128,8 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     /// (#1146 `.tc-segmented__item:hover`), otherwise secondary on the
     /// floating variant and tertiary in the well.
     static func ink(selected: Bool, hovering: Bool, floating: Bool) -> Color {
-        if selected || hovering { return GlassColor.textPrimary }
+        if selected { return GlassTokens.Color.textOnSelected.color }
+        if hovering { return GlassColor.textPrimary }
         return floating ? GlassColor.textSecondary : GlassColor.textTertiary
     }
 }
