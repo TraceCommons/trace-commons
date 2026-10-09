@@ -380,7 +380,7 @@ final class UsesScreenTests: XCTestCase {
     /// behind the core's "Learn more"; nothing of the disclosure is dropped.
     func test_thePrivateAICardLeadsWithTwoSentencesAndLearnMore() throws {
         let words: FirstRunCopy = try copy()
-        XCTAssertTrue(words.privateAi.offerLead.hasPrefix("Connect your tools to NEAR AI through this app."))
+        XCTAssertTrue(words.privateAi.offerLead.hasPrefix("Lets your tools send AI requests through this app,"))
         XCTAssertEqual(words.privateAi.learnMore, "Learn more")
         let source = try Self.source()
         let lead = try XCTUnwrap(source.range(of: "cardBody(copy.privateAi.offerLead)"))
