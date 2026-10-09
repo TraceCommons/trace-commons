@@ -295,11 +295,13 @@ pub struct VerdictDelta {
     /// Submissions whose credit newly became final.
     #[serde(default)]
     pub newly_final: u32,
-    /// The final credit those submissions carry. On the wire as
+    /// The final credit those submissions carry, summed from each one's
+    /// figure as written ([`decimal_credit`]). On the wire as
     /// `status.nudge.credit_final`, through [`Self::credit_final_tenths`];
-    /// never in a log line.
+    /// never in a log line. An f64: a state file an f32 build wrote loads
+    /// unchanged.
     #[serde(default)]
-    pub credit_final_delta: f32,
+    pub credit_final_delta: f64,
     /// The poll that first saw a verdict in this delta: `status.nudge.since`.
     pub since: DateTime<Utc>,
     /// The poll that last added to this delta. The news mark ages out from
@@ -370,10 +372,14 @@ impl VerdictDelta {
 
     /// The final credit in tenths, rounded half away from zero, or `None`
     /// when it rounds to zero: absent, never 0.
+    ///
+    /// Rounded in whole millionths first, so a sum that should be 0.35 but
+    /// reads 0.34999999999999998 still gives 4 tenths, not 3.
     #[must_use]
     pub fn credit_final_tenths(&self) -> Option<u64> {
-        let tenths = (f64::from(self.credit_final_delta) * 10.0).round();
-        (tenths >= 1.0).then_some(tenths as u64)
+        let millionths = (self.credit_final_delta * 1e6).round() as i64;
+        let tenths = millionths.saturating_add(50_000).div_euclid(100_000);
+        u64::try_from(tenths).ok().filter(|t| *t >= 1)
     }
 
     /// The summary of `submissions`, or `None` when no submission carries
@@ -387,13 +393,23 @@ impl VerdictDelta {
             newly_accepted: count(|v| v.accepted),
             newly_held: count(|v| v.held),
             newly_final: count(|v| v.final_credit),
-            credit_final_delta: submissions.values().map(|v| v.credit_final).sum(),
+            credit_final_delta: submissions
+                .values()
+                .map(|v| decimal_credit(v.credit_final))
+                .sum(),
             since: submissions.values().map(|v| v.since).min()?,
             newest_at: submissions.values().map(|v| v.newest_at).max()?,
             submissions,
         };
         (delta.total() > 0).then_some(delta)
     }
+}
+
+/// A final credit figure as the decimal the server wrote: the f32's
+/// shortest round-trip form, read back as an f64. Widening the f32 itself
+/// turns 0.35 into 0.3499999940..., which rounds to 3 tenths.
+fn decimal_credit(credit: f32) -> f64 {
+    credit.to_string().parse().unwrap_or(f64::from(credit))
 }
 
 /// The folders whose verdicts never count as news: every folder that now
@@ -1259,7 +1275,7 @@ mod tests {
         assert_eq!(got.newly_accepted, 2);
         assert_eq!(got.newly_held, 1);
         assert_eq!(got.newly_final, 1);
-        assert!((got.credit_final_delta - 2.5).abs() < f32::EPSILON);
+        assert!((got.credit_final_delta - 2.5).abs() < f64::EPSILON);
         assert_eq!(got.since, now());
         assert_eq!(got.newest_at, now());
         assert_eq!(marks.len(), 5, "every record is marked: {marks:?}");
@@ -1616,7 +1632,9 @@ mod tests {
             (0.0, None),
             (0.04, None),
             (0.05, Some(1)),
+            (0.35, Some(4)),
             (1.0, Some(10)),
+            (1.05, Some(11)),
             (2.25, Some(23)),
         ] {
             let news = VerdictDelta {
@@ -1630,6 +1648,44 @@ mod tests {
                 "{credit}"
             );
         }
+    }
+
+    /// One submission's final credit, as a poll finds it.
+    fn final_news(credit: f32) -> PendingVerdict {
+        PendingVerdict {
+            accepted: false,
+            held: false,
+            final_credit: true,
+            credit_final: credit,
+            since: now(),
+            newest_at: now(),
+        }
+    }
+
+    /// The server's figure arrives as an f32, which holds 0.35 as
+    /// 0.3499999940...; widened and rounded as it stands, 40 of the 100
+    /// figures x.x5 up to 9.95 rounded down (poldsam's #1298 review). Each
+    /// rounds half away from zero, from one submission or summed from two.
+    #[test]
+    fn a_final_credit_ending_in_five_rounds_up() {
+        for whole in 0..10u64 {
+            for tenth in 0..10u64 {
+                let credit: f32 = format!("{whole}.{tenth}5").parse().unwrap();
+                let submissions = BTreeMap::from([("a".to_string(), final_news(credit))]);
+                let got = VerdictDelta::from_submissions(submissions).expect("news");
+                assert_eq!(
+                    got.credit_final_tenths(),
+                    Some(whole * 10 + tenth + 1),
+                    "{credit}"
+                );
+            }
+        }
+        let two = BTreeMap::from([
+            ("a".to_string(), final_news(0.35)),
+            ("b".to_string(), final_news(0.7)),
+        ]);
+        let got = VerdictDelta::from_submissions(two).expect("news");
+        assert_eq!(got.credit_final_tenths(), Some(11), "0.35 + 0.7");
     }
 
     /// Credit becoming final with nothing to say is not news: a delta of
