@@ -4534,6 +4534,7 @@ class _PromoteCase(unittest.TestCase):
         self.downloaded = 2
         self.report = _remote_report()
         self.harness_calls = []
+        self.harness_admin_urls = []
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -4567,8 +4568,9 @@ class _PromoteCase(unittest.TestCase):
         for index in range(self.downloaded):
             (snapshot / f"{index:02}.jsonl").write_text("{}\n")
 
-    def _fake_harness(self, run, step, source_store, scratch_store, report_path):
+    def _fake_harness(self, run, step, source_store, scratch_store, report_path, *, postgres_admin_url=None):
         self.harness_calls.append((step, source_store, scratch_store, Path(report_path)))
+        self.harness_admin_urls.append((step, source_store, scratch_store, Path(report_path), postgres_admin_url))
         Path(report_path).write_text(json.dumps(self.report))
 
     def _main(self, argv, *, ci=False, harness=True, tree=None):
@@ -5085,11 +5087,276 @@ class RemoteRestoreTests(_PromoteCase):
             self.stderr.getvalue(),
         )
 
-    def test_remote_restore_harness_is_not_built_yet(self):
+    def test_remote_restore_passes_the_postgres_admin_url_to_the_harness(self):
         run_id = self._init()
-        self.assertEqual(self._restore(run_id, harness=False), 1)
-        self.assertEqual(self._failure(), "PipelineFailure: remote_restore_harness_unavailable")
+        self.assertEqual(
+            self._main(
+                ["promote", "remote-restore", "--run-id", run_id, "--source-store", "tracecommons-artifacts",
+                 "--scratch-store", "tracecommons-restore-scratch",
+                 "--postgres-admin-url", "postgres://trace@127.0.0.1:5432/postgres"]
+            ),
+            0,
+            self.stderr.getvalue(),
+        )
+        [(_, _, _, _, admin_url)] = self.harness_admin_urls
+        self.assertEqual(admin_url, "postgres://trace@127.0.0.1:5432/postgres")
+
+
+class _FakeScenario:
+    def __init__(self, log):
+        self.log = log
+        self.runtime_url = "postgres://trace@127.0.0.1:5432/pipeline_remote_restore"
+        self.pilot_database = "pipeline_remote_restore_pilot"
+        self.restored_database = "pipeline_remote_restore_restored"
+        self.restored_url = "postgres://trace@127.0.0.1:5432/pipeline_remote_restore_restored"
+
+    def committed_transactions(self, database):
+        self.log.append(("committed", database))
+        return 100
+
+
+class _FakeEnvironment:
+    """`Environment`'s surface the remote restore harness uses, recording
+    each call in order."""
+
+    def __init__(self, log):
+        self.log = log
+
+    def __call__(self, run, *, postgres_admin_url=None):
+        self.log.append(("environment", postgres_admin_url))
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.log.append(("environment_closed",))
+        return False
+
+    def scenario(self, name):
+        self.log.append(("scenario", name))
+        return _FakeScenario(self.log)
+
+    def dump(self, database, path):
+        self.log.append(("dump", database))
+        Path(path).write_bytes(b"dump")
+
+    def create_database(self, database):
+        self.log.append(("create_database", database))
+
+    def restore(self, path, database):
+        self.log.append(("restore", database))
+
+
+class RemoteRestoreHarnessTests(_PromoteCase):
+    """The harness itself (`run_remote_restore_harness`): the seed, the
+    database restore, the copy, and the resume, with cargo and PostgreSQL
+    replaced."""
+
+    def setUp(self):
+        super().setUp()
+        self.log = []
+        self.seed_artifacts = _fake_hash("artifacts")
+        self.copy = {
+            "schema": "trace_commons.pipeline_remote_restore_copy.v1",
+            "object_store_kind": "gcs",
+            "object_count": 7,
+            "artifact_fingerprint": self.seed_artifacts,
+            "restored_artifact_fingerprint": self.seed_artifacts,
+            "kek_unwrap_verified_count": 7,
+            "versioning_enabled": True,
+        }
+        self.resume = {
+            "schema": "trace_commons.pipeline_remote_restore_resume.v1",
+            "database_fingerprint": _fake_hash("database"),
+            "artifact_fingerprint": self.seed_artifacts,
+            "pending_runs_resumed": 1,
+            "duplicate_effects": 0,
+        }
+
+    def _seed_fingerprint(self):
+        hashes = ("database_fingerprint", "artifact_fingerprint", "index_entry_set_hash", "pending_run_id_hash",
+                  "runtime_privilege_set_hash", "tenant_fingerprint", "rls_policy_set_hash", "rls_flag_set_hash")
+        value = {"schema": "trace_commons.pipeline_restore_fingerprint.v1"}
+        value.update({key: _fake_hash(key) for key in hashes})
+        value["database_fingerprint"] = _fake_hash("database")
+        value["artifact_fingerprint"] = self.seed_artifacts
+        value.update({key: 3 for key in ("adapter_request_count", "completed_settlement_count",
+                                          "completed_credit_event_count", "rls_table_count", "rls_policy_count",
+                                          "rls_flag_table_count", "runtime_privilege_count", "tenant_count",
+                                          "audit_event_count")})
+        return value
+
+    def _fake_harness_cargo(self, run, step, cargo_args, test_filter, env, *, exact=False, ignored=False):
+        self.calls.append(("cargo", step, tuple(cargo_args), test_filter, dict(env), exact, ignored))
+        self.log.append(("cargo", step))
+        if step == "remote_restore_seed":
+            Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_text(json.dumps(self._seed_fingerprint()))
+        elif step == "remote_restore_copy":
+            Path(env["TRACE_COMMONS_PIPELINE_REMOTE_COPY_REPORT_PATH"]).write_text(json.dumps(self.copy))
+        elif step == "remote_restore_resume":
+            Path(env["TRACE_COMMONS_PIPELINE_REMOTE_RESUME_REPORT_PATH"]).write_text(json.dumps(self.resume))
+
+    def _restore(self, run_id, *, extra_environ=None):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(cargo, "cargo_test", self._fake_harness_cargo))
+            stack.enter_context(mock.patch.object(promote, "Environment", _FakeEnvironment(self.log)))
+            environ = stack.enter_context(mock.patch.dict(os.environ))
+            for key in ("TRACE_COMMONS_KEK_PROVIDER", "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME"):
+                environ.pop(key, None)
+            environ.update(extra_environ or {})
+            return self._main(
+                ["promote", "remote-restore", "--run-id", run_id, "--source-store", "tracecommons-artifacts",
+                 "--scratch-store", "tracecommons-restore-scratch/drill"],
+                harness=False,
+            )
+
+    def _cargo(self):
+        return {call[1]: call for call in self.calls if call[0] == "cargo"}
+
+    def test_the_harness_seeds_restores_copies_and_resumes_in_order(self):
+        run_id = self._init()
+        self.assertEqual(self._restore(run_id), 0, self.stderr.getvalue())
+        steps = [entry for entry in self.log if entry[0] in ("cargo", "dump", "create_database", "restore")]
+        self.assertEqual(
+            steps,
+            [
+                ("cargo", "remote_restore_seed"),
+                ("dump", "pipeline_remote_restore_pilot"),
+                ("create_database", "pipeline_remote_restore_restored"),
+                ("restore", "pipeline_remote_restore_restored"),
+                ("cargo", "remote_restore_copy"),
+                ("cargo", "remote_restore_resume"),
+            ],
+        )
+        self.assertEqual(self.log[-1], ("environment_closed",))
+        calls = self._cargo()
+        self.assertEqual(calls["remote_restore_seed"][3], "tests::pipeline_restore_pg_tests::pipeline_restore_seed")
+        self.assertEqual(calls["remote_restore_copy"][3], promote.REMOTE_RESTORE_RUN)
+        self.assertEqual(promote.REMOTE_RESTORE_RUN, "tests::pipeline_restore_pg_tests::pipeline_remote_restore_run")
+        self.assertEqual(calls["remote_restore_resume"][3], "tests::pipeline_restore_pg_tests::pipeline_restore_resume")
+        for _, step, cargo_args, _, env, exact, ignored in calls.values():
+            self.assertEqual(cargo_args, promote.PROMOTE_CARGO_ARGS, step)
+            self.assertTrue(exact and ignored, step)
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT", env, step)
+            self.assertNotIn("TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR", env, step)
+            self.assertEqual(env["TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND"], "gcs", step)
+        seed_env = calls["remote_restore_seed"][4]
+        copy_env = calls["remote_restore_copy"][4]
+        resume_env = calls["remote_restore_resume"][4]
+        # The seed writes into the live store, the resume reads the scratch
+        # store; the copy names both. One namespace, fresh, and one key.
+        self.assertEqual(seed_env["TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE"], "tracecommons-artifacts")
+        self.assertEqual(resume_env["TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE"], "tracecommons-restore-scratch/drill")
+        self.assertEqual(copy_env["TRACE_COMMONS_PIPELINE_REMOTE_SOURCE_STORE"], "tracecommons-artifacts")
+        self.assertEqual(copy_env["TRACE_COMMONS_PIPELINE_REMOTE_SCRATCH_STORE"], "tracecommons-restore-scratch/drill")
+        namespaces = {env["TRACE_COMMONS_PIPELINE_REMOTE_NAMESPACE"] for env in (seed_env, copy_env, resume_env)}
+        [namespace] = namespaces
+        self.assertRegex(namespace, rf"^pipeline-remote-restore-{run_id}-[0-9a-f]{{8}}$")
+        keys = {env["TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX"] for env in (seed_env, copy_env, resume_env)}
+        [key] = keys
+        self.assertRegex(key, r"^[0-9a-f]{64}$")
+        self.assertEqual(seed_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"], _FakeScenario([]).runtime_url)
+        self.assertEqual(resume_env["TRACE_COMMONS_PG_TEST_DATABASE_URL"], _FakeScenario([]).restored_url)
+        self.assertNotIn("TRACE_COMMONS_PG_TEST_DATABASE_URL", copy_env)
+        # The result, from the measurements, names the store only by hash.
+        result, evidence = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+        self.assertEqual((result["status"], result["safe_blockers"]), ("pass", []))
+        self.assertEqual(
+            evidence,
+            {
+                "schema": "trace_commons.pipeline_remote_restore.v1",
+                "object_store_kind": "gcs",
+                "source_store_name_hash": _digest(b"tracecommons-artifacts"),
+                "scratch_store_name_hash": _digest(b"tracecommons-restore-scratch/drill"),
+                "object_count": 7,
+                "artifact_fingerprint": self.seed_artifacts,
+                "restored_artifact_fingerprint": self.seed_artifacts,
+                "versioning_enabled": True,
+                "kek_unwrap_verified_count": 7,
+                "database_fingerprint": _fake_hash("database"),
+                "pending_runs_resumed": 1,
+                "duplicate_effects": 0,
+            },
+        )
+        # Nothing the harness wrote stays behind but its report: no dump, no key.
+        work = self._runs_dir() / run_id / "remote-restore"
+        self.assertEqual(sorted(path.name for path in work.iterdir()), ["remote-restore-report.json"])
+        for text in (self.stdout.getvalue(), self.stderr.getvalue()):
+            self.assertNotIn(key, text)
+            self.assertNotIn("tracecommons", text)
+
+    def test_the_harness_forwards_only_the_key_wrapper_selection(self):
+        run_id = self._init()
+        self.assertEqual(
+            self._restore(run_id, extra_environ={
+                "TRACE_COMMONS_KEK_PROVIDER": "gcp_cloud_kms",
+                "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME": "projects/p/locations/l/keyRings/r/cryptoKeys/k",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/secret/credentials.json",
+                "TRACE_COMMONS_OBJECT_STORE_BUCKET": "tracecommons-artifacts",
+            }),
+            0,
+            self.stderr.getvalue(),
+        )
+        for _, step, _, _, env, _, _ in self._cargo().values():
+            self.assertEqual(env["TRACE_COMMONS_KEK_PROVIDER"], "gcp_cloud_kms", step)
+            self.assertEqual(
+                env["TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME"], "projects/p/locations/l/keyRings/r/cryptoKeys/k", step
+            )
+            self.assertNotIn("GOOGLE_APPLICATION_CREDENTIALS", env, step)
+            self.assertNotIn("TRACE_COMMONS_OBJECT_STORE_BUCKET", env, step)
+        self.assertNotIn("keyRings", self.stdout.getvalue() + self.stderr.getvalue())
+        # Unset, nothing is forwarded: the children fall back to the local key.
+        self.calls.clear()
+        self.assertEqual(self._restore(run_id), 0, self.stderr.getvalue())
+        for _, step, _, _, env, _, _ in self._cargo().values():
+            self.assertNotIn("TRACE_COMMONS_KEK_PROVIDER", env, step)
+            self.assertNotIn("TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME", env, step)
+
+    def test_the_harness_refuses_a_source_that_moved_after_the_seed(self):
+        run_id = self._init()
+        self.copy["artifact_fingerprint"] = _fake_hash("moved")
+        self.assertEqual(self._restore(run_id), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: remote_restore_source_changed")
         self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_the_harness_refuses_a_resume_on_other_artifacts(self):
+        run_id = self._init()
+        self.resume["artifact_fingerprint"] = _fake_hash("other")
+        self.assertEqual(self._restore(run_id), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: remote_restore_resume_report_invalid")
+        self.assertEqual(list(self._results_dir(run_id).iterdir()), [])
+
+    def test_the_harness_refuses_malformed_measurements(self):
+        run_id = self._init()
+        for target, overrides, label in (
+            ("copy", {"extra": 1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"object_count": -1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"schema": "trace_commons.pipeline_remote_restore_copy.v0"}, "remote_restore_copy_report_invalid"),
+            ("copy", {"versioning_enabled": 1}, "remote_restore_copy_report_invalid"),
+            ("copy", {"object_store_kind": "gs://bucket"}, "remote_restore_copy_report_invalid"),
+            ("resume", {"pending_runs_resumed": True}, "remote_restore_resume_report_invalid"),
+            ("resume", {"database_fingerprint": "sha256:short"}, "remote_restore_resume_report_invalid"),
+        ):
+            saved = (dict(self.copy), dict(self.resume))
+            getattr(self, target).update(overrides)
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._restore(run_id), 1, (target, overrides))
+            self.assertEqual(self._failure(), f"PipelineFailure: {label}", (target, overrides))
+            self.assertEqual(list(self._results_dir(run_id).iterdir()), [], (target, overrides))
+            self.copy, self.resume = saved
+
+    def test_a_failing_measurement_is_a_failing_result(self):
+        run_id = self._init()
+        self.copy["versioning_enabled"] = False
+        self.copy["object_store_kind"] = "gcs_directory_double"
+        self.assertEqual(self._restore(run_id), 1)
+        result, _ = self._result(run_id, promote.REMOTE_RESTORE_CHECK_ID)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(
+            result["safe_blockers"], ["remote_restore_store_not_remote", "remote_restore_versioning_disabled"]
+        )
 
 
 class PromoteAdaptersTests(_PromoteCase):
