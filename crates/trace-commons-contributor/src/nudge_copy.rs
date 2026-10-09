@@ -50,23 +50,21 @@ use crate::project_copy::folder_mode_ask_label;
 // The unpurposed backlog (U1): Traces and History card, panel row.
 // ---------------------------------------------------------------------
 
-/// Ron's draft card title (`native-app-design-data-audit.md:86`).
-/// DRAFT, NEEDS APPROVAL.
+/// Ron's card title (`native-app-design-data-audit.md:86`), ruled by
+/// decision 9.
 pub const NUDGE_BACKLOG_TITLE_RON: &str = "{n} unpurposed traces are waiting";
-/// [`NUDGE_BACKLOG_TITLE_RON`] for one. DRAFT, NEEDS APPROVAL.
+/// [`NUDGE_BACKLOG_TITLE_RON`] for one.
 pub const NUDGE_BACKLOG_TITLE_RON_ONE: &str = "1 unpurposed trace is waiting";
 /// The plain-wording alternative to [`NUDGE_BACKLOG_TITLE_RON`].
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_TITLE_PLAIN: &str = "{n} previewed sessions are waiting for a decision";
 /// [`NUDGE_BACKLOG_TITLE_PLAIN`] for one. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_TITLE_PLAIN_ONE: &str = "1 previewed session is waiting for a decision";
-/// The U1 card's title. Owner decision 9 picks between Ron's wording and
-/// plain wording. Plain wording, picked 2026-10-08: "unpurposed traces" is
-/// jargon a contributor has no reason to know. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_PLAIN;
-/// [`NUDGE_BACKLOG_TITLE`] for one, following the same pick. DRAFT, NEEDS
-/// APPROVAL.
-pub const NUDGE_BACKLOG_TITLE_ONE: &str = NUDGE_BACKLOG_TITLE_PLAIN_ONE;
+/// The U1 card's title. Owner decision 9 picked between Ron's wording and
+/// plain wording, and was ruled for Ron's wording on 2026-10-09.
+pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_RON;
+/// [`NUDGE_BACKLOG_TITLE`] for one, following the same pick.
+pub const NUDGE_BACKLOG_TITLE_ONE: &str = NUDGE_BACKLOG_TITLE_RON_ONE;
 /// DRAFT, NEEDS APPROVAL. The mode is named by its one spelling.
 pub const NUDGE_BACKLOG_BODY: &str = concat!(
     "They are in folders set to ",
@@ -116,11 +114,10 @@ pub const NUDGE_IDLE_BODY_ONE: &str = "It looks finished. Nothing is sent until 
      and keeping it on this computer is just as good an answer.";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_REVIEW: &str = "Review";
-/// The owner's draft of the N1 notification body (decision 28).
-/// DRAFT, NEEDS APPROVAL.
+/// The owner's draft of the N1 notification body, ruled by decision 28.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
     "{n} sessions from {tool} have been idle for {days}. Contribute them?";
-/// [`NOTIFY_IDLE_BODY_OWNER_DRAFT`] for one. DRAFT, NEEDS APPROVAL.
+/// [`NOTIFY_IDLE_BODY_OWNER_DRAFT`] for one.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE: &str =
     "1 session from {tool} has been idle for {days}. Contribute it?";
 /// The alternative to [`NOTIFY_IDLE_BODY_OWNER_DRAFT`]: a notification may
@@ -132,14 +129,12 @@ pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
 /// [`NOTIFY_IDLE_BODY_ALTERNATIVE`] for one. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
     "1 session from {tool} has been idle for {days} or more. Review it to send or keep.";
-/// The N1 notification body. Owner decision 28 picks between the owner's
-/// draft and the alternative; this selects the alternative the spec
-/// recommends until it is ruled, and changing the pick is this one line.
-/// DRAFT, NEEDS APPROVAL.
-pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
-/// [`NOTIFY_IDLE_BODY`] for one, following the same pick. DRAFT, NEEDS
-/// APPROVAL.
-pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_ALTERNATIVE_ONE;
+/// The N1 notification body. Owner decision 28 picked between the owner's
+/// draft and the alternative, and was ruled for the owner's draft on
+/// 2026-10-09.
+pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_OWNER_DRAFT;
+/// [`NOTIFY_IDLE_BODY`] for one, following the same pick.
+pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE;
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
 /// Folded into a due digest after its first sentence, never a separate
@@ -1034,12 +1029,14 @@ mod tests {
         );
     }
 
-    /// The backlog title is the plain wording (2026-10-08).
+    /// Decisions 9 and 28 are ruled (2026-10-09): Ron's backlog title and
+    /// the owner's N1 body, each with its singular form.
     #[test]
-    fn the_backlog_title_is_plain() {
-        assert_eq!(NUDGE_BACKLOG_TITLE, NUDGE_BACKLOG_TITLE_PLAIN);
-        assert!(!NUDGE_BACKLOG_TITLE.contains("unpurposed"));
-        assert!(!NUDGE_BACKLOG_TITLE_ONE.contains("unpurposed"));
+    fn ruled_copy_decisions_are_selected() {
+        assert_eq!(NUDGE_BACKLOG_TITLE, NUDGE_BACKLOG_TITLE_RON);
+        assert_eq!(NUDGE_BACKLOG_TITLE_ONE, NUDGE_BACKLOG_TITLE_RON_ONE);
+        assert_eq!(NOTIFY_IDLE_BODY, NOTIFY_IDLE_BODY_OWNER_DRAFT);
+        assert_eq!(NOTIFY_IDLE_BODY_ONE, NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE);
     }
 
     /// The threshold is a phrase, so "1 day" never reads "1 days", and no
