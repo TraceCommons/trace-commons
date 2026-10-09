@@ -329,6 +329,10 @@ pub(crate) struct MissionSlotSchedule {
     /// id. Memory only, never logged. A new enrollment mints a new device
     /// key, so enrolling again between two ticks still reads as a change.
     enrollment: Option<(String, String)>,
+    /// The live catalogue as the last tick saw it, so a change no fetch
+    /// makes -- the slot ageing out, its policy ending, `unenroll` -- is
+    /// still published. Memory only.
+    seen: Option<crate::contribution_missions::ContributionMissionCatalogue>,
 }
 
 impl MissionSlotSchedule {
@@ -423,13 +427,30 @@ pub(crate) fn contribution_catalogue(
 /// - **Missions with a supported predicate**: they replace the slot.
 ///
 /// Nothing is logged: the slot is the whole of its effect. Shells are told
-/// through the queue and status events when what they render could change.
+/// through the queue and status events when what they render could change:
+/// every tick, due or not, compares the live catalogue with the one the
+/// previous tick saw, so a slot that ages out or outlives its policy between
+/// fetches is published too.
 pub(crate) async fn refresh_mission_slot(
     shared: &DaemonShared,
     now: DateTime<Utc>,
     schedule: &mut MissionSlotSchedule,
 ) {
-    use super::mission_matching::{clear_catalogue, live_catalogue, receive_catalogue_until};
+    fetch_into_mission_slot(shared, now, schedule).await;
+    let live = super::mission_matching::live_catalogue(&shared.mission_catalogue, now);
+    if live != schedule.seen {
+        schedule.seen = live;
+        shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
+}
+
+async fn fetch_into_mission_slot(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+    schedule: &mut MissionSlotSchedule,
+) {
+    use super::mission_matching::{clear_catalogue, receive_catalogue_until};
     // The config is read before the schedule is consulted: an unenroll
     // between two due attempts must still reset it, or enrolling again
     // inside the interval would wait out the old enrollment's schedule.
@@ -460,7 +481,6 @@ pub(crate) async fn refresh_mission_slot(
     if !still_enrolled {
         return;
     }
-    let before = live_catalogue(&shared.mission_catalogue, now);
     match contribution_catalogue(&catalogue, now.date_naive()) {
         // A refusal empties the slot inside `receive_catalogue`; the bounds
         // asserted above keep a published predicate from causing one.
@@ -474,9 +494,5 @@ pub(crate) async fn refresh_mission_slot(
             let _ = receive_catalogue_until(&shared.mission_catalogue, &raw, now, not_after);
         }
         None => clear_catalogue(&shared.mission_catalogue),
-    }
-    if live_catalogue(&shared.mission_catalogue, now) != before {
-        shared.publish(super::ipc::EVENT_QUEUE_CHANGED, serde_json::json!({}));
-        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
     }
 }

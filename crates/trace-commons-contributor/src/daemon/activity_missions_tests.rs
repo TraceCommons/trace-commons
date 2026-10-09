@@ -828,3 +828,68 @@ async fn the_mission_slot_is_not_live_past_the_policy_end() {
     );
     server.abort();
 }
+
+/// Shells learn of every change to what the slot renders, including the
+/// ones no fetch makes: when the slot ages out after failed fetches, the
+/// first tick past the age limit -- due or not -- publishes `queue_changed`
+/// and `status_changed`, once.
+#[tokio::test]
+async fn the_mission_slot_publishes_when_it_ages_out() {
+    use crate::daemon::activity_missions::{
+        MISSION_SLOT_REFRESH, MissionSlotSchedule, refresh_mission_slot,
+    };
+    use crate::daemon::ipc::{EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED};
+    use crate::daemon::mission_matching::{MISSION_CATALOGUE_MAX_AGE, live_catalogue};
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust()]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer.clone(), calls.clone()).await;
+    let s = shared();
+    configure_catalogue(&s, &base);
+    let mut events = s.events.subscribe();
+    let mut published = || {
+        let mut names = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            names.push(event.event);
+        }
+        names
+    };
+    let step = chrono::TimeDelta::from_std(MISSION_SLOT_REFRESH).unwrap();
+    let max_age = chrono::TimeDelta::from_std(MISSION_CATALOGUE_MAX_AGE).unwrap();
+    let mut schedule = MissionSlotSchedule::default();
+    let now = Utc::now();
+
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert_eq!(
+        published(),
+        vec![EVENT_QUEUE_CHANGED.to_string(), EVENT_STATUS_CHANGED.to_string()]
+    );
+
+    // Every later fetch fails: the slot is kept, and nothing changes for a
+    // shell while it is live.
+    *answer.lock().unwrap() = (StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({}));
+    let mut at = now;
+    while at + step <= now + max_age {
+        at += step;
+        refresh_mission_slot(&s, at, &mut schedule).await;
+        assert!(published().is_empty());
+    }
+    assert!(live_catalogue(&s.mission_catalogue, at).is_some());
+    let fetched = calls.load(Ordering::SeqCst);
+
+    // Past the age limit, on a tick that is not due to fetch.
+    let past = now + max_age + chrono::TimeDelta::seconds(1);
+    assert!(!schedule.due(past));
+    refresh_mission_slot(&s, past, &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), fetched);
+    assert!(live_catalogue(&s.mission_catalogue, past).is_none());
+    assert_eq!(
+        published(),
+        vec![EVENT_QUEUE_CHANGED.to_string(), EVENT_STATUS_CHANGED.to_string()]
+    );
+    refresh_mission_slot(&s, past + chrono::TimeDelta::seconds(1), &mut schedule).await;
+    assert!(published().is_empty(), "published once, not on every tick");
+    server.abort();
+}
