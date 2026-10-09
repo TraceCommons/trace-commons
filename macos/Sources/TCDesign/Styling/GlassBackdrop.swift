@@ -89,7 +89,9 @@ struct GlassBackdrop: NSViewRepresentable {
             guard #available(macOS 26.0, *) else { return nil }
             let glass = NSGlassEffectView()
             glass.style = GlassTheme.flatMaterial == .clearTint ? .clear : .regular
-            glass.tintColor = GlassTokens.Color.glassVeil.dynamicNSColor
+            // Lighter than the veil: a window in focus reads lighter than one
+            // out of focus, where the full veil is painted (`paintsVeil`).
+            glass.tintColor = GlassTheme.focusedTint.dynamicNSColor
             glass.appearance = GlassTheme.materialAppearance
             glass.cornerRadius = cornerRadius
             return glass

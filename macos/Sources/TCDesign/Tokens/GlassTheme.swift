@@ -49,9 +49,10 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     /// The native material under a flat pane. `clearTint` is the default:
     /// Liquid Glass, for the system's refraction, tinted with the veil,
     /// which of the five came closest to the mock (owner comparison,
-    /// 2026-10-09). Liquid Glass drops its tint in a window out of focus;
-    /// `paintsVeil` paints it back there, so the tint holds and only the
-    /// system's frost changes, as the HUD material's look holds.
+    /// 2026-10-09). In focus the glass carries a lighter tint
+    /// (`focusedTint`); out of focus, where Liquid Glass drops its tint,
+    /// the full veil is painted (`paintsVeil`), so a background window is
+    /// the darker one.
     /// `TC_GLASS_MATERIAL` picks another, for comparison.
     enum FlatMaterial: String {
         /// Liquid Glass, frosted, with the veil as the glass's own tint.
@@ -75,6 +76,20 @@ public enum GlassTheme: String, Sendable, CaseIterable {
     /// (the app's own) for classic.
     static var materialAppearance: NSAppearance? {
         current == .flat ? NSAppearance(named: .darkAqua) : nil
+    }
+
+    /// The Liquid Glass tint while the window is in focus: the veil at
+    /// `focusedTintShare` of its alpha, so a window in focus is the lighter
+    /// one and a window out of focus, under the full painted veil, the
+    /// darker, as macOS dims a background window (owner feedback,
+    /// 2026-10-09).
+    static let focusedTintShare = 0.6
+
+    static var focusedTint: GlassRGBA {
+        let veil = GlassTokens.Color.glassVeil
+        return GlassRGBA(
+            veil.rgb, alpha: veil.alpha * focusedTintShare,
+            light: GlassRGBA(veil.lightRGB ?? veil.rgb, alpha: (veil.lightAlpha ?? veil.alpha) * focusedTintShare))
     }
 
     /// Whether a pane paints the veil itself. Where the glass carries the
