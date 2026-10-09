@@ -85,8 +85,12 @@ A pass prints one line to stdout and exits with 0:
 PipelineCompareOK: traces=10 equal=10 permitted=0 unexplained=0 partial=false seconds=12 run=q0af28b7a report=.local/pipeline-comparison-pipeline_comparison_local.json
 ```
 
-`seconds=` is the time of step 3. It includes the build of the test binary
-when the command builds, so it is not the time of the comparison.
+`seconds=` covers step 3 and what `pipeline.py` does immediately before
+and after it: it makes the two scenario databases, it builds the test
+binary when a build is necessary, it runs the harness, it reads the number
+of committed transactions, and it validates the report. It does not cover
+the export, the start of the PostgreSQL container, or the check of the
+check result. Thus `seconds=` is not the time of the comparison.
 The timing file of the run (`compare_run-timing.jsonl` in the run
 directory) has the time of each trace; see
 [Where the files are](#where-the-files-are).
@@ -353,8 +357,10 @@ EOF
 ```
 
 The line holds the recorded trace (`trace_file`) that the run sent to the
-two sides. It does not hold the name of the dataset file: line `n` of the
-sample is the `n`-th file, in name order, that the export accepted. The two
+two sides. It does not hold the name of the dataset file. The trace of
+`position` `p` is the (`p` + 1)-th file, in name order, that the export
+accepted: line `p` + 1 of the bootstrap file, or line
+`p` + 1 - `bootstrap_count` of the holdout file. The two
 records of the trace are the lines `2 * position + 1` (baseline) and
 `2 * position + 2` (candidate) of the records file.
 
@@ -531,6 +537,12 @@ safe label on stderr, as `PipelineFailure: <label>`. See
 The labels that `compare` shares with the other commands are in
 [Labels of the shared tooling](#labels-of-the-shared-tooling).
 
+One refusal does not have this form. `pipeline.py` refuses an argument that
+looks like a URL before it starts a run; only the value of
+`--postgres-admin-url` can be a URL. Today this refusal ends with a Python
+traceback that names `argument_looks_like_url`, not with a
+`PipelineFailure` line.
+
 The harness is a child. `pipeline.py` shows a harness failure in one of two
 ways:
 
@@ -657,11 +669,12 @@ and `qualify`:
 | `step_failed:<step>` | A child step, an export or the harness, exited with a code that is not 0. The line also has `exit=` and `log=`. |
 | `cargo_test_list_failed:<step>`, `cargo_filter_matched_zero_tests` | The list step of `cargo test` failed, usually with a compile error, or the name of the harness test matched no test. |
 | `hf_<field>_mismatch`, `hf_manifest_contains_raw_trace_text` | A digest of the export manifest is not the digest of the pin (for example `hf_bootstrap_corpus_digest_mismatch`), or the manifest does not say `contains_raw_trace_text: false`. A source or an order that changed fails earlier, in the export itself (`step_failed:compare_export_corpus`). |
-| `pipeline_tooling_container_start_failed`, `pipeline_tooling_container_not_ready`, `pipeline_tooling_container_port_unavailable`, `pipeline_tooling_admin_url_invalid`, `pipeline_tooling_server_busy` | The environment could not start. Docker could not start the container, its server did not get ready, or its port could not be read; or the admin URL does not have the host `127.0.0.1` and the user `trace`; or another `pipeline.py` command holds that server. |
+| `pipeline_tooling_container_start_failed`, `pipeline_tooling_container_not_ready`, `pipeline_tooling_container_port_unavailable`, `pipeline_tooling_admin_url_invalid`, `pipeline_tooling_server_busy` | The environment could not start. Docker could not start the container, its server did not get ready, or its port could not be read; or the admin URL does not have the host `127.0.0.1` and the user `trace`; or the lock database `pipeline_tooling_lock` could not be created on that server, for example because another `pipeline.py` command holds it. |
 | `database_check_executed_nothing:<step>` | The harness passed, but the scenario database shows fewer than 5 committed transactions. |
+| `pipeline_tooling_sql_failed` | A SQL statement of the tooling that has no step of its own failed. For `compare`, that is the read of the committed transactions after a harness that passed. |
 | `unsupported_report_schema`, `invalid_report_scope`, `payout_enabled`, `missing_local_blockers`, `unsafe_report`, `unsafe_report_field`, `unsafe_report_value`, `private_report_field`, `invalid_report_check_id`, `invalid_report_hash`, `report_digest_mismatch` | The report of a harness that passed fails a check that it shares with a corpus report: the schema, the scope, the payout flag, the blockers, a field name or a value that is not safe, the check id, the form of a hash, or the digest of the report. |
-| `check_result_missing:<check id>`, and each other `check_result_*` or `check_evidence_*` label | A full run that passed did not leave a valid, current pass result of its own. See [pipeline-qualification.md](pipeline-qualification.md#the-result-contract-and-what-makes-a-result-invalid). |
-| `code_revision_changed` | A file of the tree changed while the command ran. The report is not written under `.local/`. |
+| `check_result_missing:<check id>`, each other `check_result_*` or `check_evidence_*` label, `unsafe_evidence_field`, `unsafe_evidence_value` | A full run that passed did not leave a valid, current pass result of its own, with evidence that holds only labels, hashes, and counts. See [pipeline-qualification.md](pipeline-qualification.md#the-result-contract-and-what-makes-a-result-invalid). |
+| `code_revision_changed` | At the end of a `compare --corpus` run that passed each other check, the hash of the tree is not the hash at the start of the command: a file changed while the command ran. The report is not written under `.local/`. A run that failed earlier does not make this check. |
 | `cleanup_failed` | The environment could not remove its container or its databases. |
 | `pipeline_check_environment_invalid`, `pipeline_check_environment_incomplete`, `pipeline_check_already_emitted` | In the log of the harness step. The check result variables are not valid or not complete, or a result of this check id exists already in the results directory. |
 | `pipeline_output_directory_unwritable`, `pipeline_output_unwritable` | In the log of the harness step. The harness could not write its report file. |
@@ -770,9 +783,20 @@ the full run.
   `records_digest`.
 
 The full run of 10,000 traces is estimated at 1 to 1.5 hours. This is an
-estimate from the 1,000-trace run, not a measurement. Some costs grow with
-the number of traces: the two index scans, and the file reads of the old
-path. They are small at 1,000 traces and are not measured beyond it.
+estimate from the 1,000-trace run, not a measurement. These costs grow with
+the number of traces:
+
+- The two index scans.
+- Each audit append of the old path reads the full audit log file of the
+  tenant (`audit/events.jsonl`) three times.
+- Each credit event of the old path reads the full credit event file of the
+  tenant (`credit_ledger/events.jsonl`). Only a trace that passes the two
+  gates gets a credit event.
+
+A fourth cost of the old path, the scan of the derived records at each
+receipt, is not in a run: the harness removes the derived files after each
+trace (blocker `baseline_derived_scan_removed`). The costs that stay are
+small at 1,000 traces and are not measured beyond it.
 
 ### Disk space
 
