@@ -3,6 +3,7 @@
   "$notes": [
     "Button size (owner ruling, 2026-10-08): size.cta is the action-bar height for every button kind, not only the primary: in a window's action bar (the footer row holding the primary CTA, in a window, a sheet or a modal) every button is the CTA's size (GlassButtonSize.bar). size.controlLarge is the inline size: glass and destructive buttons inside cards, rows, fields, popovers and toolbars (GlassButtonSize.inline, the default).",
     "Window tier: #1146's window-level tokens (--tc-blur-window, --tc-blur-popover, --tc-blur-scrim, --tc-rim-window, --tc-rim-width, --tc-shadow-window and the three --tc-scene-glow colours) have no entry here. On macOS the native material does that work: panes are Liquid Glass on macOS 26 and the HUD vibrancy material before it, the window has no rim of ours, and the scene is the desktop. A shell with no native material would need them back.",
+    "Edge rail (Run 1 OS-level Explorations, 1b): size.edgeRail* and space.edgeRail* are the rail's measures. Closed, the rail is a zone edgeRailZoneWidth by edgeRailZoneHeight on the screen's right edge holding the edgeRailHandle bar; open, a pane edgeRailWidth wide of edgeRailTile tiles, edgeRailInset in from the edge, with an edgeRailPeekWidth pane edgeRailGap to its left. Both are panes on the desktop (radius.pane); a tile takes radius.cardQuiet and the control tiers: controlHover under the pointer, controlSelected with textOnSelected when its peek is shown.",
     "Opacity: disabled (0.45) is the one disabled dimming for every control, #1146's --tc-cta-disabled-opacity; the submit pill and the checkbox, which #1146 dims to .55 and .7, use it too. The submit pill keeps its statusOff ink when disabled. rowOff (0.6) is a list row that is off, #1146's .tc-list-row[data-off]. At 0.6 a faded textTertiary sub-line is about 3.9:1 on the pane, so an off row sets its sub-line in textSecondary, which faded clears 4.5:1 (TextContrastTests)."
   ],
   "version": 1,
@@ -39,6 +40,7 @@
     "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material.", "light": { "hex": "#f4f5f8", "alpha": 0.96 } },
     "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec).", "light": { "hex": "#f2f3f6" } },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast.", "light": { "hex": "#ffffff", "alpha": 0.3 } },
+    "edgeRailHandle": { "hex": "#ffffff", "alpha": 0.28, "note": "The closed edge rail's handle, a 3 by 72 bar drawn straight on the desktop at the screen's right edge (Run 1 OS-level Explorations, 1b). Not text: it marks where to rest the pointer.", "light": { "hex": "#1d1d1f", "alpha": 0.28 } },
     "inactiveDim": { "hex": "#000000", "alpha": 0, "note": "Painted over a pane's veil while its window is out of focus, so a background window reads darker. Classic paints nothing (alpha 0); the flat theme sets it." },
     "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
     "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.", "light": { "hex": "#ebebed", "alpha": 0.84 } },
@@ -238,7 +240,9 @@
     "cardGap": 10,
     "inlineGap": 6,
     "modalInsetTop": 52,
-    "modalInset": 28
+    "modalInset": 28,
+    "edgeRailInset": 12,
+    "edgeRailGap": 16
   },
   "size": {
     "control": 26,
@@ -283,7 +287,16 @@
     "skeletonHeight": 12,
     "textAreaMinHeight": 56,
     "radio": 15,
-    "radioDot": 5
+    "radioDot": 5,
+    "edgeRailWidth": 56,
+    "edgeRailTile": 44,
+    "edgeRailRuleWidth": 28,
+    "edgeRailPeekWidth": 380,
+    "edgeRailOpenHeight": 560,
+    "edgeRailZoneWidth": 4,
+    "edgeRailZoneHeight": 240,
+    "edgeRailHandleWidth": 3,
+    "edgeRailHandleHeight": 72
   },
   "opacity": {
     "disabled": 0.45,

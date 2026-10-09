@@ -51,6 +51,10 @@ final class EdgeRailController {
             .environmentObject(model)
             .environment(compute)
             .tint(GlassTokens.Color.purpleSoft.color)
+            // The panel never becomes key, but the rail is what the person
+            // is using while it is open: it draws in focus, without the
+            // flat theme's out-of-focus dim (`inactiveDim`).
+            .environment(\.controlActiveState, .key)
         panel.contentView = NSHostingView(rootView: root)
         self.panel = panel
         state.open = false
