@@ -2522,6 +2522,9 @@ snapshots.
 `main`'s operational summary leaves the derived records of pipeline
 submissions out of its vector counts and its `missing_active_vectors` gate.
 Its submission counts and review counts include pipeline submissions.
+`main`'s benchmark export, its two ranker exports and its process-evaluation
+worker leave pipeline submissions out. The process-evaluation job route
+refuses one with `409` `pipeline_run_owns_submission`.
 
 ## DB reconciliation of a pipeline tenant
 

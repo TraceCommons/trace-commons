@@ -8906,6 +8906,161 @@ async fn mains_database_replay_export_leaves_pipeline_submissions_out() {
     assert_ne!(exported, vec![serde_json::json!(run.submission_id)]);
 }
 
+/// Consent that lets a submission into `main`'s benchmark export, ranker
+/// export and process evaluation, so that only the pipeline filter can leave
+/// one out.
+fn allow_exports_and_evaluation(envelope: &mut TraceContributionEnvelope) {
+    envelope.consent.scopes = vec![
+        ConsentScope::DebuggingEvaluation,
+        ConsentScope::RankingTraining,
+    ];
+    envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+    envelope.trace_card.allowed_uses = vec![
+        TraceAllowedUse::Evaluation,
+        TraceAllowedUse::BenchmarkGeneration,
+        TraceAllowedUse::RankingModelTraining,
+    ];
+}
+
+/// One accepted pipeline submission and one accepted legacy submission of
+/// one tenant, database reviewer reads on, for the tests of `main`'s
+/// exports and process evaluation.
+async fn mixed_submissions_fixture() -> Option<(ProductFixture, Arc<AppState>, Uuid, Uuid)> {
+    let mut fixture = product_fixture().await?;
+    {
+        let state = Arc::make_mut(&mut fixture.base.state);
+        state.db_reviewer_reads = true;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.base.runtime.clone())));
+    }
+    let state = fixture.base.state.clone();
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let mut pipeline = sample_envelope().await;
+    pipeline.submission_id = Uuid::new_v4();
+    pipeline.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    set_metadata_only_tool_name(&mut pipeline, "pipeline-tool");
+    allow_exports_and_evaluation(&mut pipeline);
+    let run = completed_run_of(&fixture.base.service, tenant, &principal, &pipeline).await;
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    set_metadata_only_tool_name(&mut legacy, "legacy-tool");
+    allow_exports_and_evaluation(&mut legacy);
+    let legacy_id = legacy.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&fixture.base.token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+    Some((fixture, state, run.submission_id, legacy_id))
+}
+
+/// `main`'s benchmark export leaves the submissions with a pipeline run out
+/// of its sources (their stored bodies are pipeline artifacts, which the
+/// export cannot decode): the export runs, and a legacy submission is still
+/// exported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_benchmark_export_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, artifact) = route_request(
+        state,
+        "POST",
+        "/v1/workers/benchmark-convert",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"purpose": "trace_commons_benchmark_candidate_conversion"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{artifact}");
+    assert_eq!(
+        artifact["source_submission_ids"],
+        serde_json::json!([legacy_id]),
+        "{artifact}"
+    );
+    assert_ne!(
+        artifact["source_submission_ids"],
+        serde_json::json!([pipeline_id])
+    );
+}
+
+/// The same for `main`'s ranker training candidates export.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_ranker_export_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, export) = route_request(
+        state,
+        "GET",
+        "/v1/ranker/training-candidates",
+        auth_headers(&fixture.export_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{export}");
+    let exported = export["candidates"]
+        .as_array()
+        .expect("the exported candidates")
+        .iter()
+        .map(|candidate| candidate["submission_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(exported, vec![serde_json::json!(legacy_id)], "{export}");
+    assert_ne!(exported, vec![serde_json::json!(pipeline_id)]);
+}
+
+/// `main`'s process-evaluation worker leaves the submissions with a pipeline
+/// run out of its candidates, and its job route refuses one with `409`
+/// `pipeline_run_owns_submission`: the evaluation of a pipeline submission
+/// is the pipeline's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_process_evaluation_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, run) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/process-evaluations/run",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({
+            "dry_run": true,
+            "limit": 10,
+            "evaluator_ref": "judge-v1",
+            "reason": "process evaluation of a mixed tenant",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(
+        run["evaluated_submission_ids"],
+        serde_json::json!([legacy_id]),
+        "{run}"
+    );
+    let job = |submission_id: Uuid| {
+        route_request(
+            state.clone(),
+            "POST",
+            "/v1/workers/process-evaluation",
+            auth_headers(&fixture.admin_token),
+            Some(serde_json::json!({
+                "submission_id": submission_id,
+                "process_evaluation": {"evaluator_version": "judge-v1"},
+                "reason": "process evaluation of a mixed tenant",
+            })),
+        )
+    };
+    let (status, refused) = job(pipeline_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(
+        refused["error"], "pipeline_run_owns_submission",
+        "{refused}"
+    );
+    let (_, legacy) = job(legacy_id).await;
+    assert_ne!(legacy["error"], "pipeline_run_owns_submission", "{legacy}");
+}
+
 /// Zaki review 1, round 2, N-2: the pipeline assessment route applies the
 /// privileged-action consent check `main`'s review decision route applies
 /// (`ensure_record_matches_privileged_action_policy_abac`): a reviewer whose

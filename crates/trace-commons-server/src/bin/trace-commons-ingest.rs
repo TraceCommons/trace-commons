@@ -41708,6 +41708,7 @@ async fn run_process_evaluation_job(
         )?;
     }
 
+    refuse_a_pipeline_submission(state, &tenant.tenant_id, body.submission_id).await?;
     let mut record = read_utility_submission_record(state, tenant, body.submission_id)
         .await
         .map_err(internal_error)?
@@ -41932,7 +41933,7 @@ async fn run_process_evaluation_worker(
     )
     .await?;
     let tenant_policy = tenant_process_evaluation_policy_for_request(state, tenant).await?;
-    let view = read_reviewer_metadata_view(state, tenant)
+    let view = read_mains_reviewer_metadata_view(state, tenant)
         .await
         .map_err(internal_error)?;
     let derived_by_submission = view
@@ -54081,7 +54082,7 @@ async fn run_benchmark_conversion_job(
         state,
         &job,
         "benchmark export job failure",
-        read_reviewer_metadata_view(state, tenant).await,
+        read_mains_reviewer_metadata_view(state, tenant).await,
     )
     .await?;
     let mut accepted_by_submission = BTreeMap::new();
@@ -59298,7 +59299,7 @@ async fn collect_ranker_training_candidates(
     tenant_policy: Option<&TenantSubmissionPolicy>,
 ) -> anyhow::Result<Vec<TraceRankerTrainingCandidate>> {
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state, tenant).await?;
+        read_mains_reviewer_metadata_view(state, tenant).await?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
