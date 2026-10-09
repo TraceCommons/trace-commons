@@ -1192,8 +1192,16 @@ pulled from GCS. From a clean checkout at the commit you intend to ship:
 ```sh
 gcloud builds submit --config cloudbuild.yaml \
   --project tracecommons-pilot-2026 \
-  --substitutions _TAG=$(git rev-parse --short HEAD)
+  --substitutions _TAG=$(git rev-parse --short HEAD),_CODE_REVISION_HASH=$(python3 scripts/operator/pipeline.py revision)
 ```
+
+`_CODE_REVISION_HASH` becomes `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` in the
+build. Compute it in the same clean checkout you upload: `pipeline.py revision`
+hashes the git tree, which `.gcloudignore` keeps out of the upload, so the build
+cannot compute it itself. A value that is not a `sha256:` digest fails the build.
+Left out, the binary has no revision, and the pipeline's qualification and
+activation routes refuse with `bundle_runtime_revision_unknown`; nothing else
+changes.
 
 Roughly 6 minutes on `E2_HIGHCPU_32`. **Wait for `SUCCESS` before installing:**
 

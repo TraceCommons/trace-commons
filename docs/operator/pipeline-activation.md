@@ -666,18 +666,17 @@ not such a digest refuses to start: `pipeline_code_revision_invalid`. `GET
 /v1/admin/config-status` shows whether the binary has a revision
 (`pipeline_code_revision_configured`).
 
-Nothing in this repository sets the variable for you. The revision matters only
-for a production distribution's own build, which injects a pipeline runtime.
-The binary that this repository builds, `cloudbuild.yaml` included, has no
-runtime: `qualifications`, `activate`, and `rollback` answer `404` `pipeline
-runtime not configured` there, before the revision is read, so a revision
-changes no upload and no change route there. It changes one field of `GET
-/v1/admin/pipeline/routing`: `active_bundle_qualified_on_revision` is null
-without a revision. A distribution's build must pass
-`TRACE_COMMONS_BUILD_CODE_REVISION_HASH` itself, with the value that
-`pipeline.py revision` printed in a checkout of the tree it compiles. (This
-repository's `.gcloudignore` drops `.git/` from the uploaded source, so a Cloud
-Build cannot compute the value from its own tree.)
+`cloudbuild.yaml` takes the value as the `_CODE_REVISION_HASH` substitution
+("Build and install" in [deployment.md](deployment.md)); any other build must
+pass `TRACE_COMMONS_BUILD_CODE_REVISION_HASH` itself, with the value that
+`pipeline.py revision` printed in a checkout of the tree it compiles. Compute it
+before uploading: this repository's `.gcloudignore` drops `.git/` (and `docs/`)
+from the uploaded source, so a Cloud Build cannot compute the value from its own
+tree. A binary running without a pipeline runtime answers `404` `pipeline
+runtime not configured` on `qualifications`, `activate`, and `rollback` before
+the revision is read, so there a revision changes no upload and no change route.
+It changes one field of `GET /v1/admin/pipeline/routing`:
+`active_bundle_qualified_on_revision` is null without a revision.
 
 The infrastructure profile. The routes derive it from this process's own
 configuration (the fields `GET /v1/admin/config-status` reports). A request
