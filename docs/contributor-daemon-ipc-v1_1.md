@@ -3926,6 +3926,26 @@ daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.
 
+**Route tallies.** The same store keeps, per session, a tally of where its
+proxy calls went (owner question Q3, default taken): counts only, keyed by
+the same keyed session-ID digest under the same key (owner decision D15,
+extended). After each refresh of the proxy ledger the daemon folds the
+ledger's last 24 hours into it, each call once: calls per proof bucket
+(`verified`; `gateway_only`, `unattested`, `pending` or `unavailable`;
+`failed`; `outside`; no label), tokens per bucket (uncached input, cache
+reads, cache writes and output, normalized per facade as `insights_glance`
+reads them), calls whose tokens are unknown, and the latest call's time. A
+call is skipped when it has no ledger id, no or an empty session ID, or no
+single tool can be named for it; the tool is never guessed. A ledger that
+started over is folded from its start. `cost_usd`, backend and model names
+are never read into it (owner decision D5, open), and no session ID is
+stored. Nothing is folded, and neither the ledger nor the store is read for
+it, unless both `insights_ledger_feed` (owner decision D3, open, default off)
+and `insights_counter_pass` are on. A tally goes when its session is dropped
+for a Never folder, or, once no stored row matches it, when its last call is
+more than 13 weeks old; at most 2048 are kept, oldest last call first.
+`unenroll` removes them with the store. The tallies reach no answer yet.
+
 `iso_week` is optional: a `YYYY-Www` string naming a real ISO week (for
 example `2026-W38`); absent or `null` is the week holding now. Anything else
 is `bad_params` / `iso-week-invalid`. `tz` is optional, in the same form as

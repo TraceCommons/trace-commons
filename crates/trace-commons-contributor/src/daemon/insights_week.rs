@@ -46,6 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Datelike, Duration, FixedOffset, NaiveDate, Offset, Utc, Weekday};
@@ -55,6 +56,8 @@ use trace_commons_protocol::insights_usage_series::{
     harness_session_digest, key_fingerprint, project_digest, session_key,
 };
 
+use super::inference_map::Speakers;
+use super::insights_route_tally::{FoldSummary, RouteTally, fold_into, fold_plan, prune};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use crate::config::ConfigStore;
 use crate::insights::SourceFormat;
@@ -209,6 +212,16 @@ struct CounterStore {
     key_fingerprint: KeyedDigest,
     next_seq: u64,
     rows: BTreeMap<KeyedDigest, CounterRow>,
+    /// Each session's route tally, keyed by its harness-session digest
+    /// under this store's key (owner question Q3 and decision D15 extended,
+    /// defaults taken). Apart from `rows` because the ledger's calls arrive
+    /// before the quiet-period pass reads the transcript. Absent in a store
+    /// written before tallies, which loads with none.
+    #[serde(default)]
+    routing: BTreeMap<KeyedDigest, RouteTally>,
+    /// The highest ledger row id folded into `routing`; `None` before any.
+    #[serde(default)]
+    ledger_folded_through: Option<i64>,
 }
 
 impl CounterStore {
@@ -218,6 +231,8 @@ impl CounterStore {
             key_fingerprint,
             next_seq: 0,
             rows: BTreeMap::new(),
+            routing: BTreeMap::new(),
+            ledger_folded_through: None,
         }
     }
 }
@@ -276,6 +291,11 @@ pub struct CounterPass {
     last_pass_at: Mutex<Option<DateTime<Utc>>>,
     /// The last failure label logged, so a refused keychain is logged once.
     last_failure: Mutex<Option<&'static str>>,
+    /// The same, for the ledger fold.
+    last_fold_failure: Mutex<Option<&'static str>>,
+    /// Bumped by every `clear`, so a fold that read the settings before an
+    /// unenroll turned the pass off cannot write the store back after it.
+    cleared: AtomicU64,
 }
 
 impl CounterPass {
@@ -298,6 +318,8 @@ impl CounterPass {
             cached: Mutex::new(None),
             last_pass_at: Mutex::new(None),
             last_failure: Mutex::new(None),
+            last_fold_failure: Mutex::new(None),
+            cleared: AtomicU64::new(0),
         }
     }
 
@@ -437,9 +459,15 @@ impl CounterPass {
         }
         let mut store = (*current).clone();
         store.schema = COUNTER_STORE_SCHEMA.to_string();
+        // A session dropped for a Never folder takes its tally with it; one
+        // that only aged out keeps it until its last call does too.
+        let mut gone: BTreeSet<KeyedDigest> = BTreeSet::new();
         for session in &removals {
-            if store.rows.remove(session).is_some() {
+            if let Some(row) = store.rows.remove(session) {
                 summary.dropped += 1;
+                if never.contains(&row.project) {
+                    gone.extend(row.harness_session);
+                }
             }
         }
         for (session, mut row) in reads {
@@ -453,6 +481,7 @@ impl CounterPass {
             COUNTER_STORE_MAX_TURNS,
             COUNTER_STORE_MAX_TOOL_CALLS,
         );
+        prune_routing(&mut store, &gone, cutoff);
         self.save(store)?;
         Ok(summary)
     }
@@ -605,6 +634,7 @@ impl CounterPass {
             Err(_) => return Err(ERR_CLEAR_FAILED),
         }
         *cached = None;
+        self.cleared.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut at) = self.last_pass_at.lock() {
             *at = None;
         }
@@ -626,6 +656,14 @@ impl CounterPass {
     /// there is no store yet; an unreadable store is an error, never empty.
     fn load_cached(&self) -> Result<Option<Arc<CounterStore>>, &'static str> {
         let mut cached = self.cached.lock().map_err(|_| UNREADABLE_STORE)?;
+        self.load_into(&mut cached)
+    }
+
+    /// `load_cached` for a caller already holding the cache lock.
+    fn load_into(
+        &self,
+        cached: &mut Option<Arc<CounterStore>>,
+    ) -> Result<Option<Arc<CounterStore>>, &'static str> {
         if let Some(store) = cached.as_ref() {
             return Ok(Some(Arc::clone(store)));
         }
@@ -644,13 +682,127 @@ impl CounterPass {
     }
 
     fn save(&self, store: CounterStore) -> Result<(), &'static str> {
+        let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
+        self.save_into(&mut cached, store)
+    }
+
+    /// `save` for a caller already holding the cache lock.
+    fn save_into(
+        &self,
+        cached: &mut Option<Arc<CounterStore>>,
+        store: CounterStore,
+    ) -> Result<(), &'static str> {
         let body = serde_json::to_vec(&store).map_err(|_| STORE_WRITE_FAILED)?;
         let dir = self.rows_path.parent().ok_or(STORE_WRITE_FAILED)?;
-        let mut cached = self.cached.lock().map_err(|_| STORE_WRITE_FAILED)?;
         crate::config::write_atomic_0600(dir, &self.rows_path, &body)
             .map_err(|_| STORE_WRITE_FAILED)?;
         *cached = Some(Arc::new(store));
         Ok(())
+    }
+
+    /// Fold the ledger's new calls into the route tallies.
+    ///
+    /// `enabled` is asked first: off, nothing is read, not the ledger, the
+    /// store, the key or the tools (owner decision D3, open, and D4). The
+    /// window is the ledger's own 24 hours, and the store's cursor says which
+    /// rows were folded already, so a call counts once across ticks, reloads
+    /// and restarts of this process (see `insights_route_tally::fold_plan`).
+    /// `speakers` is asked only when a new row carries a session id.
+    ///
+    /// Never makes a key: before the counter pass has made one there is no
+    /// store to fold into, and the next fold after the pass takes the same
+    /// window. A store under another key is left for the pass to start
+    /// again.
+    ///
+    /// Lock order: `enabled` (the settings lock) and `speakers` (the tools'
+    /// config files, the private-inference state and settings locks) are
+    /// asked with no lock of this pass held. The cache lock is then held
+    /// across load, fold and write, as `clear` holds it across removal, so
+    /// the two cannot interleave.
+    pub(crate) fn fold_ledger(
+        &self,
+        enabled: &dyn Fn() -> bool,
+        ledger: &dyn crate::routing::RoutingLedger,
+        speakers: &mut dyn FnMut() -> Speakers,
+        now: DateTime<Utc>,
+    ) -> Result<FoldSummary, &'static str> {
+        let cleared = self.cleared.load(Ordering::SeqCst);
+        if !enabled() {
+            return Ok(FoldSummary::default());
+        }
+        let result = self.fold_inner(cleared, ledger, speakers, now);
+        let failure = result.as_ref().err().copied();
+        if let Ok(mut last) = self.last_fold_failure.lock() {
+            if *last != failure {
+                if let Some(label) = failure {
+                    // A fixed label only.
+                    tracing::warn!(label, "insights ledger fold skipped");
+                }
+                *last = failure;
+            }
+        }
+        result
+    }
+
+    fn fold_inner(
+        &self,
+        cleared: u64,
+        ledger: &dyn crate::routing::RoutingLedger,
+        speakers: &mut dyn FnMut() -> Speakers,
+        now: DateTime<Utc>,
+    ) -> Result<FoldSummary, &'static str> {
+        let window = ledger
+            .exchanges_since(now - Duration::hours(crate::routing::ironwire::REFRESH_WINDOW_HOURS));
+        // A first look, without the lock, to learn whether anything is new
+        // and the tools need reading.
+        let peek = self.load_cached()?;
+        let through = peek.as_ref().and_then(|store| store.ledger_folded_through);
+        let plan = fold_plan(&window, through);
+        if plan.rows.is_empty() && plan.through == through {
+            return Ok(FoldSummary::default());
+        }
+        let speakers = if plan.needs_speakers() {
+            speakers()
+        } else {
+            Vec::new()
+        };
+
+        let mut cached = self.cached.lock().map_err(|_| UNREADABLE_STORE)?;
+        if self.cleared.load(Ordering::SeqCst) != cleared {
+            return Ok(FoldSummary::default());
+        }
+        let Some(key) = self.keys.load().map_err(|_| UNREADABLE_KEY)? else {
+            return Ok(FoldSummary::default());
+        };
+        let fingerprint = key_fingerprint(&key);
+        let mut store = match self.load_into(&mut cached)? {
+            Some(store) if store.key_fingerprint == fingerprint => (*store).clone(),
+            Some(_) => return Ok(FoldSummary::default()),
+            None => CounterStore::empty(fingerprint),
+        };
+        // Planned again under the lock, from the cursor as it now stands.
+        let plan = fold_plan(&window, store.ledger_folded_through);
+        if plan.rows.is_empty() && plan.through == store.ledger_folded_through {
+            return Ok(FoldSummary::default());
+        }
+        let summary = fold_into(&mut store.routing, &key, &plan, &speakers);
+        store.ledger_folded_through = plan.through;
+        prune_routing(
+            &mut store,
+            &BTreeSet::new(),
+            now - Duration::weeks(COUNTER_STORE_KEEP_WEEKS),
+        );
+        self.save_into(&mut cached, store)?;
+        Ok(summary)
+    }
+
+    /// How many sessions have a route tally, for tests outside this module.
+    #[cfg(test)]
+    pub(crate) fn tallied_sessions_for_test(&self) -> usize {
+        self.load_cached()
+            .ok()
+            .flatten()
+            .map_or(0, |store| store.routing.len())
     }
 }
 
@@ -836,6 +988,46 @@ impl DigestKeyStore for KeyFileInDir {
     fn clear(&self) -> Result<(), DigestKeyError> {
         self.0.clear()
     }
+}
+
+/// Age out and cap the route tallies against the rows the store keeps.
+fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff: DateTime<Utc>) {
+    let matched: BTreeSet<KeyedDigest> = store
+        .rows
+        .values()
+        .filter_map(|row| row.harness_session)
+        .collect();
+    prune(
+        &mut store.routing,
+        &matched,
+        gone,
+        cutoff,
+        COUNTER_STORE_MAX_SESSIONS,
+    );
+}
+
+/// After the routing ledger's refresh: fold its new calls into the route
+/// tallies, only while both `insights_ledger_feed` (owner decision D3, open)
+/// and `insights_counter_pass` (D4, open) are on. Gated on the pass too
+/// because the tallies live in its store: unenroll turns the pass off and
+/// clears the store, and a fold gated on the feed alone would write it back.
+/// A poisoned settings lock reads as off. Failures are logged inside, by
+/// fixed label only.
+pub(crate) fn fold_ledger_after_refresh(
+    shared: &DaemonShared,
+    ledger: &dyn crate::routing::RoutingLedger,
+) {
+    let enabled = || {
+        shared
+            .settings
+            .lock()
+            .is_ok_and(|settings| settings.insights_ledger_feed && settings.insights_counter_pass)
+    };
+    let mut speakers =
+        || super::inference_map::speakers_from_rows(&super::harness::rows_now(shared));
+    let _ = shared
+        .insights_counter
+        .fold_ledger(&enabled, ledger, &mut speakers, Utc::now());
 }
 
 /// Drop the oldest sessions, by last write and then by the order they were
@@ -1959,6 +2151,182 @@ mod tests {
                 "reason": UNREADABLE_POLICY,
             })
         );
+    }
+
+    /// A Codex call on the proxy for the fixture's session, `minutes` before
+    /// `now()`.
+    fn ledger_call(id: i64, minutes: i64, session: &str) -> crate::routing::RoutedExchange {
+        crate::routing::RoutedExchange {
+            id: Some(id),
+            started_at: now() - Duration::minutes(minutes),
+            client_session_id: Some(session.to_string()),
+            facade: "openai".to_string(),
+            path: Some("/v1/responses".to_string()),
+            backend: "SECRET-BACKEND".to_string(),
+            input_tokens: Some(100),
+            cache_read_tokens: Some(40),
+            cache_write_tokens: Some(0),
+            output_tokens: Some(10),
+            proof: Some(crate::routing::ProofStatus::Verified),
+            ..Default::default()
+        }
+    }
+
+    fn fold_with(
+        pass: &CounterPass,
+        enabled: bool,
+        rows: Vec<crate::routing::RoutedExchange>,
+    ) -> Result<super::super::insights_route_tally::FoldSummary, &'static str> {
+        let ledger = crate::routing::FixedLedger::new(rows);
+        pass.fold_ledger(&|| enabled, &ledger, &mut Vec::new, now())
+    }
+
+    fn tallies(
+        pass: &CounterPass,
+    ) -> BTreeMap<KeyedDigest, super::super::insights_route_tally::RouteTally> {
+        pass.load_cached()
+            .unwrap()
+            .map(|store| store.routing.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_fold_keys_each_tally_by_the_rows_own_session_digest() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let summary = fold_with(
+            &f.pass,
+            true,
+            vec![
+                ledger_call(1, 30, "PRIVATE-CODEX-ID"),
+                ledger_call(2, 20, "PRIVATE-CODEX-ID"),
+                // Older than the ledger's window: not read.
+                ledger_call(3, 25 * 60, "PRIVATE-CODEX-ID"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(summary.folded, 2);
+        let row_digest = stored_rows(&f.pass)[0].harness_session.unwrap();
+        let routing = tallies(&f.pass);
+        assert_eq!(
+            routing.keys().copied().collect::<Vec<_>>(),
+            vec![row_digest]
+        );
+        assert_eq!(routing[&row_digest].calls.verified, 2);
+        assert_eq!(routing[&row_digest].tokens.verified, 220);
+
+        // Persisted: cursor and tallies survive a reload, and folding the
+        // same window again under a fresh process adds nothing.
+        let reloaded = f.rekeyed(3);
+        assert_eq!(tallies(&reloaded), routing);
+        let again = fold_with(
+            &reloaded,
+            true,
+            vec![
+                ledger_call(1, 30, "PRIVATE-CODEX-ID"),
+                ledger_call(2, 20, "PRIVATE-CODEX-ID"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(again.folded, 0);
+        assert_eq!(tallies(&reloaded), routing);
+
+        // A later pass that rewrites rows keeps the tallies.
+        let mut grown = codex_bytes();
+        grown.extend_from_slice(b"\n");
+        std::fs::write(&codex, grown).unwrap();
+        assert_eq!(
+            run_with(&reloaded, &[candidate(SOURCE_CODEX, &codex)], &[], false).read,
+            1
+        );
+        assert_eq!(tallies(&reloaded), routing);
+
+        // The store holds the digest, never the id, backend or price.
+        let text = f.rows_text();
+        for leak in ["PRIVATE-CODEX-ID", "SECRET-BACKEND", "cost"] {
+            assert!(!text.contains(leak), "{leak} in the store");
+        }
+    }
+
+    #[test]
+    fn nothing_is_folded_or_read_while_the_feed_is_off() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        let before = f.rows_text();
+        struct Unread;
+        impl crate::routing::RoutingLedger for Unread {
+            fn exchanges_since(&self, _: DateTime<Utc>) -> Vec<crate::routing::RoutedExchange> {
+                panic!("the ledger is not read while the feed is off");
+            }
+        }
+        let summary = f
+            .pass
+            .fold_ledger(
+                &|| false,
+                &Unread,
+                &mut || panic!("no speakers are read while the feed is off"),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(summary, Default::default());
+        assert_eq!(f.rows_text(), before);
+    }
+
+    #[test]
+    fn a_fold_before_any_pass_writes_nothing_and_makes_no_key() {
+        let f = Fixture::new();
+        let summary =
+            fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        assert_eq!(summary, Default::default());
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+        assert!(f.pass.key_is_absent_for_test());
+    }
+
+    #[test]
+    fn a_window_with_nothing_new_does_not_write_the_store() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        let path = f.dir.path().join(COUNTER_ROWS_FILE);
+        std::fs::remove_file(&path).unwrap();
+        // The cached store still answers; nothing new means no write.
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn tallies_go_with_the_store_on_clear() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 1);
+        f.pass.clear().unwrap();
+        assert_eq!(f.pass.tallied_sessions_for_test(), 0);
+        // With the key forgotten, a fold that still sees the feed on writes
+        // nothing back.
+        fold_with(&f.pass, true, vec![ledger_call(2, 10, "PRIVATE-CODEX-ID")]).unwrap();
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+    }
+
+    #[test]
+    fn a_never_folder_drops_its_sessions_tally() {
+        let f = Fixture::new();
+        let codex = f.write("x.jsonl", &codex_bytes());
+        f.run(&[candidate(SOURCE_CODEX, &codex)]);
+        fold_with(&f.pass, true, vec![ledger_call(1, 30, "PRIVATE-CODEX-ID")]).unwrap();
+        assert_eq!(tallies(&f.pass).len(), 1);
+        run_with(
+            &f.pass,
+            &[candidate(SOURCE_CODEX, &codex)],
+            &[PROJECT.to_string()],
+            true,
+        );
+        assert!(stored_rows(&f.pass).is_empty());
+        assert!(tallies(&f.pass).is_empty());
     }
 
     #[test]

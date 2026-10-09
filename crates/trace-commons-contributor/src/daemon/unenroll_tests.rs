@@ -468,6 +468,43 @@ async fn unenroll_clears_the_insights_counter_store() {
     assert!(s.insights_counter.key_is_absent_for_test());
 }
 
+/// Owner question Q3, default taken: the route tallies live in the counter
+/// store and go with it on unenroll, and a fold after it, with the ledger
+/// feed still on, does not write them back.
+#[tokio::test]
+async fn unenroll_clears_the_route_tallies_and_no_fold_writes_them_back() {
+    let s = shared();
+    enroll_fixture(&s);
+    {
+        let mut settings = s.settings.lock().unwrap();
+        settings.insights_counter_pass = true;
+        settings.insights_ledger_feed = true;
+    }
+    counted(&s);
+    let call_at = |id: i64| crate::routing::RoutedExchange {
+        id: Some(id),
+        started_at: Utc::now() - chrono::Duration::minutes(5),
+        client_session_id: Some("SESSION-SECRET".to_string()),
+        facade: "anthropic".to_string(),
+        path: Some("/v1/messages".to_string()),
+        proof: Some(crate::routing::ProofStatus::Verified),
+        ..Default::default()
+    };
+    let ledger = crate::routing::FixedLedger::new(vec![call_at(1)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &ledger);
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 1);
+
+    assert!(call(&s).await.error.is_none());
+    assert!(!rows_file(&s).exists());
+    assert_eq!(s.insights_counter.tallied_sessions_for_test(), 0);
+    assert!(s.settings.lock().unwrap().insights_ledger_feed);
+
+    let later = crate::routing::FixedLedger::new(vec![call_at(1), call_at(2)]);
+    crate::daemon::insights_week::fold_ledger_after_refresh(&s, &later);
+    assert!(!rows_file(&s).exists());
+    assert!(s.insights_counter.key_is_absent_for_test());
+}
+
 /// Owner decision on #1287: unenroll also turns the counter pass off, in
 /// memory and on disk, so the next watcher tick does not rebuild the store
 /// it just cleared under a new key.
