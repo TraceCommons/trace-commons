@@ -43,6 +43,7 @@ import os
 import re
 import shutil
 import struct
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -82,9 +83,8 @@ PROMOTION_ONLY_CHECK_IDS = (ADAPTERS_CHECK_ID, REMOTE_RESTORE_CHECK_ID, HF_CANAR
 
 _PIN_DIR = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
 HF_LOCAL_PIN = _PIN_DIR / "pin-local.json"
-HF_NETWORK_PIN = _PIN_DIR / "pin-network.json"
 # The committed network pin, relative to the repository root: the only pin
-# `package-checks` accepts.
+# `hf-canary` and `package-checks` accept.
 HF_NETWORK_PIN_PATH = Path("crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json")
 # Every digest a network pin carries, each compared by the canary.
 HF_PIN_DIGEST_FIELDS = (
@@ -186,9 +186,14 @@ def _encode_len(output, length):
 
 
 def _encode_string(output, value):
-    """`encode_string`: the UTF-8 byte length, then the bytes."""
+    """`encode_string`: the UTF-8 byte length, then the bytes. A string with
+    no UTF-8 encoding (a lone surrogate, which `json.loads` accepts) is
+    refused: a Rust `String` cannot hold one."""
     require(isinstance(value, str), "promote_package_invalid")
-    data = value.encode()
+    try:
+        data = value.encode()
+    except UnicodeEncodeError as error:
+        raise ToolingError("promote_package_invalid") from error
     _encode_len(output, len(data))
     output += data
 
@@ -631,11 +636,21 @@ def hf_canary(args, run):
     again, into a fresh cache inside the production run, and compares every
     digest with the pin. A digest that moved is `fail` with
     `hf_pin_digest_mismatch_<field>`; a download that left no JSONL file in
-    the cache is `fail` with `hf_network_download_missing`."""
+    the cache is `fail` with `hf_network_download_missing`.
+
+    The pin is the committed `pin-network.json`, which the run's code
+    revision covers. A `--pin` whose bytes differ from it is refused
+    (`hf_network_pin_not_committed`) before anything is downloaded: a pin
+    `hf-pin record` wrote for another revision matches its own download in
+    every digest, and a canary would certify a pin nobody reviewed."""
     refuse_in_ci()
     production = open_run(args.run_id)
-    pin_path = Path(args.pin).resolve()
+    pin_path = environment.ROOT / HF_NETWORK_PIN_PATH
     pin = _load_network_pin(pin_path)
+    if args.pin is not None:
+        given = Path(args.pin).resolve()
+        require(given.is_file(), "hf_network_pin_not_committed")
+        require(sha256_digest(given.read_bytes()) == sha256_digest(pin_path.read_bytes()), "hf_network_pin_not_committed")
     work_dir = production.run.run_dir / "hf-canary"
     manifest, downloaded, cache_dir = _download(production.run, "hf_network_canary", _pin_source_fields(pin), work_dir)
     blockers = [f"hf_pin_digest_mismatch_{field}" for field in HF_PIN_DIGEST_FIELDS if manifest[field] != pin[field]]
@@ -883,9 +898,11 @@ def assemble(args, run):
     require(len(revisions) == 1, "promote_assemble_mixed_revision")
     require(len(sources) == len(mechanics_check_ids()) + len(production_check_ids()), "promote_assemble_count_mismatch")
 
-    staging = output.with_name(f".{output.name}.staging")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True, mode=0o700)
+    # A fresh staging directory beside the output (so the final rename stays
+    # on one file system), never a fixed name: a directory that already has
+    # a name like it is someone else's and is left alone.
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.staging-", dir=output.parent))
     try:
         for check_id, path in sorted(sources.items()):
             shutil.copyfile(path, staging / path.name)
@@ -932,7 +949,7 @@ def add_parsers(subparsers, hooks):
         "--env-file",
         dest="env_file",
         required=True,
-        help="The deployment's env file; only the NEAR AI endpoint, key, timeout and embedder cache are read.",
+        help="The deployment's env file; only the variables PipelineGateComponents::from_env reads are passed on.",
     )
     package.add_argument(
         "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
@@ -944,7 +961,9 @@ def add_parsers(subparsers, hooks):
         help="Use this existing PostgreSQL server instead of starting a container.",
     )
     canary = run_parser("hf-canary", hf_canary, "pipeline_hf_network_canary: download the network pin and compare it")
-    canary.add_argument("--pin", default=str(HF_NETWORK_PIN), help="The network pin (default: pin-network.json).")
+    canary.add_argument(
+        "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
+    )
     restore = run_parser("remote-restore", remote_restore, "pipeline_remote_restore: the remote-store restore drill")
     restore.add_argument("--source-store", dest="source_store", required=True, help="The live bucket[/prefix] name.")
     restore.add_argument(

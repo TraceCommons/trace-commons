@@ -260,12 +260,14 @@ is not"). It also requires:
   (`qualification_evidence_mixed_revision` otherwise);
 - the 15 mechanics results to carry one `run_id` and the seven
   package-bearing results (`PROMOTION_PACKAGE_CHECKS`) to carry one `run_id`
-  (`qualification_evidence_mixed_run` otherwise). The evidence of a bundle is
-  two runs of one revision: the mechanics run (`qualify`, reference
-  dependencies, no network) and the production run (against the production
-  assembly). A set cannot take one mechanics result from one run and the rest
-  from another, nor split the package-bearing results across runs. The rule
-  applies at the qualification, at the activation, and at the rollback;
+  (`qualification_evidence_mixed_run` otherwise; spec A-D12). The evidence of
+  a bundle is two runs of one revision: the mechanics run (`qualify`,
+  reference dependencies, no network) and the production run (against the
+  production assembly), which also carries the three promotion-only results
+  (`PROMOTION_ONLY_CHECKS`). A set cannot take one mechanics result from one
+  run and the rest from another, nor split the package-bearing results across
+  runs. The rule applies at the qualification, at the activation, and at the
+  rollback;
 - no result to carry a safe blocker, a passing one included. Each blocker is
   listed as `<label>:<check_id>`. A local restore drill passes with the blocker
   `filesystem_restore_local_only`, so a local result set is never ready;
@@ -535,11 +537,11 @@ record` refuses to start when `CI` is set (`promote_refused_in_ci`).
 |---|---|
 | `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
 | `promote package-checks --run-id R --env-file ENV [--pin PATH]` | The four package checks (`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`) on the production assembly, on the pilot's feature set, over the run's package. Its components come from `PipelineGateComponents::from_env`. From `ENV` (the deployment's env file) it passes on only what that reads: the scorer and embedder descriptors, the NEAR AI endpoint, key and timeout, the embedder cache, and the usearch settings. It never passes the live index roots, and points `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run. It refuses (`promote_env_file_incomplete`) without the NEAR AI endpoint, key and model. The HF corpus comes from the committed `pin-network.json` (`hf_network_pin_missing` until it is committed); a `--pin` whose bytes differ from it is refused (`hf_network_pin_not_committed`). Each check gets a fresh usearch index under the run's `indexes/`. Refuses any result that does not name the run's package or whose evidence does not say `harness_assembly: production` (`promote_harness_assembly_not_production:<id>`); `sign` refuses the same. |
-| `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). |
+| `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). The pin is the committed `crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json`, which the run's code revision covers; `hf_network_pin_missing` when it is absent. A `--pin` whose bytes differ from it is refused with `hf_network_pin_not_committed` before anything is downloaded, so an uncommitted pin (one `hf-pin record` just wrote, for example) is never certified. |
 | `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
 | `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
 | `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
-| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. |
+| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. Until spec A-D12 lands, `evaluate_promotion` refuses the set it writes; see below. |
 | `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
 
 In order, on the operator host, from a checkout of the deployed revision:
@@ -563,6 +565,15 @@ evidence: `filesystem_restore_local_only` on `pipeline_restore_drill` is not a
 blocker when the set holds a passing `pipeline_remote_restore` with no blocker of
 its own, from the same code revision, naming the same package. Every other
 blocker still blocks.
+
+An assembled set is two runs by design: the 15 mechanics results carry run M,
+and the seven production results carry run R. `evaluate_promotion`
+(`versioned_pipeline_qualification.rs`) applies the run rule per group (spec
+A-D12): one run id for the mechanics results, one for the package-bearing
+results (`PROMOTION_PACKAGE_CHECKS`, which holds the three promotion-only ids
+too, so they name the production package like the other four). A set with
+more than one run within a group is refused with
+`qualification_evidence_mixed_run`.
 
 The child processes `promote` starts see only the allowlisted environment
 (`child_environment`): no cloud credential variable reaches them. On the pilot

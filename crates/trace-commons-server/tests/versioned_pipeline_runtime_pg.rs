@@ -44447,7 +44447,10 @@ async fn perplexity_rescore_enumeration_skips_pipeline_submissions() {
 /// `update_trace_gate_decision_perplexity` and
 /// `update_trace_gate_decision_author_perplexity` leave the pipeline row as
 /// Settle wrote it, so its verdict still matches the Score that awarded the
-/// credit and its per-author columns stay NULL (O-C2).
+/// credit and its per-author columns stay NULL (O-C2). Each writer reports
+/// the rows it touched: none for the pipeline submission, so the re-score
+/// counts it as skipped rather than rescored (review of #1294), and one for
+/// a legacy submission.
 #[tokio::test]
 async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     let Some(backend) = runtime_backend(4).await else {
@@ -44464,7 +44467,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     assert!(before[0].agent_prose_perplexity_micros.is_none());
     let rewritten = before[0].perplexity_micros + 1_234_567;
 
-    backend
+    let touched = backend
         .update_trace_gate_decision_perplexity(
             &tenant,
             run.submission_id,
@@ -44474,7 +44477,8 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
         )
         .await
         .expect("the re-score writer runs under the runtime role");
-    backend
+    assert_eq!(touched, 0, "the pipeline row is not rewritten");
+    let touched = backend
         .update_trace_gate_decision_author_perplexity(
             &tenant,
             run.submission_id,
@@ -44482,6 +44486,10 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
         )
         .await
         .expect("the author re-score writer runs under the runtime role");
+    assert_eq!(
+        touched, 0,
+        "the pipeline row's author columns are not written"
+    );
 
     let after = gate_decision_rows(&tenant, run.submission_id).await;
     assert_eq!(after.len(), 1);
@@ -44498,7 +44506,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
     let owner = owner_backend().await;
     let legacy_submission = insert_submission_without_a_run(&owner, &tenant).await;
     insert_legacy_gate_decision(&tenant, legacy_submission).await;
-    backend
+    let touched = backend
         .update_trace_gate_decision_perplexity(
             &tenant,
             legacy_submission,
@@ -44508,7 +44516,8 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
         )
         .await
         .unwrap();
-    backend
+    assert_eq!(touched, 1);
+    let touched = backend
         .update_trace_gate_decision_author_perplexity(
             &tenant,
             legacy_submission,
@@ -44516,6 +44525,7 @@ async fn perplexity_rescore_writers_leave_pipeline_rows_alone() {
         )
         .await
         .unwrap();
+    assert_eq!(touched, 1);
     let legacy = gate_decision_rows(&tenant, legacy_submission).await;
     assert_eq!(legacy.len(), 1);
     assert_eq!(legacy[0].perplexity_micros, 7_000_000);

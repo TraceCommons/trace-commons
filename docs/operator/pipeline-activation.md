@@ -752,12 +752,22 @@ writes nothing.
    `409` `bundle_qualification_evidence_age_above_ceiling`. An attestation for
    a check outside the 22 required checks is `409`
    `qualification_evidence_invalid`. The server then evaluates the promotion
-   over the verified results, now. The evidence of a bundle is the output of
-   one `qualify` run plus the three promotion-only results. The 19 results of
-   `qualify` must carry one run id, at `qualifications`, `activate`, and
-   `rollback`: a set that mixes two runs is blocked with
+   over the verified results, now. Today's rule, at `qualifications`,
+   `activate`, and `rollback`: every result outside the three promotion-only
+   checks carries one run id (the 15 mechanics results and the four package
+   checks together), and a set that mixes two runs is blocked with
    `qualification_evidence_mixed_run`. The three promotion-only results can
-   come from other runs.
+   come from other runs. The set `pipeline.py promote assemble` writes does
+   not meet that rule yet: it takes the 15 mechanics results from the
+   `qualify` run and the four package checks from the production run, so it
+   carries two run ids and is blocked with `qualification_evidence_mixed_run`.
+   Its three promotion-only results also name the production package, which
+   today's rule refuses with
+   `qualification_evidence_package_unexpected:<check_id>`. Both refusals are
+   expected until spec A-D12 lands (PR #1295): the three promotion-only ids
+   join the package checks, and the run rule becomes per group, one run id
+   for the mechanics results and one for the package-bearing results. Neither
+   label means the assembly is broken.
 5. The package. The tenant must have a stored package of the bundle (`404`
    `bundle_package_missing`). A stored package that no longer validates (an
    altered package) is `409` `bundle_package_missing`. The key that signed the
@@ -949,8 +959,9 @@ each deploy of a new revision B, and for each tenant whose row says `pipeline`:
    needs its own run (a set for another package is `409`
    `bundle_qualification_package_mismatch`). Use the 19 results of that one
    run: do not replace one of them with a result of another run
-   (`qualification_evidence_mixed_run`). Sign the set shortly before you use
-   it.
+   (`qualification_evidence_mixed_run`; until spec A-D12 lands, an assembled
+   production set is refused the same way, see step 4 of "The order of
+   checks" above). Sign the set shortly before you use it.
 3. Start one process of build B with a runtime, both trust stores, and the
    production settings, outside client traffic. Leave both scope lists unset
    on it (`TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` and
@@ -2443,7 +2454,10 @@ already computed their credit quality under the bundle. The perplexity
 re-score (`POST /v1/admin/rescore-perplexity`, every mode) skips any
 submission with a pipeline row: rewriting its perplexity would leave the
 row's verdict disagreeing with the Score that awarded the credit and with
-its `attestation_chain_hash`, and its per-author columns stay NULL.
+its `attestation_chain_hash`, and its per-author columns stay NULL. A
+submission whose pipeline row Settle wrote after the pass enumerated it is
+left alone too, and counted as `pipeline_row_skipped` in the pass's
+completion log, not as `rescored`.
 
 Settle checks a compatibility run's Score evidence before the index write or
 any settlement leg. Evidence that lacks a field the row needs fails the run
