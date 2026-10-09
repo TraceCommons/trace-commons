@@ -1127,7 +1127,9 @@ these migrations' code, do these steps:
    tenants whose row says `pipeline`. Move every other tenant (contained,
    `legacy`, or with no row) to the drain list, or off both lists. A `contain`
    or a `deactivate` does not protect a tenant on that build: only the lists
-   do.
+   do. A tenant with a pipeline run that is off both lists gets no index
+   invalidation processed. Put the tenant back on the drain list when a build
+   with the guards runs.
 
    On that build, a tenant that is off the receipts list uploads on the legacy
    path. This includes a contained tenant. That build does not read the row, so
@@ -1136,10 +1138,12 @@ these migrations' code, do these steps:
    tenant's uploads must stay stopped, do not install that build.
 3. Do not rely on a suspension: on that build it does not hold for a phase
    that already runs or for a payout. For a tenant with a suspended Settle
-   policy, keep the tenant off both lists (its pipeline work then waits), or
+   policy, keep the tenant off both lists (its pipeline work then waits, and
+   no index invalidation is processed for it), or
    set the NEAR settlement mode of the older build to `disabled`
    (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`; this stops every NEAR payout of the
    process, `main`'s too). Keep that until a build with the guards runs again.
+   If you took the tenant off both lists, put it back on the drain list then.
 
 See also "Run one build and one configuration" in "Scope lists and the routing
 row" of [pipeline-activation.md](pipeline-activation.md).

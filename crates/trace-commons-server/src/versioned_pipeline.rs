@@ -13729,11 +13729,12 @@ impl PipelineService {
         Ok(processed)
     }
 
-    /// Pays out one run's settled Trace Credit (`dispatch_near_settlements`)
-    /// once the run is complete, under the same tenant lock as the pass's
-    /// submits (Finding I1): while a pass or `main`'s submitter holds it,
-    /// this is refused with `payout_lock_held`. `None` when the run does not
-    /// exist; a run that is not complete is returned untouched. Unlike the
+    /// Pays out one run's completed Trace Credit legs
+    /// (`dispatch_near_settlements`), whatever the state of the run, under
+    /// the same tenant lock as the pass's submits (Finding I1): while a pass
+    /// or `main`'s submitter holds it, this is refused with
+    /// `payout_lock_held`. `None` when the run does not exist; a run with no
+    /// completed, payout-eligible leg is returned untouched. Unlike the
     /// pass, this also takes up a `failed` payout again, does not wait for
     /// the confirmation interval, and returns a per-run error to its caller
     /// instead of recording it.

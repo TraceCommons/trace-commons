@@ -274,14 +274,22 @@ says `legacy`, and its new uploads take the legacy path at once. Then move it fr
 the drain list and restart ingest. Do not remove a tenant from the receipts
 list while its row says `pipeline`: every new upload of the tenant is then
 refused with `503` `pipeline_tenant_not_served`, and none goes to the legacy
-path. Keep the tenant on the drain list until the operational summary shows no
-pending runs, invalidations, or payouts for it, and for as long as its
-contributors need their pipeline submissions' statuses: the status route
-(`POST /v1/contributors/me/submission-status`) reads the pipeline's view
-only for a tenant on either list. A tenant on neither list is not processed
-at all: its in-flight runs stop, a later withdrawal still queues an
-invalidation (the withdrawal needs only a runtime), and queued invalidations
-and payouts wait, unprocessed, until the tenant is listed again. Its status
+path. Do not remove a tenant from the drain list while it has a pipeline run
+in any state. A withdrawal, a revocation, a retention expiry, or a purge of a
+pipeline submission queues an index invalidation, with or without a runtime.
+Only the worker processes an invalidation, and only for a tenant on one of its
+two lists. So for a tenant on neither list, the index entries of that content
+stay. In a fleet, one running process with a runtime must list the tenant.
+Two exceptions hold, and the code enforces both. The index rebuild after a
+restore ([backup-restore.md](backup-restore.md), steps 3 to 5) unsets both
+lists and sets them back. A build with no runtime refuses to start while the
+drain list is set, so a rollback to such a build unsets it. Keep the tenant
+listed also for as long as its contributors need their pipeline submissions'
+statuses: the status route (`POST /v1/contributors/me/submission-status`)
+reads the pipeline's view only for a tenant on either list. A tenant on
+neither list is not processed at all: its in-flight runs stop, and its queued
+invalidations and payouts wait, unprocessed, until the tenant is listed
+again. Its status
 answers are `main`'s alone: a submission only the pipeline recorded is not
 described, and a document `main` holds carries no pipeline block.
 
@@ -1458,15 +1466,17 @@ Unset the three variables after that boot.
 ## Fail-closed dependency qualification
 
 `assemble_ingest_pipeline_runtime` refuses to start an injected pipeline
-runtime whose scorer, embedder, index, or any registered settlement adapter
-is not production-qualified (`pipeline_runtime_is_production_qualified`),
-with the safe label `pipeline_runtime_dependencies_not_production_qualified`,
-whenever either is true:
+runtime whose default bundle is not production-qualified
+(`pipeline_runtime_is_production_qualified`; the dependencies that it reads
+are listed below), with the safe label
+`pipeline_runtime_dependencies_not_production_qualified`, whenever one of
+these is true:
 
-- `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` lists at least one tenant, or
+- `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` lists at least one tenant,
+- `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` lists at least one tenant, or
 - `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` is set.
 
-Tenants routed to the pipeline is, on its own, enough to trigger the
+A tenant on either list is, on its own, enough to trigger the
 refusal -- an assembly that lists tenants without also setting
 `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED` no longer runs real receipts
 through a non-production-qualified dependency (the Reference scorer, the
@@ -1478,7 +1488,8 @@ refusal. **It is for tests and local development only. Production must
 never set it.** Setting it:
 
 - Lets an injected runtime with a non-production-qualified dependency start
-  even when tenants are routed or the runtime is required, and logs one
+  even when tenants are routed or drained, or the runtime is required, and
+  logs one
   label-only warning (`pipeline_runtime_test_dependencies_allowed`) at
   startup when it does.
 - Never combines with `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`: both set
@@ -1499,8 +1510,9 @@ the active one) does not block startup.
 
 The NEAR payout adapter is the exception: it is checked whenever payout is
 enabled, whatever the default package pins. Payout is service-wide, like
-the index writer: the payout pass pays the complete runs of every bundle,
-including runs bound to an earlier default package. An unqualified payout
+the index writer: the payout pass pays the completed legs of the runs of
+every bundle, including runs bound to an earlier default package. An
+unqualified payout
 adapter with payout enabled refuses startup under the same conditions as
 any other unqualified dependency.
 
@@ -1772,8 +1784,8 @@ not the trace's fault:
   A failed store call of Settle's read of the stored index command is
   charged under `index_command_unreadable`, with one hour between attempts.
   The run fails about four hours after the first failure. Its open
-  settlement legs are forfeited when the run fails. A stored command with wrong content keeps
-  `index_command_invalid` and the short backoff.
+  settlement legs are forfeited when the run fails. A stored command with
+  wrong content keeps `index_command_invalid` and the short backoff.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
   rule, under the store's own label -- a store that cannot derive an object
@@ -1895,7 +1907,8 @@ Both need an account session, never a device key, and both answer the same
   and through the database when none is. It runs after the tombstones and
   before the bytes. It queues the revision's invalidation (reason
   `withdrawn`), a payload deletion per live object, and the end of its
-  runs' work. A runtime processes them when it runs.
+  runs' work. The worker of a process with a runtime processes them
+  later, and only for a tenant on its receipts list or its drain list.
 
 An upload whose source session is withdrawn while the pipeline receipt is
 still in progress is not recorded. The receipt's final transaction locks the
@@ -1935,7 +1948,7 @@ settlement adapter is missing), deletes the objects it wrote.
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
 revoked as before, and, when the submission has a pipeline run, then make
 the pipeline's follow-up in one transaction (with no runtime injected,
-through the database, for a later runtime to process): the export snapshot invalidations and payload deletions above,
+through the database, for the worker of a later runtime that lists the tenant): the export snapshot invalidations and payload deletions above,
 the run's index invalidation (reason `revoked`), and the release of a run
 parked in `awaiting_review`. Settle reads the revoked status and forfeits
 every leg it has not completed. `main`'s completion of a source-session
@@ -1964,7 +1977,8 @@ run that Settle keeps out of the index has no index work, and a snapshot
 can still hold it). It makes the follow-up for each (reason `withdrawn`
 when a withdrawal row exists, `revoked` otherwise, actor
 `pipeline_worker`); the invalidations it queues are processed in the same
-pass. So a lost follow-up waits at most about a minute once a worker runs.
+pass. So a lost follow-up waits about a minute once a worker runs, while that
+worker has no runs to process.
 The read checks every revoked or withdrawn submission of the tenant on each
 run, recovered or not, which is why it does not run on the 10-second
 invalidation step. A listed tenant that has no pipeline run is answered from
@@ -1988,9 +2002,13 @@ completed leg is never clawed back, and its NEAR payout is still made (see
 The worker processes the invalidations. After a tenant's runs, at most every
 10 seconds, it claims up to 32 of the tenant's due invalidations and removes
 every index entry of the withdrawn revision. A withdrawal, a cancelled index
-write, or a requeue on this ingest process runs that step on the worker's
-next pass instead; one queued on another replica waits up to 10 seconds. A
-step that claimed 32 runs again on the next pass. An index outage (the index answers `Failed`
+write, or a requeue on this ingest process makes that step due on the
+worker's next pass instead; one queued on another replica is due when the 10
+seconds have passed. Each interval of a step is a minimum distance between two
+runs of that step. A due step runs when the worker reaches it. With a backlog,
+it waits for up to 32 phase steps of its tenant and for the turn of each
+listed tenant before it. A step that claimed 32 runs again on the next pass.
+An index outage (the index answers `Failed`
 or `Uncertain`) does not charge an attempt: the invalidation stays `pending`
 and is retried after a delay that grows from 1 second to at most 1 hour,
 measured from when it was queued. There is no retry limit, so an
@@ -2018,8 +2036,9 @@ and a service built without one has payout disabled; the payout
 configuration has no other switch (`main`'s settlement mode still applies,
 below). With payout disabled, nothing is submitted to NEAR.
 
-- Payout takes only a complete run's `trace_credit` legs that have the
-  `near` payout rail and a settlement batch. A compatibility bundle's
+- Payout takes only a `trace_credit` leg that is `complete` and has the
+  `near` payout rail and a settlement batch. The state of the run does not
+  matter. A compatibility bundle's
   `NoveltyUtility` leg has no batch, so it is never paid, as on `main`.
   Other instruments never use the NEAR outbox.
 - Score records a leg's payout state when it adds the leg. A run scored
@@ -2061,7 +2080,7 @@ below). With payout disabled, nothing is submitted to NEAR.
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` | refuses an enabled payout | `credit_settlement_account_cap_unsupported`. `main` keeps an account's line under the cap by leaving events for a later run; a pipeline leg settles its own event in one batch. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_REQUIRE_CENTRAL_ISSUER_PROFILE` | refuses an enabled payout | Ingest does not start while the profile is incomplete (`credit_settlement_central_issuer_profile_incomplete` in the drill). A complete profile sets `..._REQUIRE_ISSUER_APPROVAL`, `..._MAX_POINTS_PER_ACCOUNT` and `..._REQUIRE_ROLLOUT_SMOKE_READY`, so the rows above refuse. |
   | `TRACE_COMMONS_CREDIT_SETTLEMENT_NEAR_CONTRACT_ID`, `..._REQUIRE_NEAR_CONTRACT` | applied at startup | An enabled payout must name `main`'s contract (`pipeline_runtime_near_contract_mismatch`, `payout_near_contract_missing`). |
-  | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. A leg `dry_run` confirms ends `confirmed` for good, as on `main`: a later switch to `http` does not pay it, because the payout skips a `confirmed` leg. Use `dry_run` only for legs that need no real payment. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. A `submitted` line with no recorded mode (code from before this rule submitted it) reads as `http`: `http` confirms it, and `dry_run` leaves it `submitted`. A build of `main` from before this rule also submits lines with no recorded mode. Such a line that `dry_run` submitted there stays `submitted` after the upgrade and is not confirmed; it never reached NEAR, so no money moves. Before a change between `http` and `dry_run`, stop the worker and check that no pipeline outbox line is `pending` or `failed`: the mode is recorded only after the submit, so a line in those states may have reached NEAR, and the other mode would submit it again as its own. A `failed` line needs the same care as a `pending` one: an `http` submit that errors ambiguously (a timeout after the transaction was broadcast) marks the line `failed`, and a direct `process_payout` with `retry_failed` under `dry_run` would submit it again, confirm it synthetically and overwrite its recorded mode. Resolve each such line against NEAR before the change. Both windows are open items in #1185. |
+  | `TRACE_COMMONS_NEAR_SETTLEMENT_MODE` | applied at every payout | Ingest hands the mode to the runtime and refuses one that holds another (`pipeline_runtime_near_payout_controls_mismatch`). `disabled` (the default): no outbox row is written and nothing is submitted or confirmed; each leg stays `pending`, as `main`'s rows do. `dry_run`: the full outbox state machine runs in process, with synthetic transaction hashes from each call's idempotency key, no network and no funds, and the injected adapter is not called. A leg `dry_run` confirms ends `confirmed` for good, as on `main`: a later switch to `http` does not pay it, because the payout skips a `confirmed` leg. Use `dry_run` only for legs that need no real payment. `http`: the injected adapter pays. A line is confirmed only in the mode that submitted it (recorded in its stored call as `pipeline_submission_mode`): after a switch between `http` and `dry_run`, a line the other mode submitted stays `submitted` until that mode returns, so a synthetic hash never replaces a real one. A `submitted` line with no recorded mode (code from before this rule submitted it) reads as `http`: `http` confirms it, and `dry_run` leaves it `submitted`. A build of `main` from before this rule also submits lines with no recorded mode. Such a line that `dry_run` submitted there stays `submitted` after the upgrade and is not confirmed; it never reached NEAR, so no money moves. Before a change between `http` and `dry_run`, stop the worker and check that no pipeline outbox line is `pending` or `failed`: the mode is recorded only after the submit, so a line in those states may have reached NEAR, and the other mode would submit it again as its own. A `failed` line needs the same care as a `pending` one: an `http` submit that errors ambiguously (a timeout after the transaction was broadcast) marks the line `failed`, and a direct `process_payout` with `retry_failed` under `dry_run` would submit it again, confirm it synthetically and overwrite its recorded mode. Resolve each such line against NEAR before the change. Both windows are accepted and are not tracked (#1185, C4 and finding 3b): the check before a mode change is the control. |
   | `TRACE_COMMONS_NEAR_CREDIT_REQUIRE_ADAPTER_AUTH` | refuses an enabled payout on an adapter without a credential | As `main` refuses to start its NEAR adapters without their bearer tokens, whatever the mode: `near_payout_adapter_auth_missing`. The runtime must hold the same flag (`pipeline_runtime_near_payout_controls_mismatch`). |
   | Credit holds (`credit_holds`) | applied at Settle, to settled legs only | A held principal's leg that settles into a batch (the minimal family's `accepted` event) is `held` and is not settled, as `main` leaves held accounts out of its batches and payouts. The `accepted` event is not one of `main`'s settlement-eligible event types (benchmark conversion, regression catch, training utility, ranking utility); the pipeline batches that leg itself. A compatibility run's `NoveltyUtility` leg ignores holds and writes its ledger row, as `main` writes `NoveltyUtility` credit regardless of holds; that event never settles or pays. |
   | Ranking calibration gates (`TRACE_COMMONS_RANKING_*`) | not applicable | They apply only to `RankingUtility` events; a pipeline leg writes an `accepted` event. |
@@ -2076,9 +2095,9 @@ below). With payout disabled, nothing is submitted to NEAR.
   is written, and the payout stays `pending` under the label. A payout pass
   resolves the account again once per confirmation interval
   (`TRACE_COMMONS_NEAR_CREDIT_OUTBOX_SCHEDULER_INTERVAL_SECONDS`), so the line
-  is paid within one interval after the contributor enrolls or designates a
-  NEAR account. A principal with no account is paid
-  with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
+  is paid within two intervals after the contributor enrolls or designates a
+  NEAR account, while the worker has no runs to process. A principal with no
+  account is paid with no NEAR account, as on `main`. Holds (`credit_holds`) still apply per
   principal to settled legs, as on `main`; they never stop a `NoveltyUtility`
   leg (see "Compatibility credit").
 - A withdrawal does not stop a payout. A leg is `complete` only when Settle
@@ -2091,7 +2110,8 @@ below). With payout disabled, nothing is submitted to NEAR.
   its next pass after Settle on the same ingest process completes a Trace
   Credit leg of the tenant. A pass that processed 32 runs goes again on the
   next worker pass. A leg completed on another replica is paid within one
-  interval.
+  interval, while the worker has no runs to process and the tenant's NEAR
+  submit lock is free.
 - The payout uses `main`'s per-tenant NEAR submit lock, so a payout pass,
   a second ingest replica, and `main`'s NEAR submitter never submit for one
   tenant at once. When the lock is held, the pass skips the tenant's
@@ -2123,10 +2143,10 @@ below). With payout disabled, nothing is submitted to NEAR.
   `near_outbox_by_state` (`GET /v1/admin/pipeline/operational-summary`), and
   the settled credit itself unchanged. That field counts only the pipeline's
   outbox lines (the rows with an `instrument_id`). `main`'s lines are in
-  `main`'s operational summary. `main`'s operational summary, its
-  promotion gates, and the rollout-smoke readiness built from them read
-  `main`'s outbox lines only, as `main`'s outbox listing does, so a failed
-  pipeline line never holds them. The payout stays
+  `main`'s operational summary, which, like its promotion gates and the
+  rollout-smoke readiness built from them, reads `main`'s outbox lines only,
+  as `main`'s outbox listing does, so a failed pipeline line never holds
+  them. The payout stays
   `failed`: nothing in this release takes it up again. A later release adds
   an operator retry route. A failed submit may still have reached NEAR, so
   until then check a `failed` payout's outbox line against NEAR by hand.
@@ -2234,7 +2254,8 @@ label `main` records (`unattested` when the submission has no verified
 witness evidence; nothing when the evidence cannot be read, as on `main`).
 The worker then appends `main`'s hash-only `CreditMutate` audit event for it
 through `main`'s audit log, at once on the replica that settled the leg and
-within 10 seconds on any other: the event's id is the credit event's, its
+within 10 seconds on any other, while the worker has no runs to process: the
+event's id is the credit event's, its
 actor is the issuer in the role `vector_worker` (for a minimal-family
 `accepted` event, the pipeline worker, role `system`), and its metadata
 holds the event type, the delta, and hashes of the reason and the source
@@ -2268,8 +2289,9 @@ a trace's entries before it scores the next one. A tenant's compatibility
 Score throughput is therefore one Score at a time, across every replica. A
 Score that finds the lock held does not wait for it: its run waits in `retry`,
 uncharged, as `score_lock_busy`, for 2 seconds, and that replica ends the
-tenant's batch for the pass and goes on to its other tenants. Other tenants
-and the other phases are not serialized.
+tenant's batch for the pass and goes on to its other tenants. The lock does not
+serialize other tenants or the other phases. One worker still does one phase
+step at a time.
 
 A Score that cannot read one of those unapplied index commands fails closed:
 its run waits in `retry`, uncharged, as `index_unavailable`, since leaving
@@ -2370,6 +2392,13 @@ forfeited, failed, withheld by one of `main`'s credit checks, or a
 submission that has a pipeline run with `409` `pipeline_run_owns_submission`,
 before it scores anything, so `main`'s gate path cannot award a second
 `NoveltyUtility` credit for a trace the pipeline credits.
+
+`main`'s manual credit route (`POST /v1/review/{id}/credit-events`) and
+`main`'s utility credit routes (`POST /v1/workers/utility-credit`,
+`POST /v1/workers/utility-attestations`) stay open for a pipeline submission,
+as for a legacy submission (owner decision of 2026-10-09). The credit is
+`main`'s ledger row. The pipeline's own reads and reports do not show it.
+`main`'s status document counts it as ledger credit.
 
 The delta is pinned in the signed bundle package
 (`novelty_utility_microcredits`, in microcredits). The pipeline does not read
@@ -2540,8 +2569,9 @@ An expiry deletes no payload, as `main`'s does not. A purge also invalidates
 the submission's object refs and queues one payload deletion per live object
 (reason `pipeline_retention_purge`) for `main`'s revocation-propagation
 worker, as a pipeline withdrawal does; the maintenance response counts no
-deleted file for it. This works with no pipeline runtime injected: a runtime
-processes the queued invalidations when it runs.
+deleted file for it. This works with no pipeline runtime injected. The worker of a
+process with a runtime processes the queued invalidations later, and only for
+a tenant on its receipts list or its drain list.
 
 `main`'s rollback-flag drill (`POST /v1/admin/rollback-drill`) leaves the
 database-only rows of pipeline submissions (the submissions and their
