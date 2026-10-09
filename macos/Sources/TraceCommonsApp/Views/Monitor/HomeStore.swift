@@ -80,7 +80,7 @@ final class HomeStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
-            case .digestDue, .previewReady, .inferenceCallAdded, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .unknown:
                 break
             }
         }

@@ -72,10 +72,45 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("status", as: DaemonData.Status.self)
     }
 
-    public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
+    public func listPending(
+        projectId: String?, filter: DaemonData.PendingFilter?, order: DaemonData.PendingOrder?
+    ) async throws -> [DaemonData.QueueEntry] {
         var params: [String: Any] = [:]
         if let projectId { params["project_id"] = projectId }
+        if let filter { params["filter"] = filter.rawValue }
+        if let order, order != .queue { params["order"] = order.rawValue }
         return try await call("list_pending", params: params, as: DaemonData.PendingList.self).pending
+    }
+
+    // MARK: Nudges
+
+    public func nudgeOpened(_ kind: NudgeSurface.Kind) async throws {
+        _ = try await call("nudge_opened", params: ["kind": kind.rawValue], as: DaemonData.NudgeAck.self)
+    }
+
+    public func nudgeDecline(_ kind: NudgeSurface.Kind) async throws {
+        _ = try await call("nudge_decline", params: ["kind": kind.rawValue], as: DaemonData.NudgeAck.self)
+    }
+
+    public func setSuggestionsEnabled(_ on: Bool) async throws {
+        _ = try await call("set_suggestions_enabled", params: ["on": on], as: DaemonData.NudgeAck.self)
+    }
+
+    public func setMenuBarMarkEnabled(_ on: Bool) async throws {
+        _ = try await call("set_menu_bar_mark_enabled", params: ["on": on], as: DaemonData.NudgeAck.self)
+    }
+
+    public func setNotificationsEnabled(_ on: Bool) async throws {
+        _ = try await call("set_notifications_enabled", params: ["on": on], as: DaemonData.NudgeAck.self)
+    }
+
+    public func setNotifyKind(_ kind: String, on: Bool) async throws {
+        _ = try await call("set_notify_kind", params: ["kind": kind, "on": on], as: DaemonData.NudgeAck.self)
+    }
+
+    public func dismissNotifyOffer(kind: String) async throws {
+        guard let key = NudgeSettings.offerMarker(kind: kind) else { throw NudgeSettings.noOfferForKind }
+        _ = try await call("set_settings", params: [key: false], as: DaemonData.NudgeAck.self)
     }
 
     public func listKept() async throws -> [DaemonData.QueueEntry] {

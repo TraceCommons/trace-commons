@@ -163,7 +163,7 @@ final class MenuPanelStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired, .inferenceCallAdded:
                 await load()
-            case .digestDue, .previewReady, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .unknown:
                 break
             }
         }

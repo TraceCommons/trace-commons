@@ -212,9 +212,14 @@ extension DaemonData {
         /// DRAFT wording). Never shorter than `secondLook`.
         public let secondLookLines: [String]?
         /// The local credit estimate (nudge value addendum, 4.6), on
-        /// `list_pending` rows only. Decoded, not drawn yet: its wording is
-        /// DRAFT in the core. Absent is unknown, never 0.
+        /// `list_pending` rows only. Drawn only through the core's row tags
+        /// (`NudgeEntryTags`), and only while `drawn` is true. Absent is
+        /// unknown, never 0.
         public let creditEstimate: CreditEstimate?
+        /// How many matched contribution missions this entry fits, present
+        /// only while a mission catalogue is live; `0` is a real answer, and
+        /// absent is unknown, never 0.
+        public let missionFit: Int?
 
         public var id: String { entryId }
 
@@ -254,6 +259,7 @@ extension DaemonData {
             case secondLook = "second_look"
             case secondLookLines = "second_look_lines"
             case creditEstimate = "credit_estimate"
+            case missionFit = "mission_fit"
         }
 
         public var queueState: QueueStateLabel? { QueueStateLabel(rawValue: state) }
@@ -426,7 +432,7 @@ extension DaemonData {
         }
     }
 
-    /// `status.nudge` (nudge S3). Decoded only; no screen draws it yet.
+    /// `status.nudge` (nudge S3), drawn through `NudgeSurface`.
     /// `state` is `armed`, `none` or `unknown`; only `armed` names a `lead`.
     /// `none` and `unknown` both draw nothing.
     public struct Nudge: Codable, Equatable, Sendable {
@@ -486,7 +492,29 @@ extension DaemonData {
     public struct NudgeAction: Codable, Equatable, Sendable {
         public let id: String
         public let label: String
+
+        public init(id: String, label: String) {
+            self.id = id
+            self.label = label
+        }
     }
+
+    /// `list_pending`'s `filter`: only the idle candidates
+    /// `status.idle_sessions` counts.
+    public enum PendingFilter: String, Sendable {
+        case idleSessions = "idle_sessions"
+    }
+
+    /// `list_pending`'s `order`. `.queue` is insertion order and is sent as
+    /// no `order` at all, as before the parameter existed.
+    public enum PendingOrder: String, Sendable, CaseIterable {
+        case suggested
+        case queue
+    }
+
+    /// The reply of a nudge write whose fields nothing reads: decoded only
+    /// to prove the daemon answered with a result.
+    struct NudgeAck: Decodable, Sendable {}
 
     /// `status.nudge.mark_text`: the mark's accessibility sentence and its
     /// tooltip clause.
@@ -495,8 +523,9 @@ extension DaemonData {
         public let tooltip: String
     }
 
-    /// `status.idle_sessions` (nudge U4). Decoded only; no screen draws it
-    /// yet. Counts and tool display names only, never an id or a path.
+    /// `status.idle_sessions` (nudge U4). The idle card's words arrive on
+    /// `status.nudge.text`; this is the fact behind them. Counts and tool
+    /// display names only, never an id or a path.
     public struct IdleSessions: Codable, Equatable, Sendable {
         /// How many waiting sessions are idle. Never a badge number.
         public let count: Int?
@@ -1029,23 +1058,53 @@ extension DaemonData {
         public let contributedProjects: [String]?
         /// Pending credit for them; pending, never earned.
         public let creditPending: Double?
+        /// The core's notification body, posted unchanged. When the
+        /// attention arbiter folded a re-engagement sentence in, it already
+        /// ends with `fold.text`.
         public let text: String?
+        /// The re-engagement sentence folded into this digest, and its kind;
+        /// nil when nothing was folded, and from an older daemon.
+        public let fold: DigestFold?
 
         public init(
             pending: Int?, contributed: Int? = nil, contributedProjects: [String]? = nil,
-            creditPending: Double? = nil, text: String?
+            creditPending: Double? = nil, text: String?, fold: DigestFold? = nil
         ) {
             self.pending = pending
             self.contributed = contributed
             self.contributedProjects = contributedProjects
             self.creditPending = creditPending
             self.text = text
+            self.fold = fold
         }
 
         public enum CodingKeys: String, CodingKey {
-            case pending, contributed, text
+            case pending, contributed, text, fold
             case contributedProjects = "contributed_projects"
             case creditPending = "credit_pending"
+        }
+    }
+
+    /// `digest_due.fold`: which kind was folded in, and its sentence.
+    public struct DigestFold: Codable, Equatable, Sendable {
+        public let kind: String
+        public let text: String
+    }
+
+    /// The `reengage_due` event (nudge A2): one standalone re-engagement
+    /// notification, every word composed by the daemon. Sent only to a
+    /// subscriber that declared it accepts the event.
+    public struct ReengageDue: Codable, Equatable, Sendable {
+        public let kind: String
+        public let title: String
+        public let body: String
+        public let actions: [NudgeAction]
+
+        public init(kind: String, title: String, body: String, actions: [NudgeAction]) {
+            self.kind = kind
+            self.title = title
+            self.body = body
+            self.actions = actions
         }
     }
 }
