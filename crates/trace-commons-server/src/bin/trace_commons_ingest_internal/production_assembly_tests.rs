@@ -241,7 +241,8 @@ fn adapter_identities_are_safe_labels() {
     };
     let scorer = pipeline_scorer();
     assert_eq!(scorer.dependency_identity(), "near_ai_perplexity_scorer");
-    assert!(scorer.production_qualified());
+    // Over a double: never production-qualified (round 2, Major 1).
+    assert!(!scorer.production_qualified());
     assert_eq!(scorer.content_descriptor(), scorer.descriptor().bytes());
     assert_eq!(scorer.score_chunk(b"x").unwrap().logprobs, vec![-1.0, -1.0]);
     assert_eq!(scorer.score(b"x").unwrap().tokens_scored, 4);
@@ -249,7 +250,7 @@ fn adapter_identities_are_safe_labels() {
     let embedder = pipeline_embedder();
     assert_eq!(embedder.dependency_identity(), "fastembed_text_embedder");
     assert_eq!(embedder.model_id(), "baai_bge-large-en-v1.5");
-    assert!(embedder.production_qualified());
+    assert!(!embedder.production_qualified());
     assert_eq!(embedder.content_descriptor(), embedder.descriptor().bytes());
     assert_eq!(embedder.embed(b"x").unwrap(), vec![1.0, 0.0]);
 
@@ -652,9 +653,12 @@ impl trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary
     }
 }
 
-/// `PipelineGateComponents` filled with qualified doubles: what the
-/// `near-ai-scorer` environment builder fills with the NEAR AI scorer, the
-/// fastembed embedder and the usearch index.
+/// `PipelineGateComponents` filled with doubles: what the library's
+/// `PipelineGateComponents::from_env` fills with the NEAR AI scorer, the
+/// fastembed embedder and the usearch index. Built from parts, so its
+/// scorer and embedder adapters are not production-qualified (PR #1295
+/// review round 2, Major 1); every other component here reports itself
+/// qualified, so those two are the runtime's only blockers.
 fn test_components(
     privacy: Option<
         Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>,
@@ -674,29 +678,31 @@ pub(crate) fn test_components_with_index(
     index_reader: Arc<dyn trace_commons_gate_api::IdentifiedIndexReader>,
     index_writer: Arc<dyn trace_commons_gate_api::IdentifiedIndexWriter>,
 ) -> Arc<PipelineGateComponents> {
-    Arc::new(PipelineGateComponents {
-        scorer: Arc::new(FixedScorer),
-        scorer_descriptor: scorer_descriptor(&scorer_env()),
-        embedder: Arc::new(FixedEmbedder),
-        embedder_descriptor: embedder_descriptor(&with(
-            &embedder_env(),
-            TRACE_COMMONS_VECTOR_INDEX_DIM,
-            "2",
-        )),
-        index_reader,
-        index_writer,
-        index_root_shared_with_legacy: false,
-        authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
-            Arc::new(BTreeMap::new()),
-            false,
-            Arc::new(|_: &str| false),
-        )),
-        tenant_policy_count: 0,
-        privacy_backend: privacy
-            .is_some()
-            .then_some(trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi),
-        privacy,
-    })
+    Arc::new(PipelineGateComponents::with_unqualified_adapters(
+        PipelineGateComponentParts {
+            scorer: Arc::new(FixedScorer),
+            scorer_descriptor: scorer_descriptor(&scorer_env()),
+            embedder: Arc::new(FixedEmbedder),
+            embedder_descriptor: embedder_descriptor(&with(
+                &embedder_env(),
+                TRACE_COMMONS_VECTOR_INDEX_DIM,
+                "2",
+            )),
+            index_reader,
+            index_writer,
+            index_root_shared_with_legacy: false,
+            authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
+                Arc::new(BTreeMap::new()),
+                false,
+                Arc::new(|_: &str| false),
+            )),
+            tenant_policy_count: 0,
+            privacy_backend: privacy.is_some().then_some(
+                trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag::NearAi,
+            ),
+            privacy,
+        },
+    ))
 }
 
 pub(crate) fn classifying_privacy()
@@ -789,6 +795,17 @@ impl Boot {
         }
     }
 
+    /// [`Self::production`] started with the test opt-in: over doubles the
+    /// scorer and embedder adapters are not production-qualified, so only a
+    /// boot that allows test dependencies starts.
+    fn test_opt_in() -> Self {
+        Self {
+            production_required: false,
+            allow_test_dependencies: true,
+            ..Self::production()
+        }
+    }
+
     async fn assemble(
         self,
         assembler: &dyn IngestPipelineRuntimeAssembler,
@@ -816,24 +833,46 @@ impl Boot {
 }
 
 /// Spec 4.2 item 8: through `assemble_ingest_pipeline_runtime`, a correctly
-/// configured production assembly passes every startup refusal --
-/// production-qualified, `main`'s gate configuration, no zero floor, the
-/// privacy requirement met -- and binds the compatibility bundle under the
+/// configured production assembly passes every startup refusal other than
+/// qualification -- `main`'s gate configuration, no zero floor, the privacy
+/// requirement met -- and binds the compatibility bundle under the
 /// production ids.
+///
+/// PR #1295 review round 2, Major 1: over doubles its scorer and embedder
+/// adapters are not production-qualified, and those two are its only
+/// blockers, so a production-required boot refuses it and only the test
+/// opt-in starts it. Production qualification comes only from
+/// `PipelineGateComponents::from_env` over the real components.
 #[tokio::test]
 async fn production_assembler_passes_every_startup_refusal() {
-    let service = Boot::production()
+    assert_eq!(
+        Boot::production()
+            .assemble(&ProductionPipelineAssembler)
+            .await
+            .err()
+            .expect("doubles are refused by a production-required boot")
+            .to_string(),
+        "pipeline_runtime_dependencies_not_production_qualified"
+    );
+    let service = Boot::test_opt_in()
         .assemble(&ProductionPipelineAssembler)
         .await
-        .expect("a correctly configured production assembly starts");
-    assert!(pipeline_runtime_is_production_qualified(&service));
+        .expect("the production assembly over doubles starts with the test opt-in");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
     pipeline_runtime::validate_pipeline_privacy_filter_requirement(true, &service).unwrap();
     assert!(service.binds_compatibility_bundle());
     assert!(!service.payout_enabled());
     let qualification = service
         .bundle_qualification(service.default_package())
         .unwrap();
-    assert!(qualification.blockers().is_empty(), "{qualification:?}");
+    assert_eq!(
+        qualification.blockers(),
+        vec![
+            "runtime_scorer_not_production",
+            "runtime_embedder_not_production"
+        ],
+        "{qualification:?}"
+    );
     assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
     assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
     assert_eq!(
@@ -881,7 +920,7 @@ async fn production_assembler_refuses_what_it_must() {
         refusal(
             Boot {
                 main_gate: zero,
-                ..Boot::production()
+                ..Boot::test_opt_in()
             }
             .assemble(&ProductionPipelineAssembler)
             .await
@@ -890,12 +929,13 @@ async fn production_assembler_refuses_what_it_must() {
     );
 
     assert_eq!(
-        refusal(Boot::production().assemble(&ShiftedFloorsAssembler).await),
+        refusal(Boot::test_opt_in().assemble(&ShiftedFloorsAssembler).await),
         "pipeline_runtime_main_gate_config_mismatch"
     );
 
-    // No privacy backend: not production-qualified while tenants are routed,
-    // and, started anyway for tests, refused by the privacy requirement.
+    // Not production-qualified while tenants are routed (over doubles the
+    // adapters never are, and here the privacy backend is missing too), and,
+    // started anyway for tests, refused by the privacy requirement.
     assert_eq!(
         refusal(
             Boot {
@@ -909,9 +949,7 @@ async fn production_assembler_refuses_what_it_must() {
     );
     let without_privacy = Boot {
         components: Some(test_components(None)),
-        production_required: false,
-        allow_test_dependencies: true,
-        ..Boot::production()
+        ..Boot::test_opt_in()
     }
     .assemble(&ProductionPipelineAssembler)
     .await
@@ -923,25 +961,23 @@ async fn production_assembler_refuses_what_it_must() {
         "pipeline_privacy_filter_required"
     );
 
-    assert_eq!(
-        refusal(
-            Boot {
-                production_required: false,
-                allow_test_dependencies: true,
-                unqualified_routing_allowed: true,
-                ..Boot::production()
-            }
-            .assemble(&ProductionPipelineAssembler)
-            .await
-        ),
-        "pipeline_unqualified_routing_with_production_runtime"
-    );
+    // Unqualified routing is refused only with a production-qualified
+    // runtime (`pipeline_unqualified_routing_with_production_runtime`,
+    // covered over a qualified assembly in `tests.rs`). Over doubles this
+    // runtime is not one, so a test process may route unqualified.
+    Boot {
+        unqualified_routing_allowed: true,
+        ..Boot::test_opt_in()
+    }
+    .assemble(&ProductionPipelineAssembler)
+    .await
+    .expect("an unqualified runtime started for tests may route unqualified");
 
     assert_eq!(
         refusal(
             Boot {
                 components: None,
-                ..Boot::production()
+                ..Boot::test_opt_in()
             }
             .assemble(&ProductionPipelineAssembler)
             .await
@@ -1006,7 +1042,7 @@ async fn runtime_selection_is_opt_in() {
                 settlement_mode,
                 require_adapter_auth: true,
             },
-            ..Boot::production()
+            ..Boot::test_opt_in()
         }
         .assemble(&ProductionPipelineAssembler)
         .await
@@ -1263,7 +1299,10 @@ fn read_json(path: std::path::PathBuf) -> serde_json::Value {
 /// label-and-digest-only evidence whose hash recomputes; a second boot does
 /// not refuse; a revision other than the build's refuses the start; a
 /// missing privacy backend or development infrastructure emits `fail` with
-/// the blockers.
+/// the blockers. Over doubles the scorer and embedder adapters are never
+/// production-qualified (PR #1295 review round 2, Major 1), so even with
+/// the production infrastructure the result is `fail`, naming exactly
+/// those two.
 #[tokio::test]
 async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     use trace_commons_server::versioned_pipeline_qualification::{
@@ -1272,7 +1311,7 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     let components = test_components(classifying_privacy());
     let service = Boot {
         components: Some(components.clone()),
-        ..Boot::production()
+        ..Boot::test_opt_in()
     }
     .assemble(&ProductionPipelineAssembler)
     .await
@@ -1326,7 +1365,7 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     };
     assert_eq!(
         emit(emit_vars(dir.path(), &revision()), Some(&revision())).unwrap(),
-        ProductionAdaptersEmit::Emitted(PipelineCheckStatus::Pass)
+        ProductionAdaptersEmit::Emitted(PipelineCheckStatus::Fail)
     );
     let result = read_json(dir.path().join("pipeline_production_adapters.result.json"));
     let evidence = read_json(
@@ -1334,12 +1373,18 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
             .join("pipeline_production_adapters.evidence.json"),
     );
     let digests = package_digests(service.default_package()).unwrap();
-    assert_eq!(result["status"], "pass");
+    assert_eq!(result["status"], "fail");
     assert_eq!(result["run_id"], "qproduction");
     assert_eq!(result["code_revision_hash"], revision());
     assert_eq!(result["package_hash"], digests.package_hash);
     assert_eq!(result["dependency_digest"], digests.dependency_digest);
-    assert_eq!(result["safe_blockers"], serde_json::json!([]));
+    assert_eq!(
+        result["safe_blockers"],
+        serde_json::json!([
+            "runtime_embedder_not_production",
+            "runtime_scorer_not_production",
+        ])
+    );
     assert_eq!(result["evidence_hash"], evidence_hash(&evidence).unwrap());
 
     let profile = trace_commons_server::versioned_pipeline_qualification::ProductionDependencyProfile::for_bundle(
@@ -1349,14 +1394,14 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     )
     .unwrap();
     let scorer_hash = scorer_descriptor(&scorer_env()).hash();
-    let embedder_hash = components.embedder_descriptor.hash();
+    let embedder_hash = components.parts().embedder_descriptor.hash();
     assert_eq!(
         evidence,
         serde_json::json!({
             "schema": "trace_commons.pipeline_production_adapters.v1",
             "runtime_identity_digest": profile.runtime_identity_digest().unwrap(),
-            "scorer": {"identity": "near_ai_perplexity_scorer", "descriptor_hash": scorer_hash, "qualified": true},
-            "embedder": {"identity": "fastembed_text_embedder", "descriptor_hash": embedder_hash, "output_dim": 2, "qualified": true},
+            "scorer": {"identity": "near_ai_perplexity_scorer", "descriptor_hash": scorer_hash, "qualified": false},
+            "embedder": {"identity": "fastembed_text_embedder", "descriptor_hash": embedder_hash, "output_dim": 2, "qualified": false},
             "index_reader": {"identity": "usearch_pipeline_index_reader", "qualified": true},
             "index_writer": {"identity": "usearch_pipeline_index_writer", "qualified": true},
             "index_root_shared_with_legacy": false,
@@ -1367,7 +1412,7 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
             "privacy": {"backend": "near_ai", "classifies_prose_pii": true, "qualified": true},
             "compatibility_configuration_qualifiable": true,
             "infrastructure_blockers": [],
-            "bundle_blockers": [],
+            "bundle_blockers": ["runtime_scorer_not_production", "runtime_embedder_not_production"],
         })
     );
     let text = evidence.to_string();
@@ -1416,9 +1461,7 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
     let without = test_components(None);
     let unqualified = Boot {
         components: Some(without.clone()),
-        production_required: false,
-        allow_test_dependencies: true,
-        ..Boot::production()
+        ..Boot::test_opt_in()
     }
     .assemble(&ProductionPipelineAssembler)
     .await
@@ -1455,14 +1498,20 @@ async fn production_adapters_check_is_emitted_once_with_its_evidence() {
         serde_json::json!([
             "artifact_store_not_production",
             "pipeline_privacy_filter_required",
+            "runtime_embedder_not_production",
             "runtime_privacy_not_production",
+            "runtime_scorer_not_production",
         ])
     );
     assert_eq!(evidence["privacy"]["backend"], "none");
     assert_eq!(evidence["near_settlement_mode"], "http");
     assert_eq!(
         evidence["bundle_blockers"],
-        serde_json::json!(["runtime_privacy_not_production"])
+        serde_json::json!([
+            "runtime_scorer_not_production",
+            "runtime_embedder_not_production",
+            "runtime_privacy_not_production",
+        ])
     );
     assert_eq!(
         evidence["infrastructure_blockers"],
@@ -1479,7 +1528,7 @@ async fn a_boot_refused_after_assembly_writes_no_result() {
     let components = test_components(classifying_privacy());
     let service = Boot {
         components: Some(components.clone()),
-        ..Boot::production()
+        ..Boot::test_opt_in()
     }
     .assemble(&ProductionPipelineAssembler)
     .await
@@ -1516,7 +1565,8 @@ async fn a_boot_refused_after_assembly_writes_no_result() {
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 
     // The corrected boot emits (a `fail`: the test state's infrastructure
-    // is not the production profile).
+    // is not the production profile, and the adapters over doubles are not
+    // production-qualified).
     let listener = start("127.0.0.1:0".to_string()).await.unwrap();
     drop(listener);
     let result = read_json(dir.path().join("pipeline_production_adapters.result.json"));

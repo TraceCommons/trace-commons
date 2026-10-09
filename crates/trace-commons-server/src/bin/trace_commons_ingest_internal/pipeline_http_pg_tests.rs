@@ -11959,12 +11959,16 @@ async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
 }
 
 /// Spec 2026-10-08, 4.2 item 14: the production assembler, through the seam
-/// a production boot uses (`TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`, a
-/// routed tenant, no test opt-in), over qualified scorer and embedder
-/// doubles and the usearch pipeline index on a temporary root
-/// (`near-ai-scorer`) or a qualified wrapper over `IsolatedPipelineIndex`
-/// (default features), takes a receipt to a complete Settle: the Trace
-/// Credit ledger row is written and no payout exists.
+/// a boot uses (a routed tenant), over scorer and embedder doubles and the
+/// usearch pipeline index on a temporary root (`near-ai-scorer`) or a
+/// qualified wrapper over `IsolatedPipelineIndex` (default features), takes
+/// a receipt to a complete Settle: the Trace Credit ledger row is written
+/// and no payout exists.
+///
+/// Over doubles the scorer and embedder adapters are not
+/// production-qualified (PR #1295 review round 2, Major 1), so this boot
+/// takes the test opt-in instead of `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`;
+/// unqualified routing stays off, so the tenant is routed by its row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_assembly_serves_a_routed_tenant_end_to_end() {
     use super::super::production_assembly::tests as production;
@@ -12015,10 +12019,10 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
         Some(&super::super::production_assembly::ProductionPipelineAssembler),
         Some(&connections),
         Some(&ConfiguredTraceArtifactStore::legacy(local_artifacts(&dir))),
-        true,
+        false,
         trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
         true,
-        false,
+        true,
         false,
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
@@ -12030,13 +12034,13 @@ async fn production_assembly_serves_a_routed_tenant_end_to_end() {
         main_gate,
         Some(components),
     )
-    .expect("a production assembly starts with a routed tenant and no test opt-in")
+    .expect("a production assembly over doubles starts with the test opt-in")
     .expect("an assembler was given, so a service is returned");
-    assert!(pipeline_runtime_is_production_qualified(&service));
+    assert!(!pipeline_runtime_is_production_qualified(&service));
     assert!(!service.payout_enabled());
 
-    // A production runtime routes only a tenant with a routing row (no
-    // unqualified routing): the operator activated this one.
+    // With unqualified routing off, the runtime routes only a tenant with a
+    // routing row: the operator activated this one.
     write_routing_as_operator(&tenant, "pipeline").await;
     service
         .register_default_bundle(&tenant)

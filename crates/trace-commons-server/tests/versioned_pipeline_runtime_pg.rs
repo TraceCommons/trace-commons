@@ -2915,20 +2915,23 @@ async fn qualification_inspects_the_objects_the_constructor_receives() {
 
 /// PR #1295 review, Major 1: the production assembly is library code, so
 /// this target can construct it. `pipeline_bundle_qualification` above still
-/// qualifies the local reference candidate: its assertions that the
-/// candidate's scorer and embedder are the reference ones, that neither is
-/// production-qualified, and that the configuration is not qualifiable all
-/// flip for a production candidate, and switching the check onto this
-/// constructor in production mode is Slice B-2. This shows what that
-/// candidate qualifies as: the production identities, both qualified, and a
-/// qualifiable configuration. The scorer and embedder behind the adapters are
-/// reference doubles; the identities are the adapters' own.
+/// qualifies the local reference candidate; switching the check onto the
+/// production assembly in production mode is Slice B-2, which builds its
+/// components with `PipelineGateComponents::from_env` (`near-ai-scorer`).
+///
+/// Round 2, Major 1: components built from parts -- here, reference doubles
+/// behind the production adapters -- are never production-qualified. The
+/// adapters carry the production identities and the configuration is the
+/// production one, but the scorer and embedder are blockers: only the env
+/// constructor, over the real NEAR AI scorer and fastembed embedder, makes
+/// them qualified, so a double wrapped under production descriptors cannot
+/// pass as a production candidate.
 #[tokio::test]
 async fn production_assembly_is_constructible_from_the_library() {
     use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
     use trace_commons_server::versioned_pipeline_production::{
-        FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponents,
-        ProductionPipelineInputs, assemble_production_pipeline,
+        FastEmbedDescriptor, NearAiScorerDescriptor, PipelineGateComponentParts,
+        PipelineGateComponents, ProductionPipelineInputs, assemble_production_pipeline,
     };
     let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -2945,28 +2948,31 @@ async fn production_assembly_is_constructible_from_the_library() {
     );
     let dir = tempfile::tempdir().unwrap();
     let index = IsolatedPipelineIndex::new();
-    let components = Arc::new(PipelineGateComponents {
-        scorer: Arc::new(ReferencePerplexityScorer::new()),
-        scorer_descriptor: NearAiScorerDescriptor {
-            model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
-            tail_logprob_cutoff: -8.0,
-            logprobs_top_k: 1,
+    let components = Arc::new(PipelineGateComponents::with_unqualified_adapters(
+        PipelineGateComponentParts {
+            scorer: Arc::new(ReferencePerplexityScorer::new()),
+            scorer_descriptor: NearAiScorerDescriptor {
+                model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+                tail_logprob_cutoff: -8.0,
+                logprobs_top_k: 1,
+            },
+            embedder: Arc::new(ReferenceEmbedder::new()),
+            embedder_descriptor: FastEmbedDescriptor {
+                model_id: "BAAI/bge-large-en-v1.5".to_string(),
+                output_dim: 1024,
+                max_tokens: 512,
+                matryoshka_dim: None,
+            },
+            index_reader: index.clone(),
+            index_writer: index,
+            index_root_shared_with_legacy: false,
+            authority: allow_all_authority(),
+            tenant_policy_count: 0,
+            privacy: None,
+            privacy_backend: None,
         },
-        embedder: Arc::new(ReferenceEmbedder::new()),
-        embedder_descriptor: FastEmbedDescriptor {
-            model_id: "BAAI/bge-large-en-v1.5".to_string(),
-            output_dim: 1024,
-            max_tokens: 512,
-            matryoshka_dim: None,
-        },
-        index_reader: index.clone(),
-        index_writer: index,
-        index_root_shared_with_legacy: false,
-        authority: allow_all_authority(),
-        tenant_policy_count: 0,
-        privacy: None,
-        privacy_backend: None,
-    });
+    ));
+    assert!(!components.adapters_production_qualified());
     let service = assemble_production_pipeline(ProductionPipelineInputs {
         backend,
         artifact_store: artifact_store(&dir),
@@ -2988,16 +2994,26 @@ async fn production_assembly_is_constructible_from_the_library() {
         },
         components,
     })
-    .expect("the production assembly builds over qualified adapters");
+    .expect("the production assembly builds over doubles");
     let candidate = service.default_package().clone();
     let qualification = service
         .bundle_qualification(&candidate)
         .expect("the candidate resolves against its own service");
     assert_eq!(qualification.scorer.identity, "near_ai_perplexity_scorer");
     assert_eq!(qualification.embedder.identity, "fastembed_text_embedder");
-    assert!(qualification.scorer.production_qualified);
-    assert!(qualification.embedder.production_qualified);
+    assert!(!qualification.scorer.production_qualified);
+    assert!(!qualification.embedder.production_qualified);
     assert!(qualification.configuration_qualifiable);
+    let blockers = qualification.blockers();
+    assert!(
+        blockers.contains(&"runtime_scorer_not_production"),
+        "{blockers:?}"
+    );
+    assert!(
+        blockers.contains(&"runtime_embedder_not_production"),
+        "{blockers:?}"
+    );
+    assert!(!qualification.is_production_qualified());
 }
 
 /// Task 5: `bundle_qualification` fails closed on a package it cannot

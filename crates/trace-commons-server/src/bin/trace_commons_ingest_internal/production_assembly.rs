@@ -17,67 +17,6 @@ use super::*;
 
 pub(crate) use trace_commons_server::versioned_pipeline_production::*;
 
-/// Reads one variable through `lookup`, treating an empty or all-blank value
-/// as unset.
-fn lookup_trimmed(lookup: &dyn Fn(&str) -> Option<String>, var: &str) -> Option<String> {
-    lookup(var)
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn std_env_lookup(var: &str) -> Option<String> {
-    std::env::var(var).ok()
-}
-
-/// The NEAR AI scorer descriptor (spec A-D4) from `lookup`: the same parse
-/// the legacy `enclave_near_ai` gate applies to the model and the tail
-/// cutoff; `logprobs_top_k` is the constant both use.
-pub(crate) fn near_ai_scorer_descriptor_from_lookup(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> anyhow::Result<NearAiScorerDescriptor> {
-    let model = lookup_trimmed(lookup, TRACE_COMMONS_NEAR_AI_MODEL)
-        .ok_or_else(|| anyhow::anyhow!("pipeline_scorer_model_missing"))?;
-    let tail_logprob_cutoff =
-        match lookup_trimmed(lookup, TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
-            Some(raw) => raw
-                .parse::<f32>()
-                .ok()
-                .filter(|value| value.is_finite())
-                .ok_or_else(|| anyhow::anyhow!("pipeline_scorer_tail_cutoff_invalid"))?,
-            None => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
-        };
-    Ok(NearAiScorerDescriptor {
-        model,
-        tail_logprob_cutoff,
-        logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
-    })
-}
-
-/// The fastembed embedder descriptor (spec A-D5) from `lookup`.
-pub(crate) fn fastembed_descriptor_from_lookup(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> anyhow::Result<FastEmbedDescriptor> {
-    let positive = |var: &str| -> anyhow::Result<Option<usize>> {
-        lookup_trimmed(lookup, var)
-            .map(|raw| {
-                raw.parse::<usize>()
-                    .ok()
-                    .filter(|value| *value > 0)
-                    .ok_or_else(|| anyhow::anyhow!("pipeline_embedder_descriptor_invalid"))
-            })
-            .transpose()
-    };
-    Ok(FastEmbedDescriptor {
-        model_id: lookup_trimmed(lookup, TRACE_COMMONS_EMBEDDER_MODEL_ID)
-            .unwrap_or_else(|| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string()),
-        output_dim: positive(TRACE_COMMONS_VECTOR_INDEX_DIM)?
-            .unwrap_or(TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM),
-        max_tokens: positive(TRACE_COMMONS_EMBEDDER_MAX_TOKENS)?
-            .unwrap_or(TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS),
-        matryoshka_dim: positive(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM)?,
-    })
-}
-
 /// `main`'s tenant submission policies as the authority provider reads
 /// them: the two allowlists, nothing else.
 pub(crate) fn tenant_policy_allowlists(
@@ -205,141 +144,21 @@ impl IngestPipelineRuntimeAssembler for ProductionPipelineAssembler {
     }
 }
 
-/// What a production boot hands the components builder besides the
-/// environment: `main`'s tenant policies, its require-policy flag, and
-/// which tenants it reads policies for from the database.
-pub(crate) struct PipelineComponentInputs {
-    pub(crate) tenant_policies: Arc<BTreeMap<String, TenantSubmissionPolicy>>,
-    pub(crate) require_tenant_submission_policy: bool,
-    pub(crate) db_policy_reads: DbTenantPolicyReads,
-}
-
-/// The values the legacy gate was built with, which the pipeline's
-/// descriptors must name: the two parse the same variables, and this
-/// refuses a start where they would not agree, so the package can never
-/// name a scorer or embedder other than the one that runs.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct LegacyGatePins {
-    pub(crate) model: String,
-    pub(crate) tail_logprob_cutoff: f32,
-    pub(crate) embedder_model_id: String,
-    pub(crate) embedder_output_dim: usize,
-    pub(crate) embedder_max_tokens: usize,
-    pub(crate) embedder_matryoshka_dim: Option<usize>,
-}
-
-pub(crate) fn ensure_descriptors_match_gate(
-    scorer: &NearAiScorerDescriptor,
-    embedder: &FastEmbedDescriptor,
-    gate: &LegacyGatePins,
-) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        scorer.model == gate.model
-            && scorer.tail_logprob_cutoff == gate.tail_logprob_cutoff
-            && scorer.logprobs_top_k == TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
-        "pipeline_scorer_descriptor_mismatch"
-    );
-    anyhow::ensure!(
-        embedder.model_id == gate.embedder_model_id
-            && embedder.output_dim == gate.embedder_output_dim
-            && embedder.max_tokens == gate.embedder_max_tokens
-            && embedder.matryoshka_dim == gate.embedder_matryoshka_dim,
-        "pipeline_embedder_descriptor_mismatch"
-    );
-    Ok(())
-}
-
-/// The novelty and dedup roots the legacy gate opens, resolved exactly as
-/// `build_dedup_vector_index_from_env` resolves the dedup default.
-fn legacy_index_roots(lookup: &dyn Fn(&str) -> Option<String>) -> (PathBuf, PathBuf) {
-    let novelty = lookup(TRACE_COMMONS_VECTOR_INDEX_ROOT)
-        .unwrap_or_else(|| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
-    let dedup = lookup(TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT)
-        .unwrap_or_else(|| format!("{novelty}/../dedup-index"));
-    (PathBuf::from(novelty), PathBuf::from(dedup))
-}
-
-/// The pipeline index root: required, and never a legacy root.
-pub(crate) fn pipeline_index_root_from(
-    lookup: &dyn Fn(&str) -> Option<String>,
-) -> anyhow::Result<PathBuf> {
-    let root = lookup_trimmed(lookup, TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT)
-        .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!(PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL))?;
-    let (novelty, dedup) = legacy_index_roots(lookup);
-    validate_pipeline_index_root(&root, &[&novelty, &dedup])?;
-    Ok(root)
-}
-
-/// The pipeline's privacy boundary (spec A-D7): `main`'s classifier adapter
-/// and policy, or `None` when no backend is configured.
-fn pipeline_privacy_from_env() -> anyhow::Result<(
-    Option<Arc<dyn trace_commons_server::versioned_pipeline_authority::PipelinePrivacyBoundary>>,
-    Option<trace_commons_protocol::trace_contribution::PrivacyFilterBackendTag>,
-)> {
-    let Some((adapter, backend)) =
-        trace_commons_protocol::trace_contribution::privacy_filter_adapter_from_env()
-            .map_err(|_| anyhow::anyhow!("pipeline_privacy_filter_unavailable"))?
-    else {
-        return Ok((None, None));
-    };
-    let boundary =
-        trace_commons_server::versioned_pipeline_authority::ClassifierRedactorPipelinePrivacyBoundary::new(
-            adapter,
-            backend,
-            PiiClassifyPolicy::from_env(),
-        );
-    Ok((Some(Arc::new(boundary)), Some(backend)))
-}
-
-/// Builds the legacy `enclave_near_ai` gate and, from the same scorer,
-/// embedder and settings, the components the production pipeline holds
-/// (spec A-D3, A-D6, A-D7, A-D8). Only this builder names the concrete NEAR
-/// AI, fastembed and usearch types.
+/// Builds the production pipeline's gate components through the library's
+/// one constructor, [`PipelineGateComponents::from_env`], and the legacy
+/// `enclave_near_ai` gate over the same scorer and embedder (spec A-D3,
+/// A-D6, A-D7, A-D8). Only that constructor names the concrete NEAR AI,
+/// fastembed and usearch types.
 #[cfg(feature = "near-ai-scorer")]
 pub(crate) async fn build_near_ai_gate_service_with_pipeline_components(
     inputs: PipelineComponentInputs,
 ) -> anyhow::Result<(Arc<dyn TraceGateService>, Arc<PipelineGateComponents>)> {
-    let scorer_descriptor = near_ai_scorer_descriptor_from_lookup(&std_env_lookup)?;
-    let embedder_descriptor = fastembed_descriptor_from_lookup(&std_env_lookup)?;
-    let pipeline_root = pipeline_index_root_from(&std_env_lookup)?;
-    let parts = near_ai_gate_parts_from_env().await?;
-    ensure_descriptors_match_gate(
-        &scorer_descriptor,
-        &embedder_descriptor,
-        &LegacyGatePins {
-            model: parts.model.clone(),
-            tail_logprob_cutoff: parts.tail_logprob_cutoff,
-            embedder_model_id: parts.embedder_model_id.clone(),
-            embedder_output_dim: parts.embedder_output_dim,
-            embedder_max_tokens: parts.embedder_max_tokens,
-            embedder_matryoshka_dim: parts.embedder_matryoshka_dim,
-        },
-    )?;
-    // Every pipeline write flushes, so no periodic flusher thread is needed.
-    let mut index_config = parts.vector_index_config.clone();
-    index_config.flush_interval = None;
-    let index = Arc::new(UsearchPipelineIndex::open(&pipeline_root, index_config)?);
-    let (privacy, privacy_backend) = pipeline_privacy_from_env()?;
-    let tenant_policy_count = inputs.tenant_policies.len();
-    let components = Arc::new(PipelineGateComponents {
-        scorer: parts.scorer.clone(),
-        scorer_descriptor,
-        embedder: parts.embedder.clone(),
-        embedder_descriptor,
-        index_reader: index.clone(),
-        index_writer: index,
-        index_root_shared_with_legacy: false,
-        authority: Arc::new(TenantPolicyPipelineAuthorityProvider::new(
-            tenant_policy_allowlists(&inputs.tenant_policies),
-            inputs.require_tenant_submission_policy,
-            inputs.db_policy_reads,
-        )),
-        tenant_policy_count,
-        privacy,
-        privacy_backend,
-    });
-    Ok((near_ai_gate_service_from_parts(parts), components))
+    let (components, shared) = PipelineGateComponents::from_env(inputs).await?;
+    let wrapper = near_ai_gate_key_wrapper_from_env().await?;
+    Ok((
+        near_ai_gate_service_from_parts(near_ai_gate_parts(wrapper, shared)?),
+        components,
+    ))
 }
 
 #[cfg(not(feature = "near-ai-scorer"))]
@@ -381,13 +200,6 @@ pub(crate) fn pipeline_check_vars_from_env() -> PipelineCheckVars {
         code_revision_hash: std::env::var("TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH").ok(),
     }
 }
-
-/// Where the pipeline's own vector index lives (spec A-D6). Required under
-/// the production selection, and never the legacy novelty or dedup root.
-pub(crate) const TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT: &str =
-    "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT";
-pub(crate) const PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL: &str =
-    "pipeline_vector_index_root_missing";
 
 #[cfg(test)]
 #[path = "production_assembly_tests.rs"]

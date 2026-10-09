@@ -490,15 +490,27 @@ results, and its restore drill carries the blocker
 
 The production run's four package-bearing results must come from the
 production assembly. `assemble_production_pipeline`
-(`trace_commons_server::versioned_pipeline_production`) is library code, so
-the integration targets that emit them can build it
-(`production_assembly_is_constructible_from_the_library`), but today
-`pipeline_bundle_qualification` still qualifies the reference candidate: it
-asserts that the candidate's scorer and embedder are the reference ones, that
-neither is production-qualified, and that its configuration is not
-qualifiable. All five assertions flip in production mode. Switching the check
-onto the production assembly is Slice B-2; until then `promote package-checks`
-refuses with `harness_production_assembly_unavailable`.
+(`trace_commons_server::versioned_pipeline_production`) is library code, and
+so is its one components constructor,
+`PipelineGateComponents::from_env(PipelineComponentInputs)` (`near-ai-scorer`),
+which builds the NEAR AI scorer, the fastembed embedder and the usearch
+pipeline index from the environment and refuses a start whose descriptors
+disagree with them. The ingest binary and the integration targets that emit
+these results call that same constructor. Its scorer and embedder adapters
+are the only ones that report themselves production-qualified: components
+built any other way (`PipelineGateComponents::with_unqualified_adapters`,
+which is how a test fills them with doubles) are never production-qualified,
+whatever the doubles report, so a double wrapped under the production
+descriptors cannot qualify
+(`production_assembly_is_constructible_from_the_library` pins that).
+
+Today `pipeline_bundle_qualification` still qualifies the reference
+candidate: it asserts that the candidate's scorer and embedder are the
+reference ones, that neither is production-qualified, and that its
+configuration is not qualifiable. All five assertions flip in production
+mode. Switching the check onto the production assembly, built through
+`from_env`, is Slice B-2; until then `promote package-checks` refuses with
+`harness_production_assembly_unavailable`.
 
 ## The production run: `pipeline.py promote`
 
