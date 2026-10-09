@@ -92,8 +92,17 @@ pub const PIPELINE_EMBEDDER_DESCRIPTOR_MISMATCH_LABEL: &str =
 /// exercised by the plain `cargo test` CI path regardless of which optional
 /// gate-service feature (if any) is compiled in.
 pub fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
-    match std::env::var(var) {
-        Ok(raw) => {
+    parse_usize_lookup(&std_env_lookup, var, default)
+}
+
+/// [`parse_usize_env`] through `lookup`.
+pub fn parse_usize_lookup(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    var: &'static str,
+    default: usize,
+) -> anyhow::Result<usize> {
+    match lookup(var) {
+        Some(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 Ok(default)
@@ -103,7 +112,7 @@ pub fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usiz
                     .with_context(|| format!("{var} must be a non-negative integer"))
             }
         }
-        Err(_) => Ok(default),
+        None => Ok(default),
     }
 }
 
@@ -223,9 +232,18 @@ pub fn pipeline_index_root_from(
     let root = lookup_trimmed(lookup, TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT)
         .map(PathBuf::from)
         .ok_or_else(|| anyhow::anyhow!(PIPELINE_VECTOR_INDEX_ROOT_MISSING_LABEL))?;
-    let (novelty, dedup) = legacy_index_roots(lookup);
-    validate_pipeline_index_root(&root, &[&novelty, &dedup])?;
+    ensure_pipeline_root_separate(lookup, &root)?;
     Ok(root)
+}
+
+/// Refuses `root` when it is, or nests with, the novelty or dedup root
+/// `lookup` names (`pipeline_vector_index_root_shared`).
+pub fn ensure_pipeline_root_separate(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    root: &std::path::Path,
+) -> anyhow::Result<()> {
+    let (novelty, dedup) = legacy_index_roots(lookup);
+    validate_pipeline_index_root(root, &[&novelty, &dedup])
 }
 
 /// What a production boot hands `PipelineGateComponents::from_env`
@@ -270,27 +288,34 @@ mod near_ai {
         /// The legacy gate's construction of the scorer and the embedder,
         /// unchanged: the same variables, the same parse, the same refusals.
         pub async fn from_env() -> anyhow::Result<Self> {
+            Self::from_lookup(&std_env_lookup).await
+        }
+
+        /// [`Self::from_env`], reading each variable through `lookup`.
+        pub async fn from_lookup(
+            lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+        ) -> anyhow::Result<Self> {
             use std::time::Duration as StdDuration;
             use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
             use trace_commons_gate_enclave::{NearAiPerplexityScorer, NearAiScorerConfig};
 
-            let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
+            let base_url = lookup(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
                 format!(
                     "{TRACE_COMMONS_NEAR_AI_BASE_URL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
                 )
             })?;
-            let model = std::env::var(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
+            let model = lookup(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
                 format!(
                     "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
                 )
             })?;
-            let api_key = std::env::var(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
+            let api_key = lookup(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
                 format!(
                     "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
                 )
             })?;
-            let timeout_seconds = match std::env::var(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
-                Ok(raw) => {
+            let timeout_seconds = match lookup(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
+                Some(raw) => {
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
                         TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS
@@ -302,19 +327,19 @@ mod near_ai {
                         })?
                     }
                 }
-                Err(_) => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
+                None => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
             };
             anyhow::ensure!(
                 timeout_seconds > 0,
                 "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
             );
-            let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
-                Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
+            let tail_cutoff = match lookup(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
+                Some(raw) => raw.trim().parse::<f32>().with_context(|| {
                     format!(
                         "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
                     )
                 })?,
-                Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
+                None => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
             };
             anyhow::ensure!(
                 tail_cutoff.is_finite(),
@@ -340,23 +365,22 @@ mod near_ai {
 
             // fastembed-rs embedder — same configuration surface as the local-GPU
             // path. Runs locally on CPU; no GPU required.
-            let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
-                .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
-            let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
-                .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
-            let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
-                Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
+            let embedder_model_id = lookup(TRACE_COMMONS_EMBEDDER_MODEL_ID)
+                .unwrap_or_else(|| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
+            let embedder_cache_dir = lookup(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
+                .unwrap_or_else(|| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
+            let embedder_max_tokens = match lookup(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
+                Some(raw) => raw.trim().parse::<usize>().with_context(|| {
                     format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
                 })?,
-                Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
+                None => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
             };
             anyhow::ensure!(
                 embedder_max_tokens > 0,
                 "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
             );
-            let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM)
-            {
-                Ok(raw) => {
+            let embedder_matryoshka_dim = match lookup(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
+                Some(raw) => {
                     let trimmed = raw.trim();
                     if trimmed.is_empty() {
                         None
@@ -368,7 +392,7 @@ mod near_ai {
                         })?)
                     }
                 }
-                Err(_) => None,
+                None => None,
             };
             if let Some(d) = embedder_matryoshka_dim {
                 anyhow::ensure!(
@@ -405,27 +429,40 @@ mod near_ai {
     /// interval is not among them: the caller sets it (the pipeline index
     /// runs with none).
     pub fn usearch_index_config_from_env() -> anyhow::Result<UsearchVectorIndexConfig> {
-        let dim = parse_usize_env(
+        usearch_index_config_from_lookup(&std_env_lookup)
+    }
+
+    /// [`usearch_index_config_from_env`] through `lookup`.
+    pub fn usearch_index_config_from_lookup(
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<UsearchVectorIndexConfig> {
+        let dim = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_DIM,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
         )?;
-        let max_open = parse_usize_env(
+        let max_open = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
         )?;
-        let flush_every = parse_usize_env(
+        let flush_every = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
         )?;
-        let hnsw_m = parse_usize_env(
+        let hnsw_m = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
         )?;
-        let ef_construction = parse_usize_env(
+        let ef_construction = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
         )?;
-        let ef_search = parse_usize_env(
+        let ef_search = parse_usize_lookup(
+            lookup,
             TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
             TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
         )?;
@@ -478,16 +515,38 @@ mod near_ai {
         pub async fn from_env(
             inputs: PipelineComponentInputs,
         ) -> anyhow::Result<(Arc<Self>, NearAiGateSharedComponents)> {
-            let scorer_descriptor = near_ai_scorer_descriptor_from_lookup(&std_env_lookup)?;
-            let embedder_descriptor = fastembed_descriptor_from_lookup(&std_env_lookup)?;
-            let pipeline_root = pipeline_index_root_from(&std_env_lookup)?;
-            let shared = NearAiGateSharedComponents::from_env().await?;
+            Self::from_lookup(inputs, &std_env_lookup, None).await
+        }
+
+        /// [`Self::from_env`], reading each variable through `lookup`, on
+        /// `index_root` when given (instead of
+        /// `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT`; it is still refused
+        /// when it nests with a legacy root). The privacy boundary still
+        /// reads the process environment, as `main`'s classifier does. The
+        /// same constructor, so components it builds are production-qualified
+        /// exactly as `from_env`'s are: an integration target that runs the
+        /// production harness per check builds through this.
+        pub async fn from_lookup(
+            inputs: PipelineComponentInputs,
+            lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+            index_root: Option<&std::path::Path>,
+        ) -> anyhow::Result<(Arc<Self>, NearAiGateSharedComponents)> {
+            let scorer_descriptor = near_ai_scorer_descriptor_from_lookup(lookup)?;
+            let embedder_descriptor = fastembed_descriptor_from_lookup(lookup)?;
+            let pipeline_root = match index_root {
+                Some(root) => {
+                    ensure_pipeline_root_separate(lookup, root)?;
+                    root.to_path_buf()
+                }
+                None => pipeline_index_root_from(lookup)?,
+            };
+            let shared = NearAiGateSharedComponents::from_lookup(lookup).await?;
             ensure_descriptors_match_gate(&scorer_descriptor, &embedder_descriptor, &shared.pins)?;
             // Every pipeline write flushes, so no periodic flusher thread is
             // needed.
             let index = Arc::new(UsearchPipelineIndex::open(
                 &pipeline_root,
-                usearch_index_config_from_env()?,
+                usearch_index_config_from_lookup(lookup)?,
             )?);
             let (privacy, privacy_backend) = pipeline_privacy_from_env()?;
             let tenant_policy_count = inputs.tenant_policies.len();
