@@ -77,7 +77,9 @@ PROMOTION_ONLY_CHECK_IDS = (ADAPTERS_CHECK_ID, REMOTE_RESTORE_CHECK_ID, HF_CANAR
 
 _PIN_DIR = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
 HF_LOCAL_PIN = _PIN_DIR / "pin-local.json"
-HF_NETWORK_PIN = _PIN_DIR / "pin-network.json"
+# The committed network pin, relative to the repository root: the only pin
+# `hf-canary` accepts.
+HF_NETWORK_PIN_PATH = Path("crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json")
 # Every digest a network pin carries, each compared by the canary.
 HF_PIN_DIGEST_FIELDS = (
     "source_digest",
@@ -526,11 +528,21 @@ def hf_canary(args, run):
     again, into a fresh cache inside the production run, and compares every
     digest with the pin. A digest that moved is `fail` with
     `hf_pin_digest_mismatch_<field>`; a download that left no JSONL file in
-    the cache is `fail` with `hf_network_download_missing`."""
+    the cache is `fail` with `hf_network_download_missing`.
+
+    The pin is the committed `pin-network.json`, which the run's code
+    revision covers. A `--pin` whose bytes differ from it is refused
+    (`hf_network_pin_not_committed`) before anything is downloaded: a pin
+    `hf-pin record` wrote for another revision matches its own download in
+    every digest, and a canary would certify a pin nobody reviewed."""
     refuse_in_ci()
     production = open_run(args.run_id)
-    pin_path = Path(args.pin).resolve()
+    pin_path = environment.ROOT / HF_NETWORK_PIN_PATH
     pin = _load_network_pin(pin_path)
+    if args.pin is not None:
+        given = Path(args.pin).resolve()
+        require(given.is_file(), "hf_network_pin_not_committed")
+        require(sha256_digest(given.read_bytes()) == sha256_digest(pin_path.read_bytes()), "hf_network_pin_not_committed")
     work_dir = production.run.run_dir / "hf-canary"
     manifest, downloaded, cache_dir = _download(production.run, "hf_network_canary", _pin_source_fields(pin), work_dir)
     blockers = [f"hf_pin_digest_mismatch_{field}" for field in HF_PIN_DIGEST_FIELDS if manifest[field] != pin[field]]
@@ -823,7 +835,9 @@ def add_parsers(subparsers, hooks):
 
     run_parser("package-checks", package_checks, "The package checks on the production assembly (not yet available)")
     canary = run_parser("hf-canary", hf_canary, "pipeline_hf_network_canary: download the network pin and compare it")
-    canary.add_argument("--pin", default=str(HF_NETWORK_PIN), help="The network pin (default: pin-network.json).")
+    canary.add_argument(
+        "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
+    )
     restore = run_parser("remote-restore", remote_restore, "pipeline_remote_restore: the remote-store restore drill")
     restore.add_argument("--source-store", dest="source_store", required=True, help="The live bucket[/prefix] name.")
     restore.add_argument(

@@ -4836,12 +4836,14 @@ class HfNetworkPinTests(_PromoteCase):
         self.assertEqual(self._record(output), 0, self.stderr.getvalue())
         self.assertNotIn("local_jsonl_dir", json.loads(output.read_text()))
 
-        # The canary refuses a pin that names a local directory.
+        # The canary refuses a committed pin that names a local directory.
         run_id = self._init()
         local = json.loads(output.read_text())
         local["local_jsonl_dir"] = "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
-        output.write_text(json.dumps(local))
-        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(output)]), 1)
+        committed_pin = self.root / promote.HF_NETWORK_PIN_PATH
+        committed_pin.parent.mkdir(parents=True, exist_ok=True)
+        committed_pin.write_text(json.dumps(local))
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id]), 1)
         self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_has_local_dir")
 
     def test_hf_pin_record_writes_every_digest(self):
@@ -4890,7 +4892,9 @@ class HfNetworkPinTests(_PromoteCase):
 class HfCanaryTests(_PromoteCase):
     def setUp(self):
         super().setUp()
-        self.pin_path = self.root / "pin-network.json"
+        # The committed pin: where the repository keeps it, in the scratch root.
+        self.pin_path = self.root / promote.HF_NETWORK_PIN_PATH
+        self.pin_path.parent.mkdir(parents=True, exist_ok=True)
         local = json.loads(promote.HF_LOCAL_PIN.read_text())
         pin = {key: value for key, value in local.items() if key != "local_jsonl_dir"}
         pin["revision"] = _HEX40
@@ -4967,6 +4971,46 @@ class HfCanaryTests(_PromoteCase):
         self.assertEqual(self._canary(run_id), 1)
         result, _ = self._result(run_id, promote.HF_CANARY_CHECK_ID)
         self.assertEqual((result["status"], result["safe_blockers"]), ("fail", ["hf_network_download_missing"]))
+
+    def test_hf_canary_accepts_only_the_committed_pin(self):
+        """Review of #1293: a pin `hf-pin record` wrote for another revision,
+        outside the tree, matches its own fresh download in every digest. The
+        code revision does not cover it, so the canary refuses any pin whose
+        bytes are not the committed `pin-network.json`'s, before it downloads."""
+        run_id = self._init()
+        other = dict(self.pin, revision="f" * 40)
+        elsewhere = self.root / "elsewhere" / "pin-network.json"
+        elsewhere.parent.mkdir()
+        elsewhere.write_text(json.dumps(other))
+        # Every digest of the other revision's download matches its pin.
+        self.manifest = _hf_network_manifest(source={**self.manifest["source"], "revision": "f" * 40})
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(elsewhere)]), 1)
+        self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_not_committed")
+        self.assertEqual([call for call in self.calls if call[0] == "export"], [])
+        self.assertFalse((self._results_dir(run_id) / f"{promote.HF_CANARY_CHECK_ID}.result.json").exists())
+
+        # A copy of the committed pin's bytes, wherever it is, is the
+        # committed pin.
+        self.manifest = _hf_network_manifest()
+        copy = self.root / "elsewhere" / "copy.json"
+        copy.write_bytes(self.pin_path.read_bytes())
+        self.stderr.seek(0)
+        self.stderr.truncate()
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, "--pin", str(copy)]), 0,
+                         self.stderr.getvalue())
+        _, evidence = self._result(run_id, promote.HF_CANARY_CHECK_ID)
+        self.assertEqual(evidence["pin_hash"], _digest(self.pin_path.read_bytes()))
+
+        # With no `--pin`, the committed pin is the one used.
+        self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id]), 0, self.stderr.getvalue())
+
+        # No committed pin: nothing is accepted in its place.
+        self.pin_path.unlink()
+        for argv in ([], ["--pin", str(copy)]):
+            self.stderr.seek(0)
+            self.stderr.truncate()
+            self.assertEqual(self._main(["promote", "hf-canary", "--run-id", run_id, *argv]), 1, argv)
+            self.assertEqual(self._failure(), "PipelineFailure: hf_network_pin_missing", argv)
 
     def test_hf_canary_refuses_a_pin_without_every_digest(self):
         run_id = self._init()
