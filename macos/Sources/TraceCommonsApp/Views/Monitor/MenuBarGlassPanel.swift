@@ -469,14 +469,10 @@ private struct PanelSurface: ViewModifier {
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        GlassMenuBarStrip(
-            columns: store.columns,
-            condition: MenuPanelStatus.condition(
-                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running, stale: store.stale),
-            badge: MenuPanelStatus.badge(model.decisionsOwed))
+        Image(nsImage: rendered)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(MenuBarStatus.accessibilityLabel(
                 decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
@@ -487,6 +483,27 @@ struct MenuBarStripLabel: View {
                 store.attach(model.daemonData, configDirectory: model.configDirectory)
                 await store.run()
             }
+    }
+
+    /// The strip as a bitmap. A `MenuBarExtra` label keeps only an `Image`
+    /// and a `Text` out of whatever view it is given, so the strip drawn as
+    /// a view lost its bars and kept the badge as a bare number. Drawn as a
+    /// non-template image it reaches the menu bar in its own colours.
+    /// Padded past the badge's offset so the badge is not clipped.
+    @MainActor
+    private var rendered: NSImage {
+        let renderer = ImageRenderer(content: GlassMenuBarStrip(
+            columns: store.columns,
+            condition: MenuPanelStatus.condition(
+                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+                paused: model.status.paused, available: model.startup == .running, stale: store.stale),
+            badge: MenuPanelStatus.badge(model.decisionsOwed))
+            .padding(.trailing, 6)
+            .padding(.bottom, 2))
+        renderer.scale = displayScale
+        let image = renderer.nsImage ?? NSImage()
+        image.isTemplate = false
+        return image
     }
 }
 
