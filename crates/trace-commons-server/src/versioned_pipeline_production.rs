@@ -687,10 +687,13 @@ pub const PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL: &str = "pipeline_vector_index
 pub const PIPELINE_VECTOR_INDEX_MANIFEST_MISMATCH_LABEL: &str =
     "pipeline_vector_index_manifest_mismatch";
 
-/// `path` made absolute against the working directory and with `.` and `..`
-/// resolved lexically, so a root that does not exist yet (the dedup default
-/// is `<novelty_root>/../dedup-index`) still compares.
-fn normalized_root(path: &std::path::Path) -> PathBuf {
+/// `path` as the filesystem resolves it: made absolute against the working
+/// directory, its longest existing ancestor canonicalized (symlinks and
+/// `..` resolved), and the components that do not exist yet appended with
+/// `.` and `..` resolved lexically -- a root that does not exist yet (the
+/// dedup default is `<novelty_root>/../dedup-index`) still compares. An
+/// ancestor that cannot be canonicalized is kept as written.
+fn resolved_root(path: &std::path::Path) -> PathBuf {
     use std::path::Component;
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -699,29 +702,44 @@ fn normalized_root(path: &std::path::Path) -> PathBuf {
             .unwrap_or_else(|_| PathBuf::from("/"))
             .join(path)
     };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    let mut resolved = loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            break canonical;
+        }
+        match (existing.parent(), existing.components().next_back()) {
+            (Some(parent), Some(last)) => {
+                missing.push(last);
+                existing = parent;
+            }
+            _ => break existing.to_path_buf(),
+        }
+    };
+    for component in missing.into_iter().rev() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                normalized.pop();
+                resolved.pop();
             }
-            other => normalized.push(other.as_os_str()),
+            other => resolved.push(other.as_os_str()),
         }
     }
-    normalized
+    resolved
 }
 
 /// Refuses, with `pipeline_vector_index_root_shared`, a pipeline index root
 /// equal to, or nested in either direction with, any of `legacy_roots`: two
-/// usearch indexes on one root corrupt each other's `nearest`.
+/// usearch indexes on one root corrupt each other's `nearest`. The roots are
+/// compared as the filesystem resolves them, so a symlink cannot hide an
+/// overlap (PR #1295 review).
 pub fn validate_pipeline_index_root(
     pipeline_root: &std::path::Path,
     legacy_roots: &[&std::path::Path],
 ) -> anyhow::Result<()> {
-    let pipeline_root = normalized_root(pipeline_root);
+    let pipeline_root = resolved_root(pipeline_root);
     for legacy in legacy_roots {
-        let legacy = normalized_root(legacy);
+        let legacy = resolved_root(legacy);
         anyhow::ensure!(
             !(pipeline_root.starts_with(&legacy) || legacy.starts_with(&pipeline_root)),
             PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL
@@ -735,3 +753,53 @@ pub use usearch_pipeline_index::UsearchPipelineIndex;
 
 #[cfg(feature = "near-ai-scorer")]
 mod usearch_pipeline_index;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The overlap check compares the paths the filesystem resolves, not the
+    /// text: a pipeline root reached through a symlink into the legacy root,
+    /// or a legacy root reached through a symlink into the pipeline root,
+    /// is refused. A symlink to a separate directory is not an overlap.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_overlap_with_a_legacy_root_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("vector-index");
+        let separate = base.path().join("separate");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&separate).unwrap();
+        let into_legacy = base.path().join("into-legacy");
+        std::os::unix::fs::symlink(&legacy, &into_legacy).unwrap();
+        let into_separate = base.path().join("into-separate");
+        std::os::unix::fs::symlink(&separate, &into_separate).unwrap();
+
+        for shared in [
+            into_legacy.clone(),
+            into_legacy.join("pipeline"),
+            into_legacy.join("pipeline/../pipeline"),
+        ] {
+            assert_eq!(
+                validate_pipeline_index_root(&shared, &[&legacy])
+                    .unwrap_err()
+                    .to_string(),
+                PIPELINE_VECTOR_INDEX_ROOT_SHARED_LABEL,
+                "{}",
+                shared.display()
+            );
+        }
+        // The legacy root named through a symlink, the pipeline root plainly.
+        assert!(validate_pipeline_index_root(&legacy.join("pipeline"), &[&into_legacy]).is_err());
+        // A legacy root that is a symlink into the pipeline root.
+        let pipeline = base.path().join("pipeline-index");
+        std::fs::create_dir_all(pipeline.join("nested")).unwrap();
+        let legacy_link = base.path().join("legacy-link");
+        std::os::unix::fs::symlink(pipeline.join("nested"), &legacy_link).unwrap();
+        assert!(validate_pipeline_index_root(&pipeline, &[&legacy_link]).is_err());
+
+        validate_pipeline_index_root(&into_separate.join("pipeline"), &[&legacy]).unwrap();
+        validate_pipeline_index_root(&separate, &[&legacy, &legacy.join("../dedup-index")])
+            .unwrap();
+    }
+}
