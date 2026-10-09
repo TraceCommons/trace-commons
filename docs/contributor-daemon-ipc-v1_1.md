@@ -4170,7 +4170,10 @@ keeps them. `get_settings` reports them as stored.
 
 **New installs and upgrades.** With no settings file, the install is new:
 `idle_sessions` and `verdicts_landed` are `true` (DRAFT, owner decisions 7
-and 3) and no offer is pending. A settings file that does not hold
+and 3) and no offer is pending -- unless the project policy says the install
+is old (a policy written before the Scrub check default that holds a folder,
+in any mode). Such an install is upgraded as below, and daemon startup writes
+the settings file so the next start keeps the answer. A settings file that does not hold
 `notify.verdicts_landed` (or holds `null`) is an install that predates the
 kind: it loads with the kind `false` and `verdicts_offer_pending: true`, and
 likewise `idle_sessions` with `idle_offer_pending: true` -- decided per

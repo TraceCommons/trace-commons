@@ -1076,13 +1076,17 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
-        if settings.scrub_check_defaulted_on_upgrade
+        if (settings.scrub_check_defaulted_on_upgrade
+            || settings.verdicts_offer_pending
+            || settings.idle_offer_pending)
             && store
                 .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
                 .is_none()
         {
             // Save provenance before marking the policy migration done; a
             // restart must not mistake a legacy settings-less install for fresh.
+            // The notification offers rest on the same policy evidence, and a
+            // new install has neither, so it still writes nothing here.
             settings.save(&store)?;
         }
         if policy.record_scrub_check_upgrade(
@@ -10562,6 +10566,48 @@ mod tests {
         assert_eq!(
             acknowledged.status_value()["arming_rewordings"],
             serde_json::json!([])
+        );
+    }
+
+    /// An old install without a settings file whose folders are all Ask me
+    /// has no Scrub check provenance to save, but its notification offers
+    /// must still reach disk before startup marks the policy migrated, or
+    /// the next start reads it as a new install.
+    #[test]
+    fn startup_persists_the_notify_offers_of_an_old_install_without_a_settings_file() {
+        for mode in [ProjectMode::AutoUpload, ProjectMode::NotifyOnly] {
+            let s = shared();
+            {
+                let mut policy = s.policy.lock().unwrap();
+                policy.set_mode("/tmp/legacy", mode, Utc::now()).unwrap();
+                policy.scrub_check_upgrade_recorded = false;
+                policy.save(&s.store).unwrap();
+            }
+            DaemonShared::load(s.store.clone()).unwrap();
+            let restarted = DaemonShared::load(s.store.clone()).unwrap();
+            let settings = restarted.settings.lock().unwrap();
+            assert_eq!(
+                settings.notify,
+                super::super::settings::NotifyKinds::upgraded(),
+                "{mode:?}"
+            );
+            assert!(
+                settings.verdicts_offer_pending && settings.idle_offer_pending,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A new install's startup writes no settings file on its own account.
+    #[test]
+    fn startup_of_a_new_install_writes_no_settings_file() {
+        let s = shared();
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
         );
     }
 

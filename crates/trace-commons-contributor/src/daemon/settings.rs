@@ -668,7 +668,9 @@ pub struct DaemonSettings {
     /// [`DaemonSettings::load`] gives it the upgrade values for the new kinds
     /// and sets their one-time offers, per kind (see
     /// [`DaemonSettings::apply_notify_upgrade`]). With no file at all the
-    /// install is new and gets `NotifyKinds::default()`.
+    /// install is new and gets `NotifyKinds::default()`, unless an
+    /// old-format project policy holding a folder says otherwise; then it
+    /// gets the upgrade too.
     #[serde(
         default = "NotifyKinds::upgraded",
         deserialize_with = "notify_or_upgraded"
@@ -1288,14 +1290,28 @@ impl DaemonSettings {
             // Preserve that evidence even if a preferences writer runs before
             // daemon startup. New-format policies already know this default.
             let policy = super::policy::ProjectPolicy::load(store)?;
-            return Ok(Self {
+            let mut settings = Self {
                 scrub_check_defaulted_on_upgrade: !policy.scrub_check_upgrade_recorded
                     && policy.projects.iter().any(|(key, entry)| {
                         key != super::policy::UNKNOWN_PROJECT_KEY
                             && entry.mode == super::policy::ProjectMode::AutoUpload
                     }),
                 ..Self::default()
-            });
+            };
+            // The same evidence says the install predates the notification
+            // kinds, so they get the upgrade a file without them gets. Any
+            // folder answered in an old-format policy counts, not only an
+            // armed one: an Ask me folder is an existing install too, and
+            // constraint 12 protects it as much.
+            if !policy.scrub_check_upgrade_recorded
+                && policy
+                    .projects
+                    .keys()
+                    .any(|key| key != super::policy::UNKNOWN_PROJECT_KEY)
+            {
+                settings.apply_notify_upgrade(&serde_json::Value::Null);
+            }
+            return Ok(settings);
         };
         // The serde context stays for local stderr and journals, where the
         // parser's own "missing field `schema_version` at line 1 column 65"
@@ -1381,10 +1397,13 @@ impl DaemonSettings {
     /// next save persists it. Until then every load decides the same way, so
     /// a restart in between changes nothing.
     ///
-    /// A missing file is a new install and never reaches here. The
-    /// policy-evidence rule `load` uses for the Scrub check's missing-file
-    /// case is not reused: that one guards sending, while nothing here posts
-    /// without a renderer, and a new install's first-run writes its file.
+    /// A missing file reaches here, with a `Null` stored value, only when
+    /// the project policy says the install is old: an old-format policy
+    /// (`scrub_check_upgrade_recorded` unset) holding a folder. A missing
+    /// file with no such evidence is a new install and keeps
+    /// `NotifyKinds::default()`. Daemon startup saves the file whenever an
+    /// offer is pending and no file exists, before the policy is marked
+    /// migrated, so the next load does not lose the evidence.
     fn apply_notify_upgrade(&mut self, stored: &serde_json::Value) {
         let held = |kind: &str| {
             stored
@@ -3105,6 +3124,64 @@ mod tests {
                 .unwrap()
                 .scrub_check_defaulted_on_upgrade
         );
+    }
+
+    /// Constraint 12 for an install old enough to have armed (or answered)
+    /// folders without ever writing settings: the new kinds load off with
+    /// their offers pending, as a file without them does, whatever mode the
+    /// folders are in.
+    #[test]
+    fn an_old_policy_without_settings_gets_the_notify_upgrade() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        for mode in [
+            ProjectMode::AutoUpload,
+            ProjectMode::NotifyOnly,
+            ProjectMode::Ignore,
+        ] {
+            let (_d, store) = temp_store();
+            let mut policy = ProjectPolicy::new();
+            policy
+                .set_mode("/tmp/legacy", mode, chrono::Utc::now())
+                .unwrap();
+            policy.scrub_check_upgrade_recorded = false;
+            policy.save(&store).unwrap();
+            let loaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(loaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                loaded.verdicts_offer_pending && loaded.idle_offer_pending,
+                "{mode:?}"
+            );
+            loaded.save(&store).unwrap();
+            let reloaded = DaemonSettings::load(&store).unwrap();
+            assert_eq!(reloaded.notify, NotifyKinds::upgraded(), "{mode:?}");
+            assert!(
+                reloaded.verdicts_offer_pending && reloaded.idle_offer_pending,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// A new install -- no settings file, and no policy or only one this
+    /// build's own first run wrote -- keeps the new-install defaults.
+    #[test]
+    fn a_new_install_without_settings_keeps_the_notify_defaults() {
+        use crate::daemon::policy::{ProjectMode, ProjectPolicy};
+        let (_d, store) = temp_store();
+        let fresh = DaemonSettings::load(&store).unwrap();
+        assert_eq!(fresh.notify, NotifyKinds::default());
+        assert!(!fresh.verdicts_offer_pending && !fresh.idle_offer_pending);
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/tmp/new-armed",
+                ProjectMode::AutoUpload,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        policy.save(&store).unwrap();
+        let armed = DaemonSettings::load(&store).unwrap();
+        assert_eq!(armed.notify, NotifyKinds::default());
+        assert!(!armed.verdicts_offer_pending && !armed.idle_offer_pending);
     }
 
     #[test]
