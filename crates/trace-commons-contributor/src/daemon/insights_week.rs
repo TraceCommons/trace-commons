@@ -554,22 +554,23 @@ impl CounterPass {
     }
 
     /// Remove the store and forget the key. Idempotent. The key is forgotten
-    /// only when a store was there to remove, so a daemon that never ran the
-    /// pass never touches the keychain here.
+    /// whether or not a store was there: a pass makes the key before it knows
+    /// whether it will write a row, so a missing store does not mean a
+    /// missing key. Forgetting an absent key is not an error.
     pub(crate) fn clear(&self) -> Result<(), &'static str> {
         let mut cached = self.cached.lock().map_err(|_| ERR_CLEAR_FAILED)?;
-        let existed = match std::fs::remove_file(&self.rows_path) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        match std::fs::remove_file(&self.rows_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(ERR_CLEAR_FAILED),
-        };
+        }
         *cached = None;
         if let Ok(mut at) = self.last_pass_at.lock() {
             *at = None;
         }
-        if existed && self.keys.clear().is_err() {
-            // The rows are gone; a key with nothing to read under it is left
-            // for the next clear. A fixed label only.
+        if self.keys.clear().is_err() {
+            // The rows are gone; the next clear tries the key again. A fixed
+            // label only.
             tracing::warn!("insights counter key could not be forgotten");
         }
         Ok(())
@@ -1361,6 +1362,16 @@ mod tests {
         assert_eq!(f.week(&[])["sessions_stored"], 0);
         // Idempotent.
         f.pass.clear().unwrap();
+    }
+
+    #[test]
+    fn clear_forgets_a_key_made_by_a_pass_that_wrote_no_rows() {
+        let f = Fixture::new();
+        f.run(&[]);
+        assert!(f.pass.keys.load().unwrap().is_some(), "the pass made a key");
+        assert!(!f.dir.path().join(COUNTER_ROWS_FILE).exists());
+        f.pass.clear().unwrap();
+        assert!(f.pass.keys.load().unwrap().is_none());
     }
 
     #[test]
