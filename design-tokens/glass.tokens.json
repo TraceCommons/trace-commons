@@ -38,6 +38,7 @@
     "paneBase": { "hex": "#161a22", "alpha": 0.96, "note": "The neutral dark a pane's glass sits on where there is no native material.", "light": { "hex": "#f4f5f8", "alpha": 0.96 } },
     "paneOpaque": { "hex": "#1c1e24", "note": "A pane under Reduce Transparency: solid, no material (spec).", "light": { "hex": "#f2f3f6" } },
     "glassVeil": { "hex": "#0c0e14", "alpha": 0.28, "note": "Over native glass, the thin dark veil kept for text contrast.", "light": { "hex": "#ffffff", "alpha": 0.3 } },
+    "inactiveDim": { "hex": "#000000", "alpha": 0, "note": "Painted over a pane's veil while its window is out of focus, so a background window reads darker. Classic paints nothing (alpha 0); the flat theme sets it." },
     "wellFill": { "hex": "#000000", "alpha": 0.22, "light": { "hex": "#000000", "alpha": 0.06 } },
     "controlHover": { "hex": "#ffffff", "alpha": 0.16, "note": "Hover on a glass, round, pill-icon, picker or toolbar button (#1146 --tc-control-hover). It replaces the control fill, as #1146's :hover background does (owner ruling, 2026-10-07: hover states from #1146). Light is the light control fill 8% darker, so a light control greys under the pointer as it did when this was drawn over the fill.", "light": { "hex": "#ebebed", "alpha": 0.84 } },
     "cardHover": { "hex": "#ffffff", "alpha": 0.1, "note": "Hover on an interactive card: #1146's .tc-card--interactive:hover fill, which replaces the card gradient. Light is the card fill's brighter end, so the card lifts rather than greys.", "light": { "hex": "#ffffff", "alpha": 0.86 } },
@@ -317,12 +318,12 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatLight is its light appearance (the site's light tint) and flatDark its dark appearance (a darker tint of the same navy); Settings > General > Appearance picks Light, Dark or System. The two name the same tokens with the same shape. A token neither names keeps its classic dark value in both appearances, because the flat theme draws white text on tinted glass either way. The veils and glass fills are the mock's (docs/design/flat-glass-theme): flatLight a 42% navy veil and 12% white, flatDark 70% and 4%. On macOS the veil is the tint of a clear Liquid Glass drawn in the dark appearance, painted in its place while the window is out of focus, where Liquid Glass drops its tint; the map is on the same glass under a lighter field (owner feedback, 2026-10-09). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic). Selected states are the brand purple (owner choice, 2026-10-09).",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatLight is its light appearance (the site's light tint) and flatDark its dark appearance (a darker tint of the same navy); Settings > General > Appearance picks Light, Dark or System. The two name the same tokens with the same shape. A token neither names keeps its classic dark value in both appearances, because the flat theme draws white text on tinted glass either way. Veils and text alphas are set for contrast, measured on screen over a bright snow-and-sky desktop with the window in and out of focus (2026-10-09): primary, secondary and tertiary text all 4.5:1 or more (lowest 4.6, tertiary in Dark in focus). flatLight: 70% navy veil, 6% white; flatDark: 72% and 4% (the mock's 42% and 70% fell to 2.3:1 on a bright desktop). On macOS the veil is painted over a clear Liquid Glass drawn in the dark appearance and lightly tinted with it, for the system's refraction; out of focus inactiveDim darkens it further, and Increase Contrast deepens it, Reduce Transparency makes it solid; the map is on the same glass under a lighter field (owner feedback, 2026-10-09). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic). Selected states are the brand purple (owner choice, 2026-10-09). Buttons, segmented controls, wells and checkboxes are flat: a 1pt rim at most, no top highlight, shade or glow, as the map's floating view tabs are drawn (owner feedback, 2026-10-09).",
     "flatLight": {
       "color": {
         "textPrimary": { "hex": "#ffffff" },
-        "textSecondary": { "hex": "#ffffff", "alpha": 0.8 },
-        "textTertiary": { "hex": "#ffffff", "alpha": 0.66 },
+        "textSecondary": { "hex": "#ffffff", "alpha": 0.92 },
+        "textTertiary": { "hex": "#ffffff", "alpha": 0.88 },
         "statusOn": { "hex": "#30d158" },
         "statusOnText": { "hex": "#30d158" },
         "watchOn": { "hex": "#30d158" },
@@ -332,7 +333,7 @@
         "sceneWarm": { "hex": "#1d2450" },
         "paneBase": { "hex": "#1b2140", "alpha": 0.96 },
         "paneOpaque": { "hex": "#1b2140" },
-        "glassVeil": { "hex": "#0c122c", "alpha": 0.42 },
+        "glassVeil": { "hex": "#0c122c", "alpha": 0.7 },
         "wellFill": { "hex": "#0a0e24", "alpha": 0.24 },
         "fieldFill": { "hex": "#0a0e24", "alpha": 0.24 },
         "consentFill": { "hex": "#0a0e24", "alpha": 0.24 },
@@ -353,22 +354,23 @@
         "selection": { "hex": "#6d14f3" },
         "mapFieldInner": { "hex": "#0c122c", "alpha": 0.08 },
         "mapFieldOuter": { "hex": "#0c122c", "alpha": 0.2 },
-        "purpleText": { "hex": "#f3edff" }
+        "purpleText": { "hex": "#f3edff" },
+        "inactiveDim": { "hex": "#0c122c", "alpha": 0.14 }
       },
       "gradient": {
         "paneFill": {
           "angle": 160,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.12, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.12, "at": 0.4 },
-            { "hex": "#ffffff", "alpha": 0.12, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.06, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.06, "at": 0.4 },
+            { "hex": "#ffffff", "alpha": 0.06, "at": 1 }
           ]
         },
         "cardFill": {
           "angle": 180,
           "stops": [
-            { "hex": "#ffffff", "alpha": 0.07, "at": 0 },
-            { "hex": "#ffffff", "alpha": 0.07, "at": 1 }
+            { "hex": "#ffffff", "alpha": 0.05, "at": 0 },
+            { "hex": "#ffffff", "alpha": 0.05, "at": 1 }
           ]
         },
         "cardFillQuiet": {
@@ -408,17 +410,12 @@
           { "y": 1, "hex": "#ffffff", "alpha": 0.14, "inset": true }
         ],
         "wellEdge": [
-          { "hex": "#ffffff", "alpha": 0.16, "inset": true },
-          { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true }
+          { "hex": "#ffffff", "alpha": 0.16, "inset": true }
         ],
         "controlEdge": [
-          { "hex": "#ffffff", "alpha": 0.16, "inset": true },
-          { "y": 1, "hex": "#ffffff", "alpha": 0.12, "inset": true }
+          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
         ],
-        "controlSelectedEdge": [
-          { "y": 1, "hex": "#ffffff", "alpha": 0.25, "inset": true },
-          { "y": 8, "blur": 20, "hex": "#04071a", "alpha": 0.45 }
-        ],
+        "controlSelectedEdge": [],
         "popoverEdge": [
           { "hex": "#ffffff", "alpha": 0.2, "inset": true },
           { "y": 1, "hex": "#ffffff", "alpha": 0.32, "inset": true },
@@ -438,6 +435,16 @@
           { "hex": "#ffffff", "alpha": 0.2, "inset": true },
           { "y": 1, "hex": "#ffffff", "alpha": 0.32, "inset": true },
           { "y": 14, "blur": 30, "hex": "#04071a", "alpha": 0.45 }
+        ],
+        "ctaEdge": [],
+        "ctaSecondaryEdge": [
+          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
+        ],
+        "checkboxEdge": [
+          { "hex": "#ffffff", "alpha": 0.2, "inset": true }
+        ],
+        "barTrackEdge": [
+          { "hex": "#ffffff", "alpha": 0.12, "inset": true }
         ]
       },
       "radius": { "pane": 20, "card": 16, "cardQuiet": 14, "control": 11, "menuPanel": 16 }
@@ -445,8 +452,8 @@
     "flatDark": {
       "color": {
         "textPrimary": { "hex": "#f2f3f8" },
-        "textSecondary": { "hex": "#f2f3f8", "alpha": 0.74 },
-        "textTertiary": { "hex": "#f2f3f8", "alpha": 0.6 },
+        "textSecondary": { "hex": "#f2f3f8", "alpha": 0.88 },
+        "textTertiary": { "hex": "#f2f3f8", "alpha": 0.8 },
         "statusOn": { "hex": "#30d158" },
         "statusOnText": { "hex": "#30d158" },
         "watchOn": { "hex": "#30d158" },
@@ -456,7 +463,7 @@
         "sceneWarm": { "hex": "#11152b" },
         "paneBase": { "hex": "#0d1124", "alpha": 0.96 },
         "paneOpaque": { "hex": "#0d1124" },
-        "glassVeil": { "hex": "#070a1a", "alpha": 0.7 },
+        "glassVeil": { "hex": "#070a1a", "alpha": 0.72 },
         "wellFill": { "hex": "#000000", "alpha": 0.3 },
         "fieldFill": { "hex": "#000000", "alpha": 0.3 },
         "consentFill": { "hex": "#000000", "alpha": 0.3 },
@@ -477,7 +484,8 @@
         "selection": { "hex": "#6d14f3" },
         "mapFieldInner": { "hex": "#070a1a", "alpha": 0.15 },
         "mapFieldOuter": { "hex": "#070a1a", "alpha": 0.32 },
-        "purpleText": { "hex": "#c9b3ff" }
+        "purpleText": { "hex": "#c9b3ff" },
+        "inactiveDim": { "hex": "#070a1a", "alpha": 0.14 }
       },
       "gradient": {
         "paneFill": {
@@ -532,17 +540,12 @@
           { "y": 1, "hex": "#ffffff", "alpha": 0.084, "inset": true }
         ],
         "wellEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
-          { "y": 1, "hex": "#ffffff", "alpha": 0.06, "inset": true }
+          { "hex": "#ffffff", "alpha": 0.14, "inset": true }
         ],
         "controlEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
-          { "y": 1, "hex": "#ffffff", "alpha": 0.06, "inset": true }
+          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
         ],
-        "controlSelectedEdge": [
-          { "y": 1, "hex": "#ffffff", "alpha": 0.25, "inset": true },
-          { "y": 8, "blur": 20, "hex": "#02030a", "alpha": 0.45 }
-        ],
+        "controlSelectedEdge": [],
         "popoverEdge": [
           { "hex": "#ffffff", "alpha": 0.12, "inset": true },
           { "y": 1, "hex": "#ffffff", "alpha": 0.18, "inset": true },
@@ -562,6 +565,16 @@
           { "hex": "#ffffff", "alpha": 0.12, "inset": true },
           { "y": 1, "hex": "#ffffff", "alpha": 0.18, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
+        ],
+        "ctaEdge": [],
+        "ctaSecondaryEdge": [
+          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
+        ],
+        "checkboxEdge": [
+          { "hex": "#ffffff", "alpha": 0.18, "inset": true }
+        ],
+        "barTrackEdge": [
+          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
         ]
       },
       "radius": { "pane": 20, "card": 16, "cardQuiet": 14, "control": 11, "menuPanel": 16 }

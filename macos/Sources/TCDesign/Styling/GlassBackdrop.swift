@@ -89,8 +89,8 @@ struct GlassBackdrop: NSViewRepresentable {
             guard #available(macOS 26.0, *) else { return nil }
             let glass = NSGlassEffectView()
             glass.style = GlassTheme.flatMaterial == .clearTint ? .clear : .regular
-            // Lighter than the veil: a window in focus reads lighter than one
-            // out of focus, where the full veil is painted (`paintsVeil`).
+            // A faint share of the veil, for the glass's own colour; the
+            // veil itself is painted over it (`paintsVeil`).
             glass.tintColor = GlassTheme.focusedTint.dynamicNSColor
             glass.appearance = GlassTheme.materialAppearance
             glass.cornerRadius = cornerRadius
@@ -143,15 +143,30 @@ struct GlassPaneFill: View {
     let radius: CGFloat
     @Environment(\.glassPaneIsContent) private var content
     @Environment(\.controlActiveState) private var activeState
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        switch GlassMaterial.current(content: content) {
+        // Reduce Transparency: the flat theme's pane is its solid base, as
+        // the system's own materials turn opaque. Classic leaves it to the
+        // material (R14).
+        let material = GlassTheme.current == .flat && reduceTransparency
+            ? GlassMaterial.opaque : GlassMaterial.current(content: content)
+        switch material {
         case .liquidGlass, .vibrancy:
             ZStack {
-                GlassBackdrop(material: GlassMaterial.current(content: content), cornerRadius: radius)
+                GlassBackdrop(material: material, cornerRadius: radius)
                 if GlassTheme.paintsVeil(windowIsKey: activeState == .key) {
                     shape.fill(GlassTokens.Color.glassVeil.color)
+                }
+                // Out of focus a window reads darker; under Increase
+                // Contrast the veil is deepened by the same amount again.
+                if activeState != .key {
+                    shape.fill(GlassTokens.Color.inactiveDim.color)
+                }
+                if GlassTheme.current == .flat && contrast == .increased {
+                    shape.fill(GlassTokens.Color.glassVeil.color.opacity(0.5))
                 }
                 shape.fill(GlassTokens.Gradient.paneFill.linear)
             }
