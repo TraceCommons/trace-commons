@@ -829,7 +829,7 @@ extension DaemonData {
         /// Whether in-app suggestions (suggestion cards, panel row) are on.
         public let suggestionsEnabled: Bool?
         /// "Notifications from Trace Commons", the master switch (nudge
-        /// A2). Decoded only; no screen draws it yet.
+        /// A2), drawn by Settings through `NudgeSettings`.
         public let notificationsEnabled: Bool?
         /// The menu-bar news mark and halo switch (nudge A2).
         public let menuBarMarkEnabled: Bool?
@@ -884,7 +884,7 @@ extension DaemonData {
     }
 
     /// `get_settings.notify` (nudge A2): one switch per notification kind.
-    /// Decoded only. A kind a newer daemon adds is ignored here.
+    /// A kind a newer daemon adds is ignored here.
     public struct NotifyKinds: Codable, Equatable, Sendable {
         public let digest: Bool?
         public let idleSessions: Bool?

@@ -78,6 +78,15 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
             .requestAuthorization(options: [.alert, .sound])) ?? false
     }
 
+    /// Puts the system's prompt up only if it was never answered, after a
+    /// one-time offer to turn a kind on was accepted under its sentence.
+    /// Answers whether the prompt was shown.
+    func requestAuthorizationIfNeverAsked() async -> Bool {
+        guard await authorizationStatus() == .notDetermined else { return false }
+        _ = await requestAuthorization()
+        return true
+    }
+
     /// Where the contributor turns notifications back on after saying no.
     /// The pane URL opens macOS notification settings.
     static let systemSettingsURL = URL(
