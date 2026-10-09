@@ -1379,10 +1379,15 @@ the embedder model is loaded once. The pipeline gets:
   that namespace's usearch file (and no other) and appends one fsynced record,
   so a rebuild of N entries writes O(N) manifest bytes; the log is compacted at
   start and once it holds more than twice its live entries. A write that fails
-  is undone and answers `Failed`, so its retry writes it again. A manifest that
-  disagrees with its usearch file refuses the start
-  (`pipeline_vector_index_manifest_mismatch`); empty the root and rebuild each
-  tenant's index with `POST /v1/workers/pipeline/index-rebuild`;
+  is undone and answers `Failed`, so its retry writes it again. An
+  invalidation logs a remove intent before it deletes anything, so a start
+  after one that stopped part way completes it (and its retry then finds
+  nothing left to remove). Any other disagreement between a manifest and its
+  usearch file refuses the start (`pipeline_vector_index_manifest_mismatch`):
+  entries usearch lacks with no intent logged (a lost or replaced usearch
+  file) are never dropped, and entries no manifest names are never adopted.
+  Empty the root and rebuild each tenant's index with
+  `POST /v1/workers/pipeline/index-rebuild`;
 - the tenant policies of `TRACE_COMMONS_TENANT_POLICIES` and
   `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY` as its authority. A tenant
   whose policy `main` reads from the database

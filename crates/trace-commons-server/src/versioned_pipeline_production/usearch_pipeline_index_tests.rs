@@ -826,7 +826,7 @@ fn a_failed_invalidation_is_completed_by_its_retry() {
             .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
             .unwrap();
         index
-            .fail_next_append
+            .fail_next_remove_append
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
             index
@@ -843,6 +843,195 @@ fn a_failed_invalidation_is_completed_by_its_retry() {
     let reopened = open(dir.path()).unwrap();
     assert_eq!(
         reopened
+            .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
+            .unwrap()
+            .cardinality,
+        1
+    );
+}
+
+/// PR #1295 review round 2, Minor 2: an invalidation saves usearch without
+/// the doomed entries before it logs their removal. When that log append
+/// fails, a restart before the retry finds the manifest naming entries
+/// usearch no longer holds. The start heals it (the removal was logged as
+/// intended before any delete), and the retry finds nothing left to do.
+#[test]
+fn a_restart_between_a_failed_invalidation_and_its_retry_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tenant(1);
+    {
+        let index = open(dir.path()).unwrap();
+        index
+            .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+            .unwrap();
+        index
+            .upsert(&key(&a, 1, 1), &unit(2), "sha256:one-b")
+            .unwrap();
+        index
+            .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
+            .unwrap();
+        index
+            .fail_next_remove_append
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            index
+                .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+                .unwrap_err(),
+            IndexWriteError::Uncertain
+        );
+    }
+    let reopened = open(dir.path()).expect("the start heals a logged removal");
+    assert_eq!(
+        reopened
+            .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
+            .unwrap()
+            .cardinality,
+        1
+    );
+    assert!(
+        !reopened
+            .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+            .unwrap(),
+        "the retry finds nothing left to remove"
+    );
+    assert_eq!(
+        reopened
+            .nearest(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, &unit(1), 5, None)
+            .unwrap()
+            .len(),
+        1
+    );
+    drop(reopened);
+    assert_eq!(
+        open(dir.path())
+            .unwrap()
+            .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
+            .unwrap()
+            .cardinality,
+        1
+    );
+}
+
+/// The other half of Minor 2: an invalidation whose namespace save fails
+/// after its deletes, followed by the `Drop` save that writes those deletes
+/// out anyway. The next start completes the logged removal.
+#[test]
+fn a_drop_save_after_a_failed_invalidation_save_still_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tenant(1);
+    {
+        let (index, faulty) = open_faulty(dir.path());
+        index
+            .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+            .unwrap();
+        index
+            .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
+            .unwrap();
+        faulty
+            .fail_flush_tenant
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            index
+                .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+                .unwrap_err(),
+            IndexWriteError::Uncertain
+        );
+    }
+    let reopened = open(dir.path()).expect("the start completes the logged removal");
+    assert_eq!(
+        reopened
+            .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
+            .unwrap()
+            .cardinality,
+        1
+    );
+}
+
+/// A remove intent that cannot be logged changes nothing: `Failed`, the
+/// entries stay in usearch and the manifest, and the retry removes them.
+#[test]
+fn a_failed_remove_intent_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tenant(1);
+    let (index, faulty) = open_faulty(dir.path());
+    index
+        .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+        .unwrap();
+    index
+        .fail_next_append
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        index
+            .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+            .unwrap_err(),
+        IndexWriteError::Failed
+    );
+    assert_eq!(stored(&faulty, &a), 1);
+    assert!(
+        index
+            .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+            .unwrap()
+    );
+    assert_eq!(stored(&faulty, &a), 0);
+}
+
+/// Absence alone never authorizes a removal: a usearch file that lost its
+/// entries with no intent logged (here, deleted outright, which usearch
+/// reopens as an empty shard) still refuses the start rather than drop the
+/// tenant's corpus.
+#[test]
+fn entries_missing_without_an_intent_still_refuse_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tenant(1);
+    {
+        let index = open(dir.path()).unwrap();
+        index
+            .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+            .unwrap();
+    }
+    for entry in std::fs::read_dir(dir.path()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.to_string_lossy().ends_with(".usearch") {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+    assert_eq!(
+        open(dir.path()).err().unwrap().to_string(),
+        "pipeline_vector_index_manifest_mismatch"
+    );
+}
+
+/// A compaction between a failed invalidation and the next start keeps the
+/// remove intents, so the start can still complete the removal.
+#[test]
+fn compaction_keeps_pending_remove_intents() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = tenant(1);
+    {
+        let index = open(dir.path()).unwrap();
+        index
+            .upsert(&key(&a, 1, 0), &unit(0), "sha256:one")
+            .unwrap();
+        index
+            .upsert(&key(&a, 2, 0), &unit(1), "sha256:two")
+            .unwrap();
+        index
+            .fail_next_remove_append
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            index
+                .invalidate_revision(&a, PRODUCTION_COMPATIBILITY_INDEX_ID, Uuid::from_u128(1))
+                .unwrap_err(),
+            IndexWriteError::Uncertain
+        );
+        let namespace = namespace_of(&a, PRODUCTION_COMPATIBILITY_INDEX_ID);
+        let slot = index.existing_namespace(&namespace).unwrap();
+        let mut state = slot.lock().unwrap();
+        index.compact(&namespace, &mut state).unwrap();
+    }
+    assert_eq!(
+        open(dir.path())
+            .expect("the compacted log still authorizes the removal")
             .snapshot(&a, PRODUCTION_COMPATIBILITY_INDEX_ID)
             .unwrap()
             .cardinality,
