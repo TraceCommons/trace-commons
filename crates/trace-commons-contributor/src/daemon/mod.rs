@@ -63,6 +63,7 @@ pub mod nearai_onboarding;
 mod network_data;
 pub mod notify;
 pub mod nudge;
+pub(crate) mod reengage;
 #[cfg(feature = "test-credential-store")]
 pub(crate) mod test_credential_store;
 // Under `test-credential-store` (test builds only) nothing outside the manual
@@ -1992,7 +1993,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         // the digest can fire.
         history::ContributedSince::default()
     };
-    if notify::digest_due_for_schedule(
+    let due_by_schedule = notify::digest_due_for_schedule(
         digest_schedule,
         last_digest_at,
         now,
@@ -2000,7 +2001,25 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
         &local_tz,
         pending_count,
         contributed.count,
-    ) {
+    );
+    // The attention arbiter (nudge A2) has its say on every tick, digest due
+    // or not: it decides whether the digest may post (the master and digest
+    // switches, the gap after a standalone), what folds into it, and whether
+    // one re-engagement notification posts on its own.
+    let attention = reengage::tick(
+        shared,
+        now,
+        &local_tz,
+        reengage::DigestInputs {
+            due_by_schedule,
+            pending: pending_count,
+            contributed: contributed.count,
+            last_digest_at,
+            schedule: digest_schedule,
+            interval_secs: digest_interval_secs,
+        },
+    );
+    if attention.digest_posts {
         // Two sentences, either of which may be absent: what is waiting for
         // you, and what went without you. Joined rather than merged because
         // they are about different things and a contributor acts on only one
@@ -2012,7 +2031,7 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
                 contributed.credit_pending,
             )
         });
-        let body = match (pending_count > 0, contribution.as_deref()) {
+        let mut body = match (pending_count > 0, contribution.as_deref()) {
             (true, Some(c)) => format!("{digest}\n{c}"),
             (true, None) => digest.clone(),
             (false, Some(c)) => c.to_string(),
@@ -2020,19 +2039,24 @@ fn expire_and_digest(shared: &Arc<ipc::DaemonShared>, now: chrono::DateTime<Utc>
             // exhaustion cannot be wrong later if it can.
             (false, None) => digest.clone(),
         };
-        shared.publish(
-            ipc::EVENT_DIGEST_DUE,
-            serde_json::json!({
-                "pending": pending_count,
-                "contributed": contributed.count,
-                // Labels, never keys. A shell composes its own sentence from
-                // these (each platform's notification centre words things
-                // differently), so it needs the names and not just the count.
-                "contributed_projects": contributed.project_labels,
-                "credit_pending": contributed.credit_pending,
-                "text": body,
-            }),
-        );
+        // The arbiter's third sentence, when it folded one in.
+        if let Some((_, sentence)) = &attention.fold {
+            body = format!("{body}\n{sentence}");
+        }
+        let mut payload = serde_json::json!({
+            "pending": pending_count,
+            "contributed": contributed.count,
+            // Labels, never keys. A shell composes its own sentence from
+            // these (each platform's notification centre words things
+            // differently), so it needs the names and not just the count.
+            "contributed_projects": contributed.project_labels,
+            "credit_pending": contributed.credit_pending,
+            "text": body,
+        });
+        if let Some((kind, sentence)) = &attention.fold {
+            payload["fold"] = serde_json::json!({ "kind": kind.label(), "text": sentence });
+        }
+        shared.publish(ipc::EVENT_DIGEST_DUE, payload);
         if local_notifications {
             notify::emit_local(&body);
         }

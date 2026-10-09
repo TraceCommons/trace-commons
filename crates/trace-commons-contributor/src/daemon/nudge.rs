@@ -815,7 +815,7 @@ pub fn mark(
 /// none is in force. The two share it: a decline of either counts, and the
 /// later decline governs. A decline stamped after `now` is in force: a clock
 /// that went backwards can only suppress.
-fn shared_cooldown_until(
+pub(crate) fn shared_cooldown_until(
     queue_ttl_days: i64,
     ledger: &BTreeMap<String, NudgeLedger>,
     now: DateTime<Utc>,

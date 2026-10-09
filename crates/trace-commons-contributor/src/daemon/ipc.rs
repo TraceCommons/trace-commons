@@ -676,10 +676,10 @@ impl RendererCounts {
     }
 }
 
-/// One connection's `accepts`, counted for as long as it lives. Dropped
-/// when the connection ends, however it ends, or when the same connection
+/// One subscriber's `accepts`, counted for as long as it lives. Dropped
+/// when the subscriber ends, however it ends, or when the same connection
 /// subscribes again, so the count can never outlive the subscriber.
-pub(crate) struct RendererDeclaration {
+pub struct RendererDeclaration {
     counts: Arc<RendererCounts>,
     events: Vec<&'static str>,
 }
@@ -697,7 +697,8 @@ impl RendererDeclaration {
         }
     }
 
-    fn accepts(&self, event: &str) -> bool {
+    /// Whether this subscriber declared `event`.
+    pub fn accepts(&self, event: &str) -> bool {
         self.events.contains(&event)
     }
 }
@@ -2058,12 +2059,32 @@ impl DaemonShared {
         self.renderer_count(event) > 0
     }
 
-    /// How many live socket subscribers accept `event`.
+    /// How many live subscribers accept `event`.
     pub(crate) fn renderer_count(&self, event: &str) -> usize {
         self.renderers.count(event)
     }
 
-    fn logged_in(&self) -> bool {
+    /// Declare a subscriber outside the socket (the FFI's in-process
+    /// `tc_subscribe_with_accepts`) as accepting `accepts`, parsed exactly
+    /// as `subscribe`'s `accepts` is: unknown names are ignored, a value
+    /// that is not an array of strings is refused. The returned declaration
+    /// counts toward [`Self::has_renderer`] until it is dropped, so the
+    /// caller holds it for exactly as long as it delivers events.
+    pub fn declare_renderer(
+        &self,
+        accepts: &serde_json::Value,
+    ) -> Result<RendererDeclaration, &'static str> {
+        let params = serde_json::json!({ "accepts": accepts });
+        match subscribe_accepts(&params) {
+            Ok(events) => Ok(RendererDeclaration::new(
+                &self.renderers,
+                events.unwrap_or_default(),
+            )),
+            Err(()) => Err(ERR_SUBSCRIBE_ACCEPTS_INVALID),
+        }
+    }
+
+    pub(crate) fn logged_in(&self) -> bool {
         super::uploader::enrollment_is_live(&self.store)
     }
 
@@ -5405,7 +5426,7 @@ pub(crate) struct NudgeSnapshot {
 /// or a session's own age.
 /// The display names of the tools a batch came from, deduplicated and
 /// sorted. A source with no display name is left unnamed.
-fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+pub(crate) fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
     let tools: std::collections::BTreeSet<&'static str> = candidates
         .iter()
         .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
@@ -5425,7 +5446,7 @@ fn estimate_sum_of(value: &serde_json::Value) -> Option<crate::nudge_render::Est
 
 /// Verdict news as the renderer reads it, with the date the news began in
 /// this Mac's local time.
-fn render_verdicts(
+pub(crate) fn render_verdicts(
     accepted: u32,
     held: u32,
     credit_final_tenths: Option<u64>,
