@@ -599,8 +599,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             loading: "Loading disclosure…",
             unavailable: "Disclosure unavailable. Enabling is disabled.",
             toggle_loading: "Loading disclosure",
-            offer_lead: "Connect your tools to NEAR AI through this app. Requests use the provider configured for each tool; enabling this alone does not switch existing provider connections to NEAR AI.",
-            offer_more: "A record of requests is kept on this computer.",
+            offer_lead: "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it.",
+            offer_more: "Requests are logged on this computer.",
             learn_more: "Learn more",
         },
     }
@@ -798,7 +798,10 @@ mod tests {
             format!("{} {}", copy.offer_lead, copy.offer_more),
             crate::private_inference_copy::OFFER_WHAT
         );
-        assert!(copy.offer_lead.starts_with("Connect your tools to NEAR AI"));
+        assert!(
+            copy.offer_lead
+                .starts_with("Lets your tools send AI requests through this app")
+        );
         assert!(!copy.offer_lead.contains("Near.AI"));
         assert_eq!(copy.offer_lead.matches(". ").count(), 1, "two sentences");
         assert_eq!(copy.learn_more, "Learn more");
