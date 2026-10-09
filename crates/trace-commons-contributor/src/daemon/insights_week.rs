@@ -147,9 +147,18 @@ struct CounterRow {
     /// read again.
     size_bytes: u64,
     modified_at: DateTime<Utc>,
-    /// The session's first recorded event, from discovery. Never the time it
-    /// was counted.
+    /// Discovery's `started_at`, which places a session with no dated turns.
+    /// For Claude Code and Codex that is the session file's last write, not
+    /// its first event (discovery reads no file), so it never crosses as
+    /// `started_at`: `first_event_at` does. Never the time it was counted.
     placed_at: Option<DateTime<Utc>>,
+    /// The transcript's first recorded event: the first line's top-level
+    /// `timestamp`, the rule the Claude Code and Codex sources date a queue
+    /// entry by. `None` when no line carries one, or the file could not be
+    /// read. The one time a row's `started_at` crosses as (owner question
+    /// Q1, default taken).
+    #[serde(default)]
+    first_event_at: Option<DateTime<Utc>>,
     /// Keyed digest of the folder's project key (owner decision D7, open).
     project: KeyedDigest,
     /// Order the row was made in, for the rollup's overlap rule.
@@ -165,7 +174,8 @@ struct CounterRow {
     /// `SessionInput::harness_session`, so the overlap rule is unchanged.
     #[serde(default)]
     harness_session: Option<KeyedDigest>,
-    /// Whether `harness_session` was looked for when the row was read. A v1
+    /// Whether `harness_session` (and `first_event_at` with it) was looked
+    /// for when the row was read. A v1
     /// row lacks it and is read once more, even when its file is unchanged;
     /// a v2 row that found none is not, so an ambiguous file is not read on
     /// every pass.
@@ -470,13 +480,14 @@ impl CounterPass {
             }
             bytes_budgeted = bytes_budgeted.saturating_add(cost);
             removals.remove(&session);
-            let (body, harness_session) = read_body(source, candidate, &key);
+            let (body, harness_session, first_event_at) = read_body(source, candidate, &key);
             reads.push((
                 session,
                 CounterRow {
                     size_bytes: candidate.size_bytes,
                     modified_at: candidate.modified_at,
                     placed_at: candidate.started_at,
+                    first_event_at,
                     project: project_digest(&key, &project_key),
                     seq: 0,
                     body,
@@ -584,7 +595,7 @@ impl CounterPass {
                         joined.insert(
                             input.session_ref.clone(),
                             RowJoin {
-                                started_at: row.placed_at,
+                                started_at: row.first_event_at,
                                 tally,
                             },
                         );
@@ -922,17 +933,18 @@ fn read_body(
     source: AnalyticsSource,
     candidate: &CounterCandidate,
     key: &DigestKey,
-) -> (RowBody, Option<KeyedDigest>) {
+) -> (RowBody, Option<KeyedDigest>, Option<DateTime<Utc>>) {
     let unknown = RowBody::Unknown {
         source,
         reason: UnknownReason::NoUsageCounters,
     };
     // The bound is on the file read; `size_bytes` is the whole group's.
     let Some(bytes) = bounded_read(&candidate.path, COUNTER_PASS_MAX_SESSION_BYTES) else {
-        return (unknown, None);
+        return (unknown, None, None);
     };
     let harness_session = harness_session_id(source_format(source), &bytes)
         .map(|id| harness_session_digest(key, candidate.source, &id));
+    let first_event_at = first_event_at(&bytes);
     let body = match source {
         AnalyticsSource::ClaudeCode => {
             match crate::insights::turn_series::extract_claude_turn_series(&bytes, key) {
@@ -958,7 +970,21 @@ fn read_body(
             Err(_) => unknown,
         },
     };
-    (body, harness_session)
+    (body, harness_session, first_event_at)
+}
+
+/// The first line's top-level `timestamp`, RFC 3339, as UTC: the rule the
+/// Claude Code and Codex sources use for a transcript's `started_at`
+/// (`source::claude_code::parse_session`, `source::codex`'s reader). Lines
+/// that are not JSON, or carry no such field, are passed over.
+fn first_event_at(bytes: &[u8]) -> Option<DateTime<Utc>> {
+    bytes.split(|byte| *byte == b'\n').find_map(|line| {
+        let record: serde_json::Value = serde_json::from_slice(line).ok()?;
+        let text = record.get("timestamp")?.as_str()?;
+        DateTime::parse_from_rfc3339(text)
+            .ok()
+            .map(|at| at.with_timezone(&Utc))
+    })
 }
 
 /// Codex's first-to-last observed change. Cached input is a subset of input
@@ -1174,9 +1200,11 @@ struct RowJoin<'a> {
 /// figures and coverage, gain `started_at` and `routing`, and lose the
 /// opaque reference.
 ///
-/// - `started_at` is the session's first recorded event, RFC 3339, or
-///   `null` (owner question Q1, default taken: a row may carry it; it is
-///   joinable to a queue entry's `started_at`, which is the point).
+/// - `started_at` is the transcript's first recorded event
+///   (`CounterRow::first_event_at`), RFC 3339, or `null`; never discovery's
+///   file-write time (owner question Q1, default taken: a row may carry it,
+///   though it matches a queue entry's `started_at`; the shell must still
+///   not join the two).
 /// - `routing` is the session's route tally in fixed labels and counts
 ///   (`insights_route_tally::routing_value`), or `null` on every row while
 ///   routing is unavailable.
@@ -1702,6 +1730,7 @@ mod tests {
                     size_bytes: 1,
                     modified_at: written() + Duration::minutes(i64::from(i)),
                     placed_at: None,
+                    first_event_at: None,
                     project: KeyedDigest([9; 32]),
                     seq: u64::from(i),
                     body: RowBody::Codex { observed: None },
@@ -2213,6 +2242,46 @@ mod tests {
         println!("BEGIN insights_week");
         println!("{}", serde_json::to_string_pretty(&value).unwrap());
         println!("END insights_week");
+    }
+
+    /// `started_at` is the transcript's first recorded event (owner question
+    /// Q1), read from the file. Discovery's `started_at` is the file's last
+    /// write, which for a live session is about now: it must never cross
+    /// under that name.
+    #[test]
+    fn started_at_is_the_transcripts_first_event_never_the_files_write_time() {
+        let f = Fixture::new();
+        let claude = f.write("s.jsonl", &claude_bytes());
+        let codex = f.write("x.jsonl", &codex_bytes());
+        let undated = f.write(
+            "u.jsonl",
+            br#"{"type":"session_meta","payload":{"id":"U"}}"#,
+        );
+        let late = |source, path: &Path| CounterCandidate {
+            started_at: Some(written()),
+            ..candidate(source, path)
+        };
+        f.run(&[
+            late(SOURCE_CLAUDE_CODE, &claude),
+            late(SOURCE_CODEX, &codex),
+            late(SOURCE_CODEX, &undated),
+        ]);
+        let mut started: Vec<serde_json::Value> = sessions_of(&f.week_routed())
+            .iter()
+            .map(|row| row["started_at"].clone())
+            .collect();
+        // A string sorts before null.
+        started.sort_by_key(|at| at.to_string());
+        assert_eq!(
+            started,
+            [
+                // Claude's first line carries no timestamp; its second does.
+                serde_json::json!("2026-09-14T09:00:00+00:00"),
+                serde_json::json!("2026-09-14T09:00:00+00:00"),
+                // No line carries one: unknown, never the write time.
+                serde_json::Value::Null,
+            ]
+        );
     }
 
     #[test]

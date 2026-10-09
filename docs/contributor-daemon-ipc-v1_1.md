@@ -4057,8 +4057,10 @@ sessions on disk. Otherwise:
 - `rollup.sessions[]` carries each session's figure and coverage, its
   first recorded event's time and its route counts, and nothing else about
   it: never a session ID, a digest of one, a path, a backend or model name, a
-  price or a title. `started_at` is the session's first recorded event, RFC
-  3339, or `null` when none was recorded (owner question Q1, default taken:
+  price or a title. `started_at` is the session's first recorded event (the
+  first transcript line carrying a `timestamp`, read when the row is
+  counted; never the file's last write), RFC 3339, or `null` when no line
+  carries one or the file was not read (owner question Q1, default taken:
   a row may carry it, though it can be matched to a queue entry's
   `started_at`). A shell must still not join Insights rows to queue entries.
 - `routing` is where the session's proxy calls went, from its route tally
