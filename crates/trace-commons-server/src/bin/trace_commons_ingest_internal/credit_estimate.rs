@@ -90,7 +90,7 @@ pub(super) struct CreditEstimateEvalQuery {
     /// for it.
     #[serde(default)]
     pub(super) dry_run: bool,
-    /// Bounds the decisions enumerated, oldest first. Defaults to, and
+    /// Bounds the decisions enumerated, newest first. Defaults to, and
     /// may not exceed, [`CREDIT_ESTIMATE_EVAL_MAX_LIMIT`].
     #[serde(default)]
     pub(super) limit: Option<i64>,
@@ -128,8 +128,8 @@ pub(super) struct CreditEstimateEvalResponse {
     pub(super) fit: Option<EstimateFitReport>,
 }
 
-/// One eval run. Enumerates decisions cross-tenant on the gate-driver pool
-/// (identifiers and decision times only), reads each tenant's labels through
+/// One eval run. Enumerates decisions cross-tenant on the gate-driver pool,
+/// newest first (identifiers and decision times only), reads each tenant's labels through
 /// the tenant-scoped pool (the calibration version and withheld reason are
 /// not granted to the gate-driver role), and derives features for each
 /// labelled submission inside the gate service from the envelope the corpus
@@ -146,14 +146,17 @@ pub(super) async fn run_credit_estimate_eval(
         .limit
         .unwrap_or(CREDIT_ESTIMATE_EVAL_MAX_LIMIT)
         .clamp(0, CREDIT_ESTIMATE_EVAL_MAX_LIMIT);
-    let decisions = db.list_dedup_rederive_rows(limit).await?;
+    let decisions = db.list_recent_gate_decision_keys(limit).await?;
     let mut counts = CreditEstimateEvalCounts {
         decisions: decisions.len(),
         ..CreditEstimateEvalCounts::default()
     };
 
     // Latest decision time per (tenant, submission), matching the label
-    // read, which is latest-per-submission.
+    // read, which is latest-per-submission. The enumeration is newest
+    // first, so every decision newer than the cut is in it: a submission it
+    // reaches has its latest decision here, and the time split uses the
+    // decision the label came from.
     let mut latest: BTreeMap<(String, Uuid), chrono::DateTime<Utc>> = BTreeMap::new();
     for row in &decisions {
         let slot = latest

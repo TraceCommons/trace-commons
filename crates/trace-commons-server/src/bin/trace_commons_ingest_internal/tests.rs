@@ -72399,6 +72399,38 @@ impl Database for PerplexityDriverTestDb {
             .collect())
     }
 
+    /// In-memory analogue of the Postgres `list_recent_gate_decision_keys`:
+    /// every decision row (any tenant), sorted `decided_at DESC,
+    /// decision_id DESC` as the real query orders it, capped at `limit`.
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow> = self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tenant_id, row)| {
+                trace_commons_server::trace_corpus_storage::GateDecisionKeyRow {
+                    tenant_id: tenant_id.clone(),
+                    submission_id: row.submission_id,
+                    decision_id: row.decision_id,
+                    decided_at: row.decided_at,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then(b.decision_id.cmp(&a.decision_id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// In-memory analogue of the Postgres `list_dedup_rederive_rows`
     /// enumeration: every decision row (any tenant), sorted
     /// `decided_at ASC, decision_id ASC` as the real query orders it, capped
@@ -99970,6 +100002,7 @@ mod credit_estimate_tests {
         _temp: tempfile::TempDir,
         _artifact_temp: tempfile::TempDir,
         state: Arc<AppState>,
+        db: Arc<PerplexityDriverTestDb>,
         submission_ids: Vec<Uuid>,
         features: Vec<LocalEstimateFeatures>,
     }
@@ -100066,6 +100099,7 @@ mod credit_estimate_tests {
             _temp: temp,
             _artifact_temp: artifact_temp,
             state,
+            db,
             submission_ids,
             features,
         }
@@ -100126,6 +100160,41 @@ mod credit_estimate_tests {
         for needle in ["tenant-a", "tenant-b", "ESTIMATE-FIXTURE", "decided_at"] {
             assert!(!json.contains(needle), "{needle} leaked: {json}");
         }
+    }
+
+    /// Kristi's #1285 review, finding 3: a capped run reads the NEWEST
+    /// decisions, so it reaches the calibration the fit trains on, and
+    /// every submission it reaches has its latest decision -- the one its
+    /// label comes from -- among the rows. Decisions are dated in fixture
+    /// order, so the newest two are submission 3 (unlabelled) and
+    /// submission 2 (withheld); oldest-first would read 0 and 1.
+    #[tokio::test]
+    async fn a_capped_eval_reads_the_newest_decisions() {
+        let fx = eval_fixture().await;
+        let base = Utc::now() - chrono::Duration::days(1);
+        for (_, row) in fx.db.gate_decisions.write().unwrap().iter_mut() {
+            let i = fx
+                .submission_ids
+                .iter()
+                .position(|id| *id == row.submission_id)
+                .expect("fixture submission");
+            row.decided_at = base + chrono::Duration::minutes(i as i64);
+        }
+        let response = run_credit_estimate_eval(
+            fx.state.as_ref(),
+            &CreditEstimateEvalQuery {
+                dry_run: false,
+                limit: Some(2),
+                fit: false,
+            },
+        )
+        .await
+        .expect("eval runs");
+        assert_eq!(response.counts.decisions, 2, "{:?}", response.counts);
+        assert_eq!(response.counts.unlabelled, 1, "{:?}", response.counts);
+        assert_eq!(response.counts.labelled, 1, "{:?}", response.counts);
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].features, fx.features[2]);
     }
 
     /// Kristi's #1285 review, finding 4: shuffling alone does not unlink a
