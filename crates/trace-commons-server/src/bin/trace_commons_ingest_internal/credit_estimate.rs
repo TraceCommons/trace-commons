@@ -11,11 +11,16 @@
 //! uses, or the protocol's built-in table. It never serves an empty table.
 //!
 //! `POST /v1/admin/credit-estimate-eval` returns one label-only row per
-//! labelled decision: the `lef1` features of the stored envelope, the credit
-//! quality, its calibration version, the withheld label, and a tenant hash.
-//! The features are derived inside the gate service, so this handler never
-//! holds plaintext. Rows carry no submission id, trace id, decision time or
-//! content, and are shuffled. With `fit=true` it also runs the E9 time split
+//! labelled decision: the `lef1` features of the stored envelope, the
+//! displayed credit (2 decimals), its calibration version, the withheld
+//! label, and a tenant tag. The features are derived inside the gate
+//! service, so this handler never holds plaintext. Rows carry no submission
+//! id, trace id, decision time or content, and are shuffled. They also carry
+//! nothing stored beside a submission id that would join them back to it:
+//! not the exact credit quality, and not a tenant hash, since an unsalted
+//! hash of a tenant id is recomputable by anyone holding the id. The tenant
+//! tag is assigned per run in a random order and only says which rows share
+//! a tenant. With `fit=true` it also runs the E9 time split
 //! and returns the metrics and a candidate table. It writes nothing.
 
 use std::path::Path;
@@ -23,7 +28,8 @@ use std::path::Path;
 use rand::seq::SliceRandom as _;
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
 use trace_commons_server::credit_estimate_fit::{
-    EstimateEvalRow, EstimateFitInput, EstimateFitReport, eval_label, fit_estimate_table,
+    EstimateEvalRow, EstimateFitInput, EstimateFitReport, displayed_credit, eval_label,
+    fit_estimate_table,
 };
 
 use super::*;
@@ -156,6 +162,18 @@ pub(super) async fn run_credit_estimate_eval(
             .push(*submission_id);
     }
 
+    // Per-run tenant tags, handed out in a random order so a tag carries
+    // neither the tenant id nor its place in the enumeration.
+    let tenant_tags: BTreeMap<&str, String> = {
+        let mut tenants: Vec<&str> = by_tenant.keys().copied().collect();
+        tenants.shuffle(&mut rand::thread_rng());
+        tenants
+            .into_iter()
+            .enumerate()
+            .map(|(i, tenant_id)| (tenant_id, format!("t{i}")))
+            .collect()
+    };
+
     let mut inputs: Vec<EstimateFitInput> = Vec::new();
     for (tenant_id, submission_ids) in by_tenant {
         let labels = db
@@ -212,11 +230,11 @@ pub(super) async fn run_credit_estimate_eval(
             inputs.push(EstimateFitInput {
                 row: EstimateEvalRow {
                     features,
-                    credit_quality_micros: label_row.credit_quality_micros,
+                    displayed_credit: label_row.credit_quality_micros.map(displayed_credit),
                     credit_quality_calibration_version: label_row
                         .credit_quality_calibration_version,
                     withheld,
-                    tenant_hash: tenant_hash.clone(),
+                    tenant_tag: tenant_tags[tenant_id].clone(),
                 },
                 decided_at: latest[&(tenant_id.to_string(), submission_id)],
             });
@@ -226,7 +244,8 @@ pub(super) async fn run_credit_estimate_eval(
     let fit = query.fit.then(|| fit_estimate_table(&inputs));
     let mut rows: Vec<EstimateEvalRow> = inputs.into_iter().map(|input| input.row).collect();
     // Enumeration order is decision-time order; shuffling keeps a row from
-    // being matched back to a submission by its position.
+    // being matched back to a submission by its position. The row's values
+    // are unlinkable on their own: see the module docs.
     rows.shuffle(&mut rand::thread_rng());
     Ok(CreditEstimateEvalResponse {
         dry_run: query.dry_run,

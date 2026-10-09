@@ -100098,18 +100098,18 @@ mod credit_estimate_tests {
         assert!(response.fit.is_none());
         assert_eq!(response.rows.len(), 3);
 
-        for (i, tenant_id) in TENANTS.iter().enumerate().take(3) {
+        for i in 0..3 {
             let row = response
                 .rows
                 .iter()
                 .find(|row| row.features == fx.features[i])
                 .unwrap_or_else(|| panic!("row {i} present"));
-            assert_eq!(row.tenant_hash, sha256_prefixed(tenant_id));
+            assert!(row.tenant_tag.starts_with('t'), "{}", row.tenant_tag);
             match i {
-                0 => assert_eq!(row.credit_quality_micros, Some(150_000)),
-                1 => assert_eq!(row.credit_quality_micros, Some(220_000)),
+                0 => assert_eq!(row.displayed_credit, Some(1.5)),
+                1 => assert_eq!(row.displayed_credit, Some(2.2)),
                 _ => {
-                    assert_eq!(row.credit_quality_micros, None);
+                    assert_eq!(row.displayed_credit, None);
                     assert_eq!(row.withheld, Some(EstimateWithheldLabel::Duplicate));
                 }
             }
@@ -100126,6 +100126,52 @@ mod credit_estimate_tests {
         for needle in ["tenant-a", "tenant-b", "ESTIMATE-FIXTURE", "decided_at"] {
             assert!(!json.contains(needle), "{needle} leaked: {json}");
         }
+    }
+
+    /// Kristi's #1285 review, finding 4: shuffling alone does not unlink a
+    /// row. Neither the exact credit quality, which sits beside the
+    /// submission id in `trace_gate_decisions`, nor an unsalted tenant hash,
+    /// which anyone with the tenant id can recompute, may appear in a row.
+    /// The label is displayed credit (2 decimals), and the tenant is a tag
+    /// that only says which rows share a tenant within this one run.
+    #[tokio::test]
+    async fn eval_rows_carry_no_value_that_joins_back_to_a_decision() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        let json = serde_json::to_value(&response).expect("serializes");
+        let text = json.to_string();
+        for tenant_id in TENANTS {
+            let hash = sha256_prefixed(tenant_id);
+            assert!(!text.contains(&hash), "unsalted tenant hash: {text}");
+        }
+        for micros in ["150000", "220000", "credit_quality_micros"] {
+            assert!(!text.contains(micros), "{micros} leaked: {text}");
+        }
+        let rows = json["rows"].as_array().expect("rows");
+        let tag_of = |features: &LocalEstimateFeatures| {
+            let row = rows
+                .iter()
+                .find(|row| row["features"] == serde_json::to_value(features).unwrap())
+                .expect("row present");
+            row["tenant_tag"]
+                .as_str()
+                .expect("a tenant tag")
+                .to_string()
+        };
+        // Rows 0 and 1 are tenant-a, row 2 tenant-b.
+        assert_eq!(tag_of(&fx.features[0]), tag_of(&fx.features[1]));
+        assert_ne!(tag_of(&fx.features[0]), tag_of(&fx.features[2]));
+        let shown: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|row| row["displayed_credit"].as_f64())
+            .map(|credit| format!("{credit:.2}"))
+            .collect();
+        assert_eq!(
+            shown,
+            BTreeSet::from(["1.50".to_string(), "2.20".to_string()])
+        );
     }
 
     /// A dry run reads labels only: no envelope is loaded or decrypted and

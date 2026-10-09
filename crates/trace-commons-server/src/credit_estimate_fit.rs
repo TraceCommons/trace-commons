@@ -124,16 +124,23 @@ pub fn eval_label(
 }
 
 /// One label-only row, as the eval route returns it. No submission id, no
-/// trace id, no decision time, no content.
+/// trace id, no decision time, no content, and no value stored beside a
+/// submission id that would join the row back to it: the label is the
+/// displayed credit, not the exact credit quality, and the tenant is a
+/// per-run tag, not a hash anyone holding the tenant id could recompute.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct EstimateEvalRow {
     pub features: LocalEstimateFeatures,
-    pub credit_quality_micros: Option<i64>,
+    /// [`displayed_credit`] of the decision's credit quality: rounded to 2
+    /// decimals, which is all the fit uses. `None` on a withheld decision.
+    pub displayed_credit: Option<f64>,
     pub credit_quality_calibration_version: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withheld: Option<EstimateWithheldLabel>,
-    /// `sha256:` of the tenant id, for the per-tier tenant floor.
-    pub tenant_hash: String,
+    /// The row's tenant, as a tag assigned in a random order for this one
+    /// run: rows sharing a tenant share a tag, for the per-tier tenant
+    /// floor, and the tag means nothing outside the run.
+    pub tenant_tag: String,
 }
 
 /// A row plus the decision time the split needs. The time never leaves the
@@ -303,7 +310,7 @@ fn usable<'a>(input: &'a EstimateFitInput, reference: &LocalEstimateTable) -> Op
     if input.row.withheld.is_some() {
         return None;
     }
-    let q = input.row.credit_quality_micros?;
+    let displayed = input.row.displayed_credit?;
     let features = &input.row.features;
     if features.version != LOCAL_ESTIMATE_FEATURES_VERSION || features.content_bytes == 0 {
         return None;
@@ -313,8 +320,8 @@ fn usable<'a>(input: &'a EstimateFitInput, reference: &LocalEstimateTable) -> Op
         .all(|term| features.term_value(*term, reference).is_some())
         .then(|| Scored {
             features,
-            displayed: displayed_credit(q),
-            tenant: &input.row.tenant_hash,
+            displayed,
+            tenant: &input.row.tenant_tag,
         })
 }
 
@@ -741,10 +748,12 @@ mod tests {
                         } else {
                             features(size, users, 1 + i % 3)
                         },
-                        credit_quality_micros: Some((displayed * 100_000.0).round() as i64),
+                        displayed_credit: Some(displayed_credit(
+                            (displayed * 100_000.0).round() as i64
+                        )),
                         credit_quality_calibration_version: Some(3),
                         withheld: None,
-                        tenant_hash: format!("sha256:tenant-{}", i % tenants),
+                        tenant_tag: format!("t{}", i % tenants),
                     },
                     decided_at: at(i),
                 }
@@ -788,9 +797,9 @@ mod tests {
             keys,
             BTreeSet::from([
                 "features",
-                "credit_quality_micros",
+                "displayed_credit",
                 "credit_quality_calibration_version",
-                "tenant_hash",
+                "tenant_tag",
             ])
         );
     }
@@ -835,7 +844,7 @@ mod tests {
         assert!(table.weights.is_empty() && table.cut_offs.is_empty());
         let mut held: Vec<f64> = inputs[420..]
             .iter()
-            .map(|i| displayed_credit(i.row.credit_quality_micros.unwrap()))
+            .map(|i| i.row.displayed_credit.unwrap())
             .collect();
         held.sort_by(f64::total_cmp);
         assert_eq!(table.bands[0].low, quantile(&held, 0.10));
@@ -857,7 +866,7 @@ mod tests {
         let top = sizes[280];
         for (i, input) in inputs.iter_mut().enumerate() {
             if input.row.features.content_bytes >= top {
-                input.row.tenant_hash = format!("sha256:big-{}", i % 2);
+                input.row.tenant_tag = format!("big-{}", i % 2);
             }
         }
         let report = fit_estimate_table(&inputs);
@@ -887,7 +896,7 @@ mod tests {
         // Every fifth row is a duplicate with no credit quality.
         for (i, input) in inputs.iter_mut().enumerate() {
             if i % 5 == 0 {
-                input.row.credit_quality_micros = None;
+                input.row.displayed_credit = None;
                 input.row.credit_quality_calibration_version = None;
                 input.row.withheld = Some(EstimateWithheldLabel::Duplicate);
             }
@@ -937,9 +946,9 @@ mod tests {
     /// row stays scored rather than becoming a zero-quality withhold.
     fn lowered(mut inputs: Vec<EstimateFitInput>, by: f64) -> Vec<EstimateFitInput> {
         for input in &mut inputs {
-            let shown = displayed_credit(input.row.credit_quality_micros.unwrap());
-            let lower = (shown - by).max(0.05);
-            input.row.credit_quality_micros = Some((lower * 100_000.0).round() as i64);
+            let shown = input.row.displayed_credit.unwrap();
+            let lower = ((shown - by).max(0.05) * 100.0).round() / 100.0;
+            input.row.displayed_credit = Some(lower);
         }
         inputs
     }
