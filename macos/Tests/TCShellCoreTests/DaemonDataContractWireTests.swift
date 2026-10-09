@@ -582,8 +582,12 @@ final class DaemonDataContractWireTests: XCTestCase {
         let glance = try decoder.decode(DaemonData.InsightsGlance.self, from: Data(litGlance.utf8))
         XCTAssertEqual(glance.contextTip, tip)
         // A state this build does not know is no tip, as is a lit tip
-        // missing a figure.
-        for other in [#"{"state":"quiet"}"#, #"{"state":"something-new"}"#, #"{"state":"lit","context":180000}"#] {
+        // missing a figure, and figures under any state but `lit`.
+        for other in [
+            #"{"state":"quiet"}"#, #"{"state":"something-new"}"#, #"{"state":"lit","context":180000}"#,
+            #"{"state":"held","context":180000,"threshold":200000}"#,
+            #"{"state":"something-new","context":180000,"threshold":200000}"#,
+        ] {
             let decoded = try decoder.decode(DaemonData.InsightsContextTip.self, from: Data(other.utf8))
             XCTAssertNil(decoded.lit, other)
         }
@@ -607,7 +611,8 @@ final class DaemonDataContractWireTests: XCTestCase {
 
     func testInferenceCallTokensDecodeAndAbsentStaysNil() async throws {
         let transport = FakeTransport(
-            response: frame(#"{"readable":true,"calls":[\#(Self.callId2),\#(Self.callId1)],"next_cursor":null}"#))
+            response: frame(
+                #"{"readable":true,"window_hours":24,"calls":[\#(Self.callId2),\#(Self.callId1)],"next_cursor":null}"#))
         let calls = try await LiveDaemonClient(transport: transport).inferenceCalls(limit: 25, cursor: nil).calls
         XCTAssertEqual(calls.map(\.id), [2, 1])
         XCTAssertEqual(
@@ -630,7 +635,8 @@ final class DaemonDataContractWireTests: XCTestCase {
 
     func testUsageChangedParses() {
         XCTAssertEqual(DaemonDataEventParser.parse(#"{"event":"usage_changed","data":{}}"#), .usageChanged)
-        // The payload is always `{}`; anything else in it is ignored.
+        // The payload is always `{}` and the parser reads none of it, so a
+        // frame without one is the same pulse.
         XCTAssertEqual(DaemonDataEventParser.parse(#"{"event":"usage_changed"}"#), .usageChanged)
     }
 }
