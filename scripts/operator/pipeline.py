@@ -596,11 +596,27 @@ def _compare_pin(pin_path):
     `comparison_pin_unreadable`. A pin without `with_events: true` is
     `comparison_pin_without_events`: its export has no session events. A
     local fixture pin names its JSONL directory; a pin without one exports
-    from the HF dataset that it names."""
+    from the HF dataset that it names.
+
+    Each of the three fields that only a comparison pin has is absent or
+    has its type, or the pin is `comparison_pin_unreadable`:
+    `local_jsonl_dir` is a string, `session_names` is a list of strings,
+    and `declared_privacy_risk` is a map of strings."""
     require(isinstance(_read_json(pin_path, "comparison_pin_unreadable"), dict), "comparison_pin_unreadable")
     pin = load_pin(pin_path)
     require(pin.get("with_events") is True, "comparison_pin_without_events")
     local = pin.get("local_jsonl_dir")
+    names = pin.get("session_names")
+    risks = pin.get("declared_privacy_risk")
+    require(local is None or isinstance(local, str), "comparison_pin_unreadable")
+    require(
+        names is None or (isinstance(names, list) and all(isinstance(name, str) for name in names)),
+        "comparison_pin_unreadable",
+    )
+    require(
+        risks is None or (isinstance(risks, dict) and all(isinstance(risk, str) for risk in risks.values())),
+        "comparison_pin_unreadable",
+    )
     return pin, (ROOT / local if local else None)
 
 
@@ -748,19 +764,19 @@ def _require_passing_report(report):
     require(label is None, label)
 
 
-def _write_compare_report(check_id, report, report_bytes, *, step_failed=False):
+def _write_compare_report(check_id, report, report_bytes, *, failed=False):
     """The latest report of this check under `.local/`, beside its Markdown
     view. One name for each check id and for a partial run, so a `--limit`
     run or a local-pin run does not replace the report of the full run. The
     JSON bytes are the harness's own, so they keep the hash that the check
     evidence names.
 
-    `step_failed`: the harness failed and the report names no failure. A
-    full report of this kind reads as the report of a pass, and no check
-    result exists for it, so its name has `-failed`."""
+    `failed`: the harness failed. No check result exists for its report, so
+    the name of a full report has `-failed`, and the plain name is the name
+    of a pass only. A partial report keeps `-partial`."""
     if report["partial"]:
         suffix = "-partial"
-    elif step_failed:
+    elif failed:
         suffix = "-failed"
     else:
         suffix = ""
@@ -814,8 +830,8 @@ def _compare_self_test(args, run):
        other field, no refused receipt, no alignment loss, and each trace
        compared (`compare_self_test_risk_fields`).
     3. The local pin with the baseline's quality floor skewed fails
-       (`compare_self_test_skew_passed`), and its report names the skew,
-       the pair at which the run stopped, and `quality_passed`
+       (`compare_self_test_skew_passed`), and its report names the pair at
+       which the run stopped and `quality_passed`
        (`compare_self_test_skew_fields`).
     4. The local pin again gives the report of run 1
        (`compare_self_test_not_deterministic`).
@@ -870,9 +886,7 @@ def _compare_self_test(args, run):
         )
         # PC-D20: the run stops at the pair after which the indexes can differ.
         require(
-            skewed["skew"] == "baseline_quality_floor"
-            and skewed["alignment_lost_position"] is not None
-            and "quality_passed" in skewed["unexplained_counts"],
+            skewed["alignment_lost_position"] is not None and "quality_passed" in skewed["unexplained_counts"],
             "compare_self_test_skew_fields",
         )
         repeat = scenario("compare_self_repeat", "local")
@@ -889,10 +903,11 @@ def run_compare(args, run):
     without one `pipeline_comparison_hf`.
 
     A harness that fails and leaves a valid report: the report goes under
-    `.local/`, one line says where it is, and the failure is the first
-    label that the report names (the alignment, a refused receipt, an
-    unexplained difference, a gate branch with no evidence), or else the
-    step failure. A report write that fails does not replace that failure.
+    `.local/` with `-partial` or `-failed` in its name, one line names the
+    run and the report, and the failure is the first label that the report
+    names (the alignment, a refused receipt, an unexplained difference, a
+    gate branch with no evidence), or else the step failure. A report write
+    that fails does not replace that failure.
 
     A harness that passes must leave a report that names none of the four
     and that compared the expected number of traces: the limit, or each
@@ -915,8 +930,8 @@ def run_compare(args, run):
 
     pin_path = Path(args.corpus).resolve()
     pin, local_dir = _compare_pin(pin_path)
-    # The declared risks change only the corpus files and the configuration,
-    # so a run that can emit a result needs each digest of the pin.
+    # The declared risks change only the corpus files, so a run that can
+    # emit a result needs each digest of the pin.
     pinned = all(pin.get(field) is not None for field in PIN_DIGEST_FIELDS)
     require(pinned or args.limit is not None, "comparison_pin_digest_missing")
     check_id = "pipeline_comparison_local" if local_dir is not None else "pipeline_comparison_hf"
@@ -940,7 +955,7 @@ def run_compare(args, run):
             raise failure
         label = _compare_failure_label(report)
         try:
-            shown = _shown(_write_compare_report(check_id, report, report_bytes, step_failed=label is None))
+            shown = _shown(_write_compare_report(check_id, report, report_bytes, failed=True))
         except OSError:
             # The failure of the run must win: the report stays in the run
             # directory, and no line names a file under `.local/`.
@@ -950,7 +965,7 @@ def run_compare(args, run):
             print(
                 f"PipelineCompareReport: unexplained={report['unexplained_total']} "
                 f"alignment_lost={'none' if lost is None else lost} "
-                f"partial={'true' if report['partial'] else 'false'} report={shown}"
+                f"partial={'true' if report['partial'] else 'false'} run={run.run_id} report={shown}"
             )
         raise ToolingError(label) if label is not None else failure
     _require_passing_report(report)

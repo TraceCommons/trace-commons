@@ -12,8 +12,8 @@ with `--with-events`: the output is one JSON line for each session
 (`bootstrap-compare.jsonl`, `holdout-compare.jsonl`) and `source-manifest.json`.
 It has its own output directory and step label for each `name`, so one run
 can hold two exports, and it compares all five digests of the pin (the
-declared privacy risks change only the corpus files and the configuration,
-so `configuration_digest` is compared here too).
+declared privacy risks change only the corpus files; `--with-events`
+changes the configuration, so `configuration_digest` is compared here too).
 
 `validate_comparison_report` is to the comparison report what
 `corpus.validate_report` is to the corpus report: only labels, hashes,

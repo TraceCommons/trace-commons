@@ -5225,13 +5225,15 @@ class CompareCommandTests(_CorpusRunCase):
             self.stdout.getvalue().splitlines(),
             [
                 "PipelineCompareReport: unexplained=2 alignment_lost=none partial=false "
-                f"report=pipeline-comparison-{_COMPARE_LOCAL}.json"
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-failed.json"
             ],
         )
-        report = json.loads(self._report_path().read_text())
+        # The plain name is the name of a pass only.
+        self.assertFalse(self._report_path().exists())
+        report = json.loads(self._report_path(failed=True).read_text())
         self.assertEqual(report["unexplained_total"], 2)
         self.assertEqual(report["unexplained_counts"], {"admission": 2})
-        self.assertIn("`admission`: 2", self._report_path().with_suffix(".md").read_text())
+        self.assertIn("`admission`: 2", self._report_path(failed=True).with_suffix(".md").read_text())
         self.assertEqual(results.load_results(self.run), {})
         # A driver error that ends the run after one difference: the label is
         # the report's, and the line says that the run did not complete.
@@ -5243,7 +5245,7 @@ class CompareCommandTests(_CorpusRunCase):
             self.stdout.getvalue().splitlines(),
             [
                 "PipelineCompareReport: unexplained=1 alignment_lost=none partial=true "
-                f"report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
             ],
         )
 
@@ -5252,7 +5254,10 @@ class CompareCommandTests(_CorpusRunCase):
         self.assertEqual(self._corpus(self._harness({"fail": True, **gap})), 1)
         self.assertEqual(self._failure(), "PipelineFailure: comparison_gate_branch_not_exercised")
         self.assertIn("PipelineCompareReport: unexplained=0 alignment_lost=none", self.stdout.getvalue())
-        self.assertEqual(json.loads(self._report_path().read_text())["branch_gaps"], ["novelty_passed_false"])
+        self.assertEqual(
+            json.loads(self._report_path(failed=True).read_text())["branch_gaps"], ["novelty_passed_false"]
+        )
+        self.assertFalse(self._report_path().exists())
         # A harness that passes with a gap is refused with the same label.
         self._again()
         self.assertEqual(self._corpus(self._harness(gap)), 1)
@@ -5391,7 +5396,10 @@ class CompareCommandTests(_CorpusRunCase):
         name = f"pipeline-comparison-{_COMPARE_LOCAL}-failed"
         self.assertEqual(
             self.stdout.getvalue().splitlines(),
-            [f"PipelineCompareReport: unexplained=0 alignment_lost=none partial=false report={name}.json"],
+            [
+                "PipelineCompareReport: unexplained=0 alignment_lost=none partial=false "
+                f"run={self.run.run_id} report={name}.json"
+            ],
         )
         self.assertEqual(self._local_files(), [f"{name}.json", f"{name}.md"])
         self.assertEqual(
@@ -5400,7 +5408,7 @@ class CompareCommandTests(_CorpusRunCase):
         # A partial report of a failed step keeps the name of a partial run.
         self._again()
         self.assertEqual(self._corpus(self._harness({"fail": True, "compared": 4})), 101)
-        self.assertIn("partial=true report=", self.stdout.getvalue())
+        self.assertIn(f"partial=true run={self.run.run_id} report=", self.stdout.getvalue())
         self.assertTrue(self._report_path(partial=True).is_file())
         self.assertFalse(self._report_path().exists())
 
@@ -5465,6 +5473,32 @@ class CompareCommandTests(_CorpusRunCase):
         other.write_text(json.dumps({"schema": corpus.CORPUS_SCHEMA}))
         self.assertEqual(self._corpus(pin=str(other)), 1)
         self.assertEqual(self._failure(), "PipelineFailure: unsupported_pin_schema")
+
+    def test_a_pin_field_of_a_wrong_type_gives_a_label(self):
+        cases = (
+            {"local_jsonl_dir": ["x"]},
+            {"local_jsonl_dir": 5},
+            {"local_jsonl_dir": False},
+            {"session_names": 5},
+            {"session_names": "s01.jsonl"},
+            {"session_names": ["s01.jsonl", 2]},
+            {"declared_privacy_risk": ["s01.jsonl"]},
+            {"declared_privacy_risk": "medium"},
+            {"declared_privacy_risk": {"s01.jsonl": 1}},
+        )
+        for fields in cases:
+            for argv in ([], ["--limit", "3"]):
+                with self.subTest(fields=fields, argv=argv):
+                    self.assertEqual(self._corpus(None, *argv, pin=self._write_pin(**fields)), 1)
+                    self.assertEqual(self._failure(), "PipelineFailure: comparison_pin_unreadable")
+                    self.assertEqual(self.calls, [], "refused before any export, cargo, or Docker call")
+        # The three fields with their types, and a pin without them.
+        usable = {"declared_privacy_risk": {"s01.jsonl": "medium"}}
+        absent = {"local_jsonl_dir": _DROP, "session_names": _DROP}
+        for fields in (usable, absent):
+            with self.subTest(fields=sorted(fields)):
+                self._again()
+                self.assertEqual(self._corpus(pin=self._write_pin(**fields)), 0, self.stderr.getvalue())
 
     def test_a_report_with_a_skew_gets_no_check_result(self):
         self.assertEqual(self._corpus(self._harness({"skew": "baseline_quality_floor"})), 1)
@@ -5653,8 +5687,9 @@ class CompareCommandTests(_CorpusRunCase):
             ({"compare_self_pass": {"compared": 0}}, "compare_self_test_pass_incomplete"),
             ({"compare_self_pass": {"compared": 9}}, "compare_self_test_pass_incomplete"),
             ({"compare_self_repeat": {"compared": 0}}, "compare_self_test_pass_incomplete"),
-            # The report of the skew scenario names the skew. `_compare_once`
-            # examines this for each run, so its label comes first.
+            # The report of each scenario names the skew of its run, or none.
+            # `_compare_once` examines this, so the self-test has no check of
+            # its own for it.
             ({"compare_self_skew": {**skew, "skew": None}}, "comparison_report_skew_mismatch"),
             ({"compare_self_pass": {"skew": "baseline_quality_floor"}}, "comparison_report_skew_mismatch"),
             # A scenario that must pass, with a report that names a failure.
@@ -5721,7 +5756,7 @@ class CompareCommandTests(_CorpusRunCase):
             self.stdout.getvalue().splitlines(),
             [
                 "PipelineCompareReport: unexplained=1 alignment_lost=4 partial=true "
-                f"report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
+                f"run={self.run.run_id} report=pipeline-comparison-{_COMPARE_LOCAL}-partial.json"
             ],
         )
         report = json.loads(self._report_path(partial=True).read_text())
