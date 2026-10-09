@@ -32,6 +32,7 @@ pub const COMPARISON_BLOCKERS: [&str; 8] = [
     "synthetic_settlement",
     "static_bearer_authentication",
     "deterministic_privacy_only",
+    // baseline-old-path:
     "baseline_derived_scan_removed",
 ];
 pub const COMPARISON_UNEXPLAINED_LABEL: &str = "comparison_has_unexplained_differences";
@@ -328,6 +329,7 @@ pub fn compare_records_with(
 
 /// What the harness does for one pair of admissions, so that both indexes
 /// stay equal (spec section 8.2).
+// baseline-old-path: `SkipBaselineGate`, `ApproveBaseline`, `RejectBaseline`, and their rows below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlignmentAction {
     None,

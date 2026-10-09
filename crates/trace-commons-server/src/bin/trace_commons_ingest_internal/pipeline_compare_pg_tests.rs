@@ -177,13 +177,10 @@ impl CompareCorpusReader {
 // The envelope.
 // ---------------------------------------------------------------------------
 
-/// The envelope of one fixture. The same fixture gives the same bytes on
-/// every call: each field that the protocol crate fills at random or from the
-/// clock is a function of the fixture here. A redactor error is
-/// `compare_envelope_failed`, so the run can write its partial report.
-async fn compare_envelope(
-    fixture: &CompareFixture,
-) -> Result<TraceContributionEnvelope, &'static str> {
+/// The contribution of one fixture before the redaction. Each field that the
+/// protocol crate fills at random or from the clock is a function of the
+/// fixture here.
+fn compare_raw(fixture: &CompareFixture) -> RawTraceContribution {
     // `from_recorded_trace` gives `Utc::now()` to a step with no timestamp.
     let mut trace = fixture.trace_file.clone();
     for step in &mut trace.steps {
@@ -224,24 +221,37 @@ async fn compare_envelope(
             .parent_event_id
             .and_then(|parent| new_ids.get(&parent).copied());
     }
+    raw
+}
+
+/// The envelope of one fixture. The same fixture gives the same bytes on
+/// every call (see `compare_raw`). A redactor error is
+/// `compare_envelope_failed`, so the run can write its partial report.
+async fn compare_envelope(
+    fixture: &CompareFixture,
+) -> Result<TraceContributionEnvelope, &'static str> {
     let mut envelope = DeterministicTraceRedactor::try_default()
         .map_err(|_| "compare_envelope_failed")?
-        .redact_trace(raw)
+        .redact_trace(compare_raw(fixture))
         .await
         .map_err(|_| "compare_envelope_failed")?;
-    envelope.privacy.residual_pii_risk = match fixture.privacy_risk.as_str() {
-        "low" => ResidualPiiRisk::Low,
+    match fixture.privacy_risk.as_str() {
+        // The envelope keeps the risk that the redaction gave, as
+        // `build_envelope_from_draft` of pilot-bootstrap does. The server
+        // pass cannot make that risk lower.
+        "low" => {}
+        // A declared risk: only a local pin has one.
         "medium" | "high" => {
             make_metadata_only_low_risk(&mut envelope);
             set_metadata_only_tool_name(&mut envelope, &fixture.label);
-            if fixture.privacy_risk == "medium" {
+            envelope.privacy.residual_pii_risk = if fixture.privacy_risk == "medium" {
                 ResidualPiiRisk::Medium
             } else {
                 ResidualPiiRisk::High
-            }
+            };
         }
         _ => unreachable!("CompareFixture::is_valid refuses any other privacy risk"),
-    };
+    }
     envelope.consent.scopes = vec![ConsentScope::ModelTraining];
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
     envelope.trace_card.allowed_uses = vec![TraceAllowedUse::ModelTraining];
@@ -293,6 +303,7 @@ fn baseline_orchestrator_config(gate: &MainGateConfig) -> EnclaveGateOrchestrato
 
 /// Runs the bootstrap partition through `main`'s gate with floors of zero and
 /// derives the three floors from the values it measured.
+// baseline-old-path: the old orchestrator and `MockVectorIndex`.
 async fn calibrate_floors(bootstrap: &Path) -> Result<DerivedFloors, &'static str> {
     let mut config = baseline_orchestrator_config(&compare_main_gate(DerivedFloors {
         perplexity_floor_micros: 0,
@@ -2433,6 +2444,36 @@ async fn a_declared_risk_gives_a_metadata_only_envelope() {
     }
 }
 
+/// What the contributor-side redaction alone gives for `fixture`.
+async fn redaction_risk(fixture: &CompareFixture) -> ResidualPiiRisk {
+    DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(compare_raw(fixture))
+        .await
+        .unwrap()
+        .privacy
+        .residual_pii_risk
+}
+
+#[tokio::test]
+async fn a_trace_keeps_the_privacy_risk_of_the_redaction() {
+    // The redaction does not classify a payload text of more than 32,000
+    // bytes, and it then answers a risk that the server pass cannot derive.
+    let large = large_argument_fixture("kept_large");
+    let expected = redaction_risk(&large).await;
+    assert_ne!(expected, ResidualPiiRisk::Low);
+    let envelope = compare_envelope(&large).await.unwrap();
+    assert_eq!(envelope.privacy.residual_pii_risk, expected);
+    assert!(envelope.consent.tool_payloads_included);
+
+    let prose = prose_fixture("kept_prose");
+    let envelope = compare_envelope(&prose).await.unwrap();
+    assert_eq!(
+        envelope.privacy.residual_pii_risk,
+        redaction_risk(&prose).await
+    );
+}
+
 #[test]
 fn the_baseline_configuration_holds_mains_gate() {
     let gate = compare_main_gate(DerivedFloors {
@@ -2691,13 +2732,24 @@ async fn one_trace_reaches_both_gates() {
 // Tests of the two side drivers.
 // ---------------------------------------------------------------------------
 
-/// A low-risk fixture with about 220 words of text that no other label has.
+/// A fixture with no declared risk and about 220 words of text that no other
+/// label has.
 fn prose_fixture(label: &str) -> CompareFixture {
     risk_fixture(label, "low")
 }
 
 fn risk_fixture(label: &str, risk: &str) -> CompareFixture {
     fixture_from(fixture_line(label, risk, prose_steps(&long_text(label))))
+}
+
+/// A fixture with no declared risk and one tool call whose argument has
+/// 40,000 bytes of text.
+fn large_argument_fixture(label: &str) -> CompareFixture {
+    fixture_from(fixture_line(
+        label,
+        "low",
+        large_argument_steps(label, 40_000),
+    ))
 }
 
 fn record_base(fixture: &CompareFixture, position: u64) -> RecordBase {
@@ -2841,6 +2893,39 @@ async fn a_declared_high_trace_is_aligned() {
     assert!(pair.candidate.terminal);
     assert!(!pair.candidate.scored);
     // The two sides are not scored, so the admission is the one difference.
+    assert_eq!(
+        compare_records(&pair.baseline, &pair.candidate),
+        TraceComparison::Unexplained {
+            fields: vec!["admission"]
+        }
+    );
+    app.shutdown().await;
+}
+
+/// Spec section 8.3 row 4, with no declared risk: the risk of the envelope is
+/// the one that the contributor-side redaction gave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_tool_argument_keeps_its_risk_on_both_sides() {
+    let Some((app, _artifacts)) = start_test_app(PASSING_FLOORS, true).await else {
+        return;
+    };
+    let pair = drive_pair(&app, &large_argument_fixture("large_argument"), 0).await;
+    for record in [&pair.baseline, &pair.candidate] {
+        assert_eq!(record.receipt_code, 200);
+        assert_eq!(record.privacy_risk.as_deref(), Some("high"));
+        assert_eq!(record.privacy_basis, ["consent_content_flag"]);
+    }
+    assert_eq!(pair.baseline.admission, AdmissionLabel::Quarantine);
+    assert_eq!(pair.candidate.admission, AdmissionLabel::Reject);
+    assert_eq!(pair.action, AlignmentAction::RejectBaseline);
+    assert_eq!(pair.baseline.review, ReviewLabel::Reject);
+    assert_eq!(pair.baseline.review_source, ReviewSource::Alignment);
+    assert_eq!(pair.candidate.review, ReviewLabel::None);
+    for record in [&pair.baseline, &pair.candidate] {
+        assert!(record.terminal);
+        assert!(!record.scored);
+        assert!(!record.member);
+    }
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
         TraceComparison::Unexplained {
@@ -4067,6 +4152,49 @@ fn tool_steps() -> Vec<TraceStep> {
             tool_call_id: "call_1".to_string(),
             name: "weather".to_string(),
             content: "sunny".to_string(),
+        }],
+        timestamp: None,
+    });
+    steps
+}
+
+/// The steps of a prose fixture, and one `write_file` call whose `content`
+/// argument has `bytes` bytes of words or a few more. The redaction keeps
+/// this argument: the tool name has the filesystem profile. It replaces a
+/// long text of a tool that it does not know with a marker.
+fn large_argument_steps(seed: &str, bytes: usize) -> Vec<TraceStep> {
+    let mut content = String::with_capacity(bytes + 16);
+    let mut index = 0;
+    while content.len() < bytes {
+        content.push_str(&format!("{seed}{} ", (index * 7 + seed.len()) % 61));
+        index += 1;
+    }
+    let mut steps = prose_steps(&long_text(seed));
+    steps.push(TraceStep {
+        request_hint: None,
+        response: TraceResponse::ToolCalls {
+            tool_calls: vec![TraceToolCall {
+                id: "call_1".to_string(),
+                name: "write_file".to_string(),
+                arguments: serde_json::json!({ "content": content }),
+            }],
+            input_tokens: 1,
+            output_tokens: 1,
+        },
+        expected_tool_results: vec![],
+        timestamp: None,
+    });
+    steps.push(TraceStep {
+        request_hint: None,
+        response: TraceResponse::Text {
+            content: "The file is written.".to_string(),
+            input_tokens: 1,
+            output_tokens: 1,
+        },
+        expected_tool_results: vec![ExpectedToolResult {
+            tool_call_id: "call_1".to_string(),
+            name: "write_file".to_string(),
+            content: "written".to_string(),
         }],
         timestamp: None,
     });
