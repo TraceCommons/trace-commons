@@ -318,6 +318,9 @@ pub async fn harness_dependencies_from_env() -> anyhow::Result<HarnessDependenci
         tenant_policies: Arc::new(BTreeMap::new()),
         require_tenant_submission_policy: false,
         db_policy_reads: Arc::new(|_: &str| false),
+        // The harness replaces this authority with its own
+        // (`with_boundaries`), so no tenant policy is read from a database.
+        db_policies: None,
     })
     .await?;
     Ok(HarnessDependencies::FromEnv(components))

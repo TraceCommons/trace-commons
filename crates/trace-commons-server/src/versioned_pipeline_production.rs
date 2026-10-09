@@ -428,6 +428,36 @@ impl trace_commons_gate_api::SettlementAdapter for InternalTraceCreditSettlement
 /// (`TRACE_COMMONS_DB_TENANT_POLICY_READS` and its tenant rollout).
 pub type DbTenantPolicyReads = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// Where a tenant's database policy row is read: `main`'s DB mirror
+/// ([`DatabaseTenantPolicies`]) in production.
+#[async_trait::async_trait]
+pub trait TenantPolicyStore: Send + Sync {
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<
+        Option<crate::trace_corpus_storage::TraceTenantPolicyRecord>,
+        crate::error::DatabaseError,
+    >;
+}
+
+/// `main`'s DB mirror as the pipeline's [`TenantPolicyStore`]: the same
+/// `get_trace_tenant_policy` call `main`'s admission makes.
+pub struct DatabaseTenantPolicies(pub Arc<dyn crate::db::Database>);
+
+#[async_trait::async_trait]
+impl TenantPolicyStore for DatabaseTenantPolicies {
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<
+        Option<crate::trace_corpus_storage::TraceTenantPolicyRecord>,
+        crate::error::DatabaseError,
+    > {
+        self.0.get_trace_tenant_policy(tenant_id).await
+    }
+}
+
 /// The production authority source (spec A-D8, O-A1): the tenant
 /// submission policies `main` parsed from `TRACE_COMMONS_TENANT_POLICIES`
 /// and `main`'s `TRACE_COMMONS_REQUIRE_TENANT_SUBMISSION_POLICY`.
@@ -443,14 +473,17 @@ pub type DbTenantPolicyReads = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 ///   permitted exactly when `main` permits it. The pipeline's
 ///   `NoveltyUtility` leg reads `policy` as `main`'s utility credit check
 ///   (`record_matches_utility_credit_policy_abac`) reads the same policy.
-/// - A tenant whose policy `main` reads from the database is answered `None`
-///   (the pipeline then refuses it with `authority_control_missing`): this
-///   provider is synchronous and cannot read the database, and answering
-///   from the environment map instead could apply a stale policy.
+/// - A tenant whose policy `main` reads from the database
+///   (`TRACE_COMMONS_DB_TENANT_POLICY_READS`, globally or by rollout) is
+///   answered from its `trace_tenant_policies` row, read per call through
+///   `main`'s DB mirror by [`PipelineAuthorityProvider::resolve_authority`],
+///   which is what the pipeline asks. The synchronous `authority_for_tenant`
+///   cannot read the database and answers `None` for such a tenant.
 pub struct TenantPolicyPipelineAuthorityProvider {
     policies: Arc<BTreeMap<String, SubmissionAllowlists>>,
     require_policy: bool,
     db_policy_reads: DbTenantPolicyReads,
+    db_policies: Option<Arc<dyn TenantPolicyStore>>,
 }
 
 impl TenantPolicyPipelineAuthorityProvider {
@@ -458,16 +491,21 @@ impl TenantPolicyPipelineAuthorityProvider {
         policies: Arc<BTreeMap<String, SubmissionAllowlists>>,
         require_policy: bool,
         db_policy_reads: DbTenantPolicyReads,
+        db_policies: Option<Arc<dyn TenantPolicyStore>>,
     ) -> Self {
         Self {
             policies,
             require_policy,
             db_policy_reads,
+            db_policies,
         }
     }
 }
 
+#[async_trait::async_trait]
 impl PipelineAuthorityProvider for TenantPolicyPipelineAuthorityProvider {
+    /// The environment answer only: `None` for a tenant on database policy
+    /// reads, which only [`Self::resolve_authority`] can answer.
     fn authority_for_tenant(&self, tenant_id: &str) -> Option<SubmissionAuthority> {
         if (self.db_policy_reads)(tenant_id) {
             return None;
@@ -477,6 +515,46 @@ impl PipelineAuthorityProvider for TenantPolicyPipelineAuthorityProvider {
             policy: self.policies.get(tenant_id).cloned(),
             require_policy: self.require_policy,
         })
+    }
+
+    /// The tenant's policy exactly where `main`'s admission
+    /// (`tenant_submission_policy_for_request`) reads it, now: for a tenant
+    /// on database policy reads, its `trace_tenant_policies` row through
+    /// `main`'s DB mirror, decoded by the decoding `main` uses
+    /// (`submission_allowlists_from_storage`), `None` when there is no row;
+    /// otherwise the environment map. Read per call, so a policy rewritten
+    /// by `PUT /v1/admin/tenant-policy` applies to the next receipt and the
+    /// next credit check, as it does in `main`. A missing store, a failed
+    /// read or a row that does not decode refuses with
+    /// `pipeline_authority_read_failed`: never the environment map, never
+    /// "no policy".
+    async fn resolve_authority(
+        &self,
+        tenant_id: &str,
+    ) -> anyhow::Result<Option<SubmissionAuthority>> {
+        if !(self.db_policy_reads)(tenant_id) {
+            return Ok(self.authority_for_tenant(tenant_id));
+        }
+        let read_failed = || {
+            anyhow::anyhow!(
+                crate::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL
+            )
+        };
+        let store = self.db_policies.as_ref().ok_or_else(read_failed)?;
+        let row = store
+            .get_trace_tenant_policy(tenant_id)
+            .await
+            .map_err(|_| read_failed())?;
+        let policy = row
+            .as_ref()
+            .map(crate::trace_authority::submission_allowlists_from_storage)
+            .transpose()
+            .map_err(|_| read_failed())?;
+        Ok(Some(SubmissionAuthority {
+            tenant: SubmissionAllowlists::default(),
+            policy,
+            require_policy: self.require_policy,
+        }))
     }
 
     fn production_qualified(&self) -> bool {
@@ -1005,6 +1083,7 @@ mod tests {
                 Arc::new(BTreeMap::new()),
                 false,
                 Arc::new(|_: &str| false),
+                None,
             )),
             tenant_policy_count: 0,
             privacy: None,
@@ -1029,6 +1108,7 @@ mod tests {
                 Arc::new(BTreeMap::new()),
                 false,
                 Arc::new(|_: &str| false),
+                None,
             ));
         let privacy: Arc<dyn PipelinePrivacyBoundary> =
             Arc::new(crate::versioned_pipeline_authority::DeterministicPipelinePrivacyBoundary);
@@ -1099,6 +1179,7 @@ mod tests {
             tenant_policies: Arc::new(BTreeMap::new()),
             require_tenant_submission_policy: false,
             db_policy_reads: Arc::new(|_: &str| false),
+            db_policies: None,
         };
         let dir = tempfile::tempdir().unwrap();
         let legacy = dir.path().join("vector-index");

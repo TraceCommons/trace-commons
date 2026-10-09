@@ -92,6 +92,7 @@ use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_authority::parse_storage_policy_values;
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
 // The gate variables the production pipeline assembly shares with the
 // legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
@@ -4024,17 +4025,6 @@ impl AppState {
         };
         let (prebuilt_gate_service, pipeline_gate_components) =
             if pipeline_runtime_selection == PipelineRuntimeSelection::Production {
-                production_assembly::ensure_routed_tenants_have_authority(
-                    &tenant_rollout_gates.tenant_ids(TraceTenantRolloutFeature::PipelineReceipts),
-                    &pipeline_drain_tenant_ids,
-                    &|tenant_id: &str| {
-                        tenant_rollout_gates.enabled_for(
-                            TraceTenantRolloutFeature::DbTenantPolicyReads,
-                            db_tenant_policy_reads,
-                            tenant_id,
-                        )
-                    },
-                )?;
                 let rollout = tenant_rollout_gates.clone();
                 let (gate_service, components) =
                     production_assembly::build_near_ai_gate_service_with_pipeline_components(
@@ -4049,6 +4039,10 @@ impl AppState {
                                     db_tenant_policy_reads,
                                     tenant_id,
                                 )
+                            }),
+                            db_policies: db_mirror.clone().map(|db| {
+                                Arc::new(production_assembly::DatabaseTenantPolicies(db))
+                                    as Arc<dyn production_assembly::TenantPolicyStore>
                             }),
                         },
                     )
@@ -14821,6 +14815,7 @@ fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) 
     for label in [
         PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
         trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
     ] {
         if text == label {
             return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
@@ -60111,29 +60106,19 @@ async fn tenant_submission_policy_for_request(
     Ok(state.tenant_policies.get(&tenant.tenant_id).cloned())
 }
 
+/// A `trace_tenant_policies` row as `main`'s policy, through the decoding
+/// the pipeline's authority also uses
+/// (`trace_authority::submission_allowlists_from_storage`), so the two can
+/// never read one row differently.
 fn tenant_submission_policy_from_storage(
     policy: StorageTraceTenantPolicyRecord,
 ) -> anyhow::Result<TenantSubmissionPolicy> {
+    let allowlists =
+        trace_commons_server::trace_authority::submission_allowlists_from_storage(&policy)?;
     Ok(TenantSubmissionPolicy {
-        allowed_consent_scopes: parse_storage_policy_values(
-            &policy.allowed_consent_scopes,
-            "allowed_consent_scopes",
-        )?,
-        allowed_uses: parse_storage_policy_values(&policy.allowed_uses, "allowed_uses")?,
+        allowed_consent_scopes: allowlists.allowed_consent_scopes,
+        allowed_uses: allowlists.allowed_uses,
     })
-}
-
-fn parse_storage_policy_values<T>(values: &[String], label: &str) -> anyhow::Result<BTreeSet<T>>
-where
-    T: for<'de> Deserialize<'de> + Ord,
-{
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<T>(serde_json::Value::String(value.clone()))
-                .with_context(|| format!("failed to parse trace tenant policy {label} value"))
-        })
-        .collect()
 }
 
 fn enforce_signed_claim_submission_restrictions(
