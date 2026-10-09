@@ -13,6 +13,26 @@ final class ComponentContractTests: XCTestCase {
         XCTAssertEqual(GlassPress.brightness(true), -0.08)
         XCTAssertEqual(GlassPress.brightness(false), 0)
         XCTAssertFalse(EnvironmentValues().glassPressed)
+        // A control with no fill of its own darkens what is behind its label
+        // by the same 8%, as a wash under the label.
+        XCTAssertEqual(GlassPress.washOpacity(true), 0.08)
+        XCTAssertEqual(GlassPress.washOpacity(false), 0)
+    }
+
+    /// The tab label and the toolbar glyph are labels: pressed darkens a fill
+    /// or a wash behind them, never the label itself.
+    func test_pressedNeverDarkensATabLabelOrAToolbarGlyph() throws {
+        let sources = Dictionary(uniqueKeysWithValues: try Self.componentSources())
+        let navigation = try XCTUnwrap(sources["Navigation.swift"])
+        let tabs = try XCTUnwrap(navigation.range(of: "struct GlassSegmentedTabs")
+            .map { String(navigation[$0.lowerBound...].prefix(4000)) })
+        XCTAssertFalse(tabs.contains("}\n                    .glassPressedFill()"), "the tab label darkens")
+        XCTAssertTrue(tabs.contains(".glassPressedWash("), "the tab has no pressed wash")
+        let controls = try XCTUnwrap(sources["Controls.swift"])
+        let toolbar = try XCTUnwrap(controls.range(of: "struct GlassToolbarButton")
+            .map { String(controls[$0.lowerBound...].prefix(1500)) })
+        XCTAssertFalse(toolbar.contains(".glassPressedFill()"), "the toolbar glyph darkens")
+        XCTAssertTrue(toolbar.contains(".glassPressedWash("), "the toolbar glyph has no pressed wash")
     }
 
     /// A plain-styled button has no pressed state at all. Every button in
@@ -58,21 +78,35 @@ final class ComponentContractTests: XCTestCase {
         }
     }
 
+    /// Each step's accessibility value is the caller's word for where it
+    /// stands, and with no words a step speaks only its label.
     @MainActor
     func test_stepProgressSpeaksOnlyTheCallersStateWords() {
         let values = GlassStepProgress.StateValues(done: "d", current: "c", pending: "p")
-        XCTAssertEqual(values.done, "d")
-        // Constructible with none: a step then speaks only its label.
-        _ = GlassStepProgress(labels: ["a", "b"], current: 0)
+        let progress = GlassStepProgress(labels: ["a", "b", "c"], current: 1, stateValues: values)
+        XCTAssertEqual((0..<3).map(progress.value(at:)), ["d", "c", "p"])
+
+        let wordless = GlassStepProgress(labels: ["a", "b", "c"], current: 1)
+        XCTAssertEqual((0..<3).map(wordless.value(at:)), ["", "", ""])
     }
 
     // MARK: Keyboard
 
     /// A tree row is not its own tab stop: the list holding it is one, and
     /// the arrow keys move its selection.
+    ///
+    /// R6 CONTRACT: no TCDesign list provides that yet. Keyboard reach for a
+    /// row therefore rests on the screen that holds the rows (R6's Traces
+    /// tree), which must give the list focus, arrow-key selection and
+    /// Return/Space. Do not ship a screen of rows without it.
+    ///
+    /// The one `.focusable` the row may carry is its pill's opt-out, which
+    /// only ever takes a stop away (roving focus: the selected row's pill is
+    /// the only one); nothing in the row may make itself a stop.
     func test_aListRowIsNotItsOwnTabStop() throws {
         let row = try XCTUnwrap(try Self.componentSources().first { $0.0 == "ListRow.swift" }?.1)
-        XCTAssertFalse(row.contains(".focusable("))
+        let calls = row.components(separatedBy: ".focusable(").dropFirst().map { $0.prefix { $0 != ")" } }
+        XCTAssertEqual(calls, ["submitFocusable"])
     }
 
     /// Menus and popovers close on Escape through their caller.
@@ -105,21 +139,11 @@ final class ComponentContractTests: XCTestCase {
 
     // MARK: Sources
 
-    /// Components and styling: everything but the gallery, which is a
-    /// development tool with placeholder words.
     private static func componentSources() throws -> [(String, String)] {
-        try sources().filter { !$0.0.hasPrefix("GlassGallery") }
+        try DesignSources.components()
     }
 
     private static func sources() throws -> [(String, String)] {
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Sources/TCDesign")
-        let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
-            .compactMap { $0 as? URL }
-            .filter { $0.pathExtension == "swift" }
-        return try files.map { ($0.lastPathComponent, try String(contentsOf: $0, encoding: .utf8)) }.sorted { $0.0 < $1.0 }
+        try DesignSources.all()
     }
 }

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import {
   cleanTokenStorage,
@@ -18,6 +19,7 @@ type PrivacyAction =
   | { kind: "cleanup"; discard: boolean; confirmed: boolean };
 
 export function usePrivacyControls() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const query = useQuery<TokenStorage>({
@@ -71,7 +73,7 @@ export function usePrivacyControls() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: query.isError
-      ? "Privacy storage unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : mutationError instanceof Error &&
           mutationError.message.includes("disclosure")
         ? "Read the disclosure before enabling this option."

@@ -1,0 +1,60 @@
+{
+  "schema_version": "trace_commons.daemon.v1_1",
+  "logged_in": true,
+  "account_scope": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "tenant_id": "tenant-sample",
+  "consent_scopes": [
+    "debugging_evaluation"
+  ],
+  "consent_hold": null,
+  "paused": false,
+  "queue_depth": 3,
+  "decisions_owed": 3,
+  "next_digest_at": "1970-01-01T00:00:00Z",
+  "health": {
+    "last_error_label": null,
+    "since": null
+  },
+  "daily_budget": {
+    "bytes_today": 1048576,
+    "max_bytes_per_day": 209715200,
+    "bytes_remaining": 208666624,
+    "uploads_today": 4,
+    "max_uploads_per_day": 50,
+    "uploads_remaining": 46,
+    "resets_at": "1970-01-01T00:00:00Z",
+    "blocked": false,
+    "blocked_entries": 0,
+    "blocked_bytes": 0
+  },
+  "routing": {
+    "state": "rows_seen",
+    "derived": true,
+    "last_refresh_at": "1970-01-01T00:00:00Z",
+    "unreadable_rows": 0
+  },
+  "private_inference_state": {
+    "state": "running",
+    "port": 8463
+  },
+  "grant_voids": [],
+  "witness_capacity": {
+    "waiting_sessions": 0,
+    "next_retry_at": null
+  },
+  "legacy_invite_migration": {
+    "offered": false,
+    "notice": null
+  },
+  "arming_rewordings": [],
+  "automatic_contribution_held": {
+    "held_sessions": 0,
+    "reasons": [],
+    "projects": []
+  },
+  "contribution_override": null,
+  "contribution_mode": "notify_only",
+  "contribution_mode_partial": false,
+  "dev_dry_run": false,
+  "_sample": "private AI, routing and budget need a live IronWire"
+}

@@ -500,7 +500,7 @@
                 model scrubs it (K5), not yet shown by any shell. Every string
                 is bound and comes from the Rust through
                 tc_arming_reworded_notice. Got it records that the notice was
-                shown; Ask me first is the Settings call.
+                shown; Ask me is the Settings call.
             -->
             <ItemsControl ItemsSource="{x:Bind ViewModel.ArmingRewordingCards, Mode=OneWay}">
                 <ItemsControl.ItemTemplate>
@@ -863,7 +863,7 @@
                 banner of its own for the reason the witness banner is: a
                 higher label can hold the health slot while folders are held.
                 No dismiss button: it goes when the hold does. Each folder has
-                an Ask me first button, the Settings call.
+                an Ask me button, the Settings call.
             -->
             <Border Visibility="{x:Bind ViewModel.HasGateHeldBanner, Mode=OneWay}"
                     Padding="14,12"
@@ -1040,17 +1040,17 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Pause"
+                            Content="{x:Bind interop:MonitorShellCopy.PauseWatcher}"
                             Visibility="{x:Bind ViewModel.IsWatching, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             VerticalAlignment="Center"
                             AutomationProperties.Name="Pause watching">
                         <Button.Flyout>
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="For 1 hour" Click="OnPauseForHour" />
-                                <MenuFlyoutItem Text="Until tomorrow morning"
+                                <MenuFlyoutItem Text="1 hour" Click="OnPauseForHour" />
+                                <MenuFlyoutItem Text="Until morning"
                                                 Click="OnPauseUntilTomorrow" />
-                                <MenuFlyoutItem Text="Until I turn it back on"
+                                <MenuFlyoutItem Text="Until resumed"
                                                 Click="OnPauseUntilResumed" />
                             </MenuFlyout>
                         </Button.Flyout>
@@ -1058,7 +1058,7 @@
 
                     <Button Grid.Column="2"
                             Style="{StaticResource TcSecondaryButtonStyle}"
-                            Content="Resume watching"
+                            Content="{x:Bind interop:MonitorShellCopy.ResumeWatcher}"
                             Visibility="{x:Bind ViewModel.IsPaused, Mode=OneWay}"
                             IsEnabled="{x:Bind ViewModel.IsNotBusy, Mode=OneWay}"
                             Click="OnResumeWatching"

@@ -19,7 +19,7 @@ public enum TrayIconState
     /// <summary>Watching, nothing owed.</summary>
     Idle = 0,
 
-    /// <summary>Paused by the contributor. Nothing is being queued.</summary>
+    /// <summary>Paused by the contributor. Nothing is being queued or sent.</summary>
     Paused = 1,
 
     /// <summary>A health state the contributor should know about.</summary>
@@ -57,7 +57,16 @@ public sealed class TrayModel
     /// truncates or fails on overflow rather than telling anyone.
     /// </summary>
     public const int MaxTooltipLength = 127;
-    public const string DecisionCountUnavailable = "Decision count unavailable.";
+
+    /// <summary>
+    /// An unknown decision count, in the core's words
+    /// (<c>preview_copy::decisions_owed_text</c> with no count), as GTK says it.
+    /// Read once: the words do not change while the process runs.
+    /// </summary>
+    public static string DecisionCountUnavailable => UnknownCountLine.Value;
+
+    private static readonly Lazy<string> UnknownCountLine =
+        new(() => NativeMethods.TakeOwnedString(NativeMethods.tc_decisions_owed_text(-1)) ?? string.Empty);
 
     private TrayModel(TrayIconState state, int? decisionsOwed, string tooltip, string menuHeader)
     {
@@ -120,7 +129,10 @@ public sealed class TrayModel
             TrayIconState.Attention when !isHealthy => $"{Waiting(owed)} Needs attention.",
             TrayIconState.Attention => Waiting(owed),
             TrayIconState.Unhealthy => "Needs attention.",
-            TrayIconState.Paused => "Paused. Nothing is being queued.",
+            // macOS's sentence, word for word (MainWindowView.swift and
+            // SettingsView.swift; GTK ui/settings.rs says the same). The
+            // core does not export it yet.
+            TrayIconState.Paused => "Paused. Nothing is being queued or sent.",
             _ => "Watching. Nothing waiting.",
         };
 

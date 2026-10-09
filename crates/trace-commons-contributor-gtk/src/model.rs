@@ -20,6 +20,8 @@ pub struct Status {
     #[serde(default)]
     pub tenant_id: Option<String>,
     #[serde(default)]
+    pub account_scope: Option<String>,
+    #[serde(default)]
     pub consent_scopes: Vec<String>,
     #[serde(default)]
     pub paused: bool,
@@ -87,7 +89,7 @@ pub struct ArmingRewordingCard {
     pub id: Option<u64>,
     /// The core's words.
     pub notice: trace_commons_contributor::consent_copy::ArmingRewordedNoticeCopy,
-    /// The project "Ask me first" switches, present only when the core
+    /// The project "Ask me" switches, present only when the core
     /// offered the button.
     pub ask_first_project_id: Option<String>,
 }
@@ -1162,6 +1164,9 @@ pub struct RoutingDeclaration {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConsentScope {
     pub name: String,
+    /// The core's title for the scope (`consent_options`). Required: see
+    /// the onboarding's `ScopeOption`.
+    pub title: String,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
@@ -1741,6 +1746,9 @@ pub struct TokenStorage {
     pub scope_note: String,
     pub cleanup_label: String,
     pub discard_label: String,
+    /// The discard confirmation's title; empty from an older daemon.
+    #[serde(default)]
+    pub discard_title: String,
     pub discard_confirmation: String,
     pub cancel_label: String,
     pub confirm_label: String,

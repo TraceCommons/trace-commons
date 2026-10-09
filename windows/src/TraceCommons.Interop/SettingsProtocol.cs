@@ -17,6 +17,14 @@ public sealed class ConsentOption
     [JsonPropertyName("name")]
     public string Name { get; set; } = string.Empty;
 
+    /// <summary>
+    /// The core's short bold label for the scope. Null when the daemon sent
+    /// none; a shell then does not offer the scope (owner ruling,
+    /// 2026-10-06: no shell keeps its own table of titles).
+    /// </summary>
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
+
     [JsonPropertyName("description")]
     public string Description { get; set; } = string.Empty;
 
@@ -304,6 +312,8 @@ public sealed class ProbabilityStorageView {
     [JsonPropertyName("scope_note")] public string ScopeNote { get; set; } = "";
     [JsonPropertyName("cleanup_label")] public string CleanupLabel { get; set; } = "";
     [JsonPropertyName("discard_label")] public string DiscardLabel { get; set; } = "";
+    /// <summary>The discard confirmation's title; empty from an older daemon.</summary>
+    [JsonPropertyName("discard_title")] public string DiscardTitle { get; set; } = "";
     [JsonPropertyName("discard_confirmation")] public string DiscardConfirmation { get; set; } = "";
     [JsonPropertyName("cancel_label")] public string CancelLabel { get; set; } = "";
     [JsonPropertyName("confirm_label")] public string ConfirmLabel { get; set; } = "";

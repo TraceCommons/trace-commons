@@ -46,7 +46,19 @@ final class TokenDriftTests: XCTestCase {
             let generated = GlassTokens.Color.all[name]
             XCTAssertTrue(generated?.rgb == Self.rgb(entry["hex"]), "color.\(name)")
             XCTAssertTrue(generated?.alpha == Self.number(entry["alpha"], default: 1), "color.\(name) alpha")
+            Self.checkLight(generated, entry, "color.\(name)")
         }
+    }
+
+    /// A token's light appearance value matches the JSON's `light`, or is
+    /// absent when the JSON has none.
+    private static func checkLight(_ generated: GlassRGBA?, _ entry: [String: Any], _ name: String) {
+        guard let light = entry["light"] as? [String: Any] else {
+            XCTAssertTrue(generated?.lightRGB == nil && generated?.lightAlpha == nil, "\(name) has no light value")
+            return
+        }
+        XCTAssertTrue(generated?.lightRGB == rgb(light["hex"]), "\(name).light")
+        XCTAssertTrue(generated?.lightAlpha == number(light["alpha"], default: 1), "\(name).light alpha")
     }
 
     func test_gradientsMatchTheSource() {
@@ -62,6 +74,7 @@ final class TokenDriftTests: XCTestCase {
                 let made = generated!.stops[index]
                 XCTAssertTrue(made.color.rgb == Self.rgb(stop["hex"]), "gradient.\(name)[\(index)]")
                 XCTAssertTrue(made.color.alpha == Self.number(stop["alpha"], default: 1), "gradient.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, stop, "gradient.\(name)[\(index)]")
                 XCTAssertTrue(Double(made.location) == Self.number(stop["at"]), "gradient.\(name)[\(index)] at")
             }
         }
@@ -81,6 +94,7 @@ final class TokenDriftTests: XCTestCase {
                 XCTAssertTrue(Double(made.blur) == Self.number(layer["blur"]), "shadow.\(name)[\(index)] blur")
                 XCTAssertTrue(made.color.rgb == Self.rgb(layer["hex"]), "shadow.\(name)[\(index)] colour")
                 XCTAssertTrue(made.color.alpha == Self.number(layer["alpha"], default: 1), "shadow.\(name)[\(index)] alpha")
+                Self.checkLight(made.color, layer, "shadow.\(name)[\(index)]")
                 XCTAssertTrue(made.inset == ((layer["inset"] as? Bool) ?? false), "shadow.\(name)[\(index)] inset")
             }
         }
@@ -110,6 +124,7 @@ final class TokenDriftTests: XCTestCase {
             let entry = raw as? [String: Any] ?? [:]
             guard let made = GlassTokens.TypeScale.all[name] else { continue }
             XCTAssertTrue(Double(made.size) == Self.number(entry["size"]), "type.\(name) size")
+            XCTAssertEqual(String(describing: made.weight), entry["weight"] as? String, "type.\(name) weight")
             XCTAssertTrue(Double(made.lineHeight) == Self.number(entry["lineHeight"]), "type.\(name) lineHeight")
             XCTAssertTrue(Double(made.tracking) == Self.number(entry["tracking"]), "type.\(name) tracking")
             XCTAssertTrue(made.uppercase == ((entry["uppercase"] as? Bool) ?? false), "type.\(name) uppercase")
@@ -152,13 +167,18 @@ final class TypeScaleTests: XCTestCase {
     ]
 
     /// Each step resolves its size from its own text style.
+    /// macOS's text-style sizes at the default system text size, stated
+    /// independently of the mapping under test. A style mapped to the wrong
+    /// AppKit style resolves to the wrong size and fails here.
+    private static let defaultSizes: [GlassTextStyle: CGFloat] = [
+        .largeTitle: 26, .title: 22, .title2: 17, .title3: 15, .headline: 13, .body: 13,
+        .callout: 12, .subheadline: 11, .footnote: 10, .caption: 10, .caption2: 10,
+    ]
+
     func test_eachStepResolvesItsSizeFromItsTextStyle() {
         for (name, step) in GlassTokens.TypeScale.all {
-            XCTAssertEqual(
-                step.textStyle.resolvedSize,
-                NSFont.preferredFont(forTextStyle: step.textStyle.appKit).pointSize,
-                accuracy: 0.001, "type.\(name)")
-            XCTAssertGreaterThan(step.textStyle.resolvedSize, 0, "type.\(name) resolved to nothing")
+            XCTAssertEqual(step.textStyle.resolvedSize, Self.defaultSizes[step.textStyle], "type.\(name)")
+            XCTAssertEqual(step.size, Self.defaultSizes[step.textStyle], "type.\(name) states its style's size")
         }
     }
 
@@ -186,6 +206,14 @@ final class TypeScaleTests: XCTestCase {
             XCTAssertEqual(step.scale, step.textStyle.resolvedSize / step.size, accuracy: 0.0001, "type.\(name)")
             XCTAssertEqual(step.resolvedTracking, step.tracking * step.scale, accuracy: 0.0001, "type.\(name)")
             XCTAssertGreaterThanOrEqual(step.lineSpacing, 0, "type.\(name)")
+            // Derived from the resolved size, not a literal: the stated line
+            // height less 1.2x the size, moved by the same scale.
+            XCTAssertEqual(step.lineSpacing, max(0, (step.lineHeight - step.size * 1.2) * step.scale),
+                           accuracy: 0.0001, "type.\(name)")
+            if step.lineHeight > step.size * 1.2 {
+                XCTAssertEqual(step.lineSpacing / step.scale, step.lineHeight - step.size * 1.2,
+                               accuracy: 0.0001, "type.\(name) leading is not scale-invariant")
+            }
         }
     }
 
@@ -225,6 +253,36 @@ final class FixedPointTypeTests: XCTestCase {
             }
         }
         XCTAssertEqual(allowed, 1, "glassGlyph's own font was not found; this scan proved nothing")
+        XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
+    }
+}
+
+/// A hairline is one device pixel: 0.5pt on Retina, a whole point at 1x,
+/// where a 0.5pt fill blends into the glass and drops out. No source draws
+/// a 0.5pt rule by hand.
+final class HairlineTests: XCTestCase {
+    func test_aHairlineIsOneDevicePixel() {
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 1), 1)
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 2), 0.5)
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 3), 0.5, "never thinner than half a point")
+        XCTAssertEqual(GlassHairline.thickness(displayScale: 0), 1)
+    }
+
+    func test_noSourceDrawsAHalfPointRuleByHand() throws {
+        let sources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources")
+        let files = try XCTUnwrap(FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil))
+            .compactMap { $0 as? URL }
+            .filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 50, "the sources were not found")
+        var failures: [String] = []
+        for file in files {
+            let text = try String(contentsOf: file, encoding: .utf8)
+            for needle in [".frame(height: 0.5)", ".frame(width: 0.5)"] where text.contains(needle) {
+                failures.append("\(file.lastPathComponent) draws \(needle); use GlassHairline")
+            }
+        }
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: "\n"))
     }
 }

@@ -1,0 +1,18 @@
+{
+  "schema": "trace_commons.pipeline_hf_corpus_pin.v1",
+  "repository": "jedisct1/security-audits",
+  "revision": "6d527ff0081eec6704c2a4f00e1ef8d308ae7366",
+  "split": "train",
+  "translator": "swival",
+  "bootstrap_count": 1,
+  "holdout_count": 1,
+  "min_words": 1,
+  "max_words": 2000,
+  "expected_instrument_count": 1,
+  "source_digest": "sha256:fdf56253bff083a19045afa91dc3ba8142d994b72c1dcc1b23bec5be4dd0e9ef",
+  "configuration_digest": "sha256:bbd4ffc3e36530cef1ce820bcb16e8df3cbd773d7b3f72253657c0ef1f4940af",
+  "order_digest": "sha256:6135f8f173fd9b60f13e986e1c002b91d7a32d147fd2425c66ee2b5023b7dfcb",
+  "bootstrap_corpus_digest": "sha256:a91c0f3c252672debaf0f4cd7ce23fd0aa28e6e6e08c4cd296b0180207121c06",
+  "holdout_corpus_digest": "sha256:7c62beb7a1023b9edc9c37807249aace6de60be34159b84bdac64fcda9ba7574",
+  "local_jsonl_dir": "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
+}

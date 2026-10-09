@@ -560,8 +560,10 @@ pub const NOT_SYNCED_YET: &str = "Not synced yet";
 
 // --- History -----------------------------------------------------------
 
-pub const HISTORY_IN_THE_COMMONS: &str = "In the commons";
-pub const HISTORY_WAITING_TO_BE_SCORED: &str = "Waiting to be scored";
+// The status words are the core's (`history_copy::STATUS_LABELS`), the
+// table every shell reads; the tallies and headings here reuse them.
+pub use trace_commons_contributor::history_copy::IN_THE_COMMONS as HISTORY_IN_THE_COMMONS;
+pub use trace_commons_contributor::history_copy::WAITING_TO_BE_SCORED as HISTORY_WAITING_TO_BE_SCORED;
 
 /// §5.3's section heading over the record rows.
 pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
@@ -569,14 +571,14 @@ pub const EVERYTHING_CONTRIBUTED: &str = "Everything you've contributed";
 /// §5.3's chip on a withdrawn record. The record stays on the list and
 /// reads as withdrawn (§7.3); it is never dropped and never re-labelled as
 /// something that failed.
-pub const WITHDRAWN_BY_YOU: &str = "Withdrawn by you";
+pub use trace_commons_contributor::history_copy::WITHDRAWN_BY_YOU;
 
+pub use trace_commons_contributor::history_copy::HELD_FOR_PRIVACY_REVIEW as QUARANTINE_HEADING;
 /// §5.3's row-level explanation on a held record, used only when the server
 /// sent no explanation of its own. It says the same three things
 /// [`QUARANTINE_BODY`] says -- automated, not rejected, not shared -- at row
 /// length rather than at section length.
 pub use trace_commons_contributor::history_copy::HELD_ROW_BODY;
-pub const QUARANTINE_HEADING: &str = "Held for privacy review";
 pub const QUARANTINE_BODY: &str = "An agent inspects these before they enter the commons. It \
      happens when automated checks see something that might be personal or sensitive and can't \
      decide on its own.\n\nThese have not been rejected, and they have not been shared with \
@@ -758,18 +760,13 @@ pub fn withdraw_result_sentence(reach: Option<&str>) -> String {
     }
 }
 
-/// Withdrawal is authenticated by an account session, which this build has
-/// no way to obtain. Leads with the fact that nothing happened: a
-/// contributor must not walk away from a failed withdrawal believing their
-/// trace was taken back.
-pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = concat!(
-    "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it \
-     is authenticated by your ",
-    app_name!(),
-    " account rather than by this device -- that is what lets you withdraw a trace after \
-     losing the machine that sent it. This build has no account sign-in yet, so it cannot \
-     make the request."
-);
+/// The signed-out withdrawal line, read from the core's withdrawal table
+/// (#1280 review) so every shell says the same thing. It is said before any
+/// request is made, so it never claims an answer from the server, and it
+/// states that nothing was withdrawn as a sentence of its own.
+pub fn withdraw_account_session_required() -> &'static str {
+    trace_commons_contributor::shell_words_copy::withdrawal_words().account_session_required
+}
 
 /// The daemon's label for "the server has no record of this submission for
 /// this account".
@@ -795,7 +792,7 @@ pub const WITHDRAW_NOT_FOUND_LABELS: [&str; 3] = ["not-found", "not_found", "sub
 /// indistinguishable to whoever is asked to help.
 pub fn withdraw_failure_sentence(label: &str) -> String {
     if label == "account-session-required" {
-        return WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string();
+        return withdraw_account_session_required().to_string();
     }
     if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
         return WITHDRAW_NOT_FOUND.to_string();
@@ -1609,14 +1606,17 @@ pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you
 /// The eyebrow over the list. `style::section` uppercases it.
 pub const ONBOARD_WATCH_SECTION: &str = "Projects";
 
-/// The per-row state, in the vocabulary `settings.rs` already uses for the
-/// same mode -- its dropdown reads "Ask me first". Two screens that set the
-/// same field must not name it two ways.
-pub const ONBOARD_WATCH_ASK_FIRST: &str = "Ask me first";
+/// The per-row state: the core's one name for the mode
+/// (`project_copy::CONTRIBUTION_MODE_ASK_LABEL`), which `settings.rs`'s
+/// dropdown and the pill read too. Two screens that set the same field must
+/// not name it two ways.
+pub const ONBOARD_WATCH_ASK_FIRST: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_ASK_LABEL;
 
-/// The state after `Ignore`. Echoes the button that produced it rather than
-/// introducing a third name for the mode.
-pub const ONBOARD_WATCH_IGNORED: &str = "Ignored";
+/// The state after the button that sets `ignore`: the core's one name for
+/// that mode, the same word the button says.
+pub const ONBOARD_WATCH_IGNORED: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
 
 /// Shown when `list_projects` returns nothing. This was the state of the
 /// screen on EVERY machine until the `local_path` deserialisation bug was
@@ -1643,18 +1643,20 @@ pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
 /// might try to fix.
 ///
 /// It replaces the state line rather than adding a third: "you'll always be
-/// asked" already says what `Ask me first` says.
+/// asked" already says what `Ask me` says.
 pub const ONBOARD_WATCH_UNKNOWN_NOTE: &str = concat!(
     app_name!(),
     " can't tell which folder these ran in, so they can never be contributed automatically. \
      You'll always be asked."
 );
 
-/// The per-project control on screen 5. `Ignore` is offered here and
+/// The per-project control on screen 5. `ignore` is offered here and
 /// `auto_upload` is not, per the shared spec: excluding a repository is a
 /// live thought at this moment and never returns, whereas arming automation
-/// before a single preview has been seen asks for trust not yet earned.
-pub const ONBOARD_IGNORE: &str = "Ignore";
+/// before a single preview has been seen asks for trust not yet earned. It
+/// names the mode it sets, by the core's one name.
+pub const ONBOARD_IGNORE: &str =
+    trace_commons_contributor::project_copy::CONTRIBUTION_MODE_NEVER_LABEL;
 
 /// Shown when `set_project_mode` refuses. The same sentence the settings
 /// screen uses for the same refusal, so the two places that change a
@@ -1696,7 +1698,7 @@ pub const ROOTS_CLINE: &str = "Cline sessions";
 /// not, and the path beside it still says exactly what would be read.
 pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent sessions";
 pub const ROOTS_WATCH: &str = "Watch this folder";
-pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_OFF: &str = "Not used";
 pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
 pub const ROOTS_CONTINUE: &str = "Continue";
 pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
@@ -1733,26 +1735,6 @@ pub fn roots_ago(seconds: i64) -> String {
         s if s < 5400 => format!("{} minutes ago", (s + 30) / 60),
         s if s < 172_800 => format!("{} hours ago", (s + 1800) / 3600),
         s => format!("{} days ago", (s + 43200) / 86400),
-    }
-}
-
-/// The short bold label for a consent scope.
-///
-/// `consent_options` carries the wire name and the description but no
-/// human title, so every shell maps them. The fallback matters as much as
-/// the table: an operator who adds a scope this build has never heard of
-/// still gets a readable row rather than a blank one, and the description
-/// beside it comes from the daemon regardless.
-pub fn scope_title(wire_name: &str) -> String {
-    match wire_name {
-        "debugging_evaluation" => "Finding bugs and measuring agents".to_string(),
-        "benchmark_only" | "benchmark_creation" => "Turn my traces into test cases".to_string(),
-        "ranking_training" | "reward_model_training" => {
-            "Train models that judge agent output".to_string()
-        }
-        "model_training" => "Train coding models directly".to_string(),
-        "public_attribution" => "List my handle publicly as a contributor".to_string(),
-        other => other.replace('_', " "),
     }
 }
 
@@ -2255,6 +2237,7 @@ pub use trace_commons_contributor::witness_copy::{
     WITNESS_INFERENCE_DISCLOSURE, WITNESS_INFERENCE_ENABLE, WITNESS_INFERENCE_ENABLED,
     WITNESS_INFERENCE_HEADING, WITNESS_INFERENCE_SAVE_FAILED, WITNESS_INFERENCE_SCOPE_NOTE,
     WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE, WITNESS_MEASUREMENTS_TITLE,
+    WITNESS_PRIVACY_CONFIRM_DESCRIPTION, WITNESS_PRIVACY_CONFIRM_TITLE,
     WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_TOKEN_CANCEL, WITNESS_TOKEN_CAPTURE_NOTE,
     WITNESS_TOKEN_CONFIRM, WITNESS_TOKEN_DISABLE, WITNESS_TOKEN_DISABLED, WITNESS_TOKEN_DISCLOSURE,
     WITNESS_TOKEN_ENABLE, WITNESS_TOKEN_ENABLED, WITNESS_TOKEN_HEADING, WITNESS_TOKEN_SAVE_FAILED,
@@ -2429,6 +2412,19 @@ mod tests {
     use super::*;
 
     use crate::model::human_bytes;
+
+    /// Onboarding names a project's mode by the core's one name, the words
+    /// Settings and the pill use (owner decision, 2026-10-02), and its
+    /// button names the mode it sets.
+    #[test]
+    fn onboarding_names_each_mode_by_the_cores_name() {
+        use trace_commons_contributor::project_copy::{
+            CONTRIBUTION_MODE_ASK_LABEL, CONTRIBUTION_MODE_NEVER_LABEL,
+        };
+        assert_eq!(ONBOARD_WATCH_ASK_FIRST, CONTRIBUTION_MODE_ASK_LABEL);
+        assert_eq!(ONBOARD_WATCH_IGNORED, CONTRIBUTION_MODE_NEVER_LABEL);
+        assert_eq!(ONBOARD_IGNORE, CONTRIBUTION_MODE_NEVER_LABEL);
+    }
 
     /// The correction disclosure, character for character, and then in the
     /// other two shells' actual sources.
@@ -2998,19 +2994,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_withdrawal_opens_by_saying_nothing_happened() {
+    fn a_failed_withdrawal_says_nothing_happened() {
         // A contributor must not walk away from a failure believing their
         // trace was taken back, whichever failure it was.
         for sentence in [
-            WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string(),
+            withdraw_account_session_required().to_string(),
             WITHDRAW_NOT_FOUND.to_string(),
             withdraw_failure_sentence("withdraw-failed"),
             withdraw_failure_sentence("account-session-required"),
             withdraw_failure_sentence("not-found"),
         ] {
             assert!(
-                sentence.starts_with("Nothing was withdrawn"),
-                "a failure sentence does not open by saying nothing happened: {sentence}"
+                sentence.starts_with("Nothing was withdrawn")
+                    || sentence.contains(". Nothing was withdrawn"),
+                "a failure sentence does not say nothing happened: {sentence}"
             );
         }
     }

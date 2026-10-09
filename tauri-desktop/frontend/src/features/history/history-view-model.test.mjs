@@ -107,3 +107,27 @@ test("a row with no credit states nothing rather than a zero", () => {
   assert.equal(historyCreditLine(null, undefined), null);
   assert.equal(historyCreditLine(null, Number.NaN), null);
 });
+
+test("a processing record counts and filters as waiting to be scored", () => {
+  // `processing` is the versioned pipeline's receipt status: uploaded, no
+  // verdict reported, so it shares the `submitted` bucket.
+  const withProcessing = [
+    ...records,
+    {
+      project_id: "opaque-a",
+      project_label: "API",
+      status: "processing",
+      explanations: [],
+    },
+  ];
+  assert.deepEqual(countHistory(withProcessing), {
+    all: 5,
+    accepted: 1,
+    submitted: 2,
+    quarantined: 2,
+  });
+  assert.deepEqual(
+    filterHistory(withProcessing, "submitted").map(({ status }) => status),
+    ["submitted", "processing"],
+  );
+});

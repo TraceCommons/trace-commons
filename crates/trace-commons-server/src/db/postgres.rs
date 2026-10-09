@@ -91,6 +91,10 @@ pub struct NearCreditSubmitAdvisoryLockInner {
 }
 
 impl NearCreditSubmitAdvisoryLockInner {
+    pub(crate) fn client_mut(&mut self) -> &mut deadpool_postgres::Object {
+        &mut self.client
+    }
+
     pub(crate) async fn release(self) -> Result<(), DatabaseError> {
         // Best-effort unlock on the SAME connection that took the lock; session
         // advisory locks are connection-scoped, so this must run here before the
@@ -156,6 +160,13 @@ pub struct PgBackend {
     /// invite redemption fail-closed. NEVER aliased to `pool`.
     invite_registry_pool: Option<Pool>,
 }
+
+/// Global internal lock state; these tables have guard-only forced RLS and
+/// deliberately carry no tenant-readable rows or ordinary login grants.
+pub const TRACE_COMMONS_INTERNAL_RLS_TABLES: &[&str] = &[
+    "trace_account_trust_dependency_locks",
+    "trace_account_trust_external_growth",
+];
 
 /// Tables whose tenant isolation `trace_corpus_rls_diagnostics` attests to.
 ///
@@ -228,6 +239,7 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "trace_account_admission_submissions",
     "trace_account_trust_facts",
     "trace_account_trust_evaluations",
+    "trace_account_trust_frontiers",
     "trace_source_sessions",
     "trace_submission_sessions",
     "trace_account_inference_connections",
@@ -251,6 +263,18 @@ pub const TRACE_COMMONS_RLS_TABLES: &[&str] = &[
     "pipeline_receipt_artifacts",
     "pipeline_run_settlements",
     "pipeline_admission_usage",
+    "pipeline_review_claims",
+    "pipeline_review_assessments",
+    "pipeline_index_invalidations",
+    "pipeline_export_snapshots",
+    "pipeline_export_snapshot_items",
+    "pipeline_bundle_qualifications",
+    "pipeline_attempt_artifacts",
+    "pipeline_tenant_routing",
+    "pipeline_activation_events",
+    "pipeline_receipt_ownership",
+    "pipeline_policy_interventions",
+    "pipeline_index_rebuild_fences",
     "trace_public_runs",
     "trace_reward_operators",
     "trace_reward_programs",
@@ -1633,6 +1657,113 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "legacy_invite_link_device_guards",
         include_str!("../../../../migrations/V104__legacy_invite_link_device_guards.sql"),
     ),
+    // V105 and V106 add human review claims and assessments, index
+    // invalidations with retry columns, and immutable customer export
+    // snapshots. Every table forces RLS; there
+    // is no cross-tenant claim function.
+    (
+        105,
+        "versioned_pipeline_review_invalidation",
+        include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
+    ),
+    (
+        106,
+        "versioned_pipeline_exports",
+        include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+    ),
+    // V107 (PR 4) adds the immutable production-qualification table the
+    // qualification store writes; the qualified activation gate
+    // (`PipelineQualificationStore::activate_qualified_bundle_in`, PR 5)
+    // reads it, and V112 widens its key to one row for each bundle and code
+    // revision. No cross-tenant claim function, same as V105/V106.
+    (
+        107,
+        "versioned_pipeline_qualification",
+        include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+    ),
+    // V108 (PR 4) adds the table that tracks each pipeline phase attempt's
+    // objects, staged before they are published and committed with the
+    // phase commit, so the worker can sweep the objects of an attempt that
+    // crashed, lost its lease, or had its commit refused. A committed
+    // attempt's objects are object refs of the submission, which the
+    // withdrawal and main's revocation-propagation worker delete. No
+    // cross-tenant claim function, same as V105/V106/V107.
+    (
+        108,
+        "versioned_pipeline_attempt_artifacts",
+        include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+    ),
+    // V109: the versioned pipeline's follow-ups after #1143 -- the legacy
+    // V94 payouts, and the schema checks and indexes V105 and V106 left out.
+    (
+        109,
+        "versioned_pipeline_followups",
+        include_str!("../../../../migrations/V109__versioned_pipeline_followups.sql"),
+    ),
+    // V110 (PR 5) adds each tenant's committed routing record, the immutable
+    // activation event history, and the permanent per-submission receipt
+    // owner, which the upload route reads before it chooses the legacy or the
+    // pipeline path. No cross-tenant claim function, same as
+    // V105/V106/V107/V108.
+    (
+        110,
+        "versioned_pipeline_activation",
+        include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+    ),
+    // V111 (PR 5) adds the operator's policy interventions: an `operational_status`
+    // column beside V93's `runnable` (the two kept equal by a check), the
+    // immutable intervention record, and the runtime's UPDATE on the status
+    // row, which nothing wrote before. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110.
+    (
+        111,
+        "versioned_pipeline_policy_interventions",
+        include_str!("../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"),
+    ),
+    // V112 (PR 5) is the qualified activation gate's migration: V107's
+    // qualification key gains the code revision (one qualification for each
+    // bundle and revision), and the runtime gets the one UPDATE the gate
+    // needs on the active bundle. It adds no table. No cross-tenant claim
+    // function, same as V105/V106/V107/V108/V110/V111.
+    (
+        112,
+        "versioned_pipeline_activation_gate",
+        include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+    ),
+    // V113 (PR 5) adds the committed index rebuild fence: one row per
+    // rebuild, and while a tenant has an unexpired row no worker in any
+    // process claims that tenant's index invalidations. The table is
+    // mutable (a rebuild extends and deletes its row), so it has no
+    // append-only trigger. No cross-tenant claim function, same as
+    // V105/V106/V107/V108/V110/V111/V112.
+    (
+        113,
+        "versioned_pipeline_rebuild_fence",
+        include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
+    ),
+    (
+        114,
+        "external_account_trust_evaluations",
+        include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
+    ),
+    // V114's frontier backfill read trace_accounts with no tenant context, so a
+    // migrator without BYPASSRLS seeded no row for any existing account. Re-run
+    // it as the evaluation guard under a policy that lives only for the
+    // statement; rows the trigger made since V114 keep their generations.
+    (
+        115,
+        "account_trust_frontier_backfill",
+        include_str!("../../../../migrations/V115__account_trust_frontier_backfill.sql"),
+    ),
+    // V116 (spec 2026-10-08, Slice C) marks the trace_gate_decisions rows
+    // the pipeline's Settle writes: `source` and `pipeline_run_id`, both
+    // defaulted so main's writers are unchanged, one pipeline row per
+    // submission, and the gate driver's read of `source`.
+    (
+        116,
+        "pipeline_gate_decision_rows",
+        include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -1896,6 +2027,22 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn external_account_trust_runtime_ready(&self) -> Result<bool, DatabaseError> {
+        PgBackend::external_account_trust_runtime_ready(self).await
+    }
+
+    async fn enable_external_account_trust_growth(&self) -> Result<(), DatabaseError> {
+        PgBackend::enable_external_account_trust_growth(self).await
+    }
+
+    async fn prune_account_trust_dependency_locks(
+        &self,
+        limit: i32,
+        dry_run: bool,
+    ) -> Result<u64, DatabaseError> {
+        PgBackend::prune_account_trust_dependency_locks(self, limit, dry_run).await
+    }
+
     async fn account_admission_runtime_ready(&self) -> Result<bool, DatabaseError> {
         PgBackend::account_admission_runtime_ready(self).await
     }
@@ -2119,150 +2266,11 @@ impl Database for PgBackend {
             .get()
             .await
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
-        let expected_tables = TRACE_COMMONS_RLS_TABLES
-            .iter()
-            .map(|table| (*table).to_string())
-            .collect::<Vec<_>>();
-        let expected_policy_expressions = TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS
-            .iter()
-            .map(|expression| (*expression).to_string())
-            .collect::<Vec<_>>();
-        let rows = client
-            .query(
-                "SELECT
-                    c.relname,
-                    c.relrowsecurity,
-                    c.relforcerowsecurity,
-                    COALESCE(p.has_policy, false) AS has_policy,
-                    COALESCE(p.expression_matches, false) AS expression_matches
-                 FROM pg_class c
-                 JOIN pg_namespace n ON n.oid = c.relnamespace
-                 LEFT JOIN LATERAL (
-                    SELECT
-                        true AS has_policy,
-                        pol.polcmd = '*'
-                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
-                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
-                            AS expression_matches
-                        FROM pg_policies p
-                        JOIN pg_policy pol
-                          ON pol.polname = p.policyname
-                         AND pol.polrelid = c.oid
-                        WHERE p.schemaname = n.nspname
-                          AND p.tablename = c.relname
-                          AND p.policyname = 'trace_corpus_tenant_isolation'
-                        LIMIT 1
-                 ) p ON true
-                 WHERE n.nspname = current_schema()
-                   AND c.relkind = 'r'
-                   AND c.relname = ANY($1)",
-                &[&expected_tables, &expected_policy_expressions],
-            )
-            .await?;
-        let current_role = client
-            .query_one(
-                "SELECT
-                    current_user AS current_role_name,
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
-                        WHERE n.nspname = current_schema()
-                          AND c.relkind = 'r'
-                          AND c.relname = ANY($1)
-                          AND r.rolname = current_user
-                    ) AS owns_trace_tables,
-                    EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        JOIN pg_namespace n ON n.oid = c.relnamespace
-                        JOIN pg_roles r ON r.oid = c.relowner
-                        WHERE n.nspname = current_schema()
-                          AND c.relkind = 'r'
-                          AND c.relname = ANY($1)
-                          AND r.rolname = current_user
-                          AND NOT c.relforcerowsecurity
-                    ) AS owns_unforced_trace_tables,
-                    COALESCE((
-                        SELECT rolsuper OR rolbypassrls
-                        FROM pg_roles
-                        WHERE rolname = current_user
-                    ), false) AS bypass_role",
-                &[&expected_tables],
-            )
-            .await?;
-
-        let mut seen_tables = HashSet::new();
-        let mut rls_enabled_count = 0usize;
-        let mut force_rls_enabled_count = 0usize;
-        let mut policy_installed_count = 0usize;
-        let mut rls_disabled_tables = Vec::new();
-        let mut force_rls_disabled_tables = Vec::new();
-        let mut missing_policy_tables = Vec::new();
-        let mut policy_expression_mismatch_tables = Vec::new();
-        for row in rows {
-            let table: String = row.get("relname");
-            let rls_enabled: bool = row.get("relrowsecurity");
-            let force_rls_enabled: bool = row.get("relforcerowsecurity");
-            let has_policy: bool = row.get("has_policy");
-            let expression_matches: bool = row.get("expression_matches");
-            seen_tables.insert(table.clone());
-            if rls_enabled {
-                rls_enabled_count += 1;
-            } else {
-                rls_disabled_tables.push(table.clone());
-            }
-            if force_rls_enabled {
-                force_rls_enabled_count += 1;
-            } else {
-                force_rls_disabled_tables.push(table.clone());
-            }
-            if has_policy {
-                policy_installed_count += 1;
-                if !expression_matches {
-                    policy_expression_mismatch_tables.push(table.clone());
-                }
-            } else {
-                missing_policy_tables.push(table.clone());
-            }
-        }
-        for table in &expected_tables {
-            if !seen_tables.contains(table) {
-                missing_policy_tables.push(table.clone());
-                rls_disabled_tables.push(table.clone());
-                force_rls_disabled_tables.push(table.clone());
-            }
-        }
-        missing_policy_tables.sort();
-        missing_policy_tables.dedup();
-        rls_disabled_tables.sort();
-        rls_disabled_tables.dedup();
-        force_rls_disabled_tables.sort();
-        force_rls_disabled_tables.dedup();
-        policy_expression_mismatch_tables.sort();
-        policy_expression_mismatch_tables.dedup();
-
-        let current_role_name: String = current_role.get("current_role_name");
-        let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
-        let owns_trace_tables: bool = current_role.get("owns_trace_tables");
-        let bypass_role: bool = current_role.get("bypass_role");
-        let tenant_context_transaction_local =
+        let mut diagnostics =
+            trace_corpus_rls_catalog_diagnostics(&**client, TRACE_COMMONS_RLS_TABLES).await?;
+        diagnostics.tenant_context_transaction_local =
             trace_tenant_context_is_transaction_local(&mut client).await?;
-        Ok(Some(TraceCorpusRlsDiagnostics {
-            expected_table_count: expected_tables.len(),
-            rls_enabled_count,
-            force_rls_enabled_count,
-            policy_installed_count,
-            missing_policy_tables,
-            rls_disabled_tables,
-            force_rls_disabled_tables,
-            policy_expression_mismatch_tables,
-            current_role_hash: sha256_prefixed(&current_role_name),
-            current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
-            current_role_owns_trace_tables: owns_trace_tables,
-            tenant_context_transaction_local,
-        }))
+        Ok(Some(diagnostics))
     }
 
     async fn upsert_contributor_profile(
@@ -3799,6 +3807,26 @@ impl Database for PgBackend {
         .await
     }
 
+    async fn enrol_near_ai_login(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: crate::db::NewSession<'_>,
+        identity: &crate::near_account_identity::NearAccountIdentity,
+    ) -> Result<crate::account_onboarding::ProvisionedNearAccount, DatabaseError> {
+        self.near_ai_login_enrol(
+            tenant_id,
+            account_id,
+            login,
+            device_public_key,
+            session,
+            identity,
+        )
+        .await
+    }
+
     async fn get_near_provisioned_anchor(
         &self,
         tenant: &str,
@@ -4240,6 +4268,33 @@ impl Database for PgBackend {
             account_id: row.get("account_id"),
             passkey: row.get("passkey"),
         }))
+    }
+
+    async fn credential_label_for_account(
+        &self,
+        tenant_id: &str,
+        account_id: Uuid,
+        credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        // Read-only and only after a verified assertion, so, like the login
+        // loader, no ensure_trace_tenant. Tenant, account AND credential must
+        // all match: the label of a credential another account holds is never
+        // readable here, even within one tenant.
+        let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
+        let row = tx
+            .query_opt(
+                "SELECT label FROM trace_webauthn_credentials
+                  WHERE tenant_id = trace_current_tenant_id()
+                    AND account_id = $1
+                    AND credential_id = $2
+                    AND revoked_at IS NULL",
+                &[&account_id, &credential_id],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        tx.commit().await.map_err(DatabaseError::Postgres)?;
+        Ok(row.and_then(|row| row.get::<_, Option<String>>("label")))
     }
 
     async fn update_webauthn_credential_after_login(
@@ -4871,40 +4926,9 @@ impl Database for PgBackend {
         self.ensure_trace_tenant(tenant_id).await?;
         let mut client = self.trace_pool().get().await.map_err(DatabaseError::from)?;
         let tx = Self::begin_trace_tenant_transaction(&mut client, tenant_id).await?;
-        let rows = tx
-            .query(
-                "SELECT near_account_id, payout_designated_at
-                   FROM trace_near_identities
-                  WHERE tenant_id = trace_current_tenant_id()
-                    AND account_id = $1
-                    AND revoked_at IS NULL",
-                &[&account_id],
-            )
-            .await
-            .map_err(DatabaseError::Postgres)?;
+        let resolution = resolve_payout_near_account_id_on_tx(&tx, account_id).await?;
         tx.commit().await.map_err(DatabaseError::Postgres)?;
-
-        // A designated active identity wins outright.
-        if let Some(row) = rows.iter().find(|row| {
-            row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
-                .is_some()
-        }) {
-            return Ok(crate::db::PayoutResolution::Designated(
-                row.get("near_account_id"),
-            ));
-        }
-        // No designation: a single active identity is unambiguous; otherwise hold.
-        match rows.len() {
-            0 => Ok(crate::db::PayoutResolution::Hold(
-                crate::db::PayoutHoldReason::NoneEnrolled,
-            )),
-            1 => Ok(crate::db::PayoutResolution::SoleActive(
-                rows[0].get("near_account_id"),
-            )),
-            _ => Ok(crate::db::PayoutResolution::Hold(
-                crate::db::PayoutHoldReason::AmbiguousNoDesignation,
-            )),
-        }
+        Ok(resolution)
     }
 
     async fn stage_merge_proposal(
@@ -5316,6 +5340,10 @@ impl Database for PgBackend {
                       AND COALESCE(a.attempts, 0) < $1
                       AND (a.last_attempt_at IS NULL
                            OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM pipeline_runs r
+                           WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                      )
                  ) pending",
                 &[&max_attempts, &backoff_base_seconds, &now],
             )
@@ -5367,6 +5395,14 @@ impl Database for PgBackend {
                    AND COALESCE(a.attempts, 0) < $1
                    AND (a.last_attempt_at IS NULL
                         OR a.last_attempt_at + make_interval(secs => ($2::bigint)::double precision * POWER(2, COALESCE(a.attempts,0))) <= $3)
+                   -- A submission with a pipeline run is scored by the
+                   -- pipeline's own Score phase, never a second time here
+                   -- (Zaki review 1, round 2, finding 1). V105 lets
+                   -- trace_gate_driver read these two columns across tenants.
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pipeline_runs r
+                        WHERE r.tenant_id = s.tenant_id AND r.submission_id = s.submission_id
+                   )
                  ORDER BY s.received_at ASC
                  LIMIT $4",
                 &[&max_attempts, &backoff_base_seconds, &now, &limit],
@@ -5484,6 +5520,16 @@ impl Database for PgBackend {
                  FROM trace_submissions s
                  JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 -- A submission the pipeline's Settle wrote a row for is left
+                 -- out, even if it also holds a legacy row: the re-score would
+                 -- rewrite the verdict its Score awarded credit on (spec
+                 -- 2026-10-08, Slice C, O-C3). V116 grants trace_gate_driver
+                 -- this column.
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions p
+                      WHERE p.tenant_id = s.tenant_id
+                        AND p.submission_id = s.submission_id
+                        AND p.source = 'pipeline_settle')
                  ORDER BY s.received_at ASC
                  LIMIT $1",
                 &[&limit],
@@ -5524,6 +5570,12 @@ impl Database for PgBackend {
                  -- leaves credit quality NULL; scoring it here would hand
                  -- every skipped duplicate the graded-floor product.
                  WHERE COALESCE(perplexity_micros, 0) > 0
+                   -- A row the pipeline's Settle wrote already holds the
+                   -- credit quality its Score computed under the bundle's
+                   -- pinned calibration; rescoring it here would overwrite
+                   -- that (spec 2026-10-08, Slice C, O-C3). V116 grants
+                   -- trace_gate_driver this column.
+                   AND source <> 'pipeline_settle'
                  ORDER BY decided_at ASC
                  LIMIT $1",
                 &[&limit],
@@ -6175,6 +6227,167 @@ fn refuse_if_enumeration_is_ambiguous(
     }
 }
 
+/// The catalog half of `Database::trace_corpus_rls_diagnostics`, on `client`
+/// (a pooled connection or an open transaction), for `tables`: whether each
+/// is a table in the current schema with row-level security enabled and
+/// forced and the tenant policy installed with the expected expression, and
+/// whether the current role can bypass it (a superuser, `BYPASSRLS`, or the
+/// owner of a table that does not force it). The versioned pipeline's control
+/// health reads its tables' isolation through the same check (Zaki review 1,
+/// round 2, finding 10). `tenant_context_transaction_local` is left `false`:
+/// that probe opens a transaction of its own, which only the caller holding
+/// a whole connection can run.
+pub async fn trace_corpus_rls_catalog_diagnostics<C>(
+    client: &C,
+    tables: &[&str],
+) -> Result<TraceCorpusRlsDiagnostics, DatabaseError>
+where
+    C: tokio_postgres::GenericClient + Sync,
+{
+    let expected_tables = tables
+        .iter()
+        .map(|table| (*table).to_string())
+        .collect::<Vec<_>>();
+    let expected_policy_expressions = TRACE_COMMONS_RLS_POLICY_EXPRESSION_VARIANTS
+        .iter()
+        .map(|expression| (*expression).to_string())
+        .collect::<Vec<_>>();
+    let rows = client
+        .query(
+            "SELECT
+                    c.relname,
+                    c.relrowsecurity,
+                    c.relforcerowsecurity,
+                    COALESCE(p.has_policy, false) AS has_policy,
+                    COALESCE(p.expression_matches, false) AS expression_matches
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN LATERAL (
+                    SELECT
+                        true AS has_policy,
+                        pol.polcmd = '*'
+                            AND pg_get_expr(pol.polqual, pol.polrelid) = ANY($2)
+                            AND pg_get_expr(pol.polwithcheck, pol.polrelid) = ANY($2)
+                            AS expression_matches
+                        FROM pg_policies p
+                        JOIN pg_policy pol
+                          ON pol.polname = p.policyname
+                         AND pol.polrelid = c.oid
+                        WHERE p.schemaname = n.nspname
+                          AND p.tablename = c.relname
+                          AND p.policyname = 'trace_corpus_tenant_isolation'
+                        LIMIT 1
+                 ) p ON true
+                 WHERE n.nspname = current_schema()
+                   AND c.relkind = 'r'
+                   AND c.relname = ANY($1)",
+            &[&expected_tables, &expected_policy_expressions],
+        )
+        .await?;
+    let current_role = client
+        .query_one(
+            "SELECT
+                    current_user AS current_role_name,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
+                    ) AS owns_trace_tables,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        JOIN pg_namespace n ON n.oid = c.relnamespace
+                        JOIN pg_roles r ON r.oid = c.relowner
+                        WHERE n.nspname = current_schema()
+                          AND c.relkind = 'r'
+                          AND c.relname = ANY($1)
+                          AND r.rolname = current_user
+                          AND NOT c.relforcerowsecurity
+                    ) AS owns_unforced_trace_tables,
+                    COALESCE((
+                        SELECT rolsuper OR rolbypassrls
+                        FROM pg_roles
+                        WHERE rolname = current_user
+                    ), false) AS bypass_role",
+            &[&expected_tables],
+        )
+        .await?;
+
+    let mut seen_tables = HashSet::new();
+    let mut rls_enabled_count = 0usize;
+    let mut force_rls_enabled_count = 0usize;
+    let mut policy_installed_count = 0usize;
+    let mut rls_disabled_tables = Vec::new();
+    let mut force_rls_disabled_tables = Vec::new();
+    let mut missing_policy_tables = Vec::new();
+    let mut policy_expression_mismatch_tables = Vec::new();
+    for row in rows {
+        let table: String = row.get("relname");
+        let rls_enabled: bool = row.get("relrowsecurity");
+        let force_rls_enabled: bool = row.get("relforcerowsecurity");
+        let has_policy: bool = row.get("has_policy");
+        let expression_matches: bool = row.get("expression_matches");
+        seen_tables.insert(table.clone());
+        if rls_enabled {
+            rls_enabled_count += 1;
+        } else {
+            rls_disabled_tables.push(table.clone());
+        }
+        if force_rls_enabled {
+            force_rls_enabled_count += 1;
+        } else {
+            force_rls_disabled_tables.push(table.clone());
+        }
+        if has_policy {
+            policy_installed_count += 1;
+            if !expression_matches {
+                policy_expression_mismatch_tables.push(table.clone());
+            }
+        } else {
+            missing_policy_tables.push(table.clone());
+        }
+    }
+    for table in &expected_tables {
+        if !seen_tables.contains(table) {
+            missing_policy_tables.push(table.clone());
+            rls_disabled_tables.push(table.clone());
+            force_rls_disabled_tables.push(table.clone());
+        }
+    }
+    missing_policy_tables.sort();
+    missing_policy_tables.dedup();
+    rls_disabled_tables.sort();
+    rls_disabled_tables.dedup();
+    force_rls_disabled_tables.sort();
+    force_rls_disabled_tables.dedup();
+    policy_expression_mismatch_tables.sort();
+    policy_expression_mismatch_tables.dedup();
+
+    let current_role_name: String = current_role.get("current_role_name");
+    let owns_unforced_trace_tables: bool = current_role.get("owns_unforced_trace_tables");
+    let owns_trace_tables: bool = current_role.get("owns_trace_tables");
+    let bypass_role: bool = current_role.get("bypass_role");
+    Ok(TraceCorpusRlsDiagnostics {
+        expected_table_count: expected_tables.len(),
+        rls_enabled_count,
+        force_rls_enabled_count,
+        policy_installed_count,
+        missing_policy_tables,
+        rls_disabled_tables,
+        force_rls_disabled_tables,
+        policy_expression_mismatch_tables,
+        current_role_hash: sha256_prefixed(&current_role_name),
+        current_role_bypasses_rls: owns_unforced_trace_tables || bypass_role,
+        current_role_owns_trace_tables: owns_trace_tables,
+        tenant_context_transaction_local: false,
+    })
+}
+
 async fn trace_tenant_context_is_transaction_local(
     client: &mut deadpool_postgres::Client,
 ) -> Result<bool, DatabaseError> {
@@ -6201,6 +6414,49 @@ async fn trace_tenant_context_is_transaction_local(
         .await?
         .get::<_, Option<String>>("tenant_context");
     Ok(inside.as_deref() == Some(probe_tenant) && after.as_deref().is_none_or(str::is_empty))
+}
+
+/// `Database::resolve_payout_near_account_id` on `tx`, a tenant-scoped
+/// transaction the caller already holds: the versioned pipeline's payout
+/// resolves on the connection that holds its NEAR submit lock, and never
+/// takes a second pooled connection.
+pub(crate) async fn resolve_payout_near_account_id_on_tx(
+    tx: &deadpool_postgres::Transaction<'_>,
+    account_id: Uuid,
+) -> Result<crate::db::PayoutResolution, DatabaseError> {
+    let rows = tx
+        .query(
+            "SELECT near_account_id, payout_designated_at
+               FROM trace_near_identities
+              WHERE tenant_id = trace_current_tenant_id()
+                AND account_id = $1
+                AND revoked_at IS NULL",
+            &[&account_id],
+        )
+        .await
+        .map_err(DatabaseError::Postgres)?;
+
+    // A designated active identity wins outright.
+    if let Some(row) = rows.iter().find(|row| {
+        row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("payout_designated_at")
+            .is_some()
+    }) {
+        return Ok(crate::db::PayoutResolution::Designated(
+            row.get("near_account_id"),
+        ));
+    }
+    // No designation: a single active identity is unambiguous; otherwise hold.
+    match rows.len() {
+        0 => Ok(crate::db::PayoutResolution::Hold(
+            crate::db::PayoutHoldReason::NoneEnrolled,
+        )),
+        1 => Ok(crate::db::PayoutResolution::SoleActive(
+            rows[0].get("near_account_id"),
+        )),
+        _ => Ok(crate::db::PayoutResolution::Hold(
+            crate::db::PayoutHoldReason::AmbiguousNoDesignation,
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -6940,6 +7196,14 @@ mod tests {
         (93, 4),
         (94, 4),
         (95, 4),
+        (105, 4),
+        (106, 4),
+        (107, 4),
+        (108, 4),
+        (110, 4),
+        (111, 4),
+        (112, 4),
+        (113, 4),
     ];
 
     /// Every `.sql` file in `migrations/`, as `(version, file_stem)`, read at
@@ -7679,6 +7943,16 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V18__trace_central_rls_tenant_predicate.sql"),
             include_str!("../../../../migrations/V21__trace_near_credit_account_outbox.sql"),
@@ -7702,6 +7976,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
@@ -7710,6 +7985,16 @@ mod tests {
             include_str!("../../../../migrations/V93__versioned_pipeline_durability.sql"),
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql"),
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql"),
+            include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql"),
+            include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql"),
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql"),
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql"),
+            include_str!(
+                "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+            ),
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql"),
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql"),
             include_str!("../../../../migrations/V71__reward_participant_access.sql"),
             include_str!("../../../../migrations/V6__trace_force_rls.sql"),
             include_str!("../../../../migrations/V11__trace_ranking_worker_runs.sql"),
@@ -7737,6 +8022,7 @@ mod tests {
             include_str!("../../../../migrations/V79__inference_connection.sql"),
             include_str!("../../../../migrations/V81__legacy_invite_link.sql"),
             include_str!("../../../../migrations/V86__account_trust_evaluations.sql"),
+            include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
             include_str!("../../../../migrations/V91__legacy_invite_link_devices.sql"),
             include_str!("../../../../migrations/V97__account_bindings.sql"),
         ];
@@ -7792,6 +8078,13 @@ mod tests {
             include_str!("../../../../migrations/V94__versioned_pipeline_settlement.sql");
         let content =
             include_str!("../../../../migrations/V95__versioned_pipeline_receipt_content.sql");
+        let review_invalidation =
+            include_str!("../../../../migrations/V105__versioned_pipeline_review_invalidation.sql");
+        let exports = include_str!("../../../../migrations/V106__versioned_pipeline_exports.sql");
+        let qualification =
+            include_str!("../../../../migrations/V107__versioned_pipeline_qualification.sql");
+        let attempt_artifacts =
+            include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql");
         for required in [
             "UNIQUE (tenant_id, request_idempotency_key)",
             "UNIQUE (tenant_id, run_id, phase)",
@@ -7854,6 +8147,436 @@ mod tests {
         ] {
             assert!(content.contains(required), "V95 is missing `{required}`");
         }
+        for required in [
+            "CREATE TABLE pipeline_review_claims",
+            "CREATE TABLE pipeline_review_assessments",
+            "CREATE TABLE pipeline_index_invalidations",
+            "reject_pipeline_review_assessment_mutation",
+            "CREATE TRIGGER pipeline_review_assessments_reject_update",
+            "CREATE TRIGGER pipeline_review_assessments_reject_delete",
+            "attempt_count INTEGER NOT NULL DEFAULT 0",
+            "max_attempts INTEGER NOT NULL DEFAULT 5",
+            "next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "pipeline_index_invalidation_attempt_limit",
+            // The worker's claim is per tenant and reads pending rows only.
+            "ON pipeline_index_invalidations (tenant_id, next_attempt_at, run_id)\n    WHERE state = 'pending';",
+            "ALTER TABLE pipeline_review_claims FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_review_assessments FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_index_invalidations FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(
+                review_invalidation.contains(required),
+                "V105 is missing `{required}`"
+            );
+        }
+        for forbidden in [
+            "admission_reason TEXT",
+            "pipeline_policy_interventions",
+            "operational_status",
+            "transformed_",
+            "pipeline_admission_usage",
+            "SECURITY DEFINER",
+            "SET search_path",
+        ] {
+            assert!(
+                !review_invalidation.contains(forbidden),
+                "V105 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_export_snapshots",
+            "CREATE TABLE pipeline_export_snapshot_items",
+            "reject_pipeline_export_snapshot_identity_mutation",
+            "reject_pipeline_export_snapshot_item_identity_mutation",
+            "reject_pipeline_export_snapshot_delete",
+            "CREATE TRIGGER pipeline_export_snapshots_reject_delete",
+            "CREATE TRIGGER pipeline_export_snapshot_items_reject_delete",
+            "ALTER TABLE pipeline_export_snapshots FORCE ROW LEVEL SECURITY;",
+            "ALTER TABLE pipeline_export_snapshot_items FORCE ROW LEVEL SECURITY;",
+        ] {
+            assert!(exports.contains(required), "V106 is missing `{required}`");
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "attempt_count"] {
+            assert!(
+                !exports.contains(forbidden),
+                "V106 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_bundle_qualifications",
+            "reject_pipeline_bundle_qualification_mutation",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_update",
+            "CREATE TRIGGER pipeline_bundle_qualifications_reject_delete",
+            "ON DELETE CASCADE",
+            "ALTER TABLE pipeline_bundle_qualifications FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_bundle_qualifications",
+            "GRANT SELECT, INSERT ON pipeline_bundle_qualifications TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                qualification.contains(required),
+                "V107 is missing `{required}`"
+            );
+        }
+        for forbidden in ["SECURITY DEFINER", "SET search_path", "ON DELETE RESTRICT"] {
+            assert!(
+                !qualification.contains(forbidden),
+                "V107 must not contain `{forbidden}`"
+            );
+        }
+        for required in [
+            "CREATE TABLE pipeline_attempt_artifacts",
+            "artifact IN ('approved', 'index-command', 'score-neighbors')",
+            // Rebase 10, option D: a compatibility Score stages its rows
+            // before its tenant lock, with no hash; a committed row always
+            // has one.
+            "ciphertext_sha256 TEXT CHECK (ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "OR (state = 'committed' AND committed_at IS NOT NULL AND ciphertext_sha256 IS NOT NULL)",
+            // Rebase 10 review, M8: an `approved` row always has its hash.
+            "CONSTRAINT pipeline_attempt_artifacts_approved_hash\n        CHECK (ciphertext_sha256 IS NOT NULL OR artifact <> 'approved')",
+            "state TEXT NOT NULL DEFAULT 'staged' CHECK (state IN ('staged', 'committed'))",
+            "PRIMARY KEY (tenant_id, run_id, lease_token, artifact)",
+            "UNIQUE (tenant_id, object_key)",
+            "ON DELETE CASCADE",
+            "CREATE INDEX pipeline_attempt_artifacts_due",
+            // Final review M6: a row moves only from `staged` to
+            // `committed`, so a committed object never reaches the sweep.
+            "guard_pipeline_attempt_artifact_update",
+            "CREATE TRIGGER pipeline_attempt_artifacts_guard_update",
+            "BEFORE UPDATE ON pipeline_attempt_artifacts",
+            "IF OLD.state = 'staged'\n        AND NEW.state = 'committed'\n        AND NEW.committed_at IS NOT NULL",
+            "(OLD.ciphertext_sha256 IS NOT NULL\n                AND NEW.ciphertext_sha256 = OLD.ciphertext_sha256)",
+            "OR (OLD.ciphertext_sha256 IS NULL\n                AND NEW.ciphertext_sha256 ~ '^[0-9a-f]{64}$')",
+            "ALTER TABLE pipeline_attempt_artifacts FORCE ROW LEVEL SECURITY;",
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_attempt_artifacts",
+            "GRANT SELECT, INSERT, DELETE ON pipeline_attempt_artifacts TO trace_ingest_runtime;",
+            "GRANT UPDATE (state, committed_at, ciphertext_sha256) ON pipeline_attempt_artifacts\n    TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                attempt_artifacts.contains(required),
+                "V108 is missing `{required}`"
+            );
+        }
+        // Controller ruling R2-1: a committed attempt's objects are object
+        // refs of the submission, which the withdrawal and main's
+        // revocation-propagation worker delete, so V108 has no `deleted`
+        // state for the sweep to record a second deletion in.
+        for forbidden in [
+            "SECURITY DEFINER",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "'deleted'",
+            "deleted_at",
+        ] {
+            assert!(
+                !attempt_artifacts.contains(forbidden),
+                "V108 must not contain `{forbidden}`"
+            );
+        }
+    }
+
+    /// V110 (delivery PR 5) adds the routing record, the activation event
+    /// history, and the receipt ownership record. Each is a forced-RLS table
+    /// with the tenant policy, the two immutable tables carry the V107-shaped
+    /// triggers and an append-only grant, and the migration holds no
+    /// `SECURITY DEFINER` function, no role attribute change, and nothing
+    /// that a later PR 5 migration adds. The routing row is bound to its
+    /// event (review round 1): a deferred foreign key to the event, a
+    /// generation column on both tables that a row trigger assigns on every
+    /// update (an insert keeps a supplied value from 1 to 2^62, for a
+    /// data-only restore, gets 1 below that, and is refused above it, so
+    /// that the counter cannot be put at the end of its type), and a
+    /// deferred constraint
+    /// trigger that compares the state and the generation. The events come
+    /// first, the runtime gets no grant on the row's generation, the events'
+    /// generation is not unique, and no function sets a parameter of its
+    /// own.
+    #[test]
+    fn v110_defines_routing_events_and_ownership() {
+        let activation =
+            include_str!("../../../../migrations/V110__versioned_pipeline_activation.sql");
+        for required in [
+            "CREATE TABLE pipeline_tenant_routing",
+            "CREATE TABLE pipeline_activation_events",
+            "CREATE TABLE pipeline_receipt_ownership",
+            "CREATE TRIGGER pipeline_activation_events_reject_update",
+            "CREATE TRIGGER pipeline_receipt_ownership_reject_update",
+            "GRANT SELECT, INSERT ON pipeline_activation_events TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_receipt_ownership TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "GRANT UPDATE (routing_state, activation_record_id, actor_principal_ref,\n              reason_code, evidence_hash, recorded_at)\n    ON pipeline_tenant_routing TO trace_ingest_runtime;",
+            "routing_generation BIGINT NOT NULL CHECK (routing_generation >= 1),",
+            "routing_generation BIGINT NOT NULL DEFAULT 1,",
+            "FOREIGN KEY (tenant_id, activation_record_id)\n        REFERENCES pipeline_activation_events (tenant_id, event_id)\n        DEFERRABLE INITIALLY DEFERRED",
+            "CREATE FUNCTION assign_pipeline_routing_generation()",
+            "IF TG_OP = 'INSERT' THEN\n        IF NEW.routing_generation > 4611686018427387904 THEN\n            RAISE EXCEPTION 'pipeline routing generation is out of range';\n        END IF;\n        IF NEW.routing_generation IS NULL OR NEW.routing_generation < 1 THEN\n            NEW.routing_generation := 1;\n        END IF;\n    ELSE",
+            "IF NEW.activation_record_id = OLD.activation_record_id THEN\n            RAISE EXCEPTION 'pipeline routing change needs a new activation event';",
+            "NEW.routing_generation := OLD.routing_generation + 1;",
+            "CREATE TRIGGER pipeline_tenant_routing_assign_generation\n    BEFORE INSERT OR UPDATE ON pipeline_tenant_routing\n    FOR EACH ROW EXECUTE FUNCTION assign_pipeline_routing_generation();",
+            "CREATE FUNCTION check_pipeline_routing_event()",
+            "WHERE e.tenant_id = NEW.tenant_id\n           AND e.event_id = NEW.activation_record_id\n           AND e.resulting_state = NEW.routing_state\n           AND e.routing_generation = NEW.routing_generation",
+            "RAISE EXCEPTION 'pipeline routing row does not match its activation event';",
+            "CREATE CONSTRAINT TRIGGER pipeline_tenant_routing_event_match\n    AFTER INSERT OR UPDATE ON pipeline_tenant_routing\n    DEFERRABLE INITIALLY DEFERRED\n    FOR EACH ROW EXECUTE FUNCTION check_pipeline_routing_event();",
+        ] {
+            assert!(
+                activation.contains(required),
+                "V110 is missing `{required}`"
+            );
+        }
+        assert!(
+            activation.find("CREATE TABLE pipeline_activation_events")
+                < activation.find("CREATE TABLE pipeline_tenant_routing"),
+            "V110 creates the events before the routing row that names one"
+        );
+        for table in [
+            "pipeline_tenant_routing",
+            "pipeline_activation_events",
+            "pipeline_receipt_ownership",
+        ] {
+            let force = format!("ALTER TABLE {table} FORCE ROW LEVEL SECURITY;");
+            assert_eq!(
+                activation.matches(&force).count(),
+                1,
+                "V110 must force RLS on {table} exactly once"
+            );
+            let policy = format!("CREATE POLICY trace_corpus_tenant_isolation ON {table}\n");
+            assert_eq!(
+                activation.matches(&policy).count(),
+                1,
+                "V110 must create the tenant policy on {table} exactly once"
+            );
+        }
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "pipeline_bundle_qualifications",
+            "pipeline_active_bundles",
+            "pipeline_legacy_owned_work",
+            "pipeline_legacy_writer_status",
+            "ledger_source_key",
+            // The routing binding: no function-level parameter (#974), no
+            // schema-qualified name in a function body, no rule on a time,
+            // no unique generation on the events (an event that no row
+            // names would then block the next change), and no grant that
+            // lets a writer choose the generation of an update (an insert
+            // may supply it up to 2^62, for a restore; the commit check
+            // binds it).
+            "SET search_path",
+            "public.",
+            "UNIQUE",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+        ] {
+            assert!(
+                !activation.contains(forbidden),
+                "V110 must not contain `{forbidden}`"
+            );
+        }
+        // No trigger function reads a time, and the only UPDATE grant is the
+        // six columns above.
+        for function in [
+            "assign_pipeline_routing_generation",
+            "check_pipeline_routing_event",
+        ] {
+            let start = activation
+                .find(&format!("CREATE FUNCTION {function}()"))
+                .expect("the function is defined");
+            let body = &activation[start..start + activation[start..].find("$$;").unwrap()];
+            for time in ["recorded_at", "NOW()", "clock_timestamp", "SET "] {
+                assert!(!body.contains(time), "{function} must not contain `{time}`");
+            }
+        }
+        assert_eq!(
+            activation.matches("GRANT UPDATE").count(),
+            1,
+            "V110 grants the runtime one UPDATE, on six columns of the routing row"
+        );
+    }
+
+    /// V111 (delivery PR 5) adds the operator's policy interventions: the
+    /// intervention record (an immutable, forced-RLS table with the tenant
+    /// policy and the V107-shaped triggers), an `operational_status` column on
+    /// V93's status row that a check keeps equal to `runnable`, and the
+    /// runtime's grants (an UPDATE on four columns of the status row and an
+    /// append-only grant on the record). It holds no `SECURITY DEFINER`
+    /// function and no role attribute change, and it grants the runtime no
+    /// DELETE and no UPDATE on the record, nor an UPDATE on a status column
+    /// other than the four.
+    #[test]
+    fn v111_defines_policy_interventions() {
+        let interventions = include_str!(
+            "../../../../migrations/V111__versioned_pipeline_policy_interventions.sql"
+        );
+        for required in [
+            "CREATE TABLE pipeline_policy_interventions",
+            "ADD COLUMN operational_status TEXT NOT NULL DEFAULT 'runnable'",
+            "CHECK (operational_status IN ('runnable', 'suspended', 'terminated'))",
+            "ADD CONSTRAINT pipeline_bundle_policy_status_runnable_shape CHECK (\n        runnable = (operational_status = 'runnable')\n    );",
+            "CREATE FUNCTION reject_pipeline_policy_intervention_mutation()",
+            "IF TG_OP = 'DELETE' AND pg_trigger_depth() > 1 THEN",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_update",
+            "CREATE TRIGGER pipeline_policy_interventions_reject_delete",
+            "ALTER TABLE pipeline_policy_interventions ENABLE ROW LEVEL SECURITY;",
+            "GRANT UPDATE (runnable, operational_status, error_label, updated_at)\n    ON pipeline_bundle_policy_status TO trace_ingest_runtime;",
+            "GRANT SELECT, INSERT ON pipeline_policy_interventions TO trace_ingest_runtime;",
+        ] {
+            assert!(
+                interventions.contains(required),
+                "V111 is missing `{required}`"
+            );
+        }
+        let force = "ALTER TABLE pipeline_policy_interventions FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            interventions.matches(force).count(),
+            1,
+            "V111 must force RLS on pipeline_policy_interventions exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_policy_interventions\n";
+        assert_eq!(
+            interventions.matches(policy).count(),
+            1,
+            "V111 must create the tenant policy on pipeline_policy_interventions exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SET search_path",
+            "ON DELETE RESTRICT",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "updated_by_principal_ref",
+            "pipeline_tenant_routing",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !interventions.contains(forbidden),
+                "V111 must not contain `{forbidden}`"
+            );
+        }
+        // The only statements that write grants name the intervention record
+        // (SELECT, INSERT) or the four status columns (UPDATE).
+        for grant in interventions
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+        {
+            assert!(
+                grant.starts_with("GRANT SELECT, INSERT ON pipeline_policy_interventions ")
+                    || grant.starts_with("GRANT UPDATE (runnable, operational_status, "),
+                "V111 grants something the pins do not list: `{grant}`"
+            );
+        }
+    }
+
+    /// V112 (delivery PR 5) is the activation gate's migration: it widens
+    /// the qualification key to one row for each bundle and code revision
+    /// (P5-D10) and grants the runtime the one UPDATE the gate needs on the
+    /// active bundle (P5-D11). It creates no table, holds no `SECURITY
+    /// DEFINER` function and no role attribute change, and grants nothing
+    /// else.
+    #[test]
+    fn v112_widens_the_qualification_key_and_grants_the_bundle_switch() {
+        let gate =
+            include_str!("../../../../migrations/V112__versioned_pipeline_activation_gate.sql");
+        for required in [
+            "ALTER TABLE pipeline_bundle_qualifications",
+            "DROP CONSTRAINT pipeline_bundle_qualifications_pkey,",
+            "ADD PRIMARY KEY (tenant_id, bundle_id, code_revision_hash);",
+            "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;",
+        ] {
+            assert!(gate.contains(required), "V112 is missing `{required}`");
+        }
+        for forbidden in [
+            "CREATE TABLE",
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "GRANT UPDATE ON",
+            "GRANT DELETE",
+            "GRANT ALL",
+            "DISABLE TRIGGER",
+            "pipeline_index_rebuild_fences",
+        ] {
+            assert!(
+                !gate.contains(forbidden),
+                "V112 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = gate
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT UPDATE (bundle_id, selected_at) ON pipeline_active_bundles TO trace_ingest_runtime;"
+            ],
+            "V112 grants the bundle switch and nothing else"
+        );
+    }
+
+    /// V113 (delivery PR 5) adds the committed index rebuild fence: a
+    /// forced-RLS table with the tenant policy, one row per rebuild (keyed by
+    /// the tenant and the rebuild's fence id), and the runtime's grants on
+    /// V92's terms: read, insert, and delete the rows, and update only
+    /// `fenced_until`. The rows are updated and deleted, so it carries no
+    /// append-only trigger; it holds no `SECURITY DEFINER` function and no
+    /// role attribute change.
+    #[test]
+    fn v113_defines_the_rebuild_fence() {
+        let fence =
+            include_str!("../../../../migrations/V113__versioned_pipeline_rebuild_fence.sql");
+        for required in [
+            "CREATE TABLE pipeline_index_rebuild_fences",
+            "PRIMARY KEY (tenant_id, fence_id)",
+            "REFERENCES trace_tenants(tenant_id) ON DELETE CASCADE",
+            "ALTER TABLE pipeline_index_rebuild_fences ENABLE ROW LEVEL SECURITY;",
+            "RAISE EXCEPTION 'V113: trace_ingest_runtime is missing; V90 creates it';",
+        ] {
+            assert!(fence.contains(required), "V113 is missing `{required}`");
+        }
+        let force = "ALTER TABLE pipeline_index_rebuild_fences FORCE ROW LEVEL SECURITY;";
+        assert_eq!(
+            fence.matches(force).count(),
+            1,
+            "V113 must force RLS on pipeline_index_rebuild_fences exactly once"
+        );
+        let policy =
+            "CREATE POLICY trace_corpus_tenant_isolation ON pipeline_index_rebuild_fences\n";
+        assert_eq!(
+            fence.matches(policy).count(),
+            1,
+            "V113 must create the tenant policy on pipeline_index_rebuild_fences exactly once"
+        );
+        for forbidden in [
+            "SECURITY DEFINER",
+            "BYPASSRLS",
+            "SUPERUSER",
+            "SET search_path",
+            "CREATE TRIGGER",
+            "GRANT UPDATE ON",
+            "GRANT ALL",
+            "PRIMARY KEY (tenant_id)",
+        ] {
+            assert!(
+                !fence.contains(forbidden),
+                "V113 must not contain `{forbidden}`"
+            );
+        }
+        let grants: Vec<&str> = fence
+            .lines()
+            .filter(|line| line.trim_start().starts_with("GRANT "))
+            .collect();
+        assert_eq!(
+            grants,
+            vec![
+                "GRANT SELECT, INSERT, DELETE ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+                "GRANT UPDATE (fenced_until) ON pipeline_index_rebuild_fences TO trace_ingest_runtime;",
+            ],
+            "V113 grants what the fence code reads and writes and nothing else"
+        );
     }
 
     /// The eviction drain is the one write path on

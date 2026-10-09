@@ -15,13 +15,14 @@ use secrecy::SecretString;
 use serde_json::json;
 use trace_commons_server::secrets::SecretsCrypto;
 use trace_commons_server::trace_artifact_gcs::{
-    GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
+    GcsObjectClient, GcsObjectFetch, GcsRemoteTraceArtifactProvider, InMemoryGcsObjectClient,
 };
 use trace_commons_server::trace_artifact_kek::LocalMasterKeyWrapper;
 use trace_commons_server::trace_artifact_store::{
     RemoteTraceArtifactProvider, ServiceOwnedTraceArtifactStore,
     TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2, TraceArtifactInvalidationReason, TraceArtifactKind,
-    TraceArtifactProviderConfig, TraceArtifactScope,
+    TraceArtifactProviderConfig, TraceArtifactScope, TraceArtifactStore,
+    is_trace_artifact_integrity_error,
 };
 
 #[test]
@@ -196,6 +197,51 @@ fn gcs_remote_provider_restore_reports_hit_then_miss() {
     assert!(!again);
 }
 
+/// PR 4, rebase 10 option D: through the GCS provider, the key the store
+/// derives for an object id before any content exists is the key the
+/// object is then published under, and `delete_artifact_at_object_key`
+/// deletes it there with no ciphertext hash (the GCS key never carried
+/// one): `true`, then `false`; the bucket's versioning still restores it.
+#[test]
+fn gcs_store_derives_the_key_ahead_of_the_content_and_deletes_at_it() {
+    let client = Arc::new(InMemoryGcsObjectClient::default());
+    let (store, _provider, _receipt, _scope) = seed_artifact(Arc::clone(&client));
+    let tenant = "tenant:sha256:option-d";
+    let kind = TraceArtifactKind::VectorPayload;
+    let object_id = "pipeline-score-neighbors-run-lease";
+    let key = store
+        .serialized_json_object_key(tenant, kind.clone(), object_id)
+        .expect("the key is derived ahead of the content");
+    let prepared = store
+        .prepare_serialized_json(tenant, kind.clone(), object_id, br#"{"n":[1]}"#)
+        .expect("prepare");
+    assert_eq!(prepared.receipt().object_key, key, "the prepared key");
+    let receipt = store.publish_serialized_json(&prepared).expect("publish");
+
+    assert!(
+        store
+            .delete_artifact_at_object_key(tenant, kind.clone(), &key)
+            .expect("delete at the key"),
+        "the published object is deleted at its key"
+    );
+    assert!(
+        store.read_json(tenant, &receipt).is_err(),
+        "the object is gone"
+    );
+    assert!(
+        !store
+            .delete_artifact_at_object_key(tenant, kind.clone(), &key)
+            .expect("a second delete"),
+        "nothing is left at the key"
+    );
+    assert!(
+        store
+            .restore_deleted_artifact(tenant, &receipt)
+            .expect("restore"),
+        "the bucket's versioning keeps the deleted version"
+    );
+}
+
 #[test]
 fn gcs_remote_provider_exposes_versioning_support_flag() {
     let client = Arc::new(InMemoryGcsObjectClient::default());
@@ -212,4 +258,66 @@ fn gcs_remote_provider_exposes_versioning_support_flag() {
         "trace-commons-prod",
     );
     assert!(versioned.supports_versioning());
+}
+
+/// Zaki's approval of #1143, ZA-2 follow-up: a fetch the bucket answers with
+/// "not found" reaches the store's caller typed as an integrity failure,
+/// through the provider and the store; a fetch that fails for any other
+/// reason reaches it untyped (transport).
+#[test]
+fn a_missing_gcs_object_reads_as_an_integrity_failure_and_an_outage_does_not() {
+    struct DownClient;
+    impl GcsObjectClient for DownClient {
+        fn put_object(
+            &self,
+            _key: &str,
+            _body: bytes::Bytes,
+            _metadata: std::collections::BTreeMap<String, String>,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("GcsPutFailed: 503 backend unavailable")
+        }
+        fn get_object(&self, _key: &str) -> anyhow::Result<GcsObjectFetch> {
+            anyhow::bail!("GcsGetFailed: 503 backend unavailable")
+        }
+        fn delete_object(&self, _key: &str) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsDeleteFailed: 503 backend unavailable")
+        }
+        fn restore_deleted_object(&self, _key: &str) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsRestoreFailed: 503 backend unavailable")
+        }
+        fn list_object_keys(&self, _prefix: &str) -> anyhow::Result<Vec<String>> {
+            anyhow::bail!("GcsListFailed: 503 backend unavailable")
+        }
+        fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+            anyhow::bail!("GcsBucketGetFailed: 503 backend unavailable")
+        }
+    }
+
+    let client = Arc::new(InMemoryGcsObjectClient::default());
+    let (store, provider, receipt, scope) = seed_artifact(Arc::clone(&client));
+    assert!(
+        provider
+            .delete_encrypted_artifact(&receipt.object_ref, Utc::now())
+            .unwrap()
+    );
+    let missing = store
+        .read_scoped_json::<serde_json::Value>(&scope, &receipt.object_ref)
+        .expect_err("a missing object does not read");
+    assert!(
+        is_trace_artifact_integrity_error(&missing),
+        "a missing object is an integrity failure"
+    );
+
+    let down = GcsRemoteTraceArtifactProvider::new(
+        DownClient,
+        "trace-commons-prod-bucket",
+        "trace-commons-prod",
+    );
+    let Err(outage) = down.read_encrypted_artifact(&receipt.object_ref) else {
+        panic!("a fetch during an outage does not read");
+    };
+    assert!(
+        !is_trace_artifact_integrity_error(&outage),
+        "an outage is not an integrity failure"
+    );
 }

@@ -19,7 +19,7 @@ use crate::witness::WitnessTrust;
 
 pub const CONTRIBUTOR_CONFIG_SCHEMA_VERSION: &str = "trace_commons.contributor_config.v1";
 
-const CONFIG_FILE: &str = "contributor.json";
+pub(crate) const CONFIG_FILE: &str = "contributor.json";
 const DEVICE_KEY_FILE: &str = "device.pk8";
 const RECEIPTS_FILE: &str = "receipts.jsonl";
 const NEAR_AI_NOTICE_MARKER_FILE: &str = "near-ai-notice-shown";
@@ -65,10 +65,32 @@ pub const LEGACY_INVITE_LINK_FILE: &str = "legacy-invite-link.json";
 /// without asking the issuer or the contributor. A hash, never the code.
 /// Swept by `wipe()`.
 pub const INVITE_SUBJECT_FILE: &str = "invite-subject.json";
+/// The passkeys used on this Mac, remembered for the first run's "Welcome
+/// back" (`daemon::remembered_passkeys`). Names and account hashes only.
+/// Survives sign-out; swept by `wipe()`.
+pub const REMEMBERED_PASSKEYS_FILE: &str = "remembered-passkeys.json";
 /// Name prefix of the per-entry redacted envelope files
 /// (`daemon::approved_envelope`). One file per previewed-and-approved queue
 /// entry, so they cannot be listed by name; `wipe()` sweeps them by prefix.
 pub const DAEMON_APPROVED_ENVELOPE_PREFIX: &str = "daemon-approved-envelope-";
+
+/// The plain files that belong to one enrollment, apart from the credential
+/// references `commons_credentials` owns (device key, account session,
+/// staged device key). `unenroll` removes exactly these, with the stored
+/// approved envelopes; `wipe()` removes them with everything else.
+///
+/// Not here, deliberately: receipts, history and the audit log (the local
+/// record of what this device did, and the audit log records the unenroll
+/// itself), settings, folder rules and the queue (the person's choices about
+/// this Mac, not about an account), the NEAR AI notice marker, and the
+/// remembered passkeys (a passkey is not an enrollment).
+pub(crate) const ENROLLMENT_FILES: [&str; 5] = [
+    CONFIG_FILE,
+    DAEMON_INFERENCE_CONNECTION_FILE,
+    IDENTITY_SWITCH_JOURNAL_FILE,
+    LEGACY_INVITE_LINK_FILE,
+    INVITE_SUBJECT_FILE,
+];
 /// Runtime files, not persistent state: removed on shutdown, not by `wipe()`.
 pub const DAEMON_SOCK_FILE: &str = "daemon.sock";
 pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
@@ -174,10 +196,22 @@ pub struct ContributorConfig {
     /// having picked it. Every enrollment path writes `false`; only
     /// `set_consent_scopes` writes `true`, and a new enrollment starts over.
     ///
-    /// `#[serde(default)]` is required: a config written before this field
-    /// existed has no such key, and reads as not chosen.
-    #[serde(default)]
-    pub consent_scopes_chosen: bool,
+    /// Three states, because the key's absence carries meaning:
+    ///
+    /// - `Some(true)`: chosen. Sends, and may carry the Flow 1 grant.
+    /// - `Some(false)`: an enrollment whose scopes nobody chose. Nothing is
+    ///   sent under it (`consent_hold`, `consent-scopes-not-chosen`) and the
+    ///   grant is refused.
+    /// - `None`: the config predates this record. No released client ever
+    ///   wrote it, so every such config belongs to a contributor who joined
+    ///   before it existed; they keep sending as they always have. The grant
+    ///   still asks for an explicit choice (R7).
+    ///
+    /// Absent stays absent across a save (`skip_serializing_if`), so a legacy
+    /// config rewritten for another reason is not turned into an unchosen
+    /// enrollment. Every enrollment writes `Some(..)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_scopes_chosen: Option<bool>,
     /// How [`Self::witness`] got here, for the disclosure screens (K11).
     ///
     /// Written only beside the witness it describes, by
@@ -296,6 +330,26 @@ pub fn environment_witness_origin(
     witness.map(|w| WitnessOriginRecord::for_witness(w, WitnessOrigin::Environment))
 }
 
+/// Why nothing may be sent under an enrollment: its consent scopes were saved
+/// by enrollment and never chosen (`ContributorConfig::consent_scopes_chosen`
+/// is `Some(false)`). A fixed label, and the one every send path refuses or
+/// holds with: `approve`, `include_past_sessions`, arming a folder, an
+/// `auto_upload` contribution override, the watcher's unattended approvals,
+/// and the uploader.
+pub const CONSENT_SCOPES_NOT_CHOSEN: &str = "consent-scopes-not-chosen";
+
+/// Whether sending under `cfg` is held because its consent scopes were never
+/// chosen, as the fixed label to refuse or hold with. `None` with no
+/// enrollment (nothing can be sent under one, and that is answered
+/// elsewhere), with a choice recorded, and for a config that predates the
+/// record (see `consent_scopes_chosen`).
+pub fn consent_hold(cfg: Option<&ContributorConfig>) -> Option<&'static str> {
+    match cfg {
+        Some(cfg) if cfg.consent_scopes_chosen == Some(false) => Some(CONSENT_SCOPES_NOT_CHOSEN),
+        _ => None,
+    }
+}
+
 impl ContributorConfig {
     /// Configure `witness`, recording how it arrived.
     pub fn set_witness(&mut self, witness: WitnessSettings, origin: WitnessOrigin) {
@@ -384,7 +438,112 @@ impl WitnessSettings {
             measurements,
         })
     }
+
+    /// Validate a witness entered through Settings and build the
+    /// `WitnessSettings` to save, or refuse with the same fixed label every
+    /// shell renders.
+    ///
+    /// This used to be two independent implementations -- Tauri's
+    /// `configure_witness_in` and the C ABI's `tc_witness_configure` -- each
+    /// checking the URL's shape, the signing address, and the pin list, and
+    /// each constructing the same struct by hand. A third shell would have
+    /// been a third copy. One function now does the checking and the
+    /// construction, so both callers can be a thin pass of their own inputs.
+    ///
+    /// `admission_evidence` is carried from the witness already configured
+    /// (if any), never from this input: it is a record of account-bound
+    /// admission being enabled elsewhere, not something a URL/address/pin
+    /// form sets.
+    ///
+    /// Order, and why: the URL and signing address are checked before the
+    /// pins because a malformed URL or address is the cheaper, more common
+    /// typo, and a shell showing one error at a time should show the first
+    /// field a contributor is likely to have gotten wrong. The pin list is
+    /// checked last because `trust()` -- parsing every entry, then requiring
+    /// at least one to have survived -- is the most expensive step.
+    ///
+    /// Returns `Err` on:
+    /// - [`ERR_WITNESS_URL_INVALID`]: `url` has no `https://`/`http://`
+    ///   scheme, or no host, or the host contains whitespace. Deliberately
+    ///   shallow -- a scheme and a host -- because the real check is the
+    ///   contributor's host allowlist, applied at submission time, and a
+    ///   second, weaker URL parser here would just be a second opinion.
+    /// - [`ERR_WITNESS_SIGNING_ADDRESS_INVALID`]: `signing_address` is empty
+    ///   after trimming.
+    /// - [`ERR_WITNESS_PIN_REQUIRED`]: `measurements` is empty after trimming
+    ///   and dropping blank entries. This call will not write an unpinned
+    ///   witness; see [`WitnessTrust::is_pinned`].
+    /// - [`ERR_WITNESS_PIN_MALFORMED`]: at least one entry survived trimming,
+    ///   but none of them parses into a measurement set this build can read.
+    pub fn configure(
+        admission_evidence: bool,
+        url: &str,
+        signing_address: &str,
+        measurements: impl IntoIterator<Item = String>,
+    ) -> Result<Self, &'static str> {
+        let url = url.trim();
+        if !witness_url_usable(url) {
+            return Err(ERR_WITNESS_URL_INVALID);
+        }
+        let signing_address = signing_address.trim();
+        if signing_address.is_empty() {
+            return Err(ERR_WITNESS_SIGNING_ADDRESS_INVALID);
+        }
+        let expected_measurements: Vec<String> = measurements
+            .into_iter()
+            .map(|entry| entry.trim().to_owned())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        if expected_measurements.is_empty() {
+            return Err(ERR_WITNESS_PIN_REQUIRED);
+        }
+        let settings = Self {
+            admission_evidence,
+            url: url.to_owned(),
+            signing_address: signing_address.to_owned(),
+            expected_measurements,
+        };
+        // Parsed before it is ever saved: a pin this build cannot read would
+        // otherwise be written and only discovered later, as a client
+        // silently refusing every submission.
+        match settings.trust() {
+            Ok(trust) if trust.is_pinned() => Ok(settings),
+            _ => Err(ERR_WITNESS_PIN_MALFORMED),
+        }
+    }
 }
+
+/// Whether a string is shaped like a witness base URL.
+///
+/// Deliberately shallow: a scheme and a host. The real check is the
+/// contributor's host allowlist, applied at submission time before any
+/// request is made, and duplicating a URL parser here would create a second,
+/// weaker opinion about what is reachable.
+fn witness_url_usable(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !host.is_empty() && !host.chars().any(char::is_whitespace)
+}
+
+/// [`WitnessSettings::configure`]'s refusal: the URL has no recognized
+/// scheme, no host, or a host containing whitespace.
+pub const ERR_WITNESS_URL_INVALID: &str = "witness-url-invalid";
+/// [`WitnessSettings::configure`]'s refusal: the signing address is empty
+/// after trimming.
+pub const ERR_WITNESS_SIGNING_ADDRESS_INVALID: &str = "witness-signing-address-invalid";
+/// [`WitnessSettings::configure`]'s refusal: no measurement entry survived
+/// trimming and dropping blanks. This call will not write an unpinned
+/// witness.
+pub const ERR_WITNESS_PIN_REQUIRED: &str = "witness-pin-required";
+/// [`WitnessSettings::configure`]'s refusal: at least one entry survived
+/// trimming, but none of them parses as a measurement set.
+pub const ERR_WITNESS_PIN_MALFORMED: &str = "witness-pin-malformed";
 
 /// `TRACE_COMMONS_WITNESS_URL`.
 pub const TRACE_COMMONS_WITNESS_URL: &str = "TRACE_COMMONS_WITNESS_URL";
@@ -706,6 +865,25 @@ pub struct Receipt {
     /// `#[serde(default)]` for the same reason as `approved_unattended`.
     #[serde(default)]
     pub approved_verdict: Option<String>,
+    /// The serialized size, in bytes, of the redacted envelope this receipt's
+    /// submission actually sent (K10) -- the witness's own
+    /// `envelope_bytes.len()` when a witnessed response carried the upload,
+    /// or `envelope::envelope_size` on the final, grant-stamped envelope
+    /// otherwise. Recorded once, at upload time, in `submit_loaded`: the
+    /// figure does not exist any earlier, because redaction and scope
+    /// stamping both still have to run.
+    ///
+    /// Not the raw session's size on disk (`QueueEntry::size_bytes`) and not
+    /// the estimate a preview showed before upload
+    /// (`QueueEntry::would_send_bytes`) -- this is the one number that
+    /// describes bytes that actually left the machine.
+    ///
+    /// `None` when the figure could not be measured (an unreadable envelope),
+    /// or when this receipt predates the field.
+    ///
+    /// `#[serde(default)]` for the same reason as `approved_unattended`.
+    #[serde(default)]
+    pub uploaded_bytes: Option<u64>,
 }
 
 /// The state directory's name under whichever per-user base the platform uses.
@@ -1009,7 +1187,59 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// Remove the plain files of one enrollment ([`ENROLLMENT_FILES`]), their
+    /// orphaned atomic-write temp files, and every stored approved envelope
+    /// with its temp files. Missing is not an error.
+    ///
+    /// The credential references are not touched here: `unenroll` runs this
+    /// inside `commons_credentials::clear_with`, which removes those first,
+    /// under the same commit lock -- see `daemon::unenroll` for why that
+    /// order is the fail-closed one.
+    pub(crate) fn remove_enrollment_files(&self) -> Result<()> {
+        for name in ENROLLMENT_FILES {
+            let path = self.dir.join(name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+            }
+        }
+        let tmp_prefixes: Vec<String> = ENROLLMENT_FILES
+            .iter()
+            .map(|name| format!(".{name}.tmp-"))
+            .collect();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading dir {}", self.dir.display()));
+            }
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading dir {}", self.dir.display()))?;
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            // Stored envelopes are stamped with this enrollment's identity, so
+            // they go with it -- see `wipe_files` below.
+            let is_approved_envelope = file_name.starts_with(DAEMON_APPROVED_ENVELOPE_PREFIX)
+                || file_name.starts_with(&format!(".{DAEMON_APPROVED_ENVELOPE_PREFIX}"));
+            if is_approved_envelope
+                || tmp_prefixes
+                    .iter()
+                    .any(|prefix| file_name.starts_with(prefix))
+            {
+                let path = entry.path();
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     fn wipe_files(&self) -> Result<()> {
+        // Everything an enrollment owns goes first, through the one list
+        // `unenroll` uses, so a file added there can never survive a logout.
+        self.remove_enrollment_files()?;
         // Token review payloads belong to this enrollment. Never traverse a
         // substituted link into an agent's session directory. Remaining raw
         // capture leases expire independently in Ironwire's bounded spool.
@@ -1039,6 +1269,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ] {
             let path = self.dir.join(name);
             if path.exists() {
@@ -1063,6 +1294,7 @@ impl ConfigStore {
             IDENTITY_SWITCH_JOURNAL_FILE,
             LEGACY_INVITE_LINK_FILE,
             INVITE_SUBJECT_FILE,
+            REMEMBERED_PASSKEYS_FILE,
         ]
         .into_iter()
         .map(|name| format!(".{name}.tmp-"))
@@ -1527,7 +1759,7 @@ mod tests {
     fn sample_config() -> ContributorConfig {
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(false),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.to_string(),
@@ -1582,7 +1814,55 @@ mod tests {
     fn a_config_that_predates_the_scope_choice_record_holds_no_choice() {
         let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
         let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
-        assert!(!cfg.consent_scopes_chosen);
+        assert_ne!(cfg.consent_scopes_chosen, Some(true));
+        assert!(crate::flow1::grant_precondition(true, Some(&cfg)).is_err());
+    }
+
+    /// The migration rule. No released client ever wrote the scope-choice
+    /// record, so a config without the key belongs to someone who joined
+    /// before it existed, and sends as it always did. Only an enrollment that
+    /// records `false` -- every enrollment made since -- is held.
+    #[test]
+    fn a_config_that_predates_the_scope_choice_record_is_not_held() {
+        let json = r#"{"schema_version":"1","issuer_url":"https://i","ingest_url":"https://g","audience":"a","tenant_id":"t","instance_id":"i","user_subject":"s","device_key_id":"d","consent_scopes":["debugging_evaluation"]}"#;
+        let cfg: ContributorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.consent_scopes_chosen, None);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+    }
+
+    #[test]
+    fn an_enrolment_whose_scopes_nobody_chose_is_held() {
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = Some(false);
+        assert_eq!(consent_hold(Some(&cfg)), Some(CONSENT_SCOPES_NOT_CHOSEN));
+        assert_eq!(CONSENT_SCOPES_NOT_CHOSEN, "consent-scopes-not-chosen");
+        cfg.consent_scopes_chosen = Some(true);
+        assert_eq!(consent_hold(Some(&cfg)), None);
+        // No enrollment, nothing to send under: not this hold's to answer.
+        assert_eq!(consent_hold(None), None);
+    }
+
+    /// Absence survives a save, so rewriting a legacy config for any other
+    /// reason does not turn it into an unchosen enrollment.
+    #[test]
+    fn a_legacy_config_keeps_no_record_across_a_save() {
+        let (_d, store) = store();
+        let mut cfg = sample_config();
+        cfg.consent_scopes_chosen = None;
+        store.save_config(&cfg).unwrap();
+        let raw = std::fs::read_to_string(store_path(&store, "contributor.json")).unwrap();
+        assert!(!raw.contains("consent_scopes_chosen"));
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            None
+        );
+
+        cfg.consent_scopes_chosen = Some(false);
+        store.save_config(&cfg).unwrap();
+        assert_eq!(
+            store.load_config().unwrap().unwrap().consent_scopes_chosen,
+            Some(false)
+        );
     }
 
     #[test]
@@ -1614,6 +1894,7 @@ mod tests {
             status: "accepted".into(),
             approved_unattended: None,
             approved_verdict: None,
+            uploaded_bytes: None,
         };
         store.append_receipt(&r).unwrap();
         // Simulate a corrupt line.
@@ -1650,6 +1931,28 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].approved_unattended, None);
         assert_eq!(loaded[0].approved_verdict, None);
+    }
+
+    /// K10: a receipts line written before `uploaded_bytes` existed must
+    /// still load.
+    #[test]
+    fn a_receipt_line_written_before_uploaded_bytes_existed_still_loads() {
+        let (_d, store) = store();
+        let old_line = serde_json::json!({
+            "submission_id": uuid::Uuid::new_v4(),
+            "session_hash": "sha256:aa",
+            "source": "claude-code",
+            "submitted_at": chrono::Utc::now(),
+            "status": "accepted",
+        });
+        std::fs::write(
+            store_path(&store, "receipts.jsonl"),
+            format!("{}\n", serde_json::to_string(&old_line).unwrap()),
+        )
+        .unwrap();
+        let loaded = store.load_receipts().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].uploaded_bytes, None);
     }
 
     #[test]
@@ -1946,6 +2249,93 @@ mod tests {
 
         set_attestation_env(None);
         assert!(!inference_receipt_check_attestation_from_env());
+    }
+
+    // -----------------------------------------------------------------
+    // WitnessSettings::configure (K6 of #1173): one validator, used by
+    // Tauri's configure_witness and the C ABI's tc_witness_configure,
+    // instead of each shell checking the URL, the signing address and the
+    // pin list by hand.
+    // -----------------------------------------------------------------
+
+    fn valid_pin() -> String {
+        format!("mrtd={}", "ab".repeat(48))
+    }
+
+    #[test]
+    fn configure_builds_a_pinned_witness_from_valid_input() {
+        let settings =
+            WitnessSettings::configure(true, "https://witness.example", "0xab", vec![valid_pin()])
+                .expect("valid input configures");
+        assert!(settings.admission_evidence);
+        assert_eq!(settings.url, "https://witness.example");
+        assert_eq!(settings.signing_address, "0xab");
+        assert!(settings.trust().unwrap().is_pinned());
+    }
+
+    #[test]
+    fn configure_trims_surrounding_whitespace() {
+        let settings = WitnessSettings::configure(
+            false,
+            "  https://witness.example  ",
+            "  0xab  ",
+            vec![format!("  {}  ", valid_pin())],
+        )
+        .expect("valid input configures");
+        assert_eq!(settings.url, "https://witness.example");
+        assert_eq!(settings.signing_address, "0xab");
+        assert_eq!(settings.expected_measurements, vec![valid_pin()]);
+    }
+
+    #[test]
+    fn configure_refuses_a_url_with_no_scheme_or_host() {
+        for bad_url in ["witness.example", "https://", "https:// space.example"] {
+            assert_eq!(
+                WitnessSettings::configure(false, bad_url, "0xab", vec![valid_pin()]),
+                Err(ERR_WITNESS_URL_INVALID),
+                "{bad_url:?} should have been refused"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_refuses_a_blank_signing_address() {
+        for bad_address in ["", "   "] {
+            assert_eq!(
+                WitnessSettings::configure(
+                    false,
+                    "https://witness.example",
+                    bad_address,
+                    vec![valid_pin()],
+                ),
+                Err(ERR_WITNESS_SIGNING_ADDRESS_INVALID)
+            );
+        }
+    }
+
+    #[test]
+    fn configure_will_not_write_an_unpinned_witness() {
+        // Empty, and entries that are blank after trimming: both collapse
+        // to no pin at all, and this call refuses to write one.
+        for measurements in [vec![], vec!["   ".to_owned(), String::new()]] {
+            assert_eq!(
+                WitnessSettings::configure(false, "https://witness.example", "0xab", measurements,),
+                Err(ERR_WITNESS_PIN_REQUIRED)
+            );
+        }
+    }
+
+    #[test]
+    fn configure_refuses_a_pin_this_build_cannot_parse() {
+        assert_eq!(
+            WitnessSettings::configure(
+                false,
+                "https://witness.example",
+                "0xab",
+                vec!["not-a-measurement".to_owned()],
+            ),
+            Err(ERR_WITNESS_PIN_MALFORMED)
+        );
     }
 
     // -----------------------------------------------------------------

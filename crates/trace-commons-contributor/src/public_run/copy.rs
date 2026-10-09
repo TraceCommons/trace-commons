@@ -91,6 +91,7 @@ pub struct PublicRunCopy {
     pub source_placeholder: &'static str,
     pub source_help: &'static str,
     pub cancel_edit: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub review_page: &'static str,
     pub exact_public_preview: &'static str,
     pub observed_evidence: &'static str,
@@ -119,6 +120,16 @@ pub struct PublicRunCopy {
     pub feedback_choices: [PublicRunValueLabel; 3],
     pub evidence_kind_choices: [PublicRunValueLabel; 9],
     pub contribution_status_choices: [PublicRunValueLabel; 10],
+    /// The label for a status not in `contribution_status_choices`
+    /// (`history_copy::STATUS_UNAVAILABLE`), never `unrecognized_value` and
+    /// never the raw status.
+    pub contribution_status_unavailable: &'static str,
+    /// History's word for each contribution status
+    /// (`history_copy::STATUS_LABELS`): the label a History row or a
+    /// monitor row shows, where `contribution_status_choices` is the
+    /// session-detail table. A status not in it is
+    /// `contribution_status_unavailable`.
+    pub history_status_labels: [PublicRunValueLabel; 11],
     pub permitted_use_choices: [PublicRunValueLabel; 6],
     pub reuse_permissions: [PublicRunReuseChoice; 2],
 }
@@ -129,13 +140,15 @@ pub fn public_run_copy() -> PublicRunCopy {
         all_contributions: "All contributions",
         view_session: "View session",
         session_detail: "Session detail",
-        reading_record: "Reading your redacted contribution record…",
+        // Ron's #1146 History detail and public-page words (owner ruling,
+        // 2026-10-06), where #1146 has the line.
+        reading_record: "Reading owned session detail…",
         retry_read: "Retry read",
-        content_unavailable: "Session content is unavailable. Status and contribution metadata remain.",
+        content_unavailable: "Content is unavailable from server. Metadata and bounded evidence remain visible.",
         unavailable_value: "Unavailable",
-        creator_report: "Creator report",
+        creator_report: "Creator outcome",
         task: "Task",
-        no_task: "No redacted task text is available for this contribution.",
+        no_task: "No task description supplied.",
         outcome: "Outcome",
         outcome_unavailable: "No outcome was recorded for this contribution.",
         decisive_correction: "Decisive correction",
@@ -163,19 +176,22 @@ pub fn public_run_copy() -> PublicRunCopy {
         edit_page: "Edit page",
         unpublishing: "Unpublishing…",
         unpublish: "Unpublish",
-        publication_disclosure: "Choose the exact fields that will be public. Session publication is separate from Commons contribution and profile attribution.",
+        // Approved 2026-10-07: it was "Choose
+        // the exact fields that will be public. Session publication is
+        // separate from Commons contribution and profile attribution."
+        publication_disclosure: "Choose exact fields that become public. Publication is separate from Commons contribution and profile attribution.",
         page_title: "Page title",
         public_outcome: "Public outcome summary",
         reusable_instructions: "Reusable instructions",
-        select_evidence: "Select one to four exact excerpts from the redacted contribution.",
-        publish_correction: "Publish the contributed correction",
+        select_evidence: "Select one to four exact excerpts from redacted contribution.",
+        publish_correction: "Publish contributed correction",
         reuse_permission: "Reuse permission",
         choose_permission: "Choose permission",
         source_public_run: "Source public run",
         source_placeholder: "Optional tracecommons.ai/runs link or slug",
-        source_help: "Add this when the workflow varies an existing public run.",
-        cancel_edit: "Cancel edit",
-        review_page: "Create public page",
+        source_help: "Add when workflow varies an existing public run.",
+        cancel_edit: "Cancel",
+        review_page: "Create page",
         exact_public_preview: "Exact public preview",
         observed_evidence: "Observed evidence",
         use_workflow: "Use workflow",
@@ -197,7 +213,7 @@ pub fn public_run_copy() -> PublicRunCopy {
         publication_trace_not_found: "This contribution is no longer available to this account.",
         publication_source_not_found: "The source public run is no longer available.",
         publication_invalid: "The page was refused. Remove private data, verify the evidence, and review it again.",
-        publication_unavailable: "The public page could not be changed. Retry the request.",
+        publication_unavailable: "Public page could not be changed. Review again and retry.",
         credential_storage_warning: "The page changed, but the rotated account session could not be saved. Sign in again before the next account action.",
         task_outcome_choices: [
             PublicRunValueLabel {
@@ -276,7 +292,7 @@ pub fn public_run_copy() -> PublicRunCopy {
             },
             PublicRunValueLabel {
                 value: "received",
-                label: "Received",
+                label: crate::history_copy::RECEIVED,
             },
             PublicRunValueLabel {
                 value: "accepted",
@@ -284,33 +300,38 @@ pub fn public_run_copy() -> PublicRunCopy {
             },
             PublicRunValueLabel {
                 value: "quarantined",
-                label: "Held for privacy review",
+                label: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
             },
             PublicRunValueLabel {
                 value: "awaiting_pii_backstop",
-                label: "Waiting for privacy review",
+                label: crate::history_copy::WAITING_FOR_PRIVACY_REVIEW,
             },
             PublicRunValueLabel {
                 value: "rejected",
-                label: "Rejected",
+                label: crate::history_copy::REJECTED,
             },
             PublicRunValueLabel {
                 value: "revoked",
-                label: "Withdrawn",
+                label: crate::history_copy::WITHDRAWN,
             },
             PublicRunValueLabel {
                 value: "withdrawn",
-                label: "Withdrawn",
+                label: crate::history_copy::WITHDRAWN,
             },
             PublicRunValueLabel {
                 value: "expired",
-                label: "Expired",
+                label: crate::history_copy::EXPIRED,
             },
             PublicRunValueLabel {
                 value: "purged",
-                label: "Purged",
+                label: crate::history_copy::PURGED,
             },
         ],
+        contribution_status_unavailable: crate::history_copy::STATUS_UNAVAILABLE,
+        history_status_labels: crate::history_copy::STATUS_LABELS.map(|row| PublicRunValueLabel {
+            value: row.status,
+            label: row.label,
+        }),
         permitted_use_choices: [
             PublicRunValueLabel {
                 value: "debugging",
@@ -481,7 +502,19 @@ mod tests {
         assert_eq!(copy.feedback_choices.len(), 3);
         assert_eq!(copy.evidence_kind_choices.len(), 9);
         assert_eq!(copy.contribution_status_choices.len(), 10);
+        assert_eq!(
+            copy.contribution_status_unavailable,
+            crate::history_copy::STATUS_UNAVAILABLE
+        );
         assert_eq!(copy.permitted_use_choices.len(), 6);
+        // History's table is the core's, row for row.
+        for (exported, row) in copy
+            .history_status_labels
+            .iter()
+            .zip(crate::history_copy::STATUS_LABELS)
+        {
+            assert_eq!((exported.value, exported.label), (row.status, row.label));
+        }
         assert!(
             copy.contribution_status_choices
                 .iter()

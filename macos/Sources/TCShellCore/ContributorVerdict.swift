@@ -54,7 +54,7 @@ public enum VerdictCopy {
     /// The bulk verdict control beside `Submit all`. The plain button stays
     /// a one-click unanswered submit; this is the opt-in path for answering
     /// once for the whole group.
-    public static let submitAllAs = "Submit all as..."
+    public static let submitAllAs = "Submit as..."
     public static let submitAllAsTooltip =
         "Record the same outcome for every session in this group."
 }

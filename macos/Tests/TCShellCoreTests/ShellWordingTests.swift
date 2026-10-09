@@ -36,18 +36,16 @@ final class ShellWordingTests: XCTestCase {
 
         // TCShellCore's copy types -- transcribed from the same shared design
         // the Windows interop classes were, and the first thing Slice 1 moves.
-        "TCShellCore/ArmingOffer.swift": 4,
         "TCShellCore/ContributorVerdict.swift": 4,
         "TCShellCore/CorrectionCopy.swift": 4,
         "TCShellCore/DailyBudgetCopy.swift": 6,
         "TCShellCore/MenuBarStatus.swift": 4,
         "TCShellCore/OriginalSearchOutcome.swift": 4,
-        "TCShellCore/ProjectArmingCopy.swift": 4,
-        "TCShellCore/ProjectIgnoreCopy.swift": 9,
-        "TCShellCore/ProjectRow.swift": 3,
-        "TCShellCore/RedactionLabels.swift": 3,
+        // Lowered from 2 (#1273 review): the line under the unresolved bucket
+        // is the core's (`MonitorTreeCopy.unresolved_bucket_note`).
+        "TCShellCore/ProjectRow.swift": 1,
+        "TCShellCore/RedactionLabels.swift": 1,
         "TCShellCore/RedactionMarks.swift": 2,
-        "TCShellCore/RedactionSummary.swift": 7,
         "TCShellCore/ScrubDetectors.swift": 2,
         "TCShellCore/SourceCandidate.swift": 5,
         "TCShellCore/StateDirectory.swift": 2,
@@ -55,38 +53,55 @@ final class ShellWordingTests: XCTestCase {
         "TCShellCore/SubmitToast.swift": 10,
 
         // The app model and its non-view surfaces.
-        "TraceCommonsApp/AppDelegate.swift": 1,
         "TraceCommonsApp/AppModel.swift": 8,
-        "TraceCommonsApp/HealthCopy.swift": 23,
+        // Lowered from 20: the label sentences moved to the core (`tc_health_copy_json`).
+        // Lowered from 10 at R15: `QueueStateCopy` (8 sentences, no caller) was
+        // deleted; the 2 left are the on-hold fallback's.
+        "TraceCommonsApp/HealthCopy.swift": 2,
         "TraceCommonsApp/Notifier.swift": 2,
-        "TraceCommonsApp/SelfTest.swift": 15,
+        "TraceCommonsApp/SelfTest.swift": 14,
 
         // The SwiftUI views, which carry their own labels and help text.
-        "TraceCommonsApp/Views/ActionMessageBanner.swift": 2,
-        "TraceCommonsApp/Views/BrandMark.swift": 1,
-        "TraceCommonsApp/Views/ConsentScopesView.swift": 7,
-        "TraceCommonsApp/Views/CreditRecordView.swift": 9,
-        "TraceCommonsApp/Views/HistoryView.swift": 26,
-        "TraceCommonsApp/Views/MainWindowView.swift": 14,
-        "TraceCommonsApp/Views/MenuBarView.swift": 11,
-        "TraceCommonsApp/Views/OnboardingConnectView.swift": 7,
-        "TraceCommonsApp/Views/OnboardingCoordinatorView.swift": 5,
-        "TraceCommonsApp/Views/OnboardingDoneView.swift": 8,
-        "TraceCommonsApp/Views/OnboardingPrivacyScanView.swift": 5,
-        "TraceCommonsApp/Views/OnboardingProjectsView.swift": 4,
-        "TraceCommonsApp/Views/OnboardingRootsView.swift": 5,
-        "TraceCommonsApp/Views/OnboardingWelcomeView.swift": 8,
-        "TraceCommonsApp/Views/PreviewSheet.swift": 38,
-        "TraceCommonsApp/Views/PublicProfileCopy.swift": 46,
+        // R15 deleted ActionMessageBanner.swift (2: its dismiss word moved to
+        // SettingsView.swift; its help line left with the banner, the glass
+        // notices dismiss with `MonitorTracesCopy.dismiss`), BrandMark.swift
+        // (1), CreditRecordView.swift (9: the Home credit card carries the
+        // credit record in the core's words) and MainWindowView.swift (14:
+        // the Monitor's words are the core's `MonitorScreensCopy`).
+        // HistoryView.swift: deleted at zero, 2026-10-07 -- `HistoryLegacyWords`
+        // reads the core's `shell_words_copy` (#1146 parity).
+        // MenuBarView.swift: deleted at zero, 2026-10-06 -- the pause words
+        // left for the core's shell table (#1146 parity).
+        // Lowered from 38: Look inside is read-only (#1241 Task 7) -- its
+        // verdict, correction, Contribute and header lines left, and Ron's
+        // words come from the core's `look_inside` table. Then 24 -> 14:
+        // the What's in it and Permissions tabs, which nothing drew any
+        // more, were deleted (their facts are the session card's). Then
+        // 14 -> 13: Ron's glass search field states its prompt once.
+        "TraceCommonsApp/Views/PreviewSheet.swift": 9,
+        // Lowered from 46 at #1146 parity (2026-10-07): the profile's words are
+        // the core's (`shell_words_copy`). What is left is
+        // `PublicProfileCopyCheck`'s defect lines, which name a broken
+        // property of the decoded table rather than say anything to a
+        // contributor about their profile.
+        "TraceCommonsApp/Views/PublicProfileCopy.swift": 14,
         // Back to 3: the withheld line briefly lived here and is now
         // `tc_contribution_withheld_line`, assembled in the Rust and shared
         // with the other two shells. Do not raise this again for it.
-        "TraceCommonsApp/Views/QueueFolderRow.swift": 3,
-        "TraceCommonsApp/Views/QueueView.swift": 25,
-        "TraceCommonsApp/Views/ScrubbingCaveat.swift": 4,
-        "TraceCommonsApp/Views/SettingsView.swift": 40,
-        "TraceCommonsApp/Views/WhatGetsRemovedSheet.swift": 4,
-        "TraceCommonsApp/Views/WithdrawalCopy.swift": 49,
+        // Lowered from 3 at R15: the row's Open help left with the row (the
+        // glass folder row expands in place).
+        "TraceCommonsApp/Views/QueueFolderRow.swift": 2,
+        // QueueView.swift and ScrubbingCaveat.swift: deleted at zero,
+        // 2026-10-07 -- `QueueLegacyWords` and `ScrubbingCaveat` read the
+        // core's `shell_words_copy` (#1146 parity).
+        // SettingsView.swift: deleted at zero, 2026-10-08 -- the Settings
+        // sections' sentences are the core's (`shell_words_copy`, #1146
+        // parity), and `ActionNoticeWords.dismissWord` reads the core's
+        // `dismiss_action` rather than its own "Dismiss this message".
+        // Lowered from 48 at #1146 parity (2026-10-07): the withdrawal words
+        // are the core's (`shell_words_copy`). What is left is
+        // `WithdrawalCopyCheck`'s defect lines.
+        "TraceCommonsApp/Views/WithdrawalCopy.swift": 23,
     ]
 
     /// The surfaces whose wording already comes from Rust. Nothing may ever
@@ -94,11 +109,20 @@ final class ShellWordingTests: XCTestCase {
     /// and an entry here would be a quiet way of undoing that.
     private static let rustOwnedSurfaces = [
         "TCBridge/TCConsentCopy.swift",
+        // K3 (#1173): the copy tables that used to be written here.
+        "TCBridge/TCCoreCopy.swift",
+        "TCShellCore/AutomaticGrantCopy.swift",
+        "TCShellCore/PrivacyScanCopy.swift",
+        "TCShellCore/ProjectArmingCopy.swift",
+        "TCShellCore/ProjectIgnoreCopy.swift",
+        "TCShellCore/QuitPrompt.swift",
+        "TCShellCore/RedactionSummary.swift",
         "TCBridge/TCContributionEligibility.swift",
         "TCBridge/TCRoutingCopy.swift",
         "TCBridge/TCSkillLearning.swift",
         "TCShellCore/ConsentCopy.swift",
         "TCShellCore/EligibilitySurface.swift",
+        "TCShellCore/FirstRunCopy.swift",
         "TCShellCore/ReadGate.swift",
         "TCShellCore/RoutingCopy.swift",
         "TCShellCore/RoutingSurface.swift",
@@ -133,9 +157,11 @@ final class ShellWordingTests: XCTestCase {
 
         // A scan that found nothing would turn this test into a pass over
         // nothing, which is the failure mode the Windows guard names
-        // explicitly. There are 96 Swift sources under macos/Sources today.
+        // explicitly. There are 237 Swift sources under macos/Sources today;
+        // the floor sits just under that, so a scan that loses part of the
+        // tree fails rather than passing over less of it.
         XCTAssertGreaterThanOrEqual(
-            scanned.count, 86,
+            scanned.count, 232,
             "only \(scanned.count) Swift sources were scanned under \(ShellSources.root().path); "
                 + "the whole tree is expected")
 
@@ -175,7 +201,7 @@ final class ShellWordingTests: XCTestCase {
     /// A literal nested inside an interpolation does not end the literal
     /// that holds it.
     ///
-    /// The line is `ConsentScopesView.swift`'s continue button, verbatim. A
+    /// The line is the retired consent step's continue button, verbatim. A
     /// walker that steps over `\(` as a plain two-character escape runs on
     /// into the expression, meets the `"` that opens `"permission"`, and
     /// reads it as the close of the outer literal -- one sentence becomes

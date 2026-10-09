@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Text.Json;
 using TraceCommons.Interop;
 using Xunit;
@@ -72,7 +76,7 @@ public class WatchCopyTests
 
     /// <summary>
     /// The note REPLACES the state line rather than joining it: "you'll always
-    /// be asked" already says what "Ask me first" says, and a row carrying both
+    /// be asked" already says what "Ask me" says, and a row carrying both
     /// says the same thing twice.
     /// </summary>
     [Fact]
@@ -96,18 +100,73 @@ public class WatchCopyTests
         Assert.Equal(WatchCopy.UnknownNote, WatchCopy.SubLineFor(true, "ignore"));
     }
 
+    /// <summary>
+    /// Owner decision, 2026-10-02: a row names its mode by the core's one name
+    /// (<c>project_copy::FOLDER_MODE_LABELS</c>, the disclosure bundle's
+    /// <c>folder_mode_labels</c>), the words Settings, the pill and every other
+    /// shell use. <c>ask</c> is this shell's spelling of <c>notify_only</c>.
+    /// </summary>
     [Theory]
-    [InlineData("ask", "Ask me first")]
-    [InlineData("notify_only", "Ask me first")]
-    [InlineData("ignore", "Ignored")]
-    [InlineData("auto_upload", "Contributed without asking")]
-    public void AnOrdinaryRowShowsItsModeInSettingsVocabulary(string mode, string expected)
+    [InlineData("ask", "notify_only")]
+    [InlineData("notify_only", "notify_only")]
+    [InlineData("ignore", "ignore")]
+    [InlineData("auto_upload", "auto_upload")]
+    public void AnOrdinaryRowShowsItsModeByTheCoresName(string mode, string wire)
     {
-        Assert.Equal(expected, WatchCopy.SubLineFor(false, mode));
+        Assert.Equal(FolderModeLabelsFromCore()[wire], WatchCopy.SubLineFor(false, mode));
     }
 
     /// <summary>
-    /// An armed row says it is armed. Reporting "Ask me first" there would
+    /// The core's table names exactly the three modes, each differently, and
+    /// this shell's words for them are that table's, never its own.
+    /// </summary>
+    [Fact]
+    public void TheModeNamesAreTheCoresAndNoneIsTypedHere()
+    {
+        Dictionary<string, string> core = FolderModeLabelsFromCore();
+        Assert.Equal(new[] { "auto_upload", "ignore", "notify_only" }, core.Keys.OrderBy(k => k, StringComparer.Ordinal));
+        Assert.Equal(3, core.Values.Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(core["notify_only"], WatchCopy.AskMeFirst);
+        Assert.Equal(core["ignore"], WatchCopy.Ignored);
+        Assert.Equal(core["auto_upload"], WatchCopy.Armed);
+        Assert.Equal(core["notify_only"], WatchCopy.RestoreAction);
+        Assert.Equal(core["ignore"], WatchCopy.IgnoreAction);
+
+        foreach (string file in new[]
+                 {
+                     Path.Combine("TraceCommons.Interop", "WatchCopy.cs.txt"),
+                     Path.Combine("TraceCommons.App", "ViewModels", "ContributorSettingsViewModel.cs.txt"),
+                 })
+        {
+            string source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "shell-source", file));
+            foreach (string word in core.Values.Concat(new[]
+                     {
+                         "Ask me first", "Ignored", "Ignore", "Contributed without asking", "Ask again",
+                         "Never offered", "Asks you first",
+                     }))
+            {
+                Assert.DoesNotContain("\"" + word + "\"", source, StringComparison.Ordinal);
+            }
+        }
+    }
+
+    /// <summary>The disclosure bundle's <c>folder_mode_labels</c>, read raw.</summary>
+    private static Dictionary<string, string> FolderModeLabelsFromCore()
+    {
+        string? json = NativeMethods.TakeOwnedString(NativeMethods.tc_contributor_disclosure_copy_json());
+        Assert.NotNull(json);
+        using JsonDocument doc = JsonDocument.Parse(json!);
+        var table = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (JsonProperty row in doc.RootElement.GetProperty("folder_mode_labels").EnumerateObject())
+        {
+            table[row.Name] = row.Value.GetString()!;
+        }
+
+        return table;
+    }
+
+    /// <summary>
+    /// An armed row says it is armed. Reporting "Ask me" there would
     /// state the opposite of what the daemon does with the next session, and
     /// rendering nothing leaves the row that most needs a state line without
     /// one -- which is what this screen did while the armed mode had no arm.
@@ -145,12 +204,12 @@ public class WatchCopyTests
     /// Settings drive the same field, and they read their labels from here.
     /// </summary>
     [Theory]
-    [InlineData("ask", "Ignore")]
-    [InlineData("ignore", "Ask again")]
-    [InlineData("auto_upload", "Ask again")]
-    public void TheButtonNamesTheTransitionOnceForBothSurfaces(string mode, string expected)
+    [InlineData("ask", "ignore")]
+    [InlineData("ignore", "notify_only")]
+    [InlineData("auto_upload", "notify_only")]
+    public void TheButtonNamesTheModeItSetsOnceForBothSurfaces(string mode, string wire)
     {
-        Assert.Equal(expected, WatchCopy.ActionFor(mode));
+        Assert.Equal(FolderModeLabelsFromCore()[wire], WatchCopy.ActionFor(mode));
     }
 
     /// <summary>

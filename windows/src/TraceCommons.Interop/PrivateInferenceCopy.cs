@@ -17,6 +17,30 @@ namespace TraceCommons.Interop;
 /// </summary>
 public sealed record PrivateInferenceCopy
 {
+    [JsonPropertyName("account_contribution_refresh")]
+    public string AccountContributionRefresh { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_checking")]
+    public string AccountContributionChecking { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_unavailable")]
+    public string AccountContributionUnavailable { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_pending_credit")]
+    public string AccountContributionPendingCredit { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_heading")]
+    public string AccountContributionHeading { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_refresh_action")]
+    public string AccountContributionRefreshAction { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_invite_code")]
+    public string AccountContributionInviteCode { get; init; } = string.Empty;
+
+    [JsonPropertyName("account_contribution_redeem_action")]
+    public string AccountContributionRedeemAction { get; init; } = string.Empty;
+
     [JsonPropertyName("offer_title")]
     public string OfferTitle { get; init; } = string.Empty;
 
@@ -29,6 +53,17 @@ public sealed record PrivateInferenceCopy
     /// </summary>
     [JsonPropertyName("offer_exposure")]
     public string OfferExposure { get; init; } = string.Empty;
+
+    /// <summary>
+    /// <see cref="OfferExposure"/> in one line, for an offer that shows its
+    /// longer paragraphs behind <see cref="OfferLearnMore"/>.
+    /// </summary>
+    [JsonPropertyName("offer_exposure_short")]
+    public string OfferExposureShort { get; init; } = string.Empty;
+
+    /// <summary>The offer's link to its longer paragraphs.</summary>
+    [JsonPropertyName("offer_learn_more")]
+    public string OfferLearnMore { get; init; } = string.Empty;
 
     [JsonPropertyName("offer_no_repoint")]
     public string OfferNoRepoint { get; init; } = string.Empty;
@@ -646,13 +681,69 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("balance_no_remaining")]
     public string BalanceNoRemaining { get; init; } = string.Empty;
 
+    /// <summary>The Private AI page's panel chrome and the Inference inspector's labels (#1146).</summary>
+    [JsonPropertyName("panel_refresh")]
+    public string PanelRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("panel_tools_eyebrow")]
+    public string PanelToolsEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_connection_eyebrow")]
+    public string PanelConnectionEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_eyebrow")]
+    public string PanelBalanceEyebrow { get; init; } = string.Empty;
+    [JsonPropertyName("panel_balance_refresh")]
+    public string PanelBalanceRefresh { get; init; } = string.Empty;
+    [JsonPropertyName("stat_inference_access")]
+    public string StatInferenceAccess { get; init; } = string.Empty;
+    [JsonPropertyName("stat_runtime")]
+    public string StatRuntime { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_on")]
+    public string RuntimeOn { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_off")]
+    public string RuntimeOff { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_stopping")]
+    public string RuntimeStopping { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_elsewhere")]
+    public string RuntimeElsewhere { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_not_running")]
+    public string RuntimeNotRunning { get; init; } = string.Empty;
+    [JsonPropertyName("runtime_unknown")]
+    public string RuntimeUnknown { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_tools_connected")]
+    public string InspectorToolsConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_connected")]
+    public string InspectorConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_not_connected")]
+    public string InspectorNotConnected { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_status")]
+    public string InspectorStatus { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_credential")]
+    public string InspectorCredential { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_connected_tools")]
+    public string InspectorConnectedTools { get; init; } = string.Empty;
+    [JsonPropertyName("inspector_none")]
+    public string InspectorNone { get; init; } = string.Empty;
+    [JsonPropertyName("harness_caption_connected")]
+    public string HarnessCaptionConnected { get; init; } = string.Empty;
+    [JsonPropertyName("harness_caption_not_connected")]
+    public string HarnessCaptionNotConnected { get; init; } = string.Empty;
+
     /// <summary>Every sentence for the complete-payload check, not a rendering order.</summary>
     public string[] Sentences =>
         new[]
         {
+            AccountContributionRefresh,
+            AccountContributionChecking,
+            AccountContributionUnavailable,
+            AccountContributionPendingCredit,
+            AccountContributionHeading,
+            AccountContributionRefreshAction,
+            AccountContributionInviteCode,
+            AccountContributionRedeemAction,
             OfferTitle,
             OfferWhat,
             OfferExposure,
+            OfferExposureShort,
+            OfferLearnMore,
             OfferNoRepoint,
             OfferAccept,
             OfferDecline,
@@ -791,5 +882,27 @@ public sealed record PrivateInferenceCopy
             BalanceUnknown,
             BalanceUnreported,
             BalanceNoRemaining,
+            PanelRefresh,
+            PanelToolsEyebrow,
+            PanelConnectionEyebrow,
+            PanelBalanceEyebrow,
+            PanelBalanceRefresh,
+            StatInferenceAccess,
+            StatRuntime,
+            RuntimeOn,
+            RuntimeOff,
+            RuntimeStopping,
+            RuntimeElsewhere,
+            RuntimeNotRunning,
+            RuntimeUnknown,
+            InspectorToolsConnected,
+            InspectorConnected,
+            InspectorNotConnected,
+            InspectorStatus,
+            InspectorCredential,
+            InspectorConnectedTools,
+            InspectorNone,
+            HarnessCaptionConnected,
+            HarnessCaptionNotConnected,
         };
 }

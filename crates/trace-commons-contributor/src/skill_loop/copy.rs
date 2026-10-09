@@ -8,6 +8,7 @@ pub struct SkillLearningCopy {
     pub heading: &'static str,
     pub promise: &'static str,
     pub supported_family: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub learn_action: &'static str,
     pub learning: &'static str,
     pub candidate_heading: &'static str,
@@ -25,6 +26,7 @@ pub struct SkillLearningCopy {
     pub digest: &'static str,
     pub evaluation_disclosure: &'static str,
     pub review_budget_format: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub approve_and_test: &'static str,
     pub edit_skill: &'static str,
     pub testing: &'static str,
@@ -38,6 +40,7 @@ pub struct SkillLearningCopy {
     pub inspect_runs: &'static str,
     pub model_and_budget: &'static str,
     pub model_budget_format: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub open_fixture_source: &'static str,
     pub model_output: &'static str,
     pub edits: &'static str,
@@ -67,6 +70,12 @@ pub struct SkillLearningCopy {
     pub rolling_back: &'static str,
     pub rollback_disclosure: &'static str,
     pub rollback_incomplete: &'static str,
+    /// The confirmation before a rollback (owner ruling, 2026-10-06):
+    /// [`Self::rollback`] confirms it, `rollback_keep` leaves the skill
+    /// installed. Approved 2026-10-07.
+    pub rollback_confirm_title: &'static str,
+    pub rollback_confirm_body: &'static str,
+    pub rollback_keep: &'static str,
     pub unavailable: &'static str,
 }
 
@@ -76,7 +85,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         heading: "Learn from session",
         promise: "Turn this correction into an Agent Skill, score its plans and applicability on held-out repository scenarios, then install only a version that improves on both controls.",
         supported_family: "The first supported family repairs generated files through their authoritative source.",
-        learn_action: "Learn from session",
+        learn_action: "Learn",
         learning: "Learning…",
         candidate_heading: "Candidate skill",
         generated_source: "Generated source",
@@ -93,7 +102,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         digest: "SHA-256",
         evaluation_disclosure: "Approving starts the disclosed NEAR AI Cloud requests. Every arm uses the same private model and output limit. Requests contain public repository fixtures and the exact skill package shown above. Source correction and evidence fields stay on this device; remove anything private you copied into the package before approving.",
         review_budget_format: "%1$d model requests; %2$d output tokens per request; model owner must be %3$@.",
-        approve_and_test: "Approve and test",
+        approve_and_test: "Approve & test",
         edit_skill: "Edit skill",
         testing: "Scoring held-out plans…",
         results: "Held-out plan results",
@@ -106,7 +115,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         inspect_runs: "Inspect all runs",
         model_and_budget: "Model and budget",
         model_budget_format: "Owner %1$@ · %2$d tasks · %3$d output tokens per run",
-        open_fixture_source: "Open fixture source",
+        open_fixture_source: "View source",
         model_output: "Full model output",
         edits: "Direct source edits",
         commands: "Commands",
@@ -135,7 +144,10 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         rolling_back: "Rolling back…",
         rollback_disclosure: "Rollback is available while Trace Commons can verify the installed package has not changed.",
         rollback_incomplete: "The skill could not be removed. Inspect the installed directory before retrying.",
-        unavailable: "The skill workflow could not complete. Retry the current step.",
+        rollback_confirm_title: "Roll back this skill?",
+        rollback_confirm_body: "Trace Commons removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed.",
+        rollback_keep: "Keep",
+        unavailable: "Skill workflow could not complete. Retry this step.",
     }
 }
 
@@ -198,7 +210,10 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
             "The skill must pass every applicability check and its repository plans must beat both controls without regressions before installation."
         }
         "skill-install-occupied" => {
-            "A skill already occupies this path. Choose another name or remove it, then retry."
+            // #1146's `skill-install-preview.tsx`, then the remedy. Approved 2026-10-07: it was "A skill
+            // already occupies this path. Choose another name or remove it,
+            // then retry."
+            "Target path is occupied. Installation refused. Choose another name or remove what is there, then retry."
         }
         "skill-install-plan-changed" | "skill-review-changed" => {
             "The reviewed skill changed. Review the exact package again."
@@ -253,6 +268,25 @@ mod tests {
             skill_learning_error_line("skill-evaluation-did-not-pass").contains("repository plans")
         );
         assert_eq!(skill_learning_error_line("unknown"), copy.unavailable);
+    }
+
+    /// A rollback asks first (owner ruling, 2026-10-06), and the question
+    /// says what is removed and that changed files are left alone, as
+    /// `rollback_codex_install` does.
+    #[test]
+    fn a_rollback_is_confirmed_in_the_cores_words() {
+        let copy = skill_learning_copy();
+        assert!(copy.rollback_confirm_title.ends_with('?'));
+        assert!(copy.rollback_confirm_body.contains("removes"));
+        assert!(copy.rollback_confirm_body.contains("nothing is removed"));
+        assert_ne!(copy.rollback_keep, copy.rollback);
+        for word in [
+            copy.rollback_confirm_title,
+            copy.rollback_confirm_body,
+            copy.rollback_keep,
+        ] {
+            assert!(!word.is_empty());
+        }
     }
 
     #[test]

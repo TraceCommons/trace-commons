@@ -55,10 +55,10 @@ public class ShellWordingTests
             // than in a view model so a machine that cannot build WinUI can
             // still test it -- which is precisely why the same sentences are
             // written a second time in the GTK and macOS shells today.
-            { "TraceCommons.Interop/ArmingOffer.cs", 4 },
+            { "TraceCommons.Interop/ArmingOffer.cs", 3 },
             { "TraceCommons.Interop/CorrectionCopy.cs", 4 },
             { "TraceCommons.Interop/HealthCopy.cs", 22 },
-            { "TraceCommons.Interop/HistoryCopy.cs", 30 },
+            { "TraceCommons.Interop/HistoryCopy.cs", 24 },
             { "TraceCommons.Interop/OriginalSearchOutcome.cs", 4 },
             // PendingInviteActivation.cs predates this guard: it merged to
             // main before the baseline landed, so its three notice sentences
@@ -79,36 +79,42 @@ public class ShellWordingTests
             { "TraceCommons.Interop/UnresolvedBucketCopy.cs", 3 },
             { "TraceCommons.Interop/UpdateProtocol.cs", 10 },
             { "TraceCommons.Interop/VerdictCopy.cs", 4 },
-            { "TraceCommons.Interop/WatchCopy.cs", 8 },
+            { "TraceCommons.Interop/WatchCopy.cs", 7 },
             { "TraceCommons.Interop/WeekBandCopy.cs", 1 },
-            { "TraceCommons.Interop/WithdrawCopy.cs", 29 },
+            { "TraceCommons.Interop/WithdrawCopy.cs", 26 },
 
             // View models that compose a sentence rather than reading one.
             // ContributorSettingsViewModel is the file the settings-screen
             // guard already watches for the witness row specifically; the rest
             // of its wording is unmoved. Four of its sentences moved into
             // WatchCopy.cs, which is why this entry ratcheted down.
-            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 18 },
+            { "TraceCommons.App/ViewModels/ContributorSettingsViewModel.cs", 15 },
             { "TraceCommons.App/ViewModels/HistoryViewModel.cs", 4 },
             { "TraceCommons.App/ViewModels/MainViewModel.cs", 18 },
-            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 6 },
+            { "TraceCommons.App/ViewModels/OnboardingViewModel.cs", 2 },
             { "TraceCommons.App/ViewModels/PreviewSheetViewModel.cs", 10 },
             { "TraceCommons.App/ViewModels/QueueGroupViewModel.cs", 1 },
             { "TraceCommons.App/ViewModels/SessionRootsViewModel.cs", 2 },
 
             // Window and control code-behind: dialog bodies and one fallback
             // label, written at the call site.
-            { "TraceCommons.App/MainWindow.xaml.cs", 3 },
+            // Lowered from 3: the quit prompt is now the core's
+            // (tc_quit_prompt_json).
+            { "TraceCommons.App/MainWindow.xaml.cs", 1 },
             { "TraceCommons.App/StartupRegistration.cs", 4 },
-            { "TraceCommons.App/TrayIcon.cs", 3 },
+            // Lowered from 3 (button rule, 2026-10-08): "For 1 hour" became
+            // "1 hour", a length rather than a sentence.
+            { "TraceCommons.App/TrayIcon.cs", 2 },
 
             // XAML views. Literal Text=, Header=, PlaceholderText= and
             // ToolTipService.ToolTip= content -- the accessibility labels
             // included, which are as much a rename risk as anything drawn.
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
-            { "TraceCommons.App/Controls/SettingsView.xaml", 16 },
-            { "TraceCommons.App/MainWindow.xaml", 18 },
+            { "TraceCommons.App/Controls/SettingsView.xaml", 15 },
+            // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
+            // "For 1 hour" became "1 hour".
+            { "TraceCommons.App/MainWindow.xaml", 17 },
             { "TraceCommons.App/OnboardingWindow.xaml", 16 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };

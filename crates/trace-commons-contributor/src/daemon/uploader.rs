@@ -89,6 +89,14 @@ pub enum UploadDecision {
         reason_label: String,
         pin: String,
         attested_inference: Option<crate::witness::inference_record::InferenceAttestationRecord>,
+        /// The serialized size, in bytes, of the certified bytes `pin` names
+        /// (K10) -- the witness's own `envelope_bytes.len()`, measured fresh
+        /// when this decision was reached from a witness response this call
+        /// just received, or carried forward from `QueueEntry::would_send_bytes`
+        /// when it instead re-affirms a pin an earlier pass already measured
+        /// (see `Uploader::upload_entry`'s witness re-affirmation branch).
+        /// `None` only when neither is available.
+        would_send_bytes: Option<u64>,
     },
     /// Approved on the contributor's behalf and held for a person by the
     /// Scrub check (K4 of #1118): under Manual, before anything was built;
@@ -108,6 +116,10 @@ pub enum UploadDecision {
         reason_label: String,
         reasons: Vec<&'static str>,
         pin: Option<(String, super::second_look::ScrubCounts)>,
+        /// The serialized size, in bytes, of the envelope `pin` names (K10).
+        /// `Some` only alongside a `Some` pin, and `None` whenever `pin` is
+        /// `None` for any of the reasons documented above.
+        would_send_bytes: Option<u64>,
     },
     /// Network, auth, or transient classifier failure.
     Failed { reason_label: String },
@@ -255,6 +267,10 @@ fn hold_for_review(
     witnessed: crate::witness::transport::WitnessedEnvelope,
     attested_inference: crate::witness::inference_record::InferenceAttestationRecord,
 ) -> UploadDecision {
+    // K10: measured before `witnessed` moves into the artifact below -- the
+    // exact wire bytes this held review's upload will carry, once a person
+    // clears it.
+    let would_send_bytes = Some(witnessed.envelope_bytes.len() as u64);
     let artifact = super::approved_envelope::WitnessReviewArtifact::new(
         witnessed,
         session_hash.to_string(),
@@ -269,6 +285,7 @@ fn hold_for_review(
                 reason_label,
                 pin,
                 attested_inference: Some(attested_inference),
+                would_send_bytes,
             }
         }
         _ => UploadDecision::ApprovalStale { reason_label },
@@ -283,14 +300,19 @@ fn hold_for_review(
 ///
 /// `None` when it cannot be saved. The entry is still held, only without
 /// the pin, so it reads not yet scrubbed and a person's review builds again.
+///
+/// Also returns the envelope's serialized size (K10), measured from the
+/// same value the digest and the save both already touch, so a held entry's
+/// `would_send_bytes` is never `Some` without a `pin` beside it.
 fn pin_second_look(
     store: &ConfigStore,
     entry_id: Uuid,
     envelope: &TraceContributionEnvelope,
-) -> Option<String> {
+) -> Option<(String, u64)> {
     let digest = super::preview::envelope_digest(envelope).ok()?;
     super::approved_envelope::save(store, entry_id, envelope).ok()?;
-    Some(digest)
+    let size = crate::envelope::envelope_size(envelope).ok()? as u64;
+    Some((digest, size))
 }
 
 /// Map a pipeline outcome onto a daemon decision, so the queue records a
@@ -346,6 +368,7 @@ fn decision_for(
             reason_label,
             reasons,
             pin: None,
+            would_send_bytes: None,
         },
     }
 }
@@ -512,6 +535,7 @@ impl Uploader<'_, '_> {
                 reason_label: super::second_look::REASON_SCRUB_CHECK_MANUAL.to_string(),
                 reasons: Vec::new(),
                 pin: None,
+                would_send_bytes: None,
             });
         }
         if !enrollment_is_live(self.store) {
@@ -623,6 +647,12 @@ impl Uploader<'_, '_> {
                                     .to_string(),
                                 pin,
                                 attested_inference: entry.attested_inference.clone(),
+                                // Re-affirming an already-pinned review, not
+                                // measuring fresh bytes (K10): carry the
+                                // entry's own recorded figure forward rather
+                                // than reporting `None` for a bound that has
+                                // not actually changed.
+                                would_send_bytes: entry.would_send_bytes,
                             });
                         }
                         return Ok(UploadDecision::ApprovalStale {
@@ -731,13 +761,16 @@ impl Uploader<'_, '_> {
                 reasons,
                 counts,
                 envelope,
-            } => UploadDecision::HeldForSecondLook {
-                reason_label,
-                reasons,
-                pin: envelope
-                    .and_then(|envelope| pin_second_look(self.store, entry.entry_id, &envelope))
-                    .map(|digest| (digest, counts)),
-            },
+            } => {
+                let pinned = envelope
+                    .and_then(|envelope| pin_second_look(self.store, entry.entry_id, &envelope));
+                UploadDecision::HeldForSecondLook {
+                    reason_label,
+                    reasons,
+                    would_send_bytes: pinned.as_ref().map(|(_, size)| *size),
+                    pin: pinned.map(|(digest, _)| (digest, counts)),
+                }
+            }
             outcome => decision_for(
                 outcome,
                 self.ctx.last_receipt_shipped(),
@@ -813,6 +846,7 @@ mod tests {
             reason_label,
             pin,
             attested_inference,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -1452,6 +1486,7 @@ mod tests {
             reason_label,
             reasons,
             pin,
+            ..
         } = decision
         else {
             panic!("expected a hold, got {decision:?}");
@@ -1667,7 +1702,8 @@ mod tests {
         assert!(q.hold_with_scrub_pin(
             entry.entry_id,
             REASON_SECOND_LOOK_REVIEW_REQUIRED,
-            Some((digest.as_str(), counts))
+            Some((digest.as_str(), counts)),
+            None
         ));
         let held = q.get(entry.entry_id).unwrap().clone();
         assert!(held.held_for_review());
@@ -1764,7 +1800,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(&store).unwrap();
         let cfg = crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -1838,7 +1874,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

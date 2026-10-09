@@ -1,26 +1,41 @@
 import SwiftUI
 
+/// A badge's value: a count, or unknown (a dash).
+public enum GlassBadgeValue: Sendable, Equatable {
+    case count(Int)
+    case unknown
+}
+
 /// One segment of `GlassSegmentedTabs`.
 public struct GlassSegment<Value: Hashable>: Identifiable {
     public let value: Value
     public let title: String
     /// Decisions owed, as a count pill. Never queue depth or credit.
-    public let badge: Int?
-    /// A status dot after the title (Inference: what Private AI is doing).
+    public let badge: GlassBadgeValue?
+    /// A status dot after the title (Inference: whether Private AI is
+    /// answering). Colour alone, so pair it with `accessibilityValue`.
     public let dot: GlassStatus?
-    /// What the dot says, read to VoiceOver. The dot itself is hidden from
-    /// accessibility, so a segment with a dot needs one to be heard.
+    /// What the dot and the badge say, in words, for VoiceOver: the dot is
+    /// hidden from assistive tech, so a tab with one must carry its text
+    /// equivalent here, from the core's copy.
     public let accessibilityValue: String?
 
     public var id: Value { value }
 
+    public init(_ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil, accessibilityValue: String? = nil) {
+        self.init(title, value: value, badgeValue: badge.map(GlassBadgeValue.count), dot: dot,
+                  accessibilityValue: accessibilityValue)
+    }
+
+    /// `badgeValue: .unknown` draws a dash: a count the core did not give is
+    /// never shown as a number. Pass nil, or `.count(0)`, for no badge.
     public init(
-        _ title: String, value: Value, badge: Int? = nil, dot: GlassStatus? = nil,
+        _ title: String, value: Value, badgeValue: GlassBadgeValue?, dot: GlassStatus? = nil,
         accessibilityValue: String? = nil
     ) {
         self.title = title
         self.value = value
-        self.badge = badge
+        self.badge = badgeValue == .count(0) ? nil : badgeValue
         self.dot = dot
         self.accessibilityValue = accessibilityValue
     }
@@ -33,6 +48,7 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     private let segments: [GlassSegment<Value>]
     @Binding private var selection: Value
     private let floating: Bool
+    @State private var hovered: Value?
 
     public init(_ label: String, selection: Binding<Value>, segments: [GlassSegment<Value>], floating: Bool = false) {
         self.label = label
@@ -53,31 +69,52 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                         if let dot = segment.dot {
                             GlassStatusDot(dot, size: 6)
                         }
-                        if let badge = segment.badge {
-                            GlassBadge(count: badge, subtle: true)
+                        // With a text equivalent, the badge is not read on
+                        // its own: the segment's value says it in words.
+                        Group {
+                            switch segment.badge {
+                            case .count(let count): GlassBadge(count: count, subtle: true)
+                            case .unknown: GlassBadge(count: nil, subtle: true)
+                            case nil: EmptyView()
+                            }
                         }
+                        .accessibilityHidden(segment.accessibilityValue != nil)
                     }
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
-                    .foregroundStyle(selected ? GlassColor.textPrimary : (floating ? GlassColor.textSecondary : GlassColor.textTertiary))
+                    .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value, floating: floating))
                     .padding(.horizontal, floating ? 12 : 8)
+                    // The floating item is its label and 5pt above and
+                    // below (#1146 `.tc-segmented--floating` item).
+                    .padding(.vertical, floating ? 5 : 0)
                     .frame(maxWidth: floating ? nil : .infinity)
-                    .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
+                    .frame(minHeight: floating ? nil : GlassTokens.Size.tab)
                     .background {
+                        // The press darkens the selected fill, or a wash
+                        // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(Color.white.opacity(0.18))
+                                // #1146's floating selection: a brighter fill, no edge.
+                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
+                                    .glassPressedFill()
                                     .glassEdge(GlassTokens.Shadow.controlSelectedEdge, in: Capsule())
                             }
                         }
                     }
-                    .glassPressedFill()
+                    .glassPressedWash(Capsule())
                     .contentShape(Capsule())
                 }
                 .buttonStyle(GlassPressStyle())
-                .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
+                .onHover { inside in
+                    if inside {
+                        hovered = segment.value
+                    } else if hovered == segment.value {
+                        hovered = nil
+                    }
+                }
                 .accessibilityValue(segment.accessibilityValue ?? "")
+                .accessibilityAddTraits(selected ? [.isSelected, .isButton] : .isButton)
             }
         }
         .padding(2)
@@ -85,6 +122,15 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
         .glassSurface(floating ? .control : .well, floating: floating)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
+    }
+
+    /// A segment's label ink: primary when selected or under the pointer
+    /// (#1146 `.tc-segmented__item:hover`), otherwise secondary on the
+    /// floating variant and tertiary in the well.
+    static func ink(selected: Bool, hovering: Bool, floating: Bool) -> Color {
+        if selected { return GlassTokens.Color.textOnSelected.color }
+        if hovering { return GlassColor.textPrimary }
+        return floating ? GlassColor.textSecondary : GlassColor.textTertiary
     }
 }
 
@@ -100,11 +146,14 @@ public struct GlassCrumb: Identifiable {
     }
 }
 
-/// A round back button, then crumbs: secondary › tertiary › current.
+/// A back chevron, then crumbs: secondary › tertiary › current.
 public struct GlassBreadcrumb: View {
     private let trail: [GlassCrumb]
     private let backLabel: String
     private let onBack: (() -> Void)?
+    @State private var hovered: Int?
+    /// `hovered` for the back chevron, which is not a crumb.
+    private static var backIndex: Int { -1 }
 
     /// `backLabel` names the back button (it is icon-only), from the core's
     /// copy.
@@ -117,7 +166,30 @@ public struct GlassBreadcrumb: View {
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             if let onBack {
-                GlassRoundButton(backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel, systemImage: "chevron.left", small: true, action: onBack)
+                // The chevron alone, no round container (owner,
+                // 2026-10-08); it reads primary under the pointer, as the
+                // crumbs do, and keeps a control-sized target.
+                let label = backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .glassGlyph(12, weight: .semibold)
+                        .frame(width: GlassTokens.Size.control, height: GlassTokens.Size.control)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(GlassPressStyle())
+                .foregroundStyle(hovered == Self.backIndex ? GlassColor.textPrimary : GlassColor.textSecondary)
+                .onHover { inside in
+                    if inside {
+                        hovered = Self.backIndex
+                    } else if hovered == Self.backIndex {
+                        hovered = nil
+                    }
+                }
+                .accessibilityLabel(label)
+                .help(label)
+                // The chevron's own inset stands in for the container's
+                // edge, so the first crumb keeps its place.
+                .padding(.trailing, -GlassTokens.Space.s4)
             }
             ForEach(Array(trail.enumerated()), id: \.element.id) { index, crumb in
                 if index > 0 {
@@ -128,9 +200,18 @@ public struct GlassBreadcrumb: View {
                         .accessibilityAddTraits(.isHeader)
                 } else {
                     // A text link: no fill, so the text takes the press.
+                    // Under the pointer it reads primary (#1146
+                    // `.tc-breadcrumb__crumb:hover`).
                     Button { crumb.action?() } label: { Text(crumb.title).glassPressedFill() }
                         .buttonStyle(GlassPressStyle())
-                        .foregroundStyle(GlassColor.textSecondary)
+                        .foregroundStyle(hovered == index ? GlassColor.textPrimary : GlassColor.textSecondary)
+                        .onHover { inside in
+                            if inside {
+                                hovered = index
+                            } else if hovered == index {
+                                hovered = nil
+                            }
+                        }
                 }
             }
         }
@@ -167,7 +248,8 @@ public struct GlassStepProgress: View {
         self.stateValues = stateValues
     }
 
-    private func value(at index: Int) -> String {
+    /// The accessibility value of the step at `index`.
+    func value(at index: Int) -> String {
         guard let stateValues else { return "" }
         return index < current ? stateValues.done : index == current ? stateValues.current : stateValues.pending
     }
@@ -177,7 +259,7 @@ public struct GlassStepProgress: View {
             ForEach(Array(labels.enumerated()), id: \.offset) { index, label in
                 if index > 0 {
                     Capsule()
-                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : Color.white.opacity(0.14))
+                        .fill(index <= current ? GlassTokens.Color.purpleSoft.color : GlassColor.ink(0.14))
                         .frame(height: 2)
                         .padding(.horizontal, 6)
                         .padding(.top, 6)
@@ -193,7 +275,8 @@ public struct GlassStepProgress: View {
                             }
                         }
                     Text(label)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        // #1146's step label tracks 0.06em, tighter than an eyebrow.
+                        .glassType(GlassTokens.TypeScale.eyebrow.tracking(GlassTokens.TypeScale.eyebrow.size * 0.06))
                         .foregroundStyle(index == current ? GlassColor.textPrimary : GlassColor.textTertiary)
                 }
                 .fixedSize()

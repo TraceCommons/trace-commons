@@ -15,7 +15,7 @@ namespace TraceCommons.App.ViewModels;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Until this existed the Windows app could not enrol anyone: there was no
+/// Until this existed the Windows app could not enroll anyone: there was no
 /// invite handling in it at all, so an app-only contributor had to install
 /// the CLI and run <c>login</c> there. None of it needed new protocol --
 /// every method called here was already in the daemon's pinned
@@ -34,7 +34,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 {
     private static readonly OnboardingCopy? SharedOnboardingCopy = OnboardingCopy.Load();
 
-    /// The shared payload, for the login-enrolment offer's own sentences.
+    /// The shared payload, for the login-enrollment offer's own sentences.
     /// Loaded once for the same reason the onboarding copy is: these are
     /// facts about the build, not about a running daemon.
     private static readonly PrivateInferenceCopy? SharedPrivateInferenceCopy =
@@ -218,7 +218,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             if (response.IsError)
             {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL.
                 string label = response.Error?.Message ?? string.Empty;
@@ -479,6 +479,12 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         ConsentOptionsPayload? parsed = options.ResultAs<ConsentOptionsPayload>();
         foreach (ConsentOption scope in parsed?.Scopes ?? new List<ConsentOption>())
         {
+            // Fail closed: a scope the core gave no title is not offered.
+            if (string.IsNullOrEmpty(scope.Title))
+            {
+                continue;
+            }
+
             var row = new ConsentScopeViewModel(scope);
             if (scope.AlwaysOn)
             {
@@ -728,7 +734,7 @@ public enum OnboardingStep
     Done,
 }
 
-/// <summary>A scope row: the daemon's description, and a local short title.</summary>
+/// <summary>A scope row: the core's title and description.</summary>
 public sealed class ConsentScopeViewModel : INotifyPropertyChanged
 {
     private bool _isSelected;
@@ -740,7 +746,7 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
         Name = scope.Name;
         Description = scope.Description;
         AlwaysOn = scope.AlwaysOn;
-        Title = ScopeTitle(scope.Name);
+        Title = scope.Title ?? string.Empty;
         _isSelected = scope.AlwaysOn;
     }
 
@@ -772,26 +778,6 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
         }
     }
-
-    /// <summary>
-    /// The short bold label for a scope.
-    /// </summary>
-    /// <remarks>
-    /// <c>consent_options</c> carries the wire name and the description but
-    /// no human title, so every shell maps them and all of them must agree.
-    /// The fallback matters as much as the table: an operator who adds a
-    /// scope this build has never heard of still gets a readable row, with
-    /// the daemon's description beside it.
-    /// </remarks>
-    public static string ScopeTitle(string wireName) => wireName switch
-    {
-        "debugging_evaluation" => "Finding bugs and measuring agents",
-        "benchmark_only" or "benchmark_creation" => "Turn my traces into test cases",
-        "ranking_training" or "reward_model_training" => "Train models that judge agent output",
-        "model_training" => "Train coding models directly",
-        "public_attribution" => "List my handle publicly as a contributor",
-        _ => wireName.Replace('_', ' '),
-    };
 }
 
 public sealed class ProjectViewModel : INotifyPropertyChanged
@@ -831,7 +817,7 @@ public sealed class ProjectViewModel : INotifyPropertyChanged
     /// The line beneath the name: the mode for an ordinary row, and for the
     /// unresolvable bucket the note explaining why it can never be armed. The
     /// note REPLACES the mode rather than joining it, because "you'll always be
-    /// asked" already says what "Ask me first" says.
+    /// asked" already says what "Ask me" says.
     /// </summary>
     public string SubLine => WatchCopy.SubLineFor(IsUnresolvable, _mode);
 

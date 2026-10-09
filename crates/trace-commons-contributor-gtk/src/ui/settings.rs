@@ -28,6 +28,10 @@ use super::style::{self, Tone, space};
 use crate::copy;
 use crate::copy::SourceTool;
 use crate::model::{Project, Settings, Status};
+use trace_commons_contributor::account_contribution::{
+    CHECKING_LINE, HEADING as CONTRIBUTION_HEADING, INVITE_CODE_LABEL, PENDING_CREDIT_LINE,
+    REDEEM_ACTION, REFRESH_ACTION, REFRESH_LINE, UNAVAILABLE_LINE,
+};
 use trace_commons_contributor::config::{ConfigStore, WitnessSettings};
 use trace_commons_contributor::witness::status::{WitnessStatus, WitnessTrustState};
 
@@ -203,6 +207,13 @@ pub struct SettingsView {
     inference_disable: gtk::Button,
     inference_saving: std::cell::Cell<bool>,
     inference_supported: std::cell::Cell<bool>,
+    contribution_status: gtk::Label,
+    contribution_refresh: gtk::Button,
+    invite_code: gtk::Entry,
+    invite_redeem: gtk::Button,
+    invite_attempt: RefCell<Option<(String, String)>>,
+    contribution_busy: std::cell::Cell<bool>,
+    contribution_scope: RefCell<Option<String>>,
     token_status: gtk::Label,
     token_storage_status: gtk::Label,
     token_capture: gtk::Button,
@@ -257,11 +268,37 @@ impl SettingsView {
         state_card.append(&connection);
         let connection_checks = gtk::Box::new(gtk::Orientation::Vertical, space::XS);
         state_card.append(&connection_checks);
-        let pause_button = gtk::Button::with_label("Pause");
+        // #1146's "Pause watcher" / "Resume watcher", from the core's
+        // shell table (`preview_copy::MonitorShellCopy`).
+        let pause_button = gtk::Button::with_label(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .pause_watcher,
+        );
         pause_button.add_css_class("tc-quiet");
         pause_button.set_halign(gtk::Align::Start);
         state_card.append(&pause_button);
         content.append(&state_card);
+
+        content.append(&style::section(CONTRIBUTION_HEADING));
+        let contribution_card = style::card(gtk::Orientation::Vertical, space::M);
+        let contribution_status = gtk::Label::builder()
+            .label(REFRESH_LINE)
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        contribution_card.append(&contribution_status);
+        let contribution_refresh = gtk::Button::with_label(REFRESH_ACTION);
+        contribution_card.append(&contribution_refresh);
+        let invite_code = gtk::Entry::builder()
+            .placeholder_text(INVITE_CODE_LABEL)
+            .visibility(false)
+            .build();
+        contribution_card.append(&invite_code);
+        let invite_redeem = gtk::Button::with_label(REDEEM_ACTION);
+        contribution_card.append(&invite_redeem);
+        style::append_body(&contribution_card, PENDING_CREDIT_LINE);
+        content.append(&contribution_card);
 
         // The Tools card. It is deliberately one concept: whether what a
         // tool sends is kept private on this machine. The port and the
@@ -636,7 +673,12 @@ impl SettingsView {
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&public);
 
-        content.append(&style::section("What has been changed on this machine"));
+        // The core's "Change log" (owner ruling, 2026-10-08), for every shell.
+        content.append(&style::section(
+            trace_commons_contributor::preview_copy::monitor_screens_copy()
+                .shell
+                .changes_heading,
+        ));
         let audit = style::card(gtk::Orientation::Vertical, space::XS);
         content.append(&audit);
 
@@ -708,6 +750,13 @@ impl SettingsView {
             inference_disable,
             inference_saving: std::cell::Cell::new(false),
             inference_supported: std::cell::Cell::new(false),
+            contribution_status,
+            contribution_refresh,
+            invite_code,
+            invite_redeem,
+            invite_attempt: RefCell::new(None),
+            contribution_busy: std::cell::Cell::new(false),
+            contribution_scope: RefCell::new(None),
             token_status,
             token_storage_status,
             token_capture,
@@ -724,6 +773,14 @@ impl SettingsView {
 }
 
 pub fn wire(app: &Rc<App>) {
+    let a = Rc::clone(app);
+    app.settings
+        .contribution_refresh
+        .connect_clicked(move |_| contribution_request(&a, false));
+    let a = Rc::clone(app);
+    app.settings
+        .invite_redeem
+        .connect_clicked(move |_| contribution_request(&a, true));
     let a = Rc::clone(app);
     app.settings.pause_button.connect_clicked(move |_| {
         let paused = a
@@ -889,9 +946,11 @@ fn offer_pause(app: &Rc<App>) {
     );
     dialog.add_responses(&[
         ("cancel", "Cancel"),
-        ("hour", "For 1 hour"),
-        ("tomorrow", "Until tomorrow morning"),
-        ("forever", "Until I turn it back on"),
+        // The core's pause lengths (`pause_hour`, `pause_morning`,
+        // `pause_until_resumed`), button rule 2026-10-08.
+        ("hour", "1 hour"),
+        ("tomorrow", "Until morning"),
+        ("forever", "Until resumed"),
     ]);
     dialog.set_close_response("cancel");
     let app = Rc::clone(app);
@@ -964,6 +1023,13 @@ fn render_background(app: &Rc<App>) {
 }
 
 pub fn render_status(app: &Rc<App>, status: &Status) {
+    let scope = status.account_scope.clone();
+    if *app.settings.contribution_scope.borrow() != scope {
+        *app.settings.contribution_scope.borrow_mut() = scope;
+        app.settings.contribution_status.set_text(REFRESH_LINE);
+        app.settings.invite_code.set_text("");
+        *app.settings.invite_attempt.borrow_mut() = None;
+    }
     let hosting = app.worker.hosts_the_loop();
     let connection = if status.paused {
         "Paused. Nothing is being queued or sent."
@@ -981,9 +1047,12 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     app.settings
         .connection
         .set_text(&format!("{connection}\n{connected}"));
-    app.settings
-        .pause_button
-        .set_label(if status.paused { "Resume" } else { "Pause" });
+    let shell = trace_commons_contributor::preview_copy::monitor_screens_copy().shell;
+    app.settings.pause_button.set_label(if status.paused {
+        shell.resume_watcher
+    } else {
+        shell.pause_watcher
+    });
 
     // §5.4 draws only the connected chip. The other half of the same fact
     // has to be visible too, and §7.3 will not let it be a colour on its
@@ -1879,21 +1948,24 @@ fn audit_sentence(action: &str) -> &'static str {
 ///
 /// `auto_upload` is absent for the unresolvable bucket. `Policy` refuses it
 /// there in two independent places, so offering it invited a contributor to
-/// select "Contribute automatically" and have the daemon silently decline --
-/// believing they had armed something that cannot be armed. Silencing still
-/// works, so `ignore` stays.
+/// select "Automatic" and have the daemon silently decline -- believing they
+/// had armed something that cannot be armed. Silencing still works, so
+/// `ignore` stays.
+///
+/// Each display name is the core's one name for the mode
+/// (`project_copy::FOLDER_MODE_LABELS`), the word the pill and onboarding
+/// use too.
 ///
 /// Paired rather than positional, and lifted out here so the pairing is
 /// testable without a display. The old code carried the mapping twice, as
 /// hardcoded indices into a list assumed to be the same length for every
 /// row; one shorter row turns that into a control that sets the wrong mode.
 fn mode_choices(is_unresolved_bucket: bool) -> Vec<(&'static str, &'static str)> {
-    let mut choices: Vec<(&'static str, &'static str)> = vec![("Ask me first", "notify_only")];
-    if !is_unresolved_bucket {
-        choices.push(("Contribute automatically", "auto_upload"));
-    }
-    choices.push(("Never offer this one", "ignore"));
-    choices
+    trace_commons_contributor::project_copy::FOLDER_MODE_LABELS
+        .iter()
+        .filter(|(wire, _)| !(is_unresolved_bucket && *wire == "auto_upload"))
+        .map(|(wire, label)| (*label, *wire))
+        .collect()
 }
 
 fn render_projects(app: &Rc<App>, projects: &[Project]) {
@@ -1970,7 +2042,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
         //
         // `auto_upload` is omitted for the unresolvable bucket. `Policy`
         // refuses it there in two independent places, so offering it invited
-        // a contributor to select "Contribute automatically" and have the
+        // a contributor to select "Automatic" and have the
         // daemon silently decline -- believing they had armed something that
         // cannot be armed. Silencing still works, so `Ignore` stays.
         //
@@ -3330,7 +3402,10 @@ fn wire_inference_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_inference_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.inference_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_INFERENCE_DISCLOSURE,
             copy::WITNESS_INFERENCE_CAPTURE_NOTE,
             copy::WITNESS_INFERENCE_SCOPE_NOTE,
@@ -3338,7 +3413,7 @@ fn wire_inference_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_INFERENCE_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
@@ -3448,7 +3523,10 @@ fn wire_token_consent(app: &Rc<App>) {
         .connect_clicked(move |_| save_token_consent(&a, false));
     let a = Rc::clone(app);
     app.settings.token_enable.connect_clicked(move |_| {
+        // Titled and introduced as macOS does (#1146
+        // `privacy-controls-panel.tsx`); the disclosure itself follows.
         let body = [
+            copy::WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
             copy::WITNESS_TOKEN_DISCLOSURE,
             copy::WITNESS_TOKEN_CAPTURE_NOTE,
             copy::WITNESS_TOKEN_SCOPE_NOTE,
@@ -3456,7 +3534,7 @@ fn wire_token_consent(app: &Rc<App>) {
         .join("\n\n");
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(copy::WITNESS_TOKEN_HEADING),
+            Some(copy::WITNESS_PRIVACY_CONFIRM_TITLE),
             Some(&body),
         );
         dialog.add_responses(&[
@@ -3613,7 +3691,7 @@ mod witness_tests {
                 public_since: None,
                 witness,
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
             })
@@ -4342,6 +4420,22 @@ mod tests {
         let choices = mode_choices(false);
         let wires: Vec<&str> = choices.iter().map(|(_, wire)| *wire).collect();
         assert_eq!(wires, vec!["notify_only", "auto_upload", "ignore"]);
+    }
+
+    /// Owner decision, 2026-10-02: each mode reads by the core's one name
+    /// (`project_copy::FOLDER_MODE_LABELS`), the same words the pill and
+    /// onboarding use, never a spelling typed here.
+    #[test]
+    fn each_mode_reads_by_the_cores_name() {
+        use trace_commons_contributor::project_copy::{FOLDER_MODE_LABELS, folder_mode_label};
+        let core: Vec<(&str, &str)> = FOLDER_MODE_LABELS
+            .iter()
+            .map(|(wire, label)| (*label, *wire))
+            .collect();
+        assert_eq!(mode_choices(false), core);
+        for (shown, wire) in mode_choices(true) {
+            assert_eq!(Some(shown), folder_mode_label(wire), "{wire}");
+        }
     }
 
     #[test]
@@ -5255,9 +5349,15 @@ fn wire_token_storage(app: &Rc<App>) {
         let Some(storage) = a.settings.token_storage.borrow().clone() else {
             return;
         };
+        // The button is short; the confirmation keeps the full title.
+        let title = if storage.discard_title.is_empty() {
+            &storage.discard_label
+        } else {
+            &storage.discard_title
+        };
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(&storage.discard_label),
+            Some(title),
             Some(&storage.discard_confirmation),
         );
         dialog.add_responses(&[
@@ -5275,4 +5375,73 @@ fn wire_token_storage(app: &Rc<App>) {
         });
         dialog.present();
     });
+}
+
+fn contribution_request(app: &Rc<App>, redeem: bool) {
+    let view = &app.settings;
+    if view.contribution_busy.replace(true) {
+        return;
+    }
+    let code = view.invite_code.text().to_string();
+    if redeem && code.trim().is_empty() {
+        view.contribution_busy.set(false);
+        return;
+    }
+    let Some(scope) = view.contribution_scope.borrow().clone() else {
+        view.contribution_busy.set(false);
+        return;
+    };
+    let params = if redeem {
+        let mut attempt = view.invite_attempt.borrow_mut();
+        if attempt
+            .as_ref()
+            .is_none_or(|(previous, _)| previous != &code)
+        {
+            *attempt = Some((code.clone(), uuid::Uuid::new_v4().to_string()));
+        }
+        serde_json::json!({"invite_code": code, "idempotency_key": attempt.as_ref().unwrap().1, "account_scope":scope})
+    } else {
+        serde_json::json!({"account_scope":scope})
+    };
+    view.contribution_status.set_text(CHECKING_LINE);
+    view.invite_code.set_sensitive(false);
+    view.invite_redeem.set_sensitive(false);
+    view.contribution_refresh.set_sensitive(false);
+    app.call(
+        if redeem {
+            "account_invite_redeem"
+        } else {
+            "account_contribution_status"
+        },
+        params,
+        move |app, result| {
+            let view = &app.settings;
+            view.contribution_busy.set(false);
+            view.invite_code.set_sensitive(true);
+            view.invite_redeem.set_sensitive(true);
+            view.contribution_refresh.set_sensitive(true);
+            if view.contribution_scope.borrow().as_ref() != Some(&scope) {
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    if value.get("account_scope").and_then(|v| v.as_str()) != Some(scope.as_str()) {
+                        view.contribution_status.set_text(UNAVAILABLE_LINE);
+                        return;
+                    }
+                    view.contribution_status.set_text(
+                        value
+                            .get("line")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(UNAVAILABLE_LINE),
+                    );
+                    if redeem {
+                        view.invite_code.set_text("");
+                        *view.invite_attempt.borrow_mut() = None;
+                    }
+                }
+                Err(_) => view.contribution_status.set_text(UNAVAILABLE_LINE),
+            }
+        },
+    );
 }

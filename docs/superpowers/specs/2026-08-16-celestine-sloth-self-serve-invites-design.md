@@ -105,7 +105,7 @@ high-entropy, single-use, and TTL-bounded, so it is a capability handle in its
 own right.
 
 `CLAIM_MESSAGE` is distinct from both the Legion claim message and the account
-enrolment message, so a signature captured from one ceremony can never be
+enrollment message, so a signature captured from one ceremony can never be
 replayed into another.
 
 ### Refusals

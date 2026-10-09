@@ -74,6 +74,14 @@ public sealed record WitnessCopy
     [JsonPropertyName("inference_save_failed")] public string InferenceSaveFailed { get; init; } = "";
 
     /// <summary>
+    /// The title over either privacy option's confirmation, and the line
+    /// under it (#1146 <c>privacy-controls-panel.tsx</c>), as macOS draws
+    /// them. The disclosure below them is unchanged.
+    /// </summary>
+    [JsonPropertyName("privacy_confirm_title")] public string PrivacyConfirmTitle { get; init; } = "";
+    [JsonPropertyName("privacy_confirm_description")] public string PrivacyConfirmDescription { get; init; } = "";
+
+    /// <summary>
     /// Every word the payload carries, for the whole-or-nothing check.
     ///
     /// A field the Rust stopped exporting deserialises to the empty string and
@@ -104,7 +112,8 @@ public sealed record WitnessCopy
         InferenceEnabled,
         InferenceDisabled,
         InferenceSaveFailed,
-
+        PrivacyConfirmTitle,
+        PrivacyConfirmDescription,
     };
 }
 

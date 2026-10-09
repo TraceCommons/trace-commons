@@ -98,7 +98,7 @@ fn no_consent_scope_exists_that_the_document_does_not_describe() {
 // The flags are not permissions -- authorization lives in `scopes` -- but they
 // are what the published document's redaction promises are ABOUT, and they are
 // what the protective controls read: `residual_risk` floors a declaring
-// envelope at Medium, and the ingest PII-backstop hold enrols on any of them.
+// envelope at Medium, and the ingest PII-backstop hold enrolls on any of them.
 // A content class the document does not mention is a class the page describes
 // wrongly by omission.
 //

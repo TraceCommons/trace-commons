@@ -107,8 +107,8 @@
 pub const DESTINATION: &str = "Private AI";
 
 /// The one line under the destination's title saying what it is for.
-pub const SUBTITLE: &str = "Your AI calls go out through this computer, so you can see them and \
-     choose who answers.";
+pub const SUBTITLE: &str =
+    "Send your tools' AI calls through this app to see them and pick who answers.";
 
 /// The offer’s heading names the intended provider. The body explains that
 /// existing provider connections are not changed by enabling the service.
@@ -116,7 +116,7 @@ pub const OFFER_TITLE: &str = "Route AI requests through NEAR AI";
 
 /// Requests still go to the configured provider; enabling the service does
 /// not change existing tool connections.
-pub const OFFER_WHAT: &str = "Connect your tools to NEAR AI through this app. Requests use the provider configured for each tool; enabling this alone does not switch existing provider connections to NEAR AI. A record of requests is kept on this computer.";
+pub const OFFER_WHAT: &str = "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it. Requests are logged on this computer.";
 
 /// What turning it on exposes. **Required, not optional.**
 ///
@@ -126,17 +126,25 @@ pub const OFFER_WHAT: &str = "Connect your tools to NEAR AI through this app. Re
 /// deciding on a single-user laptop and a contributor deciding on a shared
 /// build box are answering different questions, and this is the sentence that
 /// lets them tell which one they are.
-pub const OFFER_EXPOSURE: &str = "While it is on, anything else running on this computer can send calls \
-     through it as well, charged to the accounts you have set up here. On a \
-     computer only you use that is your own software; on a shared one it is \
-     anyone who can log in.";
+pub const OFFER_EXPOSURE: &str = "While it's on, anything else running on this computer can send requests through it, charged to your accounts. On a shared computer, that includes anyone who can log in.";
+
+/// [`OFFER_EXPOSURE`] in one line, for the offer card, which shows only its
+/// first paragraph and this until the contributor opens "Learn more" (owner,
+/// 2026-10-08). It keeps both facts a shared machine turns on -- other
+/// software can send through it, and it is charged to these accounts -- in
+/// sight at the moment of the decision; the full sentence is one press away.
+pub const OFFER_EXPOSURE_SHORT: &str =
+    "While it's on, other apps on this computer can use it too, charged to your accounts.";
+
+/// The link on the offer card that shows the rest of the offer's paragraphs.
+pub const OFFER_LEARN_MORE: &str = "Learn more";
 
 /// Saying yes to this is not saying yes to repointing a tool.
-pub const OFFER_NO_REPOINT: &str = "Turning this on does not change where any tool sends its calls. That \
-     stays a separate choice, made one tool at a time.";
+pub const OFFER_NO_REPOINT: &str =
+    "Turning it on doesn't change where any tool sends requests. You connect tools one at a time.";
 
-/// The accept button.
-pub const OFFER_ACCEPT: &str = "Turn it on";
+/// The accept button. Approved 2026-10-08 (button rule).
+pub const OFFER_ACCEPT: &str = "Turn on";
 
 /// The decline button. "Not now" rather than "No", because the switch stays.
 pub const OFFER_DECLINE: &str = "Not now";
@@ -158,36 +166,38 @@ pub const OFFER_DECLINE: &str = "Not now";
 /// The destination is named as a literal because a payload sentence may not
 /// interpolate, and `the_way_back_names_the_destination_it_is_in` pins it
 /// against [`DESTINATION`] so the two cannot drift apart again.
-pub const OFFER_ASKED_ONCE: &str = "Either way, this is the only time you will be asked. The switch is on the \
-     Private AI screen.";
+pub const OFFER_ASKED_ONCE: &str =
+    "You won't be asked again. You can change this anytime on the Private AI screen.";
 
 /// The settings section's heading.
-pub const SETTINGS_TITLE: &str = "Private AI on this computer";
+pub const SETTINGS_TITLE: &str = "Private AI";
 
-/// The settings switch.
-pub const SETTINGS_TOGGLE: &str = "Route AI requests through NEAR AI";
+/// The settings switch, in #1146's words (`private-ai-connection-panel.tsx`;
+/// owner ruling, 2026-10-06). Approved 2026-10-06.
+pub const SETTINGS_TOGGLE: &str = "Answer AI calls here";
 
 /// Changes are not deferred to a restart, and the line beneath the switch is
 /// what actually happened rather than what was asked for.
+/// The switch's caption, in Ron's #1146 words (`private-ai-connection-panel.tsx`).
+/// Approved 2026-10-07: it was "Changes here
+/// apply straight away, and the line below says what happened."
 pub const SETTINGS_APPLIES_AT_ONCE: &str =
-    "Changes here apply straight away, and the line below says what happened.";
+    "This doesn't share any traces. Signing in to NEAR AI is separate.";
 
 /// `off`.
-pub const STATE_OFF: &str = "Off. This app is not answering model calls.";
+pub const STATE_OFF: &str = "Off.";
 
 /// A settings response without this status may come from an older daemon.
-pub const STATE_UNREPORTED: &str = "This daemon does not report model-call status.";
+pub const STATE_UNREPORTED: &str = "This version can't report its status.";
 
 /// An unrecognized daemon state is not evidence of shutdown.
-pub const STATE_UNKNOWN: &str =
-    "The current state is unavailable. Check again before relying on this app to answer calls.";
+pub const STATE_UNKNOWN: &str = "Status unknown. Check again before relying on it.";
 
 /// The switch records a request; retained ownership reports actual cleanup.
-pub const STATE_STOPPING: &str =
-    "Stopping. Waiting for any calls in progress and cleanup to finish.";
+pub const STATE_STOPPING: &str = "Stopping. Finishing calls in progress.";
 
 /// `running`.
-pub const STATE_RUNNING: &str = "On. Calls sent to this computer are being answered.";
+pub const STATE_RUNNING: &str = "On. Answering calls sent here.";
 
 /// `running_answered_elsewhere`.
 ///
@@ -207,9 +217,8 @@ pub const STATE_RUNNING: &str = "On. Calls sent to this computer are being answe
 /// May only be shown on a fresh affirmative reading. It accuses the product
 /// of not doing what a person expects, so a guess is worse here than silence
 /// -- see [`STATE_RUNNING_DESTINATION_UNKNOWN`].
-pub const STATE_RUNNING_ANSWERED_ELSEWHERE: &str = "On, and your calls are being answered using accounts already set up on \
-     this computer. Nothing is set up here for Private AI to answer them \
-     instead.";
+pub const STATE_RUNNING_ANSWERED_ELSEWHERE: &str =
+    "On. Calls use the accounts your tools already have, because NEAR AI isn't connected.";
 
 /// `running_destination_unknown`.
 ///
@@ -221,8 +230,7 @@ pub const STATE_RUNNING_ANSWERED_ELSEWHERE: &str = "On, and your calls are being
 /// Its tone is [`PrivateInferenceTone::Attention`]. Painting it
 /// [`PrivateInferenceTone::Clear`] would be the exact failure this state
 /// exists to prevent: an unread destination shown as a working one.
-pub const STATE_RUNNING_DESTINATION_UNKNOWN: &str = "On. Calls sent to this computer are being answered. Which account is \
-     answering them could not be read just now.";
+pub const STATE_RUNNING_DESTINATION_UNKNOWN: &str = "On. Couldn't tell which account is answering.";
 
 /// `running_no_backends`.
 ///
@@ -231,8 +239,7 @@ pub const STATE_RUNNING_DESTINATION_UNKNOWN: &str = "On. Calls sent to this comp
 /// the same as [`STATE_RUNNING`] would show a working light over something
 /// that cannot work. Its tone is [`PrivateInferenceTone::Attention`] and
 /// never [`PrivateInferenceTone::Clear`].
-pub const STATE_RUNNING_NO_BACKENDS: &str = "On, but nothing is set up here for it to pass calls on to, so no call can \
-     get through it yet.";
+pub const STATE_RUNNING_NO_BACKENDS: &str = "On, but nothing is set up to answer calls yet.";
 
 /// `running_elsewhere`.
 ///
@@ -241,15 +248,14 @@ pub const STATE_RUNNING_NO_BACKENDS: &str = "On, but nothing is set up here for 
 /// stopped. Saying "left alone" rather than "already on" matters: a
 /// contributor reading "already on" would go looking in this app's settings
 /// for something this app does not control.
-pub const STATE_RUNNING_ELSEWHERE: &str = "Another program is using this computer's model-call setup. This \
-     app started nothing and stopped nothing; whether calls can get through is not confirmed.";
+pub const STATE_RUNNING_ELSEWHERE: &str = "Another app is using this setup. This app started nothing and stopped nothing. Calls may not get through.";
 
 /// `port_in_use`.
-pub const STATE_PORT_IN_USE: &str = "Private AI couldn’t start because another app is using its port. Close that app, then turn Private AI off and on again.";
+pub const STATE_PORT_IN_USE: &str =
+    "Couldn't start: another app is using its port. Close that app, then turn this off and on.";
 
 /// `start_failed`.
-pub const STATE_START_FAILED: &str =
-    "Not on. It would not start. Turn this off and on again to try once more.";
+pub const STATE_START_FAILED: &str = "Couldn't start. Turn it off and on to retry.";
 
 /// `crashed`.
 ///
@@ -257,9 +263,8 @@ pub const STATE_START_FAILED: &str =
 /// contributor to discover it. A listener that cannot stay up and is retried
 /// on every poll tick reads as a light flickering, which is how a real fault
 /// becomes invisible.
-pub const STATE_CRASHED: &str = "The model-call state could not be confirmed. It may have stopped unexpectedly \
-     or cleanup may still be pending. It will not retry by itself. Turn this off and on again to retry; this app will not start \
-     another listener while the previous instance still owns its setup.";
+pub const STATE_CRASHED: &str =
+    "May have stopped unexpectedly. It won't retry on its own: turn it off and on.";
 
 /// Said at the moment of quitting, on the two platforms where the app is the
 /// daemon.
@@ -282,7 +287,7 @@ pub const QUIT_ALSO_STOPS: &str = "Quitting also ends any model calls still hand
 #[must_use]
 pub fn serving_line(port: Option<u16>) -> String {
     match port {
-        Some(port) if port != 0 => format!("Reported local listener number: {port}."),
+        Some(port) if port != 0 => format!("Port {port}"),
         _ => String::new(),
     }
 }
@@ -383,6 +388,57 @@ pub fn state_tone(label: &str) -> PrivateInferenceTone {
     }
 }
 
+/// Every runtime state label a daemon reports in
+/// `private_inference_state.state`, in the order a shell lists them.
+///
+/// Each one has its own sentence in [`state_line`]; the empty label
+/// (unreported) and a label this build does not know are not in the list,
+/// and are answered by [`STATE_UNREPORTED`] and [`STATE_UNKNOWN`].
+pub const STATE_LABELS: [&str; 10] = [
+    LABEL_OFF,
+    LABEL_STOPPING,
+    LABEL_RUNNING,
+    LABEL_RUNNING_NO_BACKENDS,
+    LABEL_RUNNING_ANSWERED_ELSEWHERE,
+    LABEL_RUNNING_DESTINATION_UNKNOWN,
+    LABEL_RUNNING_ELSEWHERE,
+    LABEL_PORT_IN_USE,
+    LABEL_START_FAILED,
+    LABEL_CRASHED,
+];
+
+/// One state label's sentence, and whether an indicator may paint that
+/// state as working: [`state_line`] and [`state_tone`]'s
+/// [`PrivateInferenceTone::reads_as_working`], carried together so a shell
+/// that renders a table looks the label up and never compares sentences.
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct StateCopy {
+    pub line: &'static str,
+    pub working: bool,
+}
+
+/// [`StateCopy`] for every label in [`STATE_LABELS`], keyed by label.
+///
+/// A shell that holds this table answers a label it does not find with
+/// [`STATE_UNKNOWN`], not working, and an empty one with
+/// [`STATE_UNREPORTED`], not working -- what [`state_line`] and
+/// [`state_tone`] answer for both.
+#[must_use]
+pub fn state_copies() -> std::collections::BTreeMap<&'static str, StateCopy> {
+    STATE_LABELS
+        .into_iter()
+        .map(|label| {
+            (
+                label,
+                StateCopy {
+                    line: state_line(label),
+                    working: state_tone(label).reads_as_working(),
+                },
+            )
+        })
+        .collect()
+}
+
 /// Whether a shell should put the offer in front of the contributor.
 ///
 /// Two inputs and one rule, crossing the ABI for the reason the tone table
@@ -435,8 +491,7 @@ pub fn write_confirmed(
 }
 
 /// A transport failure may arrive after persistence; do not claim nothing changed.
-pub const WRITE_UNCONFIRMED: &str =
-    "The change could not be confirmed. Check the app's status and try again.";
+pub const WRITE_UNCONFIRMED: &str = "Couldn't confirm the change. Try again.";
 
 /// Whether quitting may end this app's model-call work. Requested off does
 /// not prove cleanup completed; foreign ownership is never this app's work.
@@ -468,6 +523,8 @@ pub struct PrivateInferenceCopy {
     pub offer_title: &'static str,
     pub offer_what: &'static str,
     pub offer_exposure: &'static str,
+    pub offer_exposure_short: &'static str,
+    pub offer_learn_more: &'static str,
     pub offer_no_repoint: &'static str,
     pub offer_accept: &'static str,
     pub offer_decline: &'static str,
@@ -537,6 +594,16 @@ pub struct PrivateInferenceCopy {
     pub near_ai_enroll_working: &'static str,
     /// [`NEAR_AI_ENROLL_DONE`].
     pub near_ai_enroll_done: &'static str,
+    pub account_contribution_refresh: &'static str,
+    pub account_contribution_checking: &'static str,
+    pub account_contribution_unavailable: &'static str,
+    pub account_contribution_pending_credit: &'static str,
+    /// The account contribution card's heading and controls (approved
+    /// 2026-10-06), so no shell types its own.
+    pub account_contribution_heading: &'static str,
+    pub account_contribution_refresh_action: &'static str,
+    pub account_contribution_invite_code: &'static str,
+    pub account_contribution_redeem_action: &'static str,
     /// The ten refusals, in the daemon's order.
     pub near_ai_enroll_already_enrolled: &'static str,
     /// [`NEAR_AI_ENROLL_NO_SESSION_LINE`].
@@ -680,6 +747,35 @@ pub struct PrivateInferenceCopy {
     /// [`BALANCE_NO_REMAINING`]. The sentence a `null` remaining figure gets
     /// INSTEAD of `$0.00`.
     pub balance_no_remaining: &'static str,
+    /// The Private AI page's panel chrome, after #1146: [`PANEL_REFRESH`],
+    /// the three eyebrows and the balance panel's re-read link.
+    pub panel_refresh: &'static str,
+    pub panel_tools_eyebrow: &'static str,
+    pub panel_connection_eyebrow: &'static str,
+    pub panel_balance_eyebrow: &'static str,
+    pub panel_balance_refresh: &'static str,
+    /// The page's two stat tiles and the runtime tile's words, chosen by
+    /// [`runtime_word`].
+    pub stat_inference_access: &'static str,
+    pub stat_runtime: &'static str,
+    pub runtime_on: &'static str,
+    pub runtime_off: &'static str,
+    pub runtime_stopping: &'static str,
+    pub runtime_elsewhere: &'static str,
+    pub runtime_not_running: &'static str,
+    pub runtime_unknown: &'static str,
+    /// The Inference inspector: its sub-line ([`INSPECTOR_TOOLS_CONNECTED`],
+    /// a template), its two legend cells and its three row labels.
+    pub inspector_tools_connected: &'static str,
+    pub inspector_connected: &'static str,
+    pub inspector_not_connected: &'static str,
+    pub inspector_status: &'static str,
+    pub inspector_credential: &'static str,
+    pub inspector_connected_tools: &'static str,
+    pub inspector_none: &'static str,
+    /// The caption beside a tool row's action.
+    pub harness_caption_connected: &'static str,
+    pub harness_caption_not_connected: &'static str,
 }
 
 /// The sentence the settings card shows once the control has moved out of it.
@@ -692,15 +788,16 @@ pub const SETTINGS_MOVED: &str = "Private AI has its own screen now.";
 ///
 /// Turning it OFF from a menu is safe in a way turning it on is not: it only
 /// ever reduces what this computer will answer, so it needs no sentence in
-/// front of it.
-pub const TRAY_TURN_OFF: &str = "Stop answering model calls";
+/// front of it. Approved 2026-10-08 (button rule).
+pub const TRAY_TURN_OFF: &str = "Stop answering";
 
 /// The tray action while it is off.
 ///
 /// Trailing ellipsis because it opens the screen rather than acting: turning
 /// it ON changes what anything else on this computer may send through, and
 /// that is not a decision to take from a menu with the consequence off-screen.
-pub const TRAY_OPEN_TO_TURN_ON: &str = "Route AI requests through NEAR AI…";
+/// Approved 2026-10-08 (button rule).
+pub const TRAY_OPEN_TO_TURN_ON: &str = "Private AI…";
 
 /// The heading over the list of tools found on this computer.
 ///
@@ -719,7 +816,7 @@ pub const HARNESSES_TITLE: &str = "Your tools";
 /// missing from it would conclude their tool cannot be connected rather than
 /// that this app has not been taught about it yet.
 pub const HARNESSES_WHAT: &str =
-    "Choose which tools send AI requests through this app. Supported tools are listed below.";
+    "Pick which tools send their AI calls through this app. Only supported tools are listed.";
 
 /// What the amount [`harness_spend_line`] names does and does not cover.
 ///
@@ -736,9 +833,8 @@ pub const HARNESSES_WHAT: &str =
 /// which nothing was billed -- but a contributor who saw a busy afternoon
 /// come back as nothing would conclude the number was broken rather than
 /// that it was narrow.
-pub const HARNESSES_SPEND_SCOPE: &str = "Only calls answered on this computer are in that figure. Calls answered \
-     on another machine, or in a browser, are not, and neither is work a \
-     monthly plan has already paid for.";
+pub const HARNESSES_SPEND_SCOPE: &str =
+    "Counts calls answered on this computer only: not other machines, browsers or prepaid plans.";
 
 /// A tool this app could not find on this computer.
 ///
@@ -751,15 +847,13 @@ pub const HARNESSES_SPEND_SCOPE: &str = "Only calls answered on this computer ar
 /// beside it. That sentence says a tool's own settings still send its calls
 /// somewhere, which is a claim about settings belonging to something that is
 /// not on this computer at all.
-pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer. This app looked where this tool keeps its \
-     own settings and found nothing there, so there is nothing here to \
-     connect.";
+pub const HARNESS_NOT_INSTALLED: &str = "Not found on this computer.";
 
 /// A tool whose own settings still send its calls wherever they went before.
 ///
 /// Said as a fact about the tool's settings rather than as a fault. Nothing
 /// is wrong with a tool nobody has connected.
-pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Using its existing settings.";
+pub const HARNESS_NOT_CONNECTED: &str = "Uses its own settings.";
 
 /// A tool whose settings are right and from which nothing has arrived yet.
 ///
@@ -767,8 +861,7 @@ pub const HARNESS_NOT_CONNECTED: &str = "Not connected. Using its existing setti
 /// value in it is not evidence that a single call was ever answered, and a
 /// surface that showed those two the same way would tell a contributor their
 /// tool was working while it sent every call somewhere else.
-pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "Connected, and nothing has arrived from it yet. Its settings send its \
-     calls here; none has come in so far.";
+pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "No calls from it yet.";
 
 /// A tool a call actually arrived from. The only state that means it works.
 ///
@@ -776,8 +869,7 @@ pub const HARNESS_CONNECTED_NOTHING_SEEN: &str = "Connected, and nothing has arr
 /// stops at what this computer did, because which tool a call came from is
 /// worked out from how the call was phrased, and two tools that phrase calls
 /// the same way cannot be told apart.
-pub const HARNESS_ANSWERING: &str =
-    "Answering. A call from it reached this computer and was answered here.";
+pub const HARNESS_ANSWERING: &str = "A call from it was answered here.";
 
 /// The action that connects one tool.
 pub const HARNESS_CONNECT: &str = "Connect";
@@ -794,16 +886,17 @@ pub const HARNESS_DISCONNECT: &str = "Disconnect";
 /// This app is about to edit a file it does not own, so the change is shown
 /// before it is made. The same reason the destination exists at all: the
 /// consequence is stated where the decision is taken.
-pub const HARNESS_PREVIEW_TITLE: &str = "Connection settings";
+pub const HARNESS_PREVIEW_TITLE: &str = "Change this tool's settings?";
 
 /// The button that writes the change.
-pub const HARNESS_PREVIEW_CONFIRM: &str = "Make this change";
+pub const HARNESS_PREVIEW_CONFIRM: &str = "Apply";
 
 /// The button that does not.
 ///
-/// Not "Cancel". The file is the contributor's, and the outcome of saying no
-/// is that it keeps every value it has.
-pub const HARNESS_PREVIEW_CANCEL: &str = "Leave the file as it is";
+/// The file is the contributor's, and the outcome of saying no is that it
+/// keeps every value it has. One verb under the button rule (owner,
+/// 2026-10-09); it was "Leave the file as it is".
+pub const HARNESS_PREVIEW_CANCEL: &str = "Cancel";
 
 /// A slot that already had a value in it, which was left alone.
 ///
@@ -813,25 +906,21 @@ pub const HARNESS_PREVIEW_CANCEL: &str = "Leave the file as it is";
 /// there: it must not read as an error to be cleared, and it must not
 /// suggest that this app could take the slot if asked.
 pub const HARNESS_SLOT_TAKEN: &str =
-    "This tool already has a connection configured. Its settings were left unchanged.";
+    "This tool already has a connection set up, so it was left alone.";
 
 /// A tool holding an old setting in a process that is still running.
 ///
 /// Kept in front of the contributor until a call actually arrives, because
 /// the alternative is a list claiming a tool sends its calls here while the
 /// window in front of them does not.
-pub const HARNESS_NEEDS_RESTART: &str = "Its settings changed while it was running. Quit this tool and open it \
-     again; until then the copy of it that is running still has the old \
-     setting.";
+pub const HARNESS_NEEDS_RESTART: &str = "If it's open, restart it to pick up the change.";
 
 /// No tool was found.
 ///
 /// Says what was looked for. An empty list that explains nothing cannot be
 /// told apart from a broken one, and the contributor's next question is
 /// always which tools were even considered.
-pub const HARNESSES_NONE_FOUND: &str = "None of the tools this app knows about was found here. It looked for \
-     each of them in the place that tool keeps its own settings, and found \
-     no settings file to work with.";
+pub const HARNESSES_NONE_FOUND: &str = "No supported tools found on this computer.";
 
 /// A settings file that could not be read, and was therefore not touched.
 ///
@@ -840,7 +929,7 @@ pub const HARNESSES_NONE_FOUND: &str = "None of the tools this app knows about w
 /// say the right thing or nothing at all; either way it is refused, so that
 /// somebody's own mistake in their own file never comes back looking like
 /// this app's.
-pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn’t read this tool’s settings. No changes were made. Edit the file manually or use the command shown.";
+pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn't read this tool's settings, so nothing changed. Edit the file or run the command shown.";
 
 /// A plan that found the file already saying what the action wanted.
 ///
@@ -848,8 +937,7 @@ pub const HARNESS_UNREADABLE_CONFIG: &str = "Couldn’t read this tool’s setti
 /// plan with nothing in it opened a preview holding a title, a path and
 /// nothing else, which reads as this app having lost the change rather than
 /// as there being none to make.
-pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "There is nothing to change. This tool's own settings file already says \
-     what this would have written, so it was left exactly as it is.";
+pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "Nothing to change. Its settings already match.";
 
 /// This app's own description of a tool did not survive checking.
 ///
@@ -857,18 +945,16 @@ pub const HARNESS_PLAN_NOTHING_TO_CHANGE: &str = "There is nothing to change. Th
 /// contributor's and this one is not their doing. A refusal that let them
 /// think their own file was at fault would send them to edit something that
 /// is already right.
-pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str = "This app's own description of this tool did not hold up when it was \
-     checked, so nothing was worked out and nothing was written. That is a \
-     fault here, not in any file of yours.";
+pub const HARNESS_PLAN_ENTRY_UNUSABLE: &str =
+    "Something went wrong in this app, so nothing changed. Your files aren't the problem.";
 
 /// This build could not work out where a tool keeps its settings.
 ///
 /// Names the way forward rather than stopping at the refusal: the command
 /// shown on the row does by hand exactly what this app could not work out
 /// how to do.
-pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where this tool keeps its own settings on \
-     this computer, so it has no file to change. The command shown on the \
-     tool does the same thing by hand.";
+pub const HARNESS_PLAN_NO_CONFIG_PATH: &str =
+    "Couldn't find this tool's settings file. Run the command shown instead.";
 
 /// Why a tool this app hosts the answering for cannot be connected yet.
 ///
@@ -888,9 +974,10 @@ pub const HARNESS_PLAN_NO_CONFIG_PATH: &str = "This app could not work out where
 /// The next step is spelled the way the button that performs it is spelled --
 /// see [`CREDENTIAL_OBTAIN`] -- so a contributor reading this sentence is
 /// looking for words that exist somewhere on the screen.
-pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering this tool's calls, and no key \
-     is kept here to answer them with yet. Sign in with NEAR AI first, and \
-     this tool can be connected after that.";
+///
+/// Approved 2026-10-06: the button's words changed to #1146's, so this
+/// sentence did too.
+pub const HARNESS_NEEDS_CREDENTIAL: &str = "This computer would be the one answering, and it has no NEAR AI key yet. Sign in first, then connect your tools.";
 
 /// The sentence for one tool's state, or the empty string.
 ///
@@ -1011,7 +1098,7 @@ pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
     let hours = minutes / 60;
     let days = hours / 24;
     let (count, unit) = if seconds < 60 {
-        return "Last call answered here: just now.".to_string();
+        return "Last call: just now".to_string();
     } else if minutes < 60 {
         (minutes, "minute")
     } else if hours < 24 {
@@ -1020,7 +1107,7 @@ pub fn harness_last_call_line(seconds_ago: Option<u64>) -> String {
         (days, "day")
     };
     let plural = if count == 1 { "" } else { "s" };
-    format!("Last call answered here: {count} {unit}{plural} ago.")
+    format!("Last call: {count} {unit}{plural} ago")
 }
 
 /// What the calls answered here have cost since midnight, assembled on this
@@ -1065,10 +1152,10 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
         // Too small to show, and not nothing. Rounding it down into the
         // sentence a day with no calls gets would say something false about
         // a day that had them.
-        return "Cost of calls answered here since midnight: less than $0.01.".to_string();
+        return "Today on this computer: under $0.01".to_string();
     }
     format!(
-        "Cost of calls answered here since midnight: ${}.{:02}.",
+        "Today on this computer: ${}.{:02}",
         cents / 100,
         cents % 100
     )
@@ -1078,8 +1165,8 @@ pub fn harness_spend_line(micros: Option<u64>) -> String {
 ///
 /// Names the machine for the reason [`OFFER_TITLE`] does: what changes is
 /// what this computer holds, and that is the only part a contributor can go
-/// and check.
-pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
+/// and check. #1146's word for what it holds (owner ruling, 2026-10-06).
+pub const CREDENTIAL_TITLE: &str = "NEAR AI credential";
 
 /// Why the card is there at all.
 ///
@@ -1087,14 +1174,15 @@ pub const CREDENTIAL_TITLE: &str = "NEAR AI account";
 /// that calls fail without one -- they do not; they are answered using
 /// whatever accounts a contributor's tools already had, which is what
 /// [`STATE_RUNNING_ANSWERED_ELSEWHERE`] says on the state row above.
-pub const CREDENTIAL_WHAT: &str = "Sign in to use NEAR AI with your tools and check your balance.";
+pub const CREDENTIAL_WHAT: &str = "Sign in to NEAR AI to use it with your tools.";
 
 /// Provider selector copy shared by every native shell.
-pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign-in method";
+pub const CREDENTIAL_PROVIDER_LABEL: &str = "Sign in with";
 pub const CREDENTIAL_PROVIDER_GITHUB: &str = "GitHub";
 pub const CREDENTIAL_PROVIDER_GOOGLE: &str = "Google";
 pub const CREDENTIAL_PROVIDER_NEAR: &str = "NEAR wallet";
-pub const CREDENTIAL_WALLET_NOTICE: &str = "Your wallet signs a login message. Spending keys stay in your wallet; signing in does not stake or transfer funds.";
+pub const CREDENTIAL_WALLET_NOTICE: &str =
+    "Your wallet only signs a login message. Nothing is staked or moved.";
 
 pub(crate) fn wallet_browser_copy() -> serde_json::Value {
     serde_json::json!({
@@ -1122,25 +1210,21 @@ pub(crate) fn wallet_browser_copy() -> serde_json::Value {
 /// the key is theirs, it is listed in their own account, and removing it
 /// there is the thing this app cannot do for them --
 /// [`CREDENTIAL_FORGET_EXPLAINS`] says so again at the moment it matters.
-pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI \
-     account to send AI requests. You can revoke this key in NEAR AI.\n\n\
-     The app also keeps you signed in to check your balance and, when you ask, \
-     join a commons. This saved sign-in can read your account and create more keys.\n\n\
-     Your key and saved sign-in are stored in this computer's system credential store. \
-     You may be asked to allow access when the app starts.";
+pub const CREDENTIAL_COST: &str = "Sign in through your browser. The app creates an API key in your NEAR AI account for your tools. You can revoke this key in NEAR AI.\n\nThe app also keeps you signed in to check your balance and, when you ask, join a commons. This saved sign-in can read your account and create more keys.\n\nYour key and saved sign-in are stored in this computer's system credential store. You may be asked to allow access when the app starts.";
 
 /// The button that starts the ceremony.
-pub const CREDENTIAL_OBTAIN: &str = "Sign in with NEAR AI";
+pub const CREDENTIAL_OBTAIN: &str = "Sign in";
 
 /// The button shown while one is running.
 ///
-/// Says what stops -- this computer's waiting -- and not "cancel the
-/// sign-in", which would suggest reaching into a browser tab this app does
-/// not control. Anything the contributor already finished over there stands.
-pub const CREDENTIAL_CANCEL: &str = "Stop waiting for the browser";
+/// #1146's words (owner ruling, 2026-10-06). What stops is this computer's
+/// waiting; anything the contributor already finished in the browser
+/// stands.
+/// Cut to one verb (owner ruling, 2026-10-07).
+pub const CREDENTIAL_CANCEL: &str = "Cancel";
 
 /// The button that removes a stored key from this machine.
-pub const CREDENTIAL_FORGET: &str = "Forget this key";
+pub const CREDENTIAL_FORGET: &str = "Forget";
 
 /// What forgetting does, and the larger part it does not do.
 ///
@@ -1150,13 +1234,11 @@ pub const CREDENTIAL_FORGET: &str = "Forget this key";
 /// confirmation that said "removed" and let it
 /// be read as "revoked" would be the claim this codebase does not make --
 /// `handle_forget` answers `revoked: false` for the same reason.
-pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Forgetting removes the inference key and saved Private AI sign-in from this \
-     computer. It does not revoke them at Private AI. Remove the key in your \
-     Private AI account to stop it working elsewhere.";
+pub const CREDENTIAL_FORGET_EXPLAINS: &str = "Removes the key and saved sign-in from this computer only. This does not revoke them at NEAR AI. Delete the key in your NEAR AI account to stop it working elsewhere.";
 
 /// The button behind `migration_available`: copy the sign-in an earlier
 /// build kept in the login keychain into the store this build uses.
-pub const CREDENTIAL_MIGRATE: &str = "Move my sign-in";
+pub const CREDENTIAL_MIGRATE: &str = "Move";
 
 /// What moving does, beside the button, and the one prompt it can cause.
 ///
@@ -1169,11 +1251,7 @@ pub const CREDENTIAL_MIGRATE: &str = "Move my sign-in";
 /// Says the old copy stays, because it does: the move copies, and the
 /// login-keychain entry is only removed when a later sign-in or Forget
 /// supersedes it.
-pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "Moving copies your saved key and Private AI sign-in from the login \
-     keychain into the store this version of the app uses, so later updates \
-     stop asking for your password. macOS may ask for your login password \
-     once to allow it. The old copy stays in the login keychain until you \
-     next sign in or forget this key.";
+pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "macOS may ask for your login password once. After that, updates stop asking. The old copy stays in the login keychain until you next sign in or choose Forget.";
 
 /// `migration_available`.
 ///
@@ -1181,8 +1259,7 @@ pub const CREDENTIAL_MIGRATE_EXPLAINS: &str = "Moving copies your saved key and 
 /// upgraded contributor saw before this state existed, and it was false:
 /// the store opened fine, the sign-in simply lives in the login keychain an
 /// earlier build used, and no number of restarts moves it.
-pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your Private AI sign-in from an earlier version of the app is still in \
-     your login keychain. Move it to keep using it without signing in again.";
+pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your sign-in from an earlier version is still in the login keychain. Move it to keep using it.";
 
 /// `storage_unentitled`.
 ///
@@ -1191,20 +1268,19 @@ pub const CREDENTIAL_MIGRATION_AVAILABLE: &str = "Your Private AI sign-in from a
 /// store; telling a contributor to try again would be a lie they could act
 /// on. A locally built app lands here, and so does any build signed without
 /// the entitlement.
-pub const CREDENTIAL_STORAGE_UNENTITLED: &str = "This copy of the app is not signed to use the system credential store \
-     where your Private AI sign-in is kept, so it cannot read or save one. \
-     Restarting will not change that. Use a released build of the app.";
+pub const CREDENTIAL_STORAGE_UNENTITLED: &str =
+    "This build can't use the credential store. Use a released build.";
 
 /// `absent`.
-pub const CREDENTIAL_ABSENT: &str = "NEAR AI isn’t connected to this app.";
+pub const CREDENTIAL_ABSENT: &str = "Not signed in to NEAR AI.";
 
 /// `obtaining`.
 ///
 /// Names the five minutes because the listener gives the browser exactly
 /// that long and then releases the port. A contributor who walked away and
 /// came back to a card still saying "waiting" would be waiting on nothing.
-pub const CREDENTIAL_OBTAINING: &str = "Finish signing in in your browser. This app stops waiting after five \
-     minutes; any credentials already kept here remain until sign-in finishes.";
+pub const CREDENTIAL_OBTAINING: &str =
+    "Finish signing in in your browser. This app waits up to 5 minutes.";
 
 /// `failed`.
 ///
@@ -1213,23 +1289,21 @@ pub const CREDENTIAL_OBTAINING: &str = "Finish signing in in your browser. This 
 /// refusal is a 400 with an empty body: there is nothing more specific to
 /// say that would be true, and a sentence that guessed would be carrying a
 /// guess into a contributor's head.
-pub const CREDENTIAL_FAILED: &str = "The latest sign-in did not finish. Any credentials already kept here remain. \
-     Sign in again to try once more.";
+pub const CREDENTIAL_FAILED: &str = "Sign-in didn't finish. Try again.";
 
 /// `cancelled`.
 ///
 /// Not a fault and not phrased as one. Stopping was the contributor's own
 /// doing, and the sentence reports it and stops.
-pub const CREDENTIAL_CANCELLED: &str =
-    "You stopped the sign-in before it finished, and nothing was kept here.";
+pub const CREDENTIAL_CANCELLED: &str = "Sign-in cancelled. Nothing was saved.";
 
 /// `present`.
 ///
 /// Says the key is here and that this screen will not show it. It does not
 /// say the key stays on this computer, which would be false: every call
 /// answered with it carries it to whoever answers.
-pub const CREDENTIAL_PRESENT: &str = "A key from Private AI is kept on this computer, and calls answered here \
-     can use it. The key itself is never shown on this screen.";
+pub const CREDENTIAL_PRESENT: &str =
+    "Your NEAR AI key is stored on this computer. It's never shown here.";
 
 /// A state this build has no words for, or a read that did not arrive.
 ///
@@ -1243,17 +1317,15 @@ pub const CREDENTIAL_PRESENT: &str = "A key from Private AI is kept on this comp
 /// The same shape as [`STATE_RUNNING_DESTINATION_UNKNOWN`], for the same
 /// reason: an unread fact gets its own sentence rather than borrowing a
 /// known one.
-pub const CREDENTIAL_UNKNOWN: &str = "Whether a key is kept here could not be read just now. Check again \
-     before signing in, so you do not end up with a second key you did not \
-     mean to make.";
+pub const CREDENTIAL_UNKNOWN: &str =
+    "Couldn't check for a saved key. Check again before signing in, or you may make a second key.";
 
 /// A daemon that does not answer this at all.
 ///
 /// Distinct from [`CREDENTIAL_UNKNOWN`] on purpose: one is a read that
 /// failed, the other is a build that was never asked to answer, and telling
 /// somebody to check again is useless advice for the second.
-pub const CREDENTIAL_UNREPORTED: &str =
-    "This daemon does not report whether a Private AI key is kept here.";
+pub const CREDENTIAL_UNREPORTED: &str = "This version can't report your sign-in.";
 
 /// What a shell may offer for one credential state.
 ///
@@ -1290,10 +1362,10 @@ pub enum CredentialAction {
 pub fn credential_state_line(label: &str) -> &'static str {
     match label {
         LABEL_CREDENTIAL_STORAGE_UNAVAILABLE => {
-            "Private AI sign-in could not be read. Unlock your system credential store and restart the app."
+            "Couldn't read your sign-in. Unlock your credential store, then restart the app."
         }
         LABEL_CREDENTIAL_CLEANUP_REQUIRED => {
-            "Private AI sign-in is disabled here, but its saved credentials could not be deleted. Unlock your system credential store, then choose Forget again."
+            "Signed out, but saved credentials couldn't be deleted. Unlock your credential store, then choose Forget again."
         }
         LABEL_CREDENTIAL_STORAGE_UNENTITLED => CREDENTIAL_STORAGE_UNENTITLED,
         LABEL_CREDENTIAL_MIGRATION_AVAILABLE => CREDENTIAL_MIGRATION_AVAILABLE,
@@ -1546,6 +1618,52 @@ pub fn group_control(pending: u64, contributable: Option<u64>) -> ContributionCo
     }
 }
 
+/// A `list_projects` group's whole eligibility picture, computed once from
+/// `pending` and `contributable`.
+///
+/// Before this existed, every caller re-derived `eligible_count` and
+/// `withheld_count` from the same two numbers by hand: Tauri's
+/// `eligibility_group_copy` computed `contributable.unwrap_or(pending).
+/// min(pending)` and `pending.saturating_sub(eligible)` inline, and the
+/// macOS shell computed `pending - contributableCount` itself in Swift, with
+/// no `min` clamp at all -- a second, slightly different arithmetic for the
+/// same fact, safe only because the FFI's `tc_contribution_withheld_line`
+/// clamps a negative input to zero on its side of the ABI. One function now
+/// does this arithmetic, so both numbers are derived exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupEligibility {
+    /// How many of `pending` may actually be sent. Clamped to `pending`:
+    /// `contributable` is documented never to exceed it, but a caller
+    /// reading data from an older or mismatched daemon should not be able to
+    /// turn a clamp failure into a claim of more eligible sessions than
+    /// exist.
+    pub eligible_count: u64,
+    /// `pending` minus `eligible_count`, never negative.
+    pub withheld_count: u64,
+    /// Whether the group's submit control may be offered at all -- exactly
+    /// [`group_control`]'s answer for this `pending`/`contributable` pair.
+    pub can_contribute: bool,
+}
+
+/// Compute [`GroupEligibility`] from a `list_projects` row's `pending_count`
+/// and `contributable_count`.
+///
+/// `contributable`, like [`group_control`]'s parameter of the same name,
+/// must be `None` for an ABSENT `contributable_count` (an invited
+/// contributor, for whom every pending session is sendable) and
+/// `Some(0)` for a present count of zero -- never conflate the two, or an
+/// invited contributor's folder reads as having nothing eligible.
+#[must_use]
+pub fn group_eligibility(pending: u64, contributable: Option<u64>) -> GroupEligibility {
+    let eligible_count = contributable.unwrap_or(pending).min(pending);
+    GroupEligibility {
+        eligible_count,
+        withheld_count: pending.saturating_sub(eligible_count),
+        can_contribute: group_control(pending, contributable.map(|_| eligible_count))
+            == ContributionControl::Contribute,
+    }
+}
+
 /// The sentence for one queue entry's `eligibility` label.
 ///
 /// An unfamiliar or empty label answers [`ELIGIBILITY_UNKNOWN`]. IT MUST NOT
@@ -1652,13 +1770,27 @@ pub fn eligibility_reason_line(label: &str) -> &'static str {
 /// this surface where that is the honest noun: everything else here is about
 /// what this machine holds, and a balance is not. It is a fact about an
 /// account that other computers, and a browser, spend from too.
-pub const BALANCE_TITLE: &str = "What is left in your Private AI account";
-pub const FUNDING_TITLE: &str = "Cloud billing";
-pub const FUNDING_WHAT: &str = "Choose a payment method or staking option in Cloud. Your browser may ask you to sign in again.";
+///
+/// After Ron's #1146 heading (`private-ai-balance-panel.tsx`, "NEAR AI
+/// usage"), but the figure under it is what remains, not what was used.
+/// Approved 2026-10-07: it was "What is left
+/// in your Private AI account", then #1146's "NEAR AI usage".
+pub const BALANCE_TITLE: &str = "NEAR AI balance";
+pub const FUNDING_TITLE: &str = "Billing";
+/// Ron's #1146 caption (`private-ai-funding-panel.tsx`), without his
+/// machinery word, rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it
+/// was "Choose a payment method or staking option in Cloud. Your browser
+/// may ask you to sign in again."
+pub const FUNDING_WHAT: &str = "Opens billing for the organization shown above.";
+/// Kept over #1146's "Manage credits" (owner ruling): the offer surface
+/// keeps contribution credit apart from NEAR AI billing.
 pub const FUNDING_MANAGE: &str = "Manage billing";
-pub const FUNDING_REFRESH: &str = "Refresh account";
-pub const FUNDING_UNAVAILABLE: &str =
-    "The billing destination could not be verified. Refresh account to try again.";
+/// #1146's "Verify current account".
+pub const FUNDING_REFRESH: &str = "Check account";
+/// #1146's "Account destination not read.", then the remedy, by the
+/// [`FUNDING_REFRESH`] control's name. Approved 2026-10-07: it was "The billing destination could not be
+/// verified. Refresh account to try again."
+pub const FUNDING_UNAVAILABLE: &str = "Your account hasn't been read. Check again.";
 
 /// Canonical wording for the organization handoff; no shell chooses a payer.
 pub fn funding_message(
@@ -1668,19 +1800,13 @@ pub fn funding_message(
     match report {
         FundingReport::Ready {
             organization_name, ..
-        } => format!("Cloud organization: {organization_name}"),
+        } => format!("Organization: {organization_name}"),
         FundingReport::NoSession | FundingReport::SessionExpired => {
-            "Sign in to Private AI to manage billing.".into()
+            "Sign in to manage billing.".into()
         }
-        FundingReport::NoInferenceKey => {
-            "Connect Private AI to choose its billing destination.".into()
-        }
-        FundingReport::NoOrganization => {
-            "The connected Cloud organization is unavailable. Sign in to Private AI again.".into()
-        }
-        FundingReport::Changed => {
-            "The Private AI connection changed. Refresh account to check its destination.".into()
-        }
+        FundingReport::NoInferenceKey => "Sign in to NEAR AI to set up billing.".into(),
+        FundingReport::NoOrganization => "Couldn't find your organization. Sign in again.".into(),
+        FundingReport::Changed => "Your account changed. Check it again, then retry.".into(),
         FundingReport::InvalidRequest | FundingReport::Unavailable => FUNDING_UNAVAILABLE.into(),
     }
 }
@@ -1692,16 +1818,18 @@ pub fn funding_message(
 /// total; this one exists because a total invites being read as a
 /// per-machine figure. Both failures are somebody planning around a number
 /// that means something else.
-pub const BALANCE_WHAT: &str = "This is the whole account, not just this computer. Calls answered \
-     anywhere you are signed in are already in these figures.";
+///
+/// Not #1146's caption ("Account balance requires retained session
+/// authority. ..."): it drops the figure's scope, which
+/// `the_balance_row_carries_its_own_words` holds this sentence to.
+pub const BALANCE_WHAT: &str = "Your whole account, not just this computer.";
 
 /// `no_session`.
 ///
 /// Not phrased as a fault, for [`CREDENTIAL_ABSENT`]'s reason: it is the
 /// state of a fresh install, and the state of anyone who has forgotten a
 /// sign-in on purpose.
-pub const BALANCE_NO_SESSION: &str = "No Private AI sign-in is kept here, so there is no balance to read. Sign \
-     in to see one.";
+pub const BALANCE_NO_SESSION: &str = "Sign in to see your balance.";
 
 /// `session_expired`.
 ///
@@ -1714,9 +1842,7 @@ pub const BALANCE_NO_SESSION: &str = "No Private AI sign-in is kept here, so the
 /// It does not say the sign-in was revoked, or that anything was deleted
 /// here. Nothing was: a refused refresh clears no stored token, precisely so
 /// that a service having a bad afternoon cannot log a contributor out.
-pub const BALANCE_SESSION_EXPIRED: &str = "The Private AI sign-in kept here was not accepted, so the balance could \
-     not be read. Sign in again to fix it. You do not need to forget \
-     anything first -- signing in replaces what is stored here.";
+pub const BALANCE_SESSION_EXPIRED: &str = "Your sign-in wasn't accepted. Sign in again to see your balance. You don't need to forget anything first.";
 
 /// `no_organization`.
 ///
@@ -1724,8 +1850,8 @@ pub const BALANCE_SESSION_EXPIRED: &str = "The Private AI sign-in kept here was 
 /// organization at signup best-effort, and logs rather than fails when it
 /// cannot. The way out is on the service's own site, which the sentence
 /// says, because this app has no way to create one.
-pub const BALANCE_NO_ORGANIZATION: &str = "This Private AI account has no organization yet, and a balance belongs \
-     to one. Open the account in your browser to finish setting it up.";
+pub const BALANCE_NO_ORGANIZATION: &str =
+    "Finish setting up your NEAR AI account in your browser to see a balance.";
 
 /// `unavailable`.
 ///
@@ -1733,8 +1859,7 @@ pub const BALANCE_NO_ORGANIZATION: &str = "This Private AI account has no organi
 /// a failed read is a fact about the read, and letting it be heard as a fact
 /// about the money is how a contributor comes away believing an account is
 /// empty.
-pub const BALANCE_UNAVAILABLE: &str = "The balance could not be read just now. That says nothing about what is \
-     in the account -- only that the answer did not arrive.";
+pub const BALANCE_UNAVAILABLE: &str = "Couldn't read your balance. Try again.";
 
 /// A `state` this build has no words for.
 ///
@@ -1743,15 +1868,14 @@ pub const BALANCE_UNAVAILABLE: &str = "The balance could not be read just now. T
 /// here would tell somebody who is signed in that they are not, and
 /// borrowing any of the others would put a reason in their head that nobody
 /// worked out.
-pub const BALANCE_UNKNOWN: &str = "The balance came back in a form this app does not know how to read. A \
-     newer version may understand it.";
+pub const BALANCE_UNKNOWN: &str = "This version can't read your balance.";
 
 /// A daemon that does not answer this at all.
 ///
 /// Distinct from [`BALANCE_UNKNOWN`] for [`CREDENTIAL_UNREPORTED`]'s reason:
 /// one is a read that failed and the other is a build that was never asked,
 /// and "a newer version may understand it" is advice about the wrong half.
-pub const BALANCE_UNREPORTED: &str = "This daemon does not report a Private AI balance.";
+pub const BALANCE_UNREPORTED: &str = "This version can't show a balance.";
 
 /// `known`, with `remaining_nanos` null.
 ///
@@ -1761,8 +1885,7 @@ pub const BALANCE_UNREPORTED: &str = "This daemon does not report a Private AI b
 /// for an account nobody has capped. Rendering that as zero tells a
 /// contributor with an uncapped account that they are out of money, which is
 /// both false and the most alarming thing this surface could say.
-pub const BALANCE_NO_REMAINING: &str = "No spending limit is set on this account, so there is no remaining \
-     figure to show. That is not the same as nothing left.";
+pub const BALANCE_NO_REMAINING: &str = "No spending limit set.";
 
 /// One amount, formatted once for all three shells.
 ///
@@ -1832,7 +1955,7 @@ pub fn balance_remaining_line(nanos: Option<i64>, scale: u8) -> String {
     if amount.is_empty() {
         return BALANCE_UNKNOWN.to_string();
     }
-    format!("Left to spend: {amount}.")
+    format!("{amount} left")
 }
 
 /// The configured ceiling, or nothing at all.
@@ -1849,7 +1972,7 @@ pub fn balance_limit_line(nanos: Option<i64>, scale: u8) -> String {
     if amount.is_empty() {
         return String::new();
     }
-    format!("Spending limit: {amount}.")
+    format!("Limit: {amount}")
 }
 
 /// What the account has spent, all of it, everywhere.
@@ -1867,7 +1990,7 @@ pub fn balance_spent_line(nanos: Option<i64>, scale: u8) -> String {
     if amount.is_empty() {
         return String::new();
     }
-    format!("Spent on this account so far: {amount}.")
+    format!("Spent: {amount}")
 }
 
 /// How long ago THIS COMPUTER asked, assembled on this side.
@@ -1894,7 +2017,7 @@ pub fn balance_observed_line(seconds_ago: Option<u64>) -> String {
     let hours = minutes / 60;
     let days = hours / 24;
     let (count, unit) = if seconds < 60 {
-        return "Asked for just now.".to_string();
+        return "Checked just now".to_string();
     } else if minutes < 60 {
         (minutes, "minute")
     } else if hours < 24 {
@@ -1903,7 +2026,7 @@ pub fn balance_observed_line(seconds_ago: Option<u64>) -> String {
         (days, "day")
     };
     let plural = if count == 1 { "" } else { "s" };
-    format!("Asked for {count} {unit}{plural} ago.")
+    format!("Checked {count} {unit}{plural} ago")
 }
 
 /// The sentence for one `near_ai_balance` `state`.
@@ -1977,6 +2100,86 @@ pub fn balance_action(label: &str) -> CredentialAction {
     }
 }
 
+// The Private AI page's panel chrome and the Inference inspector's labels,
+// after #1146's `private-ai-page.tsx` and `inference-inspector.tsx`. Plain
+// labels: none of them describes what turning anything on exposes, so none
+// needs a consent review.
+
+/// The link at the right of a Private AI panel's header that re-reads it.
+pub const PANEL_REFRESH: &str = "Refresh";
+/// The eyebrow over the tools panel ([`HARNESSES_TITLE`] is its heading).
+pub const PANEL_TOOLS_EYEBROW: &str = "Local tools";
+/// The eyebrow over the connection panel ([`SETTINGS_TITLE`] is its heading).
+pub const PANEL_CONNECTION_EYEBROW: &str = "Connection";
+/// The eyebrow over the balance panel ([`BALANCE_TITLE`] is its heading).
+pub const PANEL_BALANCE_EYEBROW: &str = "Account balance";
+/// The balance panel's own re-read link.
+pub const PANEL_BALANCE_REFRESH: &str = "Refresh";
+/// The stat tile whose value is the credential's state line.
+pub const STAT_INFERENCE_ACCESS: &str = "NEAR AI";
+/// The stat tile whose value is one of the `RUNTIME_*` words.
+pub const STAT_RUNTIME: &str = "Private AI";
+/// The runtime tile for a listener that is running, whatever it can reach.
+/// The state line beside the switch says what that is worth.
+pub const RUNTIME_ON: &str = "On";
+/// `off`.
+pub const RUNTIME_OFF: &str = "Off";
+/// `stopping`.
+pub const RUNTIME_STOPPING: &str = "Stopping";
+/// `running_elsewhere`: the setup is held by another program, not this app.
+pub const RUNTIME_ELSEWHERE: &str = "Used elsewhere";
+/// `port_in_use`, `start_failed`, `crashed`: asked for, and not running.
+pub const RUNTIME_NOT_RUNNING: &str = "Not running";
+/// Unreported, or a label this build does not know. Never "Off".
+pub const RUNTIME_UNKNOWN: &str = "Unknown";
+/// The Inference inspector's sub-line under its title. `{connected}` and
+/// `{total}` are counts from the tools list.
+pub const INSPECTOR_TOOLS_CONNECTED: &str = "{connected} of {total} tools connected";
+
+/// The fields of [`PrivateInferenceCopy`] that are templates, and the holes
+/// each carries. Every other field is a finished sentence, and a test holds
+/// the table to that, so a hole cannot reach a shell's finished-sentence
+/// list (Windows `PrivateInferenceCopy.Sentences`).
+pub const PRIVATE_INFERENCE_TEMPLATES: &[(&str, &[&str])] =
+    &[("inspector_tools_connected", &["connected", "total"])];
+/// The inspector's legend cell for connected tools.
+pub const INSPECTOR_CONNECTED: &str = "connected";
+/// The inspector's legend cell for listed tools that are not connected.
+pub const INSPECTOR_NOT_CONNECTED: &str = "not connected";
+/// The inspector row whose value is the listener's state line.
+pub const INSPECTOR_STATUS: &str = "Private AI";
+/// The inspector row whose value is the credential's state line.
+pub const INSPECTOR_CREDENTIAL: &str = "NEAR AI";
+/// The inspector row whose value is the connected tools' names.
+pub const INSPECTOR_CONNECTED_TOOLS: &str = "Connected tools";
+/// That row when the list was read and no tool is connected.
+pub const INSPECTOR_NONE: &str = "None";
+/// The caption beside a tool row's action when its settings name this
+/// computer. A settings fact, never a claim that the tool is answering.
+pub const HARNESS_CAPTION_CONNECTED: &str = "Connected";
+/// The caption beside a tool row's action otherwise.
+pub const HARNESS_CAPTION_NOT_CONNECTED: &str = "Not connected";
+
+/// The runtime tile's word for one `private_inference_state` label.
+///
+/// Every running label is "On" -- the sentence beside the switch says what
+/// that reaches -- and an unreported or unfamiliar label is "Unknown", never
+/// "Off": a state nobody has words for must not read as a stopped one.
+#[must_use]
+pub fn runtime_word(label: &str) -> &'static str {
+    match label {
+        LABEL_OFF => RUNTIME_OFF,
+        LABEL_STOPPING => RUNTIME_STOPPING,
+        LABEL_RUNNING
+        | LABEL_RUNNING_NO_BACKENDS
+        | LABEL_RUNNING_ANSWERED_ELSEWHERE
+        | LABEL_RUNNING_DESTINATION_UNKNOWN => RUNTIME_ON,
+        LABEL_RUNNING_ELSEWHERE => RUNTIME_ELSEWHERE,
+        LABEL_PORT_IN_USE | LABEL_START_FAILED | LABEL_CRASHED => RUNTIME_NOT_RUNNING,
+        _ => RUNTIME_UNKNOWN,
+    }
+}
+
 /// The payload, built from the constants above.
 #[must_use]
 pub fn private_inference_copy() -> PrivateInferenceCopy {
@@ -1986,6 +2189,8 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         offer_title: OFFER_TITLE,
         offer_what: OFFER_WHAT,
         offer_exposure: OFFER_EXPOSURE,
+        offer_exposure_short: OFFER_EXPOSURE_SHORT,
+        offer_learn_more: OFFER_LEARN_MORE,
         offer_no_repoint: OFFER_NO_REPOINT,
         offer_accept: OFFER_ACCEPT,
         offer_decline: OFFER_DECLINE,
@@ -2035,6 +2240,14 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         near_ai_enroll_needs_login: NEAR_AI_ENROLL_NEEDS_LOGIN,
         near_ai_enroll_working: NEAR_AI_ENROLL_WORKING,
         near_ai_enroll_done: NEAR_AI_ENROLL_DONE,
+        account_contribution_refresh: crate::account_contribution::REFRESH_LINE,
+        account_contribution_checking: crate::account_contribution::CHECKING_LINE,
+        account_contribution_unavailable: crate::account_contribution::UNAVAILABLE_LINE,
+        account_contribution_pending_credit: crate::account_contribution::PENDING_CREDIT_LINE,
+        account_contribution_heading: crate::account_contribution::HEADING,
+        account_contribution_refresh_action: crate::account_contribution::REFRESH_ACTION,
+        account_contribution_invite_code: crate::account_contribution::INVITE_CODE_LABEL,
+        account_contribution_redeem_action: crate::account_contribution::REDEEM_ACTION,
         near_ai_enroll_already_enrolled: NEAR_AI_ENROLL_ALREADY_ENROLLED_LINE,
         near_ai_enroll_no_session: NEAR_AI_ENROLL_NO_SESSION_LINE,
         near_ai_enroll_endpoint_refused: NEAR_AI_ENROLL_ENDPOINT_REFUSED_LINE,
@@ -2122,6 +2335,28 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         balance_unknown: BALANCE_UNKNOWN,
         balance_unreported: BALANCE_UNREPORTED,
         balance_no_remaining: BALANCE_NO_REMAINING,
+        panel_refresh: PANEL_REFRESH,
+        panel_tools_eyebrow: PANEL_TOOLS_EYEBROW,
+        panel_connection_eyebrow: PANEL_CONNECTION_EYEBROW,
+        panel_balance_eyebrow: PANEL_BALANCE_EYEBROW,
+        panel_balance_refresh: PANEL_BALANCE_REFRESH,
+        stat_inference_access: STAT_INFERENCE_ACCESS,
+        stat_runtime: STAT_RUNTIME,
+        runtime_on: RUNTIME_ON,
+        runtime_off: RUNTIME_OFF,
+        runtime_stopping: RUNTIME_STOPPING,
+        runtime_elsewhere: RUNTIME_ELSEWHERE,
+        runtime_not_running: RUNTIME_NOT_RUNNING,
+        runtime_unknown: RUNTIME_UNKNOWN,
+        inspector_tools_connected: INSPECTOR_TOOLS_CONNECTED,
+        inspector_connected: INSPECTOR_CONNECTED,
+        inspector_not_connected: INSPECTOR_NOT_CONNECTED,
+        inspector_status: INSPECTOR_STATUS,
+        inspector_credential: INSPECTOR_CREDENTIAL,
+        inspector_connected_tools: INSPECTOR_CONNECTED_TOOLS,
+        inspector_none: INSPECTOR_NONE,
+        harness_caption_connected: HARNESS_CAPTION_CONNECTED,
+        harness_caption_not_connected: HARNESS_CAPTION_NOT_CONNECTED,
     }
 }
 
@@ -2428,7 +2663,7 @@ pub const NEAR_AI_ENROLL_WHAT: &str =
 /// The control.
 pub const NEAR_AI_ENROLL_ACTION: &str = "Join with NEAR AI";
 
-/// Before there is a session to enrol with.
+/// Before there is a session to enroll with.
 ///
 /// NOT a refusal. Nothing has gone wrong and nothing was attempted; there is
 /// a step to take first, and this says which.
@@ -2438,7 +2673,8 @@ pub const NEAR_AI_ENROLL_NEEDS_LOGIN: &str = "Sign in to NEAR AI, then choose th
 pub const NEAR_AI_ENROLL_WORKING: &str = "Joining with your NEAR AI account...";
 
 /// After it lands.
-pub const NEAR_AI_ENROLL_DONE: &str = "This device is joined. You can contribute sessions now.";
+pub const NEAR_AI_ENROLL_DONE: &str =
+    "This device is joined. Check your contribution status before sending sessions.";
 
 /// `already_enrolled`. Not a failure a contributor caused or can fix by
 /// retrying, and it must not read as one.
@@ -2495,7 +2731,7 @@ pub const NEAR_AI_ENROLL_VERIFICATION_FAILED_LINE: &str = "The commons could not
 pub const NEAR_AI_ENROLL_UNAVAILABLE_LINE: &str =
     "Joining with a NEAR AI login is not available right now. Nothing was joined.";
 
-/// The sentence for one login-enrolment control name.
+/// The sentence for one login-enrollment control name.
 ///
 /// Every label the daemon can return reaches its own sentence, and anything
 /// else reaches the generic one. Never the empty string: a refusal a shell
@@ -2636,12 +2872,12 @@ pub const OUTCOME_ADMISSION_EVIDENCE_REFUSED: &str =
 
 // PRIVATE-INFERENCE-SURFACE-END
 
-// The daemon's control names for login enrolment. Below the marker on
+// The daemon's control names for login enrollment. Below the marker on
 // purpose: the sweep above bans mechanism words from sentences a contributor
 // reads, and these are wire labels nobody is shown. Mirrored here rather than
 // imported because `daemon::nearai_onboarding` lands separately; when it does,
 // these should be sourced from it so a rename moves one string.
-/// The daemon's control names for login enrolment, so a shell never spells
+/// The daemon's control names for login enrollment, so a shell never spells
 /// one and a rename moves one string.
 pub const NEAR_AI_ENROLL_ALREADY_ENROLLED: &str = "near_ai_enroll_already_enrolled";
 pub const NEAR_AI_ENROLL_NO_SESSION: &str = "near_ai_enroll_no_session";
@@ -2726,7 +2962,37 @@ pub use crate::daemon::private_inference::{
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_declared_templates_carry_holes() {
+        let value = serde_json::to_value(private_inference_copy()).unwrap();
+        crate::witness_copy::tests::assert_only_declared_templates(
+            &value,
+            PRIVATE_INFERENCE_TEMPLATES,
+        );
+    }
+
     use super::*;
+
+    /// Reviewed on #1162: the Scrub check's two hold labels used to fall
+    /// through to "Status unavailable", so every shell listed held sessions
+    /// that are still waiting as "N -- Status unavailable". Both share the
+    /// one line #1162 merged, which says the session is waiting and was not
+    /// sent.
+    #[test]
+    fn the_scrub_check_holds_have_waiting_lines_not_status_unavailable() {
+        use crate::daemon::second_look::{
+            REASON_SCRUB_CHECK_MANUAL, REASON_SECOND_LOOK_REVIEW_REQUIRED,
+        };
+        for label in [
+            REASON_SECOND_LOOK_REVIEW_REQUIRED,
+            REASON_SCRUB_CHECK_MANUAL,
+        ] {
+            let line = queue_outcome_line(label);
+            assert_eq!(line, "Waiting for review; not sent", "{label}");
+            assert!(line.contains("Waiting"), "{line}");
+            assert!(line.contains("not sent"), "{line}");
+        }
+    }
 
     /// The failure this surface exists to prevent, pinned.
     ///
@@ -2941,7 +3207,7 @@ mod tests {
                 "{label} is not painted as a refusal"
             );
             assert!(
-                state_line(label).contains("off and on again"),
+                state_line(label).contains("off and on"),
                 "{label} does not name the way out: {}",
                 state_line(label)
             );
@@ -2953,7 +3219,7 @@ mod tests {
     #[test]
     fn the_crashed_state_says_it_will_stay_that_way() {
         assert!(
-            state_line(LABEL_CRASHED).contains("will not retry by itself"),
+            state_line(LABEL_CRASHED).contains("won't retry on its own"),
             "the crashed sentence stopped saying it is sticky: {}",
             state_line(LABEL_CRASHED)
         );
@@ -3111,7 +3377,7 @@ mod tests {
         );
         assert!(
             copy.harness_connected_nothing_seen
-                .contains("nothing has arrived"),
+                .contains("No calls from it yet"),
             "the connected state stopped saying nothing has arrived: {}",
             copy.harness_connected_nothing_seen
         );
@@ -3124,7 +3390,7 @@ mod tests {
     fn an_occupied_slot_is_reported_and_never_offered() {
         let taken = private_inference_copy().harness_slot_taken;
         assert!(
-            taken.contains("left unchanged"),
+            taken.contains("left alone"),
             "the occupied sentence stopped saying it was left alone: {taken}"
         );
         for word in ["error", "failed", "instead", "take over", "override"] {
@@ -3141,11 +3407,11 @@ mod tests {
     fn an_unreadable_file_is_a_refusal_and_not_a_no_op() {
         let refused = private_inference_copy().harness_unreadable_config;
         assert!(
-            refused.contains("Couldn’t read"),
+            refused.contains("Couldn't read"),
             "the unreadable sentence stopped explaining the read failure: {refused}"
         );
         assert!(
-            refused.contains("No changes were made"),
+            refused.contains("nothing changed"),
             "the unreadable sentence stopped saying nothing was written: {refused}"
         );
     }
@@ -3156,12 +3422,12 @@ mod tests {
     fn an_empty_list_says_what_was_looked_for() {
         let copy = private_inference_copy();
         assert!(
-            copy.harnesses_none_found.contains("looked for"),
+            copy.harnesses_none_found.contains("supported tools"),
             "the empty-list sentence stopped saying what was looked for: {}",
             copy.harnesses_none_found
         );
         assert!(
-            copy.harnesses_what.contains("Supported tools"),
+            copy.harnesses_what.contains("supported tools"),
             "the list's line stopped qualifying what the list is: {}",
             copy.harnesses_what
         );
@@ -3349,7 +3615,7 @@ mod tests {
     /// The window is named in the sentence, not left for a shell to add.
     #[test]
     fn the_amount_names_its_own_window() {
-        assert!(harness_spend_line(Some(1_230_000)).contains("since midnight"));
+        assert!(harness_spend_line(Some(1_230_000)).contains("Today"));
         assert!(HARNESSES_SPEND_SCOPE.contains("this computer"));
     }
 
@@ -3368,7 +3634,7 @@ mod tests {
     #[test]
     fn a_fraction_of_a_cent_is_not_reported_as_nothing() {
         let tiny = harness_spend_line(Some(1));
-        assert!(tiny.contains("less than $0.01"), "{tiny}");
+        assert!(tiny.contains("under $0.01"), "{tiny}");
         assert_ne!(tiny, harness_spend_line(Some(0)));
     }
 
@@ -3531,10 +3797,10 @@ mod tests {
             "the forget sentence stopped saying the key stays valid: {explains}"
         );
         assert!(
-            explains.contains("does not revoke them at Private AI"),
+            explains.contains("does not revoke them at NEAR AI"),
             "the forget sentence stopped distinguishing removal from revocation: {explains}"
         );
-        assert!(explains.contains("saved Private AI sign-in"));
+        assert!(explains.contains("saved sign-in"));
         assert!(!explains.contains("thrown away as soon"));
         for word in ["revoked", "cancelled", "deleted everywhere"] {
             assert!(
@@ -3674,6 +3940,53 @@ mod tests {
         // An empty group is an empty group either way.
         assert_eq!(group_control(0, None), ContributionControl::None);
         assert_eq!(group_control(0, Some(0)), ContributionControl::None);
+    }
+
+    /// `group_eligibility` is the arithmetic every caller used to do by
+    /// hand: `eligible_count` clamped to `pending`, `withheld_count` the
+    /// non-negative remainder, and `can_contribute` exactly `group_control`'s
+    /// own answer.
+    #[test]
+    fn group_eligibility_computes_the_eligible_and_withheld_counts() {
+        assert_eq!(
+            group_eligibility(7, Some(3)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 4,
+                can_contribute: true,
+            }
+        );
+        // The question does not apply: every pending session is eligible,
+        // and nothing is withheld.
+        assert_eq!(
+            group_eligibility(7, None),
+            GroupEligibility {
+                eligible_count: 7,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
+        // Nothing sendable: no control offered, and the whole group is
+        // withheld.
+        assert_eq!(
+            group_eligibility(7, Some(0)),
+            GroupEligibility {
+                eligible_count: 0,
+                withheld_count: 7,
+                can_contribute: false,
+            }
+        );
+        // A `contributable` above `pending` is data this function does not
+        // trust blindly: `eligible_count` is clamped rather than exceeding
+        // `pending`, so `withheld_count` cannot go negative.
+        assert_eq!(
+            group_eligibility(3, Some(9)),
+            GroupEligibility {
+                eligible_count: 3,
+                withheld_count: 0,
+                can_contribute: true,
+            }
+        );
     }
 
     /// The withheld line counts and says nothing else.
@@ -4150,7 +4463,7 @@ mod tests {
     ///
     /// The three that happen BEFORE anything is spent are the ones that
     /// matter most: no NEAR AI session, the commons unreachable, and the
-    /// commons not offering login enrolment. A contributor told "the commons
+    /// commons not offering login enrollment. A contributor told "the commons
     /// is unreachable" when they have simply never logged in will go and
     /// debug their network. The daemon already fixed that confusion once on
     /// its side by checking the session before reaching out; collapsing the
@@ -4320,7 +4633,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            141,
+            173,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );
@@ -4387,7 +4700,7 @@ mod tests {
             "a null must carry no amount at all: {none}"
         );
         // And a real zero is still shown, because a real zero is true.
-        assert_eq!(balance_remaining_line(Some(0), 9), "Left to spend: $0.00.");
+        assert_eq!(balance_remaining_line(Some(0), 9), "$0.00 left");
         assert_ne!(balance_remaining_line(Some(0), 9), none);
     }
 
@@ -4565,14 +4878,11 @@ mod tests {
     /// say the figure was updated then.
     #[test]
     fn the_age_says_when_we_asked() {
-        assert_eq!(balance_observed_line(Some(0)), "Asked for just now.");
-        assert_eq!(balance_observed_line(Some(59)), "Asked for just now.");
-        assert_eq!(balance_observed_line(Some(60)), "Asked for 1 minute ago.");
-        assert_eq!(balance_observed_line(Some(7_200)), "Asked for 2 hours ago.");
-        assert_eq!(
-            balance_observed_line(Some(172_800)),
-            "Asked for 2 days ago."
-        );
+        assert_eq!(balance_observed_line(Some(0)), "Checked just now");
+        assert_eq!(balance_observed_line(Some(59)), "Checked just now");
+        assert_eq!(balance_observed_line(Some(60)), "Checked 1 minute ago");
+        assert_eq!(balance_observed_line(Some(7_200)), "Checked 2 hours ago");
+        assert_eq!(balance_observed_line(Some(172_800)), "Checked 2 days ago");
         for seconds in [0, 60, 7_200, 172_800] {
             let line = balance_observed_line(Some(seconds));
             assert!(
@@ -4809,14 +5119,95 @@ mod tests {
                 // never meant the destination cannot see you, and the
                 // exposure sentence still says in full what turning this on
                 // lets anything else on the machine do.
+                // "Learn more" is a link label, not a promise of earnings;
+                // only the substring "earn" in it would trip the ban.
                 let text = text
                     .replace(DESTINATION, "")
-                    .replace("Route AI requests through NEAR AI", "");
+                    .replace("Route AI requests through NEAR AI", "")
+                    .replace(OFFER_LEARN_MORE, "");
                 assert!(
                     !text.to_lowercase().contains(word),
                     "{word:?} appears in: {text}"
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod state_table_tests {
+    use super::*;
+
+    /// The runtime tile names every reported label, reads only a stopped
+    /// listener as "Off", and never reads a working tone as anything but
+    /// "On". An unreported or unfamiliar label is "Unknown", never "Off".
+    #[test]
+    fn the_runtime_word_never_reads_an_unknown_state_as_off() {
+        for label in STATE_LABELS {
+            let word = runtime_word(label);
+            assert_ne!(word, RUNTIME_UNKNOWN, "{label}");
+            assert_eq!(word == RUNTIME_OFF, label == LABEL_OFF, "{label}");
+            if state_tone(label).reads_as_working() {
+                assert_eq!(word, RUNTIME_ON, "{label}");
+            }
+        }
+        assert_eq!(runtime_word(""), RUNTIME_UNKNOWN);
+        assert_eq!(runtime_word("a_state_from_a_later_daemon"), RUNTIME_UNKNOWN);
+        assert_eq!(runtime_word(LABEL_PORT_IN_USE), RUNTIME_NOT_RUNNING);
+        assert_eq!(runtime_word(LABEL_RUNNING_ELSEWHERE), RUNTIME_ELSEWHERE);
+    }
+
+    /// Every label a daemon can report is in the table, once, with its own
+    /// sentence: none falls through to the unknown or unreported line.
+    #[test]
+    fn the_state_table_names_every_reported_label_with_its_own_line() {
+        let table = state_copies();
+        assert_eq!(table.len(), STATE_LABELS.len());
+        assert_eq!(table.len(), 10);
+        for label in STATE_LABELS {
+            let copy = table[label];
+            assert_eq!(copy.line, state_line(label), "{label}");
+            assert_ne!(copy.line, STATE_UNKNOWN, "{label}");
+            assert_ne!(copy.line, STATE_UNREPORTED, "{label}");
+        }
+        // The states the daemon's own state machine reports are all here.
+        use crate::daemon::private_inference::PrivateInferenceState as State;
+        let running = State::Running { port: 1 };
+        let mut reported: Vec<&str> = [
+            State::Off,
+            State::Stopping { port: None },
+            State::RunningWithoutBackends { port: 1 },
+            State::RunningElsewhere { port: 1 },
+        ]
+        .iter()
+        .map(State::label)
+        .collect();
+        for authenticated in [Some(true), Some(false), None] {
+            reported.push(running.label_for(authenticated));
+        }
+        reported.extend([LABEL_PORT_IN_USE, LABEL_START_FAILED, LABEL_CRASHED]);
+        reported.sort_unstable();
+        let mut listed = STATE_LABELS.to_vec();
+        listed.sort_unstable();
+        assert_eq!(reported, listed);
+    }
+
+    /// Only `running` may be painted as working; the table says so for each
+    /// label rather than leaving a shell to infer it.
+    #[test]
+    fn only_running_is_working_in_the_state_table() {
+        for (label, copy) in state_copies() {
+            assert_eq!(copy.working, label == LABEL_RUNNING, "{label}");
+            assert_eq!(
+                copy.working,
+                state_tone(label).reads_as_working(),
+                "{label}"
+            );
+        }
+        let wire = serde_json::to_value(state_copies()[LABEL_RUNNING]).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"line": STATE_RUNNING, "working": true})
+        );
     }
 }

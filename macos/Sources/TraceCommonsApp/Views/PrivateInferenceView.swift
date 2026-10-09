@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The indicator every surface on this destination is painted from.
@@ -21,144 +22,120 @@ enum PrivateInferenceIndicator {
         PrivateInferenceSurface.tone(state, calls: calls).readsAsWorking
     }
 
-    /// The private-inference tone onto this shell's palette.
-    ///
-    /// A separate bridge from the routing and witness ones for the reason
-    /// spelled out on `SettingsView.witnessTone`: the three ABI tone ranges
-    /// are disjoint so a cross-wired mapper is wrong for every value.
-    ///
-    /// Every arm answers a distinct `TC.Tone`, and each of those carries its
-    /// own glyph as well as its own colour -- so held, attention, refused
-    /// and anything a later daemon grows stay distinguishable from clear in
-    /// greyscale and to a colour-blind reader, which is the whole point.
-    static func palette(_ tone: PrivateInferenceTone) -> TC.Tone {
+    /// The tone onto a glass status, as the window's Inference dot maps
+    /// it (`MonitorWindowView.inferenceDot`): only clear is on; held,
+    /// attention and refused all ask; neutral is off. A glass status is a dot,
+    /// so whoever draws it draws the core's sentence beside it.
+    static func status(_ tone: PrivateInferenceTone) -> GlassStatus {
         switch tone {
-        case .neutral: return .neutral
-        case .held: return .held
-        case .clear: return .clear
-        case .attention: return .attention
-        case .refused: return .refused
+        case .clear: return .on
+        case .held, .attention, .refused: return .ask
+        case .neutral: return .off
         }
+    }
+
+    /// The Private AI dot (#1146 `flow-map.tsx` and `inference-inspector.tsx`):
+    /// on while the core's tone is clear, outside (red) for every other
+    /// tone, an unread one included. Drawn on the Inference tab, the map's
+    /// Private AI segment and the inspector's Status row, always beside or
+    /// behind the core's sentence for the same state.
+    static func dotStatus(_ tone: PrivateInferenceTone) -> GlassStatus {
+        tone.readsAsWorking ? .on : .outside
     }
 }
 
-/// Answering model calls on this computer: a destination of its own rather
-/// than a card near the bottom of Settings.
+/// The Private AI switch, with the core's sentence on what turning it on
+/// exposes beside it, drawn by the glass Inference tab on `InferenceStore`.
 ///
-/// Renders nothing at all if the words did not arrive, for the reason
-/// `AppModel.privateInferenceCopy` gives: a screen missing the sentence
-/// about what turning the switch on exposes is worse than no screen.
-struct PrivateInferenceView: View {
-    var body: some View {
-        ScrollView {
-            PrivateInferenceContent()
-        }
-        .tcScreen()
+/// The switch says what was asked for; the state line says what happened,
+/// and it is drawn from the core's tone -- never from `isOn`, which stays on
+/// over a listener that refused to start. `isOn` nil is a switch nobody
+/// could read: drawn off and disabled, never on. A write that was not
+/// confirmed is `refusal`, in the core's words, under the card.
+///
+/// #1146's `PrivateAiConnectionPanel`: one card, never collapsed. The
+/// title as an h2, what turning it on does and exposes, then the sign-in
+/// (`credential`, when the host hands it in), then the switch.
+struct PrivateAISwitchCard: View {
+    let copy: PrivateInferenceCopy
+    let isOn: Bool?
+    let state: PrivateInferenceState
+    let calls: PrivateInferenceCalls
+    let busy: Bool
+    let refusal: String?
+    let onSet: (Bool) -> Void
+    let onDismiss: () -> Void
+    /// Re-reads the connection. With it the card wears #1146's panel header
+    /// (the connection eyebrow over the title, and a re-read link).
+    var onRefresh: (() -> Void)?
+    /// The sign-in, drawn inside the card between the words and the switch,
+    /// as #1146 draws the credential in its connection panel.
+    var credential: AnyView?
+
+    /// The state line and its dot, from the listener's report alone. It
+    /// takes no switch: what was asked for never says what happened.
+    static func stateLabel(
+        state: PrivateInferenceState, copy: PrivateInferenceCopy, calls: PrivateInferenceCalls
+    ) -> (line: String, status: GlassStatus) {
+        (PrivateInferenceSurface.stateLine(state, copy: copy, calls: calls),
+         PrivateInferenceIndicator.status(PrivateInferenceSurface.tone(state, calls: calls)))
     }
-}
-
-/// The screen's content, split out of its `ScrollView` for the same reason
-/// `SettingsContent` and `QueueContent` are: `ImageRenderer` renders a
-/// `ScrollView` as blank, so the screenshot hook can only rasterize what
-/// lives outside one.
-struct PrivateInferenceContent: View {
-    @EnvironmentObject private var model: AppModel
-
-    /// The same narrow prose column Settings uses. This screen is three
-    /// paragraphs and a switch; the full window width would set them at a
-    /// measure nobody reads.
-    private static let proseColumn: CGFloat = 640
 
     var body: some View {
-        if let copy = model.privateInferenceCopy {
-            content(copy)
-        }
-    }
-
-    @ViewBuilder
-    private func content(_ copy: PrivateInferenceCopy) -> some View {
-        let state = model.privateInferenceState
-        let tone = PrivateInferenceIndicator.palette(
-            PrivateInferenceSurface.tone(state, calls: model.privateInferenceCalls))
-        VStack(alignment: .leading, spacing: TC.Space.l) {
-            // Sign-in comes first so setup starts with the account needed
-            // to connect tools. The section shows account controls once signed in.
-            CredentialSection(copy: copy, prominent: true)
-                .padding(TC.Space.l)
-                .tcCard()
-            HarnessListSection(copy: copy)
-                .padding(TC.Space.l)
-                .tcCard()
-            // The switch, below the list and unchanged: a kill switch, which
-            // is what it always was.
-            DisclosureGroup {
-                VStack(alignment: .leading, spacing: TC.Space.sm) {
+        let label = Self.stateLabel(state: state, copy: copy, calls: calls)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            GlassCard {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
+                    if let onRefresh {
+                        PrivateAIPanelHeader(
+                            eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,
+                            refresh: copy.panelRefresh, disabled: busy, onRefresh: onRefresh)
+                    } else {
+                        Text(copy.settingsTitle)
+                            .glassType(GlassTokens.TypeScale.title)
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityAddTraits(.isHeader)
+                    }
+                    GlassStatusLabel(label.line, status: label.status)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(copy.offerWhat)
-                        .font(TC.Font_.body)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     // The exposure paragraph in full, on the destination as well as
                     // in the offer. A contributor who declined and came back months
                     // later is making the same decision and is owed the same words.
                     Text(copy.offerExposure)
-                        .font(TC.Font_.body)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Toggle(
-                        copy.settingsToggle,
-                        isOn: Binding(
-                            get: { model.daemonSettings?.privateInferenceOn ?? false },
-                            set: { model.applyPrivateInference($0) }
-                        )
-                    )
-                    .disabled(model.privateInferenceBusy || model.daemonSettings?.privateInference == nil)
-                    .toggleStyle(.switch)
-                    .tint(TC.accent)
-                    .font(TC.Font_.body)
-                    // The switch above says what was asked for. This says what
-                    // happened, and it is drawn from the tone -- never from the
-                    // switch's own boolean, which stays on over a listener that
-                    // refused to start.
-                    Label(
-                        PrivateInferenceSurface.stateLine(
-                            state, copy: copy, calls: model.privateInferenceCalls),
-                        systemImage: tone.symbol
-                    )
-                    .font(TC.Font_.body)
-                    .foregroundStyle(tone.textColor)
-                    .fixedSize(horizontal: false, vertical: true)
-                    if let serving = PrivateInferenceSurface.servingLine(
-                        state, calls: model.privateInferenceCalls)
-                    {
-                        Text(serving).font(TC.Font_.meta).foregroundStyle(.secondary)
+                    if let credential {
+                        GlassHairline(GlassColor.hairline)
+                        credential
+                    }
+                    GlassHairline(GlassColor.hairline)
+                    Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
+                        .toggleStyle(GlassToggleStyle(.settings))
+                        .disabled(busy || isOn == nil)
+                    if let serving = PrivateInferenceSurface.servingLine(state, calls: calls) {
+                        Text(serving)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Text(copy.settingsAppliesAtOnce)
-                        .font(TC.Font_.meta)
-                        .foregroundStyle(.secondary)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.top, TC.Space.sm)
-            } label: {
-                VStack(alignment: .leading, spacing: TC.Space.xs) {
-                    Text(copy.settingsTitle)
-                        .font(TC.Font_.bodyDense)
-                    Label(
-                        PrivateInferenceSurface.stateLine(
-                            state, copy: copy, calls: model.privateInferenceCalls),
-                        systemImage: tone.symbol
-                    )
-                    .font(TC.Font_.meta)
-                    .foregroundStyle(tone.textColor)
-                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let refusal {
+                GlassNotice(tone: .outside, title: refusal) {
+                    Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)
+                        .buttonStyle(GlassButtonStyle(.glass))
                 }
             }
-            .padding(TC.Space.l)
-            .tcCard()
-            if let error = model.lastActionError {
-                ActionMessageBanner(text: error) { model.lastActionError = nil }
-            }
         }
-        .padding(.top, TC.Space.Content.top)
-        .padding(.horizontal, TC.Space.Content.horizontal)
-        .padding(.bottom, TC.Space.Content.bottom)
-        .tcColumn(Self.proseColumn)
     }
 }

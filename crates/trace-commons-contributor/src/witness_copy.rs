@@ -31,12 +31,14 @@ use crate::witness::status::{InferenceReceiptCount, WitnessLastResult, WitnessTr
 /// The card's heading.
 pub const WITNESS_HEADING: &str = "Redaction witness";
 
-/// What the card is for, in one sentence a contributor can act on.
+/// What the card is for, in Ron's #1146 words (`witness-panel.tsx`).
+/// Rewritten plainly at the owner's request. Approved 2026-10-07 (owner rewrite): it was "A witness is a
+/// sealed machine that removes private material from a session for you,
+/// instead of this app doing it here. ..."
 pub const WITNESS_INTRO: &str = concat!(
-    "A witness is a sealed machine that removes private material from a session for you, ",
-    "instead of this app doing it here. Turning it on means sending the session to that ",
-    "machine before anything is redacted, which is why it is checked against a measurement ",
-    "you pin before a single byte leaves."
+    "A witness gets your raw sessions only after you agree and its measurement ",
+    "checks out. If its pin isn't valid, nothing is sent. With no witness, redaction ",
+    "happens on this computer."
 );
 
 /// What the certificate proves, stated where a contributor reads it, so no
@@ -46,21 +48,43 @@ pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
     "It is not a statement that a session is clean."
 );
 
-/// Why the pin is a list and not a value.
+/// How the pin list is written, in Ron's #1146 words, then why more than
+/// one is pinned: an upgrade changes the measurement. Approved 2026-10-07: #1146's two lines dropped the upgrade
+/// explanation, which was "More than one measurement can be pinned. An
+/// upgrade to the witness changes its measurement, so the new one is added
+/// here before the change happens; a client that holds only the old one
+/// will refuse the upgraded witness."
 pub const WITNESS_MEASUREMENTS_NOTE: &str = concat!(
-    "More than one measurement can be pinned. An upgrade to the witness changes its ",
-    "measurement, so the new one is added here before the change happens; a client that ",
-    "holds only the old one will refuse the upgraded witness."
+    "One measurement set per line. At least one valid pin required. A witness upgrade ",
+    "changes its measurement: add the new set before the upgrade, or the upgraded witness ",
+    "is refused."
 );
 
-/// Field titles.
-pub const WITNESS_URL_TITLE: &str = "Address";
-pub const WITNESS_SIGNING_ADDRESS_TITLE: &str = "Signing key";
-pub const WITNESS_MEASUREMENTS_TITLE: &str = "Pinned measurements";
+/// Field titles (#1146).
+pub const WITNESS_URL_TITLE: &str = "Witness URL";
+pub const WITNESS_SIGNING_ADDRESS_TITLE: &str = "Signing address";
+pub const WITNESS_MEASUREMENTS_TITLE: &str = "Expected measurements";
 
-/// Actions.
-pub const WITNESS_CONFIGURE: &str = "Use this witness";
-pub const WITNESS_CLEAR: &str = "Stop using a witness";
+/// What each empty field shows (#1146). Examples of a shape, never values.
+pub const WITNESS_URL_PLACEHOLDER: &str = "https://witness.example";
+pub const WITNESS_SIGNING_ADDRESS_PLACEHOLDER: &str = "0x\u{2026}";
+pub const WITNESS_MEASUREMENTS_PLACEHOLDER: &str =
+    "mrtd=\u{2026}\nmrtd=\u{2026},mrconfigid=\u{2026}";
+
+/// The refusing state's fixed operator label, introduced (#1146).
+/// `{label}` is the label, verbatim.
+pub const WITNESS_OPERATOR_LABEL: &str = "Operator label: {label}";
+
+/// The fields of [`WitnessCopy`] that are templates, and the holes each
+/// carries. Every other field is a finished sentence, and a test holds the
+/// table to that, so a hole cannot reach a shell that renders as-is.
+pub const WITNESS_COPY_TEMPLATES: &[(&str, &[&str])] = &[("operator_label", &["label"])];
+
+/// Actions (#1146).
+pub const WITNESS_CONFIGURE: &str = "Save witness";
+/// Approved 2026-10-07: it was "Stop using a
+/// witness".
+pub const WITNESS_CLEAR: &str = "Return";
 
 /// What clearing actually does. Not "off": the redaction still happens, on
 /// this machine, and saying "off" would read as no redaction at all.
@@ -86,20 +110,29 @@ pub fn token_review_summary(
     )
 }
 
-pub const WITNESS_TOKEN_HEADING: &str = "Token probabilities";
+/// Approved 2026-10-07: it was "Token
+/// probabilities".
+pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
 pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
 pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
 pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
-pub const WITNESS_TOKEN_ENABLE: &str = "Include token probabilities";
-pub const WITNESS_TOKEN_DISABLE: &str = "Stop including token probabilities";
-pub const WITNESS_TOKEN_CONFIRM: &str = "Allow token review";
-pub const WITNESS_TOKEN_CANCEL: &str = "Not now";
+/// Approved 2026-10-07: they were "Include
+/// token probabilities" and "Stop including token probabilities".
+pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
+pub const WITNESS_TOKEN_DISABLE: &str = "Disable";
+/// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow token
+/// review".
+pub const WITNESS_TOKEN_CONFIRM: &str = "Enable";
+/// Approved 2026-10-07: it was "Not now".
+pub const WITNESS_TOKEN_CANCEL: &str = "Cancel";
 pub const WITNESS_TOKEN_ENABLED: &str = "Token probabilities will be included in explicit witness reviews when a matching capture is available.";
 pub const WITNESS_TOKEN_DISABLED: &str = "Token probabilities are not included.";
 pub const WITNESS_TOKEN_SAVE_FAILED: &str =
     "The change could not be confirmed. Check the saved setting before trying again.";
 
-pub const WITNESS_INFERENCE_HEADING: &str = "Include captured inference evidence";
+/// Approved 2026-10-07: it was "Include
+/// captured inference evidence".
+pub const WITNESS_INFERENCE_HEADING: &str = "Model-call evidence";
 pub const WITNESS_INFERENCE_DISCLOSURE: &str = concat!(
     "When a contribution uses a witness, this allows the final model call's exact request ",
     "and response to be sent to that remote witness before redaction. These may include ",
@@ -118,10 +151,27 @@ pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "receipt was verified. A supported desktop app asks separately before sending a ",
     "session for witness review. This permission alone does not make it ready to send."
 );
-pub const WITNESS_INFERENCE_ENABLE: &str = "Review permission";
-pub const WITNESS_INFERENCE_DISABLE: &str = "Stop including inference bodies";
-pub const WITNESS_INFERENCE_CONFIRM: &str = "Allow sending captured bodies";
-pub const WITNESS_INFERENCE_CANCEL: &str = "Not now";
+/// Approved 2026-10-07: they were "Review
+/// permission" and "Stop including inference bodies".
+pub const WITNESS_INFERENCE_ENABLE: &str = "Enable";
+pub const WITNESS_INFERENCE_DISABLE: &str = "Disable";
+/// "Enable". Approved 2026-10-07 (owner ruling): it was "Allow sending
+/// captured bodies".
+pub const WITNESS_INFERENCE_CONFIRM: &str = "Enable";
+/// Approved 2026-10-07: it was "Not now".
+pub const WITNESS_INFERENCE_CANCEL: &str = "Cancel";
+
+/// The confirmation over either privacy option's disclosure (#1146
+/// `privacy-controls-panel.tsx`); the disclosure itself is unchanged.
+/// Approved 2026-10-07.
+pub const WITNESS_PRIVACY_CONFIRM_TITLE: &str = "Review privacy change";
+/// Approved 2026-10-07.
+pub const WITNESS_PRIVACY_CONFIRM_DESCRIPTION: &str =
+    "Changing local privacy behavior requires explicit confirmation.";
+/// The local capture row's and the token-review storage block's names
+/// (#1146).
+pub const WITNESS_LOCAL_CAPTURE: &str = "Local token capture";
+pub const WITNESS_LOCAL_STORAGE: &str = "Local token-review storage";
 pub const WITNESS_INFERENCE_ENABLED: &str =
     "Permission saved. Captured bodies may be included when a contribution uses a witness.";
 pub const WITNESS_INFERENCE_DISABLED: &str = "Captured inference bodies are not included.";
@@ -349,6 +399,7 @@ pub struct WitnessReviewCopy {
     pub heading: &'static str,
     pub disclosure: &'static str,
     pub action: &'static str,
+    /// The confirm button. Approved 2026-10-08 (button rule).
     pub confirm: &'static str,
     pub cancel: &'static str,
     pub working: &'static str,
@@ -441,6 +492,9 @@ pub struct AdmissionCopy {
     pub prerequisite: &'static str,
     pub backend: &'static str,
     pub confirm: &'static str,
+    /// The tick that must be ticked before [`Self::confirm`] can be pressed
+    /// (#1146 `admission-preparation-overlay.tsx`). Approved 2026-10-06.
+    pub confirm_line: &'static str,
     pub cancel: &'static str,
     pub permission: &'static str,
     pub working: &'static str,
@@ -526,6 +580,15 @@ pub struct WitnessCopy {
     pub inference_enabled: &'static str,
     pub inference_disabled: &'static str,
     pub inference_save_failed: &'static str,
+    pub url_placeholder: &'static str,
+    pub signing_address_placeholder: &'static str,
+    pub measurements_placeholder: &'static str,
+    /// `{label}`: the refusing state's fixed operator label.
+    pub operator_label: &'static str,
+    pub privacy_confirm_title: &'static str,
+    pub privacy_confirm_description: &'static str,
+    pub local_capture: &'static str,
+    pub local_storage: &'static str,
     pub review: WitnessReviewCopy,
     pub onboarding: FirstContributionCopy,
     pub wallet: WalletCopy,
@@ -690,11 +753,19 @@ pub fn witness_copy() -> WitnessCopy {
         inference_enabled: WITNESS_INFERENCE_ENABLED,
         inference_disabled: WITNESS_INFERENCE_DISABLED,
         inference_save_failed: WITNESS_INFERENCE_SAVE_FAILED,
+        url_placeholder: WITNESS_URL_PLACEHOLDER,
+        signing_address_placeholder: WITNESS_SIGNING_ADDRESS_PLACEHOLDER,
+        measurements_placeholder: WITNESS_MEASUREMENTS_PLACEHOLDER,
+        operator_label: WITNESS_OPERATOR_LABEL,
+        privacy_confirm_title: WITNESS_PRIVACY_CONFIRM_TITLE,
+        privacy_confirm_description: WITNESS_PRIVACY_CONFIRM_DESCRIPTION,
+        local_capture: WITNESS_LOCAL_CAPTURE,
+        local_storage: WITNESS_LOCAL_STORAGE,
         review: WitnessReviewCopy {
             heading: "Review with your configured witness",
             disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
             action: "Prepare witness review",
-            confirm: "Send this session for review",
+            confirm: "Send",
             cancel: "Not now",
             working: "Preparing your witness review. The session may already have left this device.",
             failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
@@ -735,6 +806,7 @@ pub fn witness_copy() -> WitnessCopy {
             prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
             backend: "NEAR AI backend name",
             confirm: "Prepare session",
+            confirm_line: "I understand and want to prepare this session.",
             cancel: "Cancel",
             permission: "Review inference-body permission",
             working: "Preparing this session…",
@@ -756,16 +828,17 @@ pub fn witness_copy() -> WitnessCopy {
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
-            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
-            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
-            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
-            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
+            // Plain-language rewrite (owner, 2026-10-08).
+            start: "Share a session you already have, or finish a new task in a supported agent. Choose its folder in Settings, then come back here to review it.",
+            review: "Open a waiting session and choose Look inside. If you've set up a witness, you're asked before the session is sent to it for review. Check what comes back before you send it.",
+            follow_up: "Follow it in History. Sending, acceptance and credit happen separately. Points are not a spendable NEAR AI balance.",
+            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests with IronWire, and sending what it captures, each need their own setup. This app doesn't create a provider account for you.",
         },
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const EVERY_STATE: [WitnessTrustState; 7] = [
@@ -1025,7 +1098,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            23,
+            24,
             "a field added to AdmissionCopy must be counted here, or a shell is handed \
              a sentence no test has read"
         );
@@ -1172,6 +1245,81 @@ mod tests {
         );
     }
 
+    /// Every string leaf of `value`, with its dotted path.
+    fn template_leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::String(text) => out.push((path.to_string(), text.clone())),
+            serde_json::Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    template_leaves(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            serde_json::Value::Object(fields) => {
+                for (key, item) in fields {
+                    let next = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    template_leaves(item, &next, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The `{name}` holes in `text`, in order.
+    fn holes_in(text: &str) -> Vec<String> {
+        let mut holes = Vec::new();
+        let mut rest = text;
+        while let Some(open) = rest.find('{') {
+            let close = rest[open..].find('}').expect("a hole closes") + open;
+            holes.push(rest[open + 1..close].to_string());
+            rest = &rest[close + 1..];
+        }
+        holes
+    }
+
+    /// Only the declared templates carry holes, and each carries exactly
+    /// its declared ones: a hole anywhere else would reach a shell's
+    /// finished-sentence list as a literal `{name}`.
+    pub(crate) fn assert_only_declared_templates(
+        value: &serde_json::Value,
+        declared: &[(&str, &[&str])],
+    ) {
+        let mut leaves = Vec::new();
+        template_leaves(value, "", &mut leaves);
+        assert!(!leaves.is_empty(), "the table is not being read");
+        for (path, text) in &leaves {
+            let holes = holes_in(text);
+            match declared.iter().find(|(field, _)| field == path) {
+                Some((_, expected)) => {
+                    let mut got = holes.clone();
+                    got.sort();
+                    let mut want: Vec<String> = expected.iter().map(|h| h.to_string()).collect();
+                    want.sort();
+                    assert_eq!(got, want, "{path} carries the wrong holes: {text:?}");
+                }
+                None => assert!(
+                    holes.is_empty() && !text.contains('}'),
+                    "{path} is not a declared template but has a hole: {text:?}"
+                ),
+            }
+        }
+        for (field, _) in declared {
+            assert!(
+                leaves.iter().any(|(path, _)| path == field),
+                "the declared template {field} is not in the table"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_declared_templates_carry_holes() {
+        let value = serde_json::to_value(witness_copy()).unwrap();
+        assert_only_declared_templates(&value, WITNESS_COPY_TEMPLATES);
+    }
+
     #[test]
     fn the_copy_call_carries_every_fixed_word() {
         let copy = witness_copy();
@@ -1179,7 +1327,7 @@ mod tests {
         let object = json.as_object().unwrap();
         assert_eq!(
             object.len(),
-            37,
+            45,
             "a field added to WitnessCopy must be counted here, or a shell can be handed \
              a word this test has never seen"
         );

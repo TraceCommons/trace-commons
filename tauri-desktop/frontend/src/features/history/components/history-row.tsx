@@ -4,7 +4,7 @@ import {
   canWithdrawStatus,
   historyStatusLabel,
   type SharedHistoryStatusCopy,
-} from "../withdrawal-eligibility";
+} from "../withdrawal-eligibility.ts";
 import {
   contributorFacingExplanations,
   historyCreditLine,
@@ -81,7 +81,7 @@ export function HistoryRow({
         <span>
           {record.source} · {date}
         </span>
-        <small>Status: {status}</small>
+        {status && <small>Status: {status}</small>}
         {rowExplanations.map((explanation) => (
           <small className="text-muted-foreground" key={explanation}>
             {explanation}

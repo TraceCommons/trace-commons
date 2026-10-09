@@ -16,6 +16,10 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
     private let lock = NSLock()
     private var recorded: [Call] = []
     private var failures: Set<String> = []
+    /// A failure label other than the method's default, so a test can fail
+    /// a read without the account-ending labels (`session-detail-not-found`
+    /// clears every account-owned record).
+    private var failureMessages: [String: String] = [:]
     private var credentialWarnings: Set<String> = []
     private var publicationVersion = 0
     private var ownerScopeSHA256 = "sha256:owner-a"
@@ -34,6 +38,13 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         } else {
             failures.remove(method)
         }
+    }
+
+    func setFailure(_ method: String, message: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        failures.insert(method)
+        failureMessages[method] = message
     }
 
     func setCredentialWarning(_ method: String, enabled: Bool = true) {
@@ -57,13 +68,14 @@ private final class SessionPublicationDaemon: DaemonCalling, @unchecked Sendable
         defer { lock.unlock() }
         recorded.append(Call(method: method, params: paramsJSON))
         if failures.contains(method) {
-            let message: String
+            var message: String
             switch method {
             case "history_detail": message = "session-detail-not-found"
             case "publish_public_run": message = "public-run-conflict"
             case "unpublish_public_run": message = "public-run-unpublish-failed"
             default: message = "synthetic-test-failure"
             }
+            message = failureMessages[method] ?? message
             return #"{"id":1,"error":{"code":"unavailable","message":"\#(message)"}}"#
         }
         switch method {
@@ -203,29 +215,102 @@ final class SessionPublicationTests: XCTestCase {
         XCTAssertEqual(copy.contributionStatusChoices.count, 10)
         XCTAssertEqual(copy.contributionStatusLabel(for: "submitted"), "Submitted")
         XCTAssertEqual(copy.contributionStatusLabel(for: "accepted"), "Accepted into the commons")
-        XCTAssertEqual(copy.contributionStatusLabel(for: "future_state"), copy.unrecognizedValue)
+        // K8 (#1173), the counterpart of the Tauri frontend's
+        // `historyStatusLabel`: the privacy-backstop hold and the quarantine
+        // hold each read with their own core-chosen label, not a shared
+        // generic one.
+        XCTAssertEqual(copy.contributionStatusLabel(for: "quarantined"), "Held for privacy review")
+        XCTAssertEqual(
+            copy.contributionStatusLabel(for: "awaiting_pii_backstop"), "Waiting for privacy review")
+        // An unrecognised status reads as the core's history label, the same
+        // words GTK, Windows and Tauri show -- not "Unrecognized".
+        XCTAssertEqual(copy.contributionStatusUnavailable, "Status unavailable")
+        XCTAssertEqual(
+            copy.contributionStatusLabel(for: "future_state"), copy.contributionStatusUnavailable)
         XCTAssertEqual(copy.permittedUseChoices.count, 6)
         XCTAssertEqual(copy.permittedUseLabel(for: "model_training"), "Model training")
         XCTAssertEqual(copy.permittedUseLabel(for: "future_use"), copy.unrecognizedValue)
         XCTAssertFalse(copy.permittedUsesUnavailable.isEmpty)
     }
 
-    func testServerPreAcceptanceStatesUseTheNonDistributedWithdrawalCopy() {
+    func testServerPreAcceptanceStatesUseTheNonDistributedWithdrawalCopy() throws {
         for status in ["received", "quarantined", "awaiting_pii_backstop", "rejected"] {
-            let confirmation = WithdrawalCopy.confirmation(for: .init(status: status))
+            let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: .init(status: status)), status)
             XCTAssertNil(confirmation.ambiguity, status)
             XCTAssertEqual(confirmation.bodies, [WithdrawalCopy.canonicalNotDistributed], status)
         }
+    }
+
+    /// K3 (#1173): a status this build does not know is confirmed with the
+    /// core's prompt, the one the other shells show, weighted as the gravest,
+    /// under #1146's dialog title, with no credit line of its own beside it.
+    func testAnUnknownStatusIsConfirmedWithTheCorePrompt() throws {
+        let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: .init(status: "future_state")))
+        let prompt = try XCTUnwrap(TCCoreCopy.withdrawalConfirmationPrompt())
+        XCTAssertEqual(confirmation.bodies, [prompt])
+        XCTAssertEqual(confirmation.gravest, 0)
+        XCTAssertEqual(confirmation.question, "Confirm withdrawal")
+        XCTAssertNil(confirmation.ambiguity)
+        XCTAssertNil(confirmation.credit)
+        XCTAssertTrue(prompt.contains("cannot be recalled"), prompt)
+        XCTAssertTrue(prompt.contains(WithdrawalCopy.creditNote), prompt)
+        XCTAssertEqual(WithdrawalCopyCheck.failures(), [])
+    }
+
+    /// #1146 parity (2026-10-07): the withdrawal words are the core's, under
+    /// Ron's labels, and the tiers keep their meaning.
+    func testWithdrawalWordsAreTheCoresUnderRonsLabels() throws {
+        for stage in [WithdrawalCopy.Stage.notInTheCommons, .inTheCommons, .unknown] {
+            let confirmation = try XCTUnwrap(WithdrawalCopy.confirmation(for: stage))
+            XCTAssertEqual(confirmation.question, "Confirm withdrawal")
+            XCTAssertEqual(confirmation.description, "Review what withdrawal changes before continuing.")
+            XCTAssertEqual(confirmation.confirmLabel, "Withdraw")
+            XCTAssertEqual(confirmation.busyLabel, "Withdrawing\u{2026}")
+        }
+        XCTAssertEqual(WithdrawalCopy.resultHeading, "Withdrawn by you")
+        XCTAssertEqual(WithdrawalCopy.tryAgain, "Try again")
+        XCTAssertTrue(WithdrawalCopy.resultSentence(.commonsDistributed).contains("cannot be recalled"))
+        XCTAssertTrue(WithdrawalCopy.resultSentence(nil).contains("cannot be recalled"))
+        XCTAssertEqual(WithdrawalCopy.failureSentence(label: "not-found"), WithdrawalCopy.notFound)
+        // The daemon's label is for logs, never echoed.
+        XCTAssertFalse(WithdrawalCopy.failureSentence(label: "withdraw-failed").contains("withdraw-failed"))
+        XCTAssertEqual(WithdrawalCopyCheck.failures(), [])
     }
 
     func testEveryTerminalContributionStateSuppressesWithdrawal() {
         for status in ["withdrawn", "revoked", "purged", "expired"] {
             XCTAssertTrue(ContributionStatusPresentation.isTerminal(status), status)
         }
-        for status in ["submitted", "received", "quarantined", "accepted", "rejected"] {
+        // K8 (#1173): `awaiting_pii_backstop` is a pre-acceptance hold, named
+        // withdrawable on the same terms as the rest of this set by the
+        // Tauri frontend's `canWithdrawStatus` (`withdrawal-eligibility.ts`).
+        for status in ["submitted", "received", "quarantined", "awaiting_pii_backstop", "accepted", "rejected"] {
             XCTAssertFalse(ContributionStatusPresentation.isTerminal(status), status)
         }
         XCTAssertFalse(ContributionStatusPresentation.isTerminal(nil))
+    }
+
+    /// Fail closed, as the Tauri frontend's `canWithdrawStatus` does (an
+    /// allowlist that answers `false` for a status it does not name): an
+    /// unrecognized status -- a wider future status enum, or a label from a
+    /// newer daemon -- is treated as terminal, so Withdraw is not offered on
+    /// it. The owner's decision on #1212's review, 2026-10-02; macOS used to
+    /// fail open here.
+    func testAnUnrecognizedContributionStateIsTreatedAsTerminalAndOffersNoWithdraw() throws {
+        for status in ["a-status-from-the-future", "unknown", "", "Accepted"] {
+            XCTAssertTrue(ContributionStatusPresentation.isTerminal(status), status)
+            XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(status), status)
+        }
+        // Every status the core names is either open or closed, so none of
+        // them falls to the unrecognized case.
+        let copy = try XCTUnwrap(PublicRunCopy.decode(fromJSON: try XCTUnwrap(TCPublicRun.copyJSON())))
+        XCTAssertEqual(copy.contributionStatusChoices.count, 10)
+        for choice in copy.contributionStatusChoices {
+            let open = ["submitted", "received", "accepted", "quarantined",
+                        "awaiting_pii_backstop", "rejected"].contains(choice.value)
+            XCTAssertEqual(
+                ContributionStatusPresentation.offersWithdraw(choice.value), open, choice.value)
+        }
     }
 
     func testEditorUsesTheSharedRustValidatorAndNormalizedDraft() throws {
@@ -380,6 +465,20 @@ final class SessionPublicationTests: XCTestCase {
         )
     }
 
+    /// With no daemon client (the core is down) a read is not left as
+    /// nothing at all: the detail draws the core's unavailable line, with
+    /// Retry, as a refused read does, never an empty pane.
+    @MainActor
+    func testAReadWithNoDaemonSaysSoRatherThanDrawingNothing() {
+        let model = AppModel()
+        model.loadSessionDetail(record)
+        XCTAssertFalse(model.loadingSessionDetails.contains(record.submissionID))
+        XCTAssertNil(model.sessionDetails[record.submissionID])
+        let line = model.sessionDetailErrors[record.submissionID]
+        XCTAssertNotNil(line)
+        XCTAssertEqual(line, TCPublicRun.sessionDetailErrorLine(label: "daemon-unavailable"))
+    }
+
     @MainActor
     func testRefreshFailureClearsCachedSessionDetail() async throws {
         let model = AppModel()
@@ -394,6 +493,84 @@ final class SessionPublicationTests: XCTestCase {
                 && model.sessionDetailErrors[self.record.submissionID] != nil
         }
         XCTAssertNil(model.sessionDetails[record.submissionID])
+    }
+
+    /// A failed detail read leaves Withdraw standing on the record's own
+    /// status, as the legacy row offered it; an unknown status still offers
+    /// none.
+    @MainActor
+    func testAFailedDetailReadStillOffersWithdrawOnTheRecordStatus() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        daemon.setFailure("history_detail")
+        let received = HistoryRecord(
+            submissionID: record.submissionID, submittedAt: record.submittedAt, projectID: record.projectID,
+            projectLabel: record.projectLabel, source: record.source, status: "received",
+            consentScopes: record.consentScopes, creditPointsPending: 0, creditPointsFinal: nil,
+            explanations: [], lastRefreshedAt: nil)
+        model.loadSessionDetail(received)
+        try await waitUntil {
+            !model.loadingSessionDetails.contains(received.submissionID)
+                && model.sessionDetailErrors[received.submissionID] != nil
+        }
+        let detail = model.sessionDetails[received.submissionID]
+        XCTAssertNil(detail)
+        let status = SessionDetailView.withdrawalStatus(received, detail: detail)
+        XCTAssertEqual(status, "received")
+        XCTAssertTrue(ContributionStatusPresentation.offersWithdraw(status))
+
+        let unknown = HistoryRecord(
+            submissionID: received.submissionID, submittedAt: received.submittedAt, projectID: received.projectID,
+            projectLabel: received.projectLabel, source: received.source, status: "a-status-from-the-future",
+            consentScopes: [], creditPointsPending: 0, creditPointsFinal: nil, explanations: [], lastRefreshedAt: nil)
+        XCTAssertFalse(ContributionStatusPresentation.offersWithdraw(
+            SessionDetailView.withdrawalStatus(unknown, detail: detail)))
+    }
+
+    /// A reload keeps the detail it already holds until the daemon answers,
+    /// so the public-run editor drawn from it, and its draft, stay mounted
+    /// (an app switch reloads). A failed reload keeps it, with the error
+    /// beside it.
+    @MainActor
+    func testAFailedReloadKeepsTheDetailItHolds() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID] != nil }
+        let before = model.sessionDetails[record.submissionID]
+
+        daemon.setFailure("history_detail", message: "synthetic-read-failure")
+        model.loadSessionDetail(record)
+        XCTAssertEqual(model.sessionDetails[record.submissionID], before, "the reload unmounted the detail")
+        XCTAssertTrue(model.loadingSessionDetails.contains(record.submissionID))
+        try await waitUntil {
+            !model.loadingSessionDetails.contains(self.record.submissionID)
+                && model.sessionDetailErrors[self.record.submissionID] != nil
+        }
+        XCTAssertEqual(model.sessionDetails[record.submissionID], before, "a failed reload dropped the detail")
+    }
+
+    /// A reload that answers replaces the detail and clears an earlier error.
+    @MainActor
+    func testAnAnsweredReloadReplacesTheDetail() async throws {
+        let model = AppModel()
+        model.setClientForTesting(client)
+        daemon.setFailure("history_detail", message: "synthetic-read-failure")
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetailErrors[self.record.submissionID] != nil }
+        daemon.setFailure("history_detail", enabled: false)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID] != nil }
+        XCTAssertEqual(model.sessionDetails[record.submissionID]?.publicationVersion, 0)
+        XCTAssertNil(model.sessionDetailErrors[record.submissionID])
+
+        // The daemon's record moves (a publication elsewhere); the reload
+        // draws the new one, not the one it held.
+        _ = try client.publishPublicRun(
+            submissionID: record.submissionID, draft: draft, taskSuccess: "partial",
+            contributedVersion: "trace-contribution/1", expectedPublicationVersion: 0)
+        model.loadSessionDetail(record)
+        try await waitUntil { model.sessionDetails[self.record.submissionID]?.publicationVersion == 1 }
     }
 
     @MainActor

@@ -1,4 +1,5 @@
 import SwiftUI
+import TCDesign
 import TCShellCore
 
 /// The key this destination answers with.
@@ -18,6 +19,9 @@ struct CredentialSection: View {
     let copy: PrivateInferenceCopy
     var requiresSession = false
     var prominent = false
+    /// Whether the section draws its own title. Inside #1146's connection
+    /// panel it does not: the panel's title is the heading.
+    var titled = true
     @State private var ownProvider = "github"
     /// Where the provider choice lives when the caller holds it. `nil` -- every
     /// production caller -- keeps it in this view's own state.
@@ -57,32 +61,34 @@ struct CredentialSection: View {
 
     var body: some View {
         let status = model.credentialStatus
-        let tone = PrivateInferenceIndicator.palette(
-            CredentialSurface.tone(status, calls: model.credentialCalls))
+        let tone = CredentialSurface.tone(status, calls: model.credentialCalls)
         let action = CredentialSurface.action(
             requiresSession ? CredentialStatus(state: status.sessionState) : status,
             calls: model.credentialCalls)
         let balanceAction = requiresSession ? CredentialAction.none : BalanceSurface.actionToDraw(
             balance: BalanceSurface.action(model.balanceStatus, calls: model.balanceCalls),
             credential: action)
-        VStack(alignment: .leading, spacing: TC.Space.sm) {
-            if prominent {
-                Label(copy.credentialTitle, systemImage: "person.crop.circle")
-                    .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            if !titled {
+                // Drawn inside the connection card, which is its heading.
+                EmptyView()
+            } else if prominent {
+                Text(copy.credentialTitle)
+                    .glassType(GlassTokens.TypeScale.heading)
+                    .foregroundStyle(GlassColor.textPrimary)
             } else {
-                TCSectionHeader(title: copy.credentialTitle)
+                GlassSectionRule(copy.credentialTitle)
             }
             Text(copy.credentialWhat)
-                .font(TC.Font_.body)
+                .glassType(GlassTokens.TypeScale.body)
+                .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             // What is true, painted from the shared tone -- never from
-            // whether this shell happens to be holding an attempt.
-            Label(
+            // whether this shell happens to be holding an attempt. The dot
+            // means nothing alone; the core's sentence beside it does.
+            GlassStatusLabel(
                 CredentialSurface.stateLine(status, copy: copy, calls: model.credentialCalls),
-                systemImage: tone.symbol
-            )
-            .font(TC.Font_.body)
-            .foregroundStyle(tone.textColor)
+                status: PrivateInferenceIndicator.status(tone))
             .fixedSize(horizontal: false, vertical: true)
             // The sentence that must accompany the button comes from the
             // action, not from a branch here, and it is drawn ABOVE the
@@ -90,39 +96,44 @@ struct CredentialSection: View {
             // pressed it.
             if let explains = CredentialSurface.actionExplains(action, copy: copy) {
                 Text(explains)
-                    .font(TC.Font_.body)
+                    .glassType(GlassTokens.TypeScale.body)
+                    .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if action == .obtain || balanceAction == .obtain {
-                Picker(copy.credentialProviderLabel, selection: selection) {
-                    ForEach(Self.providerOptions(copy), id: \.tag) { option in
-                        Text(option.title).tag(option.tag)
-                    }
+                // The glass pill shows only the chosen provider, so the
+                // chooser's own word is drawn beside it, as the native
+                // picker drew its label. VoiceOver hears it once, from the
+                // pill, which carries both the label and the value.
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Text(copy.credentialProviderLabel)
+                        .glassType(GlassTokens.TypeScale.label)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .accessibilityHidden(true)
+                    GlassPicker(
+                        copy.credentialProviderLabel,
+                        selection: Binding(
+                            get: { provider },
+                            set: { if let value = $0 { selection.wrappedValue = value } }),
+                        options: Self.providerOptions(copy).map { GlassPickerOption($0.title, value: $0.tag) },
+                        placeholder: copy.credentialProviderLabel)
                 }
                 .frame(minHeight: 44)
                 .disabled(model.credentialBusy)
                 if provider == "near" {
                     Text(copy.credentialWalletNotice)
-                        .font(TC.Font_.body)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             actionButton(action)
-            // What the key is worth, on the same card as the key. A balance
-            // is the one fact on this screen about an ACCOUNT rather than
-            // this computer, and it is here because it is the thing the
-            // sign-in above is for -- a contributor who has just signed in
-            // should not have to go looking for what they signed in to see.
-            //
-            // `credentialAction` is passed so the two rows cannot draw the
-            // same sign-in button twice; the decision is
-            // `BalanceSurface.actionToDraw`'s, not this view's.
-            if !requiresSession && action != .obtain {
-                Divider().padding(.vertical, TC.Space.xs)
-                BalanceRow(copy: copy, credentialAction: action, run: run)
-                Divider().padding(.vertical, TC.Space.xs)
-                FundingRow(copy: copy)
-            }
+            // The balance and funding are their own panels after this card,
+            // as #1146 draws them (`PrivateAIBalanceCard`, `FundingRow`). The
+            // sign-in the balance needs stays here, beside the provider
+            // chooser it uses, and never doubles this card's own button: the
+            // decision is `BalanceSurface.actionToDraw`'s, not this view's.
+            actionButton(balanceAction)
         }
         .task(id: action) {
             // A state nobody could read polls nothing. There is no outcome
@@ -148,17 +159,9 @@ struct CredentialSection: View {
     @ViewBuilder
     private func actionButton(_ action: CredentialAction) -> some View {
         if let label = CredentialSurface.actionLabel(action, copy: copy) {
-            if prominent && action == .obtain {
-                Button(label) { run(action) }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(TC.accent)
-                    .disabled(model.credentialBusy)
-            } else {
-                Button(label) { run(action) }
-                    .buttonStyle(.bordered)
-                    .disabled(model.credentialBusy)
-            }
+            Button(label) { run(action) }
+                .buttonStyle(GlassButtonStyle(prominent && action == .obtain ? .primary : .glass))
+                .disabled(model.credentialBusy)
         }
     }
 

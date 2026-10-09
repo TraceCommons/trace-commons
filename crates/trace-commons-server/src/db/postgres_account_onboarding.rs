@@ -225,7 +225,7 @@ impl PgBackend {
     /// `trace_near_provisioning_ceremonies` is a ceremony handle and an opaque
     /// `payload`, so the row mechanics -- the GUC that the RLS policy reads,
     /// the expiry, the single-use delete on take -- are the same for every
-    /// ceremony and are written once here. Two enrolment ceremonies with two
+    /// ceremony and are written once here. Two enrollment ceremonies with two
     /// copies of the RLS handshake is a rule that eventually diverges, and the
     /// half that diverges silently is whichever has the thinner tests.
     async fn store_ceremony_payload<T: serde::Serialize>(
@@ -386,7 +386,7 @@ impl PgBackend {
     /// Bounded at one retry: a second failure to resolve means something other
     /// than a race.
     ///
-    /// Shared by both enrolment ceremonies (#836). The wallet and the login
+    /// Shared by both enrollment ceremonies (#836). The wallet and the login
     /// write different rows, but they race identically, and this is the subtle
     /// half -- a second copy would be the one to drift, and it would drift
     /// silently because a race is not what a test reaches for first.
@@ -788,6 +788,87 @@ impl PgBackend {
                 anchor_hash: material.anchor_hash.clone(),
             },
         )))
+    }
+
+    /// Enroll a further device into the `bound` account `(tenant, account)`: a
+    /// second Mac signed in with that account's passkey, proving the near.ai
+    /// login the account is already bound to.
+    ///
+    /// **One transaction, in the session's own tenant, and the comparison is
+    /// inside it.** Under the anchor's advisory lock (the one provisioning and
+    /// bind take, so no concurrent claim of this anchor interleaves), it reads
+    /// the anchor row for this login under forced RLS and requires it to name
+    /// this account, open and `bound`, with the binding row share-locked so a
+    /// concurrent state change waits for this transaction. Only then does it
+    /// write the device, principal, provisioned-device row, session and audit
+    /// row, and commit. A mismatch returns before the first write; dropping
+    /// the transaction leaves nothing behind.
+    ///
+    /// **It never resolves the anchor across tenants.** No login-resolver
+    /// lookup, no mint, no claim: an anchor held by another account in another
+    /// tenant is invisible here, exactly as an anchor nobody holds is, so the
+    /// two are one refusal
+    /// ([`crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH`]) and
+    /// this path can never disclose, or create, another account.
+    pub(super) async fn near_ai_login_enrol(
+        &self,
+        tenant: &str,
+        account: Uuid,
+        login: &crate::near_ai_login::VerifiedNearAiLogin,
+        device_public_key: &[u8; 32],
+        session: NewSession<'_>,
+        identity: &NearAccountIdentity,
+    ) -> Result<ProvisionedNearAccount, DatabaseError> {
+        if session.client_kind != crate::account_native_auth::NATIVE_SESSION_CLIENT_KIND {
+            return Err(refused());
+        }
+        let material = NearAiAnchorMaterial::for_login(login, identity)?;
+        let mut client = self.trace_pool().get().await?;
+        let tx = Self::begin_trace_tenant_transaction(&mut client, tenant).await?;
+        tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            &[&material.anchor_hash],
+        )
+        .await?;
+        let own = tx
+            .query_opt(
+                "SELECT 1 FROM trace_account_bindings b
+                   JOIN trace_accounts a
+                     ON a.tenant_id = b.tenant_id AND a.account_id = b.account_id
+                   JOIN trace_near_account_anchors n
+                     ON n.tenant_id = b.tenant_id AND n.account_id = b.account_id
+                  WHERE b.tenant_id = trace_current_tenant_id() AND b.account_id = $1
+                    AND b.state = 'bound' AND a.closed_at IS NULL
+                    AND n.anchor_hash = $2 AND n.identity_source = 'near_ai_login'
+                  FOR SHARE OF b",
+                &[&account, &material.anchor_hash],
+            )
+            .await?;
+        if own.is_none() {
+            return Err(named_refusal(
+                crate::account_onboarding::NEAR_AI_ENROL_ACCOUNT_MISMATCH,
+            ));
+        }
+        let (device, _principal) = attach_near_ai_login_device(
+            &tx,
+            tenant,
+            &account,
+            device_public_key,
+            &material.anchor_hash,
+            &session,
+        )
+        .await?;
+        let actor = crate::account_session::account_actor_ref(
+            &crate::account_session::AccountId::from_uuid(account),
+        );
+        tx.execute("INSERT INTO trace_account_audit(tenant_id,action,actor_ref,outcome,safe_metadata) VALUES(trace_current_tenant_id(),'account_device_enrolled',$1,'success',$2)", &[&actor,&serde_json::json!({"identity":"near_ai_login"})]).await?;
+        tx.commit().await?;
+        Ok(ProvisionedNearAccount {
+            tenant_id: tenant.to_string(),
+            account_id: account,
+            device_key_id: device,
+            anchor_hash: material.anchor_hash,
+        })
     }
 
     /// The existing-account branch: re-check the passkey account, provision X

@@ -35,7 +35,7 @@ pub const GEMINI_CLI_HOME_ENV: &str = "GEMINI_CLI_HOME";
 pub const GEMINI_SESSION_SUBDIR: &str = "tmp";
 
 /// The per-project subdirectory holding session documents.
-const CHATS_DIR: &str = "chats";
+pub(crate) const CHATS_DIR: &str = "chats";
 
 /// The sibling file naming the project's true working directory. Older
 /// hash-named project directories do not have one.
@@ -74,7 +74,7 @@ impl GeminiCliSource {
 }
 
 /// The session naming rule, in one place: `session-<...>.json`.
-fn is_session_file_name(file_name: &str) -> bool {
+pub(crate) fn is_session_file_name(file_name: &str) -> bool {
     file_name.starts_with("session-") && file_name.ends_with(".json")
 }
 
@@ -428,6 +428,10 @@ fn load_session(path: &Path, cwd: Option<String>) -> anyhow::Result<SessionTrans
     let project = project_dir.and_then(|dir| project_label(dir, cwd.as_deref()));
 
     Ok(SessionTranscript {
+        source_session: super::native_session_identity(
+            SOURCE_GEMINI_CLI,
+            document.get("sessionId").and_then(|v| v.as_str()),
+        ),
         source: Cow::Borrowed(SOURCE_GEMINI_CLI),
         // Gemini's session document carries no CLI version field.
         agent_version: None,
@@ -721,6 +725,10 @@ mod tests {
         let t = source.load(&r).unwrap();
 
         assert_eq!(t.source, SOURCE_GEMINI_CLI);
+        assert_eq!(
+            t.source_session.as_ref().unwrap().native_id,
+            "11111111-1111-4111-8111-111111111111"
+        );
         assert_eq!(
             t.conversation_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111"),

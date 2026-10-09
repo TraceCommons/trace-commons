@@ -110,7 +110,7 @@ impl Harness {
         store
             .save_config(&ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -447,7 +447,7 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     store
         .save_config(&ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -886,7 +886,7 @@ async fn an_approval_whose_previewed_bytes_are_gone_is_not_uploaded() {
     let entry_id = h.only_entry().entry_id;
     {
         let mut q = h.shared.queue.lock().unwrap();
-        assert!(q.record_previewed_envelope(entry_id, "sha256:never-stored", None));
+        assert!(q.record_previewed_envelope(entry_id, "sha256:never-stored", None, None));
     }
     let resp = ipc::handle_local(
         &h.shared,

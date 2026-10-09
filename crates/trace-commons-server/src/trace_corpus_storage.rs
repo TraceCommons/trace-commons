@@ -925,6 +925,11 @@ pub struct TraceNearCreditOutboxItemRecord {
     pub near_transaction_hash: Option<String>,
     pub last_error_hash: Option<String>,
     pub confirmed_at: Option<DateTime<Utc>>,
+    /// Set (V94) only on a versioned-pipeline payout row, which the
+    /// pipeline submits and confirms through its own NEAR payout adapter;
+    /// `None` on every row `main` writes, and on every account-hold row.
+    #[serde(default)]
+    pub instrument_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2135,7 +2140,7 @@ pub struct TraceGateDecisionRow {
     /// `None` means NOT INSTRUMENTED: every decision written before V53, and
     /// any path that records a decision without scoring it. It is not `Some(0)`
     /// — a below-floor trace earns a genuine composite of 0, and conflating
-    /// the two would enrol unmeasured rows into the sample as real
+    /// the two would enroll unmeasured rows into the sample as real
     /// observations. Readers MUST NOT default it.
     pub composite_score_micros: Option<i64>,
     /// Which vector-index shard the novelty score was computed against
@@ -2712,6 +2717,23 @@ pub trait TraceCorpusStore: Send + Sync {
         tenant_id: &str,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
 
+    /// The submissions of `tenant_id` among `submission_ids`, in no set
+    /// order; an id with no submission is left out. A store that cannot read
+    /// them in one statement reads them one at a time (the default).
+    async fn get_trace_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError> {
+        let mut records = Vec::with_capacity(submission_ids.len());
+        for submission_id in submission_ids {
+            if let Some(record) = self.get_trace_submission(tenant_id, *submission_id).await? {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     /// Keyset-paginated submission read scoped to an account's active principal
     /// set, for the dual-auth account read-back surface
     /// (`GET /v1/account/traces`). Rows are filtered by
@@ -2729,6 +2751,21 @@ pub trait TraceCorpusStore: Send + Sync {
         cursor: Option<TraceSubmissionKeysetCursor>,
         limit: i64,
     ) -> Result<Vec<TraceSubmissionRecord>, DatabaseError>;
+
+    /// Read-only activity projection under one statement snapshot. Tenant and
+    /// principals MUST come from account authentication, never a request body.
+    async fn account_activity_days(
+        &self,
+        _tenant_id: &str,
+        _principal_refs: &[String],
+        _starts_at: DateTime<Utc>,
+        _observed_at: DateTime<Utc>,
+        _qualification: trace_commons_protocol::activity_missions::Qualification,
+    ) -> Result<Vec<trace_commons_protocol::activity_missions::ActivityDay>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "activity_missions_source_unavailable".into(),
+        ))
+    }
 
     async fn upsert_trace_tenant_policy(
         &self,
@@ -2761,6 +2798,25 @@ pub trait TraceCorpusStore: Send + Sync {
         &self,
         tenant_id: &str,
     ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError>;
+
+    /// `list_trace_credit_events` for the events of `submission_ids` only, in
+    /// the same order. The default filters the whole ledger.
+    async fn list_trace_credit_events_for_submissions(
+        &self,
+        tenant_id: &str,
+        submission_ids: &[Uuid],
+    ) -> Result<Vec<TraceCreditEventRecord>, DatabaseError> {
+        let wanted = submission_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        Ok(self
+            .list_trace_credit_events(tenant_id)
+            .await?
+            .into_iter()
+            .filter(|event| wanted.contains(&event.submission_id))
+            .collect())
+    }
 
     /// Move quarantined submissions back to `AwaitingPiiBackstop` so the
     /// backstop driver re-assesses them, oldest-received first, capped at
@@ -3530,7 +3586,12 @@ pub trait TraceCorpusStore: Send + Sync {
     /// are left untouched. Implementations MUST scope the update by `tenant_id`
     /// (the V23 table has forced RLS bound to `trace_current_tenant_id()`).
     ///
-    /// Defaults to a log-once warning + no-op; only the production Postgres
+    /// Returns the number of rows updated: 0 when there is nothing to update,
+    /// or when the submission has a pipeline row, which a re-score never
+    /// rewrites (spec 2026-10-08, Slice C, O-C3). The caller counts a 0 as a
+    /// skip, never as a re-score.
+    ///
+    /// Defaults to a log-once warning + no-op (0 rows); only the production Postgres
     /// backend has a real implementation. The default deliberately does not
     /// panic but does warn (label-only, no tenant/submission identifiers) so a
     /// future non-Postgres backend that exercises the re-score path cannot
@@ -3542,14 +3603,14 @@ pub trait TraceCorpusStore: Send + Sync {
         _perplexity_micros: i64,
         _peak_perplexity_micros: Option<i64>,
         _perplexity_passed: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Write ONLY the five per-author perplexity columns (migration V73) on
@@ -3561,21 +3622,23 @@ pub trait TraceCorpusStore: Send + Sync {
     /// different model than the row was gated under cannot rewrite gating
     /// history. Implementations MUST scope the update by `tenant_id`.
     ///
-    /// Defaults to a log-once warning + no-op, as
-    /// `update_trace_gate_decision_perplexity` does and for the same reason.
+    /// Returns the number of rows updated, as
+    /// `update_trace_gate_decision_perplexity` does: 0 for a pipeline
+    /// submission. Defaults to a log-once warning + no-op (0 rows), as that
+    /// method does and for the same reason.
     async fn update_trace_gate_decision_author_perplexity(
         &self,
         _tenant_id: &str,
         _submission_id: Uuid,
         _columns: [Option<i64>; 5],
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_author_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Update ONLY the credit-quality columns for the decision row identified by

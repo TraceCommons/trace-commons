@@ -467,21 +467,18 @@ public sealed class TrayIcon : IDisposable
 
             if (_menu.IsPaused)
             {
-                AppendMenu(menu, MF_STRING, MenuIdResume, "Resume watching");
+                AppendMenu(menu, MF_STRING, MenuIdResume, MonitorShellCopy.ResumeWatcher);
             }
             else
             {
                 IntPtr pauseMenu = CreatePopupMenu();
                 if (pauseMenu != IntPtr.Zero)
                 {
-                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseHour, "For 1 hour");
-                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseTomorrow, "Until tomorrow morning");
-                    AppendMenu(
-                        pauseMenu,
-                        MF_STRING,
-                        MenuIdPauseUntilResumed,
-                        "Until I turn it back on");
-                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, "Pause");
+                    // The core's pause lengths (button rule, 2026-10-08).
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseHour, "1 hour");
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseTomorrow, "Until morning");
+                    AppendMenu(pauseMenu, MF_STRING, MenuIdPauseUntilResumed, "Until resumed");
+                    AppendMenu(menu, MF_STRING | MF_POPUP, pauseMenu, MonitorShellCopy.PauseWatcher);
                 }
             }
 
@@ -523,7 +520,7 @@ public sealed class TrayIcon : IDisposable
             AppendMenu(menu, MF_STRING, MenuIdSettings, "Settings");
 
             AppendMenu(menu, MF_SEPARATOR, IntPtr.Zero, null);
-            AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit Trace Commons…");
+            AppendMenu(menu, MF_STRING, MenuIdQuit, "Quit…");
 
             // Required before TrackPopupMenu, and the reason this class owns a
             // real popup window rather than a message-only one: without the
@@ -627,18 +624,21 @@ public sealed class TrayIcon : IDisposable
 
         uint? dot = state switch
         {
-            // tc_green: something is waiting for you. The spec asks for a
-            // numeric badge here; a 16px tray icon cannot carry two legible
-            // digits, so the count lives in the tooltip and in the menu
-            // header, both of which a screen reader can also read, and the
-            // icon carries only "there is something".
-            TrayIconState.Attention => lightTaskbar ? 0xFF178F70U : 0xFF3FBE9AU,
+            // The brand accent (TcAccentBrush in BrandTokens.xaml, generated
+            // from design-tokens/glass.tokens.json; BrandTokensTests holds
+            // these literals to it): something is waiting for you. The spec
+            // asks for a numeric badge here; a 16px tray icon cannot carry
+            // two legible digits, so the count lives in the tooltip and in
+            // the menu header, both of which a screen reader can also read,
+            // and the icon carries only "there is something".
+            TrayIconState.Attention => lightTaskbar ? 0xFF6D14F3U : 0xFF8A3DFFU,
 
             // The spec says an amber dot. This design system has no amber;
-            // tc_coral is its "something went wrong" ink, and inventing a
+            // statusOutside (TcStatusOutsideBrush, which the coral keys now
+            // carry) is its "something went wrong" ink, and inventing a
             // token for one 3px dot would put a colour in the product that
             // no other surface uses.
-            TrayIconState.Unhealthy => lightTaskbar ? 0xFFD65D4FU : 0xFFF2887AU,
+            TrayIconState.Unhealthy => lightTaskbar ? 0xFFD0342CU : 0xFFFF6B6BU,
 
             // Paused and idle carry no dot. Paused is "struck through" in the
             // spec; a strike at 16px is a smear, and the tooltip says

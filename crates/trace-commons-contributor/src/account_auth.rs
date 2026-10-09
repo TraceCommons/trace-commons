@@ -78,6 +78,7 @@ pub struct AccountSession {
 pub(crate) struct LoadedAccountSession {
     pub session: AccountSession,
     pub snapshot: crate::daemon::commons_credentials::Snapshot,
+    raw: Vec<u8>,
 }
 
 /// What a completed sign-in reports to a caller. Carries no token.
@@ -118,7 +119,24 @@ pub(crate) fn try_load_session_with_snapshot(
     if !session_is_usable(&session) {
         return Ok(None);
     }
-    Ok(Some(LoadedAccountSession { session, snapshot }))
+    Ok(Some(LoadedAccountSession {
+        session,
+        snapshot,
+        raw,
+    }))
+}
+
+impl LoadedAccountSession {
+    /// The `binding_state` stored with this session when it was signed in
+    /// (`native_identity::persist_session`), or `None` for a record that has
+    /// none (an older record, or one an enrollment wrote).
+    pub(crate) fn stored_binding_state(&self) -> Option<String> {
+        serde_json::from_slice::<serde_json::Value>(&self.raw)
+            .ok()?
+            .get("binding_state")?
+            .as_str()
+            .map(str::to_owned)
+    }
 }
 
 /// Whether a session is still worth presenting: not expired, and not about
@@ -136,9 +154,11 @@ pub(crate) fn store_rotated_token(
     if rotated_token.trim().is_empty() || rotated_token.trim() != rotated_token {
         bail!("account_session_rotation_invalid");
     }
-    let mut session = loaded.session.clone();
-    session.access_token = rotated_token;
-    let body = serde_json::to_vec(&session).context("serializing the rotated account session")?;
+    // Preserve pre-enrollment origin/binding metadata and future extension
+    // fields while rotating only the bearer secret.
+    let mut payload: serde_json::Value = serde_json::from_slice(&loaded.raw)?;
+    payload["access_token"] = serde_json::Value::String(rotated_token);
+    let body = serde_json::to_vec(&payload).context("serializing the rotated account session")?;
     crate::daemon::commons_credentials::replace_account_rotation(store, &loaded.snapshot, &body)
 }
 
@@ -220,6 +240,7 @@ fn native_client(cfg: &ContributorConfig) -> Result<Client> {
         "TRACE_COMMONS_CONTRIBUTOR_UNUSED_BEARER_ENV",
     )
     .bearer_token(UNAUTHENTICATED_PLACEHOLDER)
+    .max_response_bytes(256 * 1024)
     .host_allowlist(config_allowlist(cfg))
     .build()
     .context("building the ingest client for native sign-in")

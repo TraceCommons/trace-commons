@@ -57,7 +57,7 @@ impl Harness {
         store
             .save_config(&ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -181,5 +181,38 @@ async fn a_staged_conversation_is_offered_even_when_the_project_is_armed() {
         entries[0].state,
         QueueState::Pending,
         "an armed project must not arm an imported conversation"
+    );
+}
+
+/// K11/K13: the cwd cache entry the watcher writes for a staged conversation
+/// names the tool it declared itself to be, not the adapter that read it.
+///
+/// `list_projects.tools` rolls up from this field, so with the preference
+/// swapped (adapter over declared source) an imported Antigravity
+/// conversation would be reported as `trajectory` and answer nowhere. The
+/// IPC test inserts `antigravity` into the cache by hand and the watcher's
+/// own test covers only Claude Code, so this is the only end-to-end check
+/// that the declared source wins.
+#[tokio::test]
+async fn a_staged_conversation_is_recorded_under_its_declared_tool() {
+    let h = Harness::new();
+    h.settle().await;
+
+    let state = h.shared.state.lock().unwrap();
+    let staged: Vec<_> = state
+        .cwd_cache
+        .iter()
+        .filter(|(path, _)| path.ends_with("conversation.json"))
+        .collect();
+    assert_eq!(
+        staged.len(),
+        1,
+        "the staged conversation must have one cwd cache entry; got {:?}",
+        state.cwd_cache
+    );
+    assert_eq!(
+        staged[0].1.tool.as_deref(),
+        Some("antigravity"),
+        "the declared source must win over the `trajectory` adapter"
     );
 }

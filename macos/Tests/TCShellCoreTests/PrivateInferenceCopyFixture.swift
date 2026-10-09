@@ -32,7 +32,7 @@ enum PrivateInferenceCopyFixture {
     /// from, so an assertion that reads the wrong field says which one.
     static let complete = """
         {"destination":"DESTINATION","subtitle":"SUBTITLE",
-         "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE",
+         "offer_title":"T","offer_what":"WHAT","offer_exposure":"EXPOSURE","offer_exposure_short":"EXPOSURE SHORT","offer_learn_more":"MORE",
          "offer_no_repoint":"NO-REPOINT","offer_accept":"ACCEPT",
          "offer_decline":"DECLINE","offer_asked_once":"ONCE",
          "settings_title":"S-TITLE","settings_toggle":"S-TOGGLE",
@@ -138,6 +138,28 @@ enum PrivateInferenceCopyFixture {
          "balance_unavailable":"BALANCE-UNAVAILABLE",
          "balance_unknown":"BALANCE-UNKNOWN",
          "balance_unreported":"BALANCE-UNREPORTED",
-         "balance_no_remaining":"BALANCE-NO-REMAINING"}
+         "balance_no_remaining":"BALANCE-NO-REMAINING",
+         "panel_refresh":"PANEL-REFRESH",
+         "panel_tools_eyebrow":"PANEL-TOOLS-EYEBROW",
+         "panel_connection_eyebrow":"PANEL-CONNECTION-EYEBROW",
+         "panel_balance_eyebrow":"PANEL-BALANCE-EYEBROW",
+         "panel_balance_refresh":"PANEL-BALANCE-REFRESH",
+         "stat_inference_access":"STAT-INFERENCE-ACCESS",
+         "stat_runtime":"STAT-RUNTIME",
+         "runtime_on":"RUNTIME-ON",
+         "runtime_off":"RUNTIME-OFF",
+         "runtime_stopping":"RUNTIME-STOPPING",
+         "runtime_elsewhere":"RUNTIME-ELSEWHERE",
+         "runtime_not_running":"RUNTIME-NOT-RUNNING",
+         "runtime_unknown":"RUNTIME-UNKNOWN",
+         "inspector_tools_connected":"INSPECTOR-TOOLS-CONNECTED",
+         "inspector_connected":"INSPECTOR-CONNECTED",
+         "inspector_not_connected":"INSPECTOR-NOT-CONNECTED",
+         "inspector_status":"INSPECTOR-STATUS",
+         "inspector_credential":"INSPECTOR-CREDENTIAL",
+         "inspector_connected_tools":"INSPECTOR-CONNECTED-TOOLS",
+         "inspector_none":"INSPECTOR-NONE",
+         "harness_caption_connected":"HARNESS-CAPTION-CONNECTED",
+         "harness_caption_not_connected":"HARNESS-CAPTION-NOT-CONNECTED"}
         """
 }

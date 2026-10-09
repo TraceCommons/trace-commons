@@ -12,6 +12,7 @@ mod css_contract;
 pub mod funding;
 pub mod history;
 pub mod insights;
+mod managed_sessions;
 pub mod mark;
 pub mod mission_drafts;
 pub mod onboarding;
@@ -1088,7 +1089,7 @@ impl App {
         label
     }
 
-    /// "Ask me first": Settings' call, unchanged -- `set_project_mode` with
+    /// "Ask me": Settings' call, unchanged -- `set_project_mode` with
     /// this project's id and `notify_only`. It also answers a rewording
     /// notice. A refusal changes nothing; the core's refusal line says so.
     fn ask_first_button(
@@ -1442,10 +1443,12 @@ impl App {
         }
         self.queue_badge.set_label(&label);
         self.queue_badge.set_visible(!label.is_empty());
+        // The core's words for an unknown count, as the other shells say it.
         self.queue_badge.set_tooltip_text(
             decisions_owed
                 .is_none()
-                .then_some("Decision count unavailable."),
+                .then(|| trace_commons_contributor::preview_copy::decisions_owed_text(None))
+                .as_deref(),
         );
         // A colour is never the only carrier: the glyph above is what
         // survives greyscale, and this is what makes it findable.

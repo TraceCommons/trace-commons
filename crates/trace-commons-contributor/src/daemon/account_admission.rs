@@ -122,6 +122,7 @@ impl Drop for ReadingGuard {
 /// The last answer, in memory only.
 #[derive(Default)]
 pub struct AccountAdmissionState {
+    observed_scope: Mutex<Option<String>>,
     answer: Mutex<Option<Answer>>,
     session: Arc<SessionCache>,
 }
@@ -331,6 +332,15 @@ impl AccountAdmissionState {
     pub(super) fn forget_session(&self) {
         self.drop_session();
     }
+
+    /// Drop everything held for the enrollment: the session and the last
+    /// answer. For `unenroll`, after which no answer read for the old
+    /// enrollment may count for a later one -- not even one for the same
+    /// account, whose answer is keyed by the config that is now gone.
+    pub(super) fn forget_enrollment(&self) {
+        self.drop_session();
+        self.forget();
+    }
 }
 
 /// Ask ingest again, before a full pass. Never fails the pass: every error
@@ -340,6 +350,21 @@ impl AccountAdmissionState {
 /// answer and never asks.
 pub async fn refresh(shared: &DaemonShared, now: DateTime<Utc>, dry_run: bool) {
     let state = &shared.account_admission;
+    // Local-only lifecycle observation also serves manually contributing clients.
+    // It never reads the OS store or keeps a server session alive.
+    let scope = super::commons_credentials::account_scope(&shared.store).ok();
+    let changed = {
+        let mut observed = state.observed_scope.lock().expect("account scope lock");
+        if *observed == scope {
+            false
+        } else {
+            *observed = scope;
+            true
+        }
+    };
+    if changed {
+        shared.publish(super::ipc::EVENT_STATUS_CHANGED, serde_json::json!({}));
+    }
     let Ok(Some(cfg)) = shared.store.load_config() else {
         state.forget();
         return;

@@ -1,5 +1,7 @@
 import AppKit
 import SwiftUI
+import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The pieces of app behaviour that SwiftUI does not own.
@@ -27,7 +29,6 @@ import TCShellCore
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var compute: ComputeModel?
-    var navigation: MainWindowNavigation?
     /// Read at quit time for one sentence, and for nothing else.
     ///
     /// With the listener inside this process, quitting stops answering
@@ -43,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reader of this file cannot see the plist, and the app's shape is
         // too load-bearing to leave stated in only one place.
         NSApp.setActivationPolicy(.regular)
+        // The person's Light, Dark or System choice (Settings > General).
+        GlassAppearance.applyStored()
 
         // No window is opened here, and no attempt is made to detect a login
         // launch.
@@ -82,6 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let confirmed =
             quitCoordinator.isStopping
             || QuitConfirmation.granted(
+                prompt: model?.quitPrompt
+                    ?? QuitPrompt.decode(fromJSON: TCCoreCopy.quitPromptWithoutWatcherJSON()),
                 computeDetail: compute?.copy?.quitDetail,
                 privateInferenceDetail: model?.privateInferenceQuitDetail
             )
@@ -91,8 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }, reply: { [weak self] stopped in
             if !stopped {
                 self?.compute?.noteQuitRefused()
-                self?.navigation?.section = .compute
-                OpenMainWindow.request()
+                OpenMonitor.request(.settings(.compute))
             }
             sender.reply(toApplicationShouldTerminate: stopped)
         })
@@ -105,13 +109,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ sender: NSApplication,
         hasVisibleWindows: Bool
     ) -> Bool {
-        if !hasVisibleWindows { OpenMainWindow.request() }
+        if !hasVisibleWindows { OpenMonitor.request() }
         return true
     }
 
     /// Invite links, delivered above the view layer.
     ///
-    /// This deliberately does not enrol. It fills the field and brings the
+    /// This deliberately does not enroll. It fills the field and brings the
     /// screen up; pressing the button stays a person's decision, because
     /// which commons to join is the question that screen exists to ask. The
     /// other two clients say the same thing at their own registration sites.
@@ -119,12 +123,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The invite reaches `PendingInvite` and nothing else. It is a
     /// credential, so it is not logged, not put in a window title, and not
     /// echoed in an error.
+    ///
+    /// D-14 (default taken): a link that arrives while already onboarded
+    /// only opens the Monitor. The request carries no destination; while
+    /// onboarding is required it routes to the first-run window, where the
+    /// Connect screen picks the invite up.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
             guard let invite = DeepLink.inviteURL(from: url) else { continue }
             PendingInvite.shared.set(invite)
             NSApp.activate(ignoringOtherApps: true)
-            OpenMainWindow.request()
+            OpenMonitor.request()
             return
         }
     }
@@ -164,32 +173,31 @@ final class PendingInvite: ObservableObject {
 enum QuitConfirmation {
     /// Shows the alert and answers whether to proceed.
     ///
-    /// The copy is unchanged from when it lived in the menu-bar item: it was
-    /// written specifically because the watcher stops with the app, and
-    /// nothing about gaining a Dock icon makes that less true.
+    /// The heading, the body and both buttons are the core's
+    /// (`quit_copy::quit_prompt`), chosen for whether this process hosts the
+    /// watcher or is attached to one: the hosting sentence this alert used to
+    /// hard-code is false for an attached app, whose watcher keeps sending.
+    /// Without a prompt the quit is not confirmed, because it is not
+    /// confirmable before the true sentence for this process is shown.
     @MainActor
     static func granted(
+        prompt: QuitPrompt?,
         computeDetail: String? = nil,
         privateInferenceDetail: String? = nil
     ) -> Bool {
+        guard let prompt else { return false }
         NSApp.activate(ignoringOtherApps: true)
         let alert = NSAlert()
-        alert.messageText = "Quit Trace Commons?"
-        alert.informativeText = """
-        The watcher runs inside this app, so quitting stops it. Nothing will be \
-        noticed or sent while it is closed.
-
-        Sessions already waiting stay on this machine and will be here when you \
-        come back. Nothing is sent while nobody's approving.
-        """
+        alert.messageText = prompt.title
+        alert.informativeText = prompt.body
         if let computeDetail { alert.informativeText += "\n\n" + computeDetail }
         // Appended only when the switch is on. A contributor who never
         // turned it on should not be warned about losing it.
         if let privateInferenceDetail {
             alert.informativeText += "\n\n" + privateInferenceDetail
         }
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Keep running")
+        alert.addButton(withTitle: prompt.confirm)
+        alert.addButton(withTitle: prompt.cancel)
         return alert.runModal() == .alertFirstButtonReturn
     }
 }

@@ -9,7 +9,7 @@ final class MenuBarStatusTests: XCTestCase {
         XCTAssertNil(MenuBarStatus.badgeText(decisionsOwed: nil))
         XCTAssertEqual(MenuBarStatus.state(decisionsOwed: nil, unhealthy: false, paused: false), .attention)
         let label = MenuBarStatus.accessibilityLabel(decisionsOwed: nil, unhealthy: false, paused: true)
-        XCTAssertTrue(label.contains("Decision count unavailable"))
+        XCTAssertTrue(label.contains("Decisions owed unavailable"))
         XCTAssertFalse(label.contains("Nothing waiting"))
         XCTAssertTrue(label.hasSuffix("Paused."))
     }

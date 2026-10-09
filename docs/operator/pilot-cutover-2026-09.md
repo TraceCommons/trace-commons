@@ -308,7 +308,7 @@ first, with rollback.
 - **No hand grants.** V90 is the grant step. Run the V90 post-check above
   after V91.
 - **The old build keeps serving.** An earlier rehearsal ran `5f239be4` on the
-  V89 schema: enrolment, submissions, status and re-POST all passed. In the
+  V89 schema: enrollment, submissions, status and re-POST all passed. In the
   `5888b8bcd` rehearsal, `5f239be4` served submits, a re-POST and status on
   the V91 schema. There is no outage window.
 - **Locks.** Each migration took 0.02–0.04 s on the rehearsal database. V89
@@ -516,12 +516,23 @@ the cutover itself.
      without an invite device.
    - Only then set the policy variables and `ENABLED=true`. With the grants
      above, legacy `tenant-…` devices were verified to keep uploading. That
-     covered individual and pooled devices, and a new pooled enrolment.
+     covered individual and pooled devices, and a new pooled enrollment.
 5. **Witness certificate v2, last.** Follow "verifiers first" in
    `attested-inference.md`. Only after clients that verify v2 are adopted:
    0.12.x has no v2 support.
 
 ## Rollback
+
+> **2026-10-02: `5f239be4` is retired as a rollback target.** The owner
+> decided that the pilot will not be rolled back to it, or to any other
+> pre-#1043 build. The procedure below is kept as a record of what was
+> rehearsed. The legacy-segment resume it relies on (`accept_legacy_segment`)
+> is now **disabled by default**: the repair refuses it with
+> `legacy_segment_resume_disabled` and writes nothing, and its dry run still
+> reports `file_ahead_through_legacy_rows`. Enable it only in an emergency,
+> by starting ingest with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true`
+> for the repair and restarting without it afterwards. See
+> `audit-trail-forensics.md`, "Rolling forward after a binary rollback".
 
 - **What works.** Reinstall the `5f239be4` binaries. Released clients kept
   submitting and reading status against the V91 schema (tested in the
@@ -557,16 +568,22 @@ the cutover itself.
     2. `{"dry_run": false, "accept_legacy_segment": true}`. Without
        `accept_legacy_segment` the repair refuses
        `legacy_segment_not_accepted` and writes nothing. Expect
-       `chain_resumed: true`.
+       `chain_resumed: true`. Since 2026-10-02 this step also needs ingest
+       started with `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME=true`; without
+       it the repair refuses `legacy_segment_resume_disabled`, and the dry
+       run reports `legacy_segment_resume_enabled: false`.
     3. Run the dry run once more: `clean`. Then confirm one submission
        succeeds, and run the audit-chain, db-reconciliation and rollback
        drills. The audit-chain drill reports `db_legacy_segment_resume_count:
        1`. The old build's file-only events are counted apart
        (`db_audit_legacy_segment_file_only_event_count`), not as missing
        events or reader-parity gaps.
-  - A non-dry run on a clean chain, with or without `accept_legacy_segment`,
-    still writes one `audit_chain_repair` audit event, as every non-dry run
-    does. It is harmless, but repeat step 3 as a dry run.
+  - A non-dry run on a clean chain without `accept_legacy_segment` (or with
+    it, while `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME` is set) still
+    writes one `audit_chain_repair` audit event, as every non-dry run does.
+    It is harmless, but repeat step 3 as a dry run. With the switch off, a
+    run carrying the flag is refused `legacy_segment_resume_disabled` even
+    on a clean chain.
   - A dry run reporting `legacy_segment_resume_interrupted: true` means an
     earlier repair's file line went in but its DB row did not commit. Run
     step 2: it completes that event and writes no second one.
@@ -660,7 +677,7 @@ refused with 422 rather than read as a dry run.
 | 2 | Re-POSTs 500, and witnessed submissions cannot persist evidence (V76) | every client | V90 (membership in `trace_witness_evidence_runtime`) |
 | 3 | Withdrawal 500; revocation, purge and rescrub hit the token trigger. Pre-existing since V65–V68. | every client using withdraw; operators | V90's column grants on the token tables. Not the table-wide grant from the earlier draft. |
 | 4 | Audit-chain and db-reconciliation drills `ready: false` after the first new event per tenant, so `smoke-gate.sh` fails | operators | Fixed by #1095. The first hashed row may chain from the file history, pre-cutover rows are counted as a legacy prefix, and reader parity compares them without chain fields. db-reconciliation keeps the transitional sample gap until 16 newer events exist; see smoke step 7. |
-| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Fixed by #1100. Run the audit-chain repair per affected tenant: dry run, then `accept_legacy_segment: true`. See [Rollback](#rollback). |
+| 5 | Rollback, then roll-forward, locks tenants out of submissions | everyone, after a rollback | Fixed by #1100. Run the audit-chain repair per affected tenant: dry run, then `accept_legacy_segment: true`. See [Rollback](#rollback). Since 2026-10-02 `5f239be4` is retired as a rollback target, and the resume is disabled by default behind `TRACE_COMMONS_ALLOW_LEGACY_SEGMENT_RESUME`, for an emergency only. |
 | 6 | Account admission refuses 0.12.x NEAR uploads with 422 | NEAR-provisioned clients | Keep it off until a `source_session` client is adopted |
 | 7 | Account admission refuses to boot while the runtime can UPDATE `trace_accounts.account_id` | operators | Done by V90. Pre-check 6 makes sure V90 can do it. |
 | 8 | Witness v2 certificates rejected by 0.12.x | witnessed clients | Keep the witness at `v1` |
@@ -692,7 +709,7 @@ match the pilot as below, with pre-check 0's other branch: it started at V73.
 | Status of pre-cutover submissions | pass |
 | Server-side idempotent re-POST of a pre-cutover submission | pass, same `submission_id` |
 | New submits on an individual and a pooled tenant | pass, `accepted` |
-| New enrolment on the individual invite's second use, then a submit | pass |
+| New enrollment on the individual invite's second use, then a submit | pass |
 | 0.12.6 `account login`: URL as printed | 404, as expected |
 | The same URL with `/v1/traces` removed, then `daemon withdraw` of a pre-cutover submission | pass: `withdrawn: true`, server `revoked` |
 | DB audit rows written after the cutover | hashed, and each matches the file log's `event_id`, `previous_event_hash` and `event_hash`. The DB head equals the file head. |
@@ -700,7 +717,7 @@ match the pilot as below, with pre-check 0's other branch: it started at V73.
 | `db-reconciliation` drill | not `ready`, with only the smoke step 7 gaps |
 | The same tenant after 17 more audit events | the sample-parity gap cleared; only the vector gap remained |
 | A client built from `main` (#1096): `account login` | printed `/account/login` on the ingest origin; that URL worked unmodified |
-| Rollback to `5f239be4` on V91, then roll forward with the #1100 repair | as in [Rollback](#rollback) |
+| Rollback to `5f239be4` on V91, then roll forward with the #1100 repair | as in [Rollback](#rollback). `5f239be4` was retired as a rollback target on 2026-10-02. |
 
 ### Earlier rehearsal, candidate at V89
 
@@ -731,12 +748,12 @@ replaced.
 
 | Run | Result |
 |---|---|
-| Old build `5f239be4` at V74: enrol (individual and pooled), 3 submits, status | pass |
+| Old build `5f239be4` at V74: enroll (individual and pooled), 3 submits, status | pass |
 | Old build: withdraw | **fail**, `permission denied for table trace_token_bundles` (pre-existing) |
 | Old build: withdraw with the token-bundle grant | pass |
-| Old build on the migrated V89 schema: submits, re-POST, new enrolments | pass |
-| Candidate, migrations only, no new grants | status and enrolment pass. **Every new submit fails**: `permission denied for table trace_submission_sessions` in `lock_source_session_for_submission`. Withdraw fails the same way. |
-| Candidate with the required grants | new submits for 3 tenants, a server-side idempotent re-POST, 2 new enrolments on the second invite use and the pooled code, status, and withdraw (`withdrawn: true`, server `revoked`): all pass. DB audit rows written after the cutover are hashed, and match the file log's `event_id`, `previous_event_hash` and `event_hash`. |
+| Old build on the migrated V89 schema: submits, re-POST, new enrollments | pass |
+| Candidate, migrations only, no new grants | status and enrollment pass. **Every new submit fails**: `permission denied for table trace_submission_sessions` in `lock_source_session_for_submission`. Withdraw fails the same way. |
+| Candidate with the required grants | new submits for 3 tenants, a server-side idempotent re-POST, 2 new enrollments on the second invite use and the pooled code, status, and withdraw (`withdrawn: true`, server `revoked`): all pass. DB audit rows written after the cutover are hashed, and match the file log's `event_id`, `previous_event_hash` and `event_hash`. |
 | Candidate plus account admission, runtime role granted, pilot `trace_accounts` UPDATE | boot refused, `account_admission_permissions_or_linkage_not_ready` |
 | The same, with `trace_accounts` UPDATE narrowed | boot ok. Legacy individual, pooled, and newly enrolled pooled devices all submit `accepted`. |
 | Rollback to `5f239be4` after candidate traffic | submits and status pass |

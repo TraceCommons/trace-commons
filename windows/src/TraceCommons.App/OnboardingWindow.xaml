@@ -6,7 +6,7 @@
     strings here are transcription rather than authorship, and the macOS app
     is the reference implementation.
 
-    Until this window existed the Windows app could not enrol anyone at all.
+    Until this window existed the Windows app could not enroll anyone at all.
 
     One screen per decision, switched by Visibility rather than a Frame: the
     flow is linear, the screens are small, and a Frame would add navigation

@@ -669,6 +669,15 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
     private string _inferenceEvidenceNotice = string.Empty;
     public bool InferenceEvidenceEnabled => _inferenceEvidenceEnabled;
     public string InferenceEvidenceHeading => _witnessCopy?.InferenceHeading ?? string.Empty;
+
+    /// <summary>
+    /// The title over both privacy confirmations, and the line under it: the
+    /// core's <c>WITNESS_PRIVACY_CONFIRM_TITLE</c> and
+    /// <c>WITNESS_PRIVACY_CONFIRM_DESCRIPTION</c>, as macOS and GTK title them.
+    /// </summary>
+    public string PrivacyConfirmTitle => _witnessCopy?.PrivacyConfirmTitle ?? string.Empty;
+
+    public string PrivacyConfirmDescription => _witnessCopy?.PrivacyConfirmDescription ?? string.Empty;
     public string InferenceEvidenceDisclosure => _witnessCopy?.InferenceDisclosure ?? string.Empty;
     public string InferenceEvidenceCaptureNote => _witnessCopy?.InferenceCaptureNote ?? string.Empty;
     public string InferenceEvidenceScopeNote => _witnessCopy?.InferenceScopeNote ?? string.Empty;
@@ -1310,6 +1319,19 @@ public sealed class ContributorSettingsViewModel : INotifyPropertyChanged
         var grantedSet = new HashSet<string>(granted, StringComparer.Ordinal);
         foreach (ConsentOption option in options?.Scopes ?? new List<ConsentOption>())
         {
+            // Fail closed: a scope the core gave no title is not offered. One
+            // already granted is kept as it is, never revoked by a later
+            // write.
+            if (string.IsNullOrEmpty(option.Title))
+            {
+                if (!option.AlwaysOn && grantedSet.Contains(option.Name))
+                {
+                    _preservedNonDataScopes.Add(option.Name);
+                }
+
+                continue;
+            }
+
             var row = new ConsentScopeViewModel(option);
             if (!option.AlwaysOn)
             {
@@ -2077,20 +2099,24 @@ public sealed class ProjectSettingViewModel : INotifyPropertyChanged
 
     public string Mode => _mode;
 
+    /// <summary>
+    /// The row's mode by the core's one name (<see cref="WatchCopy.ModeLabel"/>),
+    /// the words onboarding, the pill and every other shell use.
+    /// </summary>
     public string StateText => _mode switch
     {
-        "ignore" => "Never offered",
+        "ignore" => WatchCopy.Ignored,
 
         // Unreachable for the unresolvable bucket, and deliberately guarded
         // rather than trusted: the daemon refuses auto_upload for it in two
         // places, so if this row ever reported that mode the honest reading is
-        // that something is wrong, not that it was armed. Saying "Contributed
-        // without asking" there would be the one claim this row must never
+        // that something is wrong, not that it was armed. Calling it armed
+        // there would be the one claim this row must never
         // make.
         "auto_upload" when !UnresolvedBucketCopy.MayOfferAutoUpload(IsUnresolvedBucket)
-            => "Asks you first",
+            => WatchCopy.AskMeFirst,
         "auto_upload" => WatchCopy.Armed,
-        _ => "Asks you first",
+        _ => WatchCopy.AskMeFirst,
     };
 
     /// <summary>

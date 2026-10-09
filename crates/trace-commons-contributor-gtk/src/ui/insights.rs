@@ -99,6 +99,11 @@ fn copy(key: &str) -> &'static str {
         .expect("shared Insights copy key")
 }
 
+/// A short button's accessible name, in the core's full words.
+fn named(button: &gtk::Button, key: &str) {
+    button.update_property(&[gtk::accessible::Property::Label(copy(key))]);
+}
+
 #[derive(Default)]
 struct Flight {
     busy: bool,
@@ -216,6 +221,9 @@ impl InsightsView {
         let save = gtk::Button::with_label(copy("save"));
         save.set_sensitive(false);
         let refresh = gtk::Button::with_label(copy("refresh"));
+        // Short labels repeat on this page; each is named in full.
+        named(&save, "save_accessibility");
+        named(&refresh, "refresh_accessibility");
         controls.append(&label(copy("source")));
         controls.append(&source);
         controls.append(&choose);
@@ -253,6 +261,7 @@ impl InsightsView {
         let create_episode = gtk::Button::with_label(copy("episode_create"));
         episode_body.append(&create_episode);
         let refresh_episodes = gtk::Button::with_label(copy("refresh"));
+        named(&refresh_episodes, "episode_refresh_accessibility");
         episode_body.append(&refresh_episodes);
         let episodes = gtk::Box::new(gtk::Orientation::Vertical, 6);
         episode_body.append(&episodes);
@@ -277,6 +286,10 @@ impl InsightsView {
         episode_edit.append(&episode_category);
         episode_edit.append(&episode_outcome);
         let save_episode_assessment = gtk::Button::with_label(copy("episode_save_assessment"));
+        named(
+            &save_episode_assessment,
+            "episode_save_assessment_accessibility",
+        );
         let clear_episode_assessment = gtk::Button::with_label(copy("episode_clear_assessment"));
         let save_episode_members = gtk::Button::with_label(copy("episode_save_members"));
         let delete_episode = gtk::Button::with_label(copy("episode_delete"));
@@ -489,7 +502,7 @@ impl InsightsView {
             }
             let dialog = adw::MessageDialog::new(
                 Some(&parent),
-                Some(copy("episode_clear_assessment")),
+                Some(copy("episode_clear_assessment_title")),
                 Some(copy("episode_clear_assessment_confirm")),
             );
             dialog.add_responses(&[
@@ -1847,6 +1860,7 @@ impl InsightsView {
             )));
             let explain = gtk::Button::with_label(copy("explain"));
             let delete = gtk::Button::with_label(copy("delete"));
+            named(&delete, "delete_accessibility");
             row.append(&explain);
             row.append(&delete);
             self.saved.append(&row);

@@ -5,9 +5,13 @@ full repo guidance (build commands, CI gates, conventions, known gotchas); read
 it too. This file leads with licensing because it is the one rule here whose
 violation a compiler will never report.
 
-The Tauri app (`tauri-desktop/`) is the main client for the MVP, the first
-end-user release this repo is targeting; client-side work for that release
-lands there first. `CLAUDE.md` lists the other shells.
+Native SwiftUI (`macos/`) is the main client on macOS (#1173 D1): no new
+Tauri work on macOS, and the Tauri app is retired there once the native
+screens match. Windows and Linux stay on Tauri, frozen, until macOS ships
+(#1173 D13, a default for now). `CLAUDE.md` lists the other shells.
+Native macOS is also the lead client and the parity target: GTK, Windows and
+Tauri match its terminology, states, flows and affordances, and Tauri drift
+is low priority.
 
 ## Licensing: the split is load-bearing
 
@@ -153,3 +157,10 @@ See `CLAUDE.md`: build and verification commands (note CI applies
 `RUSTFLAGS=-D warnings`, so plain `cargo check` does not catch what CI catches),
 the CI job inventory, hash-only logging, fail-closed defaults, tenant scoping,
 RLS, and the repo's known gotchas.
+
+## Product text
+
+When adding or changing user-facing UI text, follow
+[docs/ui-copy-guide.md](docs/ui-copy-guide.md). It covers short action labels,
+preserved context, separate titles and accessibility names, and shared-copy
+review checks.

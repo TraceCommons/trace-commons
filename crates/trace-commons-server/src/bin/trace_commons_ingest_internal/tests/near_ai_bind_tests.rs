@@ -103,13 +103,16 @@ fn fresh_subject() -> String {
 /// A stand-in for NEAR AI's `GET /users/me` answering `subject` to any token,
 /// and a count of how often it was asked. The count is how a test proves a
 /// refused finish never spent the token.
-async fn stub_near_ai(subject: String) -> (String, Arc<AtomicUsize>) {
+///
+/// The subject is read per request from `subject`, so a test can stand for a
+/// Mac that is signed in to a different near.ai identity than the first.
+async fn stub_near_ai(subject: Arc<std::sync::Mutex<String>>) -> (String, Arc<AtomicUsize>) {
     let hits = Arc::new(AtomicUsize::new(0));
     let counter = hits.clone();
     let router = axum::Router::new().route(
         "/users/me",
         axum::routing::get(move || {
-            let subject = subject.clone();
+            let subject = subject.lock().expect("subject").clone();
             let counter = counter.clone();
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -130,6 +133,8 @@ struct Harness {
     state: Arc<AppState>,
     hits: Arc<AtomicUsize>,
     subject: String,
+    /// What the NEAR AI stub answers now; starts as `subject`.
+    live_subject: Arc<std::sync::Mutex<String>>,
     near_ai_base: String,
     _env: ProvisioningEnv,
     // The state writes under this; it lives exactly as long as the state.
@@ -139,6 +144,12 @@ struct Harness {
 impl Harness {
     fn anchor_hash(&self) -> String {
         identity().login_index_label(&self.subject)
+    }
+
+    /// From now on the NEAR AI stub answers `subject`: this Mac's near.ai
+    /// sign-in is someone else's.
+    fn sign_in_to_near_ai_as(&self, subject: &str) {
+        *self.live_subject.lock().expect("subject") = subject.to_string();
     }
 
     fn hits(&self) -> usize {
@@ -158,7 +169,8 @@ async fn harness() -> Option<Harness> {
     let backend = postgres_backend_for_ingest_test().await?;
     let env = ProvisioningEnv::publish();
     let subject = fresh_subject();
-    let (near_ai_base, hits) = stub_near_ai(subject.clone()).await;
+    let live_subject = Arc::new(std::sync::Mutex::new(subject.clone()));
+    let (near_ai_base, hits) = stub_near_ai(live_subject.clone()).await;
     let temp = tempfile::tempdir().expect("temp dir");
     let mut state = test_state(temp.path().to_path_buf());
     let settings = Arc::get_mut(&mut state).expect("fresh state is uniquely owned");
@@ -172,6 +184,7 @@ async fn harness() -> Option<Harness> {
         state,
         hits,
         subject,
+        live_subject,
         near_ai_base,
         _env: env,
         _root: temp,
@@ -184,6 +197,8 @@ struct Unbound {
     tenant: String,
     account_id: Uuid,
     token: String,
+    /// The passkey S2 wrote, so a second Mac can sign in with it.
+    credential_id: String,
 }
 
 async fn unbound_account(backend: &PgBackend) -> Unbound {
@@ -198,11 +213,12 @@ async fn unbound_account_under(backend: &PgBackend, ceiling: i64) -> Option<Unbo
     let tenant = trace_commons_server::near_account_identity::random_near_ai_tenant_id();
     let account_id = Uuid::new_v4();
     let secret = generate_session_secret();
+    let credential_id = format!("z2-s3-{}", Uuid::new_v4().simple());
     let outcome = backend
         .create_passkey_origin_account(trace_commons_server::db::NewPasskeyOriginAccount {
             tenant_id: &tenant,
             account_id,
-            credential_id: &format!("z2-s3-{}", Uuid::new_v4().simple()),
+            credential_id: &credential_id,
             passkey: &serde_json::json!({ "fixture": "bind reads no passkey" }),
             label: None,
             session: trace_commons_server::db::NewSession {
@@ -225,7 +241,39 @@ async fn unbound_account_under(backend: &PgBackend, ceiling: i64) -> Option<Unbo
         token: native_token_value(&tenant, &secret),
         tenant,
         account_id,
+        credential_id,
     })
+}
+
+/// A second Mac signing in with the same (synced) passkey: a fresh, weak
+/// native session for the same account, issued the way
+/// `native_passkey_login_finish` issues one.
+async fn second_mac_session(backend: &PgBackend, account: &Unbound) -> Unbound {
+    let secret = generate_session_secret();
+    backend
+        .issue_passkey_session(
+            &account.tenant,
+            account.account_id,
+            trace_commons_server::db::NewSession {
+                token_hash: &hash_secret(&secret),
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(1),
+            },
+            &account.credential_id,
+            trace_commons_server::db::RedeemAudit {
+                action: "account_passkey_native_login".to_string(),
+                outcome: "success".to_string(),
+                metadata: serde_json::json!({ "client_kind": NATIVE_SESSION_CLIENT_KIND }),
+            },
+        )
+        .await
+        .expect("a second Mac signs in with the passkey");
+    Unbound {
+        token: native_token_value(&account.tenant, &secret),
+        tenant: account.tenant.clone(),
+        account_id: account.account_id,
+        credential_id: account.credential_id.clone(),
+    }
 }
 
 /// A daemon's device key.
@@ -666,9 +714,9 @@ async fn pg_bind_moves_an_unbound_account_to_bound_in_its_own_tenant() {
 
 /// A bound account's gate lifts: a route the gate refuses an unbound account
 /// is reached, by the original session and by the one bind returned. And a
-/// second bind is refused as already bound.
+/// second ceremony under another near.ai identity is refused as a mismatch.
 #[tokio::test]
-async fn pg_a_bound_accounts_gate_lifts_and_it_cannot_bind_again() {
+async fn pg_a_bound_accounts_gate_lifts_and_it_cannot_bind_again_to_another_identity() {
     let Some(h) = harness().await else {
         return;
     };
@@ -698,20 +746,22 @@ async fn pg_a_bound_accounts_gate_lifts_and_it_cannot_bind_again() {
         assert_eq!(after.status, StatusCode::OK, "{:?}", after.json());
     }
 
-    let again = send(
-        &h.state,
-        "POST",
-        BIND_START,
-        Some(&serde_json::json!({
-            "device_public_key": Device::new().public_b64(),
-            "code_challenge": pkce().1,
-            "code_challenge_method": "S256",
-        })),
-        Some(&account.token),
-    )
-    .await;
-    assert_eq!(again.status, StatusCode::CONFLICT);
-    assert_eq!(again.json()["error"], "account_already_bound");
+    // A bound account's next ceremony is an enrollment of a further device,
+    // never a re-bind: under a different near.ai identity it is refused and
+    // the account keeps its one anchor.
+    h.sign_in_to_near_ai_as(&fresh_subject());
+    let again = bind(&h, &account, &Device::new()).await;
+    assert_eq!(again.status, StatusCode::CONFLICT, "{:?}", again.json());
+    assert_eq!(again.json()["error"], NEAR_AI_ACCOUNT_MISMATCH);
+    assert_eq!(
+        binding_row(&admin, &account.tenant, account.account_id).await,
+        ("bound".to_string(), true)
+    );
+    assert_eq!(
+        anchors_for(&admin, &h.anchor_hash()).await,
+        vec![(account.tenant.clone(), account.account_id)]
+    );
+    assert_eq!(linked_rows(&admin, &account.tenant).await, [1; 4]);
 
     drop_tenants(&admin, &[&account.tenant]).await;
 }
@@ -1778,9 +1828,11 @@ async fn pg_bind_shares_the_near_ai_provisioning_rate_budget() {
     let signature = device.sign(&started.signing_bytes);
 
     // Provisioning's per-address budget, used up. These requests carry no
-    // forwarded address, so they all share the one fallback key.
+    // forwarded address, so they all share the one fallback key. The key is
+    // derived, not spelled: a literal went stale when the fallback was renamed.
+    let fallback = client_ip_for_rate_limit(&HeaderMap::new());
     for action in ["near-ai-start", "near-ai-finish"] {
-        while ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:xff-absent"), 30) {}
+        while ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:{fallback}"), 30) {}
     }
 
     let reply = send(
@@ -2228,4 +2280,363 @@ async fn pg_a_refuse_branch_that_lost_the_race_provisions_nothing_for_x() {
 
     reset_account_rate_limiter_for_test();
     drop_tenants(&admin, &[&p.tenant, &x_tenant]).await;
+}
+
+// --- A second Mac joins a bound account ---------------------------------------
+//
+// "Use existing passkey" on a second Mac signs in to an account another Mac
+// already bound. The bind routes then run an enrollment: the near.ai identity
+// this Mac proves must be the one already bound to the session's own account,
+// compared inside the one transaction that would attach the device. The
+// account being compared against comes from the session, never the body.
+
+/// The wire label an enrollment answers with when this Mac's near.ai identity
+/// is not the one the session's account is bound to. One fixed value, whatever
+/// the identity resolves to elsewhere.
+const NEAR_AI_ACCOUNT_MISMATCH: &str = "near_ai_account_mismatch";
+
+/// How many tenants exist, for "nothing was minted".
+async fn tenant_count(admin: &deadpool_postgres::Object) -> i64 {
+    admin
+        .query_one("SELECT count(*) FROM trace_tenants", &[])
+        .await
+        .expect("tenants")
+        .get(0)
+}
+
+/// Where, if anywhere, a device key was registered.
+async fn device_key_rows(admin: &deadpool_postgres::Object, device: &Device) -> i64 {
+    let id = trace_commons_protocol::onboarding::device_key_id_from_public_key_bytes(
+        &device.public_bytes(),
+    );
+    count(
+        admin,
+        "SELECT count(*) FROM device_keys WHERE device_key_id = $1",
+        &[&id],
+    )
+    .await
+}
+
+/// An account bound on Mac 1, and Mac 2 signed in to it with the same passkey.
+async fn bound_on_another_mac(h: &Harness) -> (Unbound, Unbound) {
+    let account = unbound_account(&h.backend).await;
+    let reply = bind(h, &account, &Device::new()).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    assert_eq!(reply.json()["outcome"], "bound");
+    let second = second_mac_session(&h.backend, &account).await;
+    (account, second)
+}
+
+/// The near.ai identity the account is bound to enrolls the second Mac's
+/// device into that same account, in its own tenant: a second device key,
+/// principal and provisioned-device row; still one anchor; the binding row
+/// untouched; a hash-only audit row; and a working native session.
+#[tokio::test]
+async fn pg_a_second_mac_signed_in_to_the_bound_identity_enrols_into_the_account() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let (account, mac2) = bound_on_another_mac(&h).await;
+    let before = binding_row(&admin, &account.tenant, account.account_id).await;
+    assert_eq!(linked_rows(&admin, &account.tenant).await, [1; 4]);
+
+    let device = Device::new();
+    let reply = bind(&h, &mac2, &device).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.json());
+    let body = reply.json();
+    assert_eq!(body["outcome"], "enrolled");
+    assert_eq!(body["binding_state"], "bound");
+    assert_eq!(body["tenant_id"], account.tenant.as_str());
+    assert_eq!(body["account_id"], account.account_id.to_string());
+    assert_eq!(body["anchor_hash"], h.anchor_hash().as_str());
+    assert_eq!(h.hits(), 2, "one introspection per ceremony");
+
+    // One anchor still, two devices, two principals, two provisioned rows.
+    assert_eq!(linked_rows(&admin, &account.tenant).await, [1, 2, 2, 2]);
+    assert_eq!(
+        anchors_for(&admin, &h.anchor_hash()).await,
+        vec![(account.tenant.clone(), account.account_id)]
+    );
+    assert_eq!(device_key_rows(&admin, &device).await, 1);
+    assert_eq!(
+        binding_row(&admin, &account.tenant, account.account_id).await,
+        before,
+        "an enrolment never touches the binding row"
+    );
+    assert_eq!(
+        audit_metadata(&admin, &account.tenant, "account_device_enrolled").await,
+        vec![serde_json::json!({ "identity": "near_ai_login" })]
+    );
+
+    // The returned session is a native session on the same account.
+    let token = body["access_token"].as_str().expect("token");
+    let state = binding_state_via(&h, token).await;
+    assert_eq!(state.status, StatusCode::OK);
+    assert_eq!(state.json()["binding_state"], "bound");
+
+    drop_tenants(&admin, &[&account.tenant]).await;
+}
+
+/// A second Mac signed in to a DIFFERENT near.ai identity is refused before
+/// its device key is written anywhere -- whether that identity already owns
+/// an account elsewhere (X) or none at all. Both refusals are byte-identical,
+/// name nothing, mint no tenant or account, leave X and the session's account
+/// exactly as they were, and are audited label-only in the session's tenant.
+#[tokio::test]
+async fn pg_a_second_mac_signed_in_to_another_identity_is_refused_and_writes_nothing() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let (account, mac2) = bound_on_another_mac(&h).await;
+
+    // X: someone else's near.ai account, provisioned the ordinary way.
+    let x_subject = fresh_subject();
+    h.sign_in_to_near_ai_as(&x_subject);
+    let x = provision(&h, &Device::new()).await;
+    let x_tenant = x["tenant_id"].as_str().expect("tenant").to_string();
+    let x_rows = linked_rows(&admin, &x_tenant).await;
+    let x_anchor = identity().login_index_label(&x_subject);
+    let account_rows = linked_rows(&admin, &account.tenant).await;
+    let tenants = tenant_count(&admin).await;
+
+    // Mac 2 signed in to near.ai as X.
+    let device = Device::new();
+    let to_x = bind(&h, &mac2, &device).await;
+    assert_eq!(to_x.status, StatusCode::CONFLICT, "{:?}", to_x.json());
+    assert_eq!(
+        to_x.json(),
+        serde_json::json!({ "error": NEAR_AI_ACCOUNT_MISMATCH })
+    );
+    assert_eq!(device_key_rows(&admin, &device).await, 0, "no key anywhere");
+    assert_eq!(linked_rows(&admin, &account.tenant).await, account_rows);
+    assert_eq!(linked_rows(&admin, &x_tenant).await, x_rows);
+    assert_eq!(anchors_for(&admin, &x_anchor).await.len(), 1);
+
+    // Mac 2 signed in to a near.ai identity nobody has used.
+    let nobody = fresh_subject();
+    h.sign_in_to_near_ai_as(&nobody);
+    let device = Device::new();
+    let to_nobody = bind(&h, &mac2, &device).await;
+    assert_eq!(to_nobody.status, to_x.status);
+    assert_eq!(
+        to_nobody.bytes, to_x.bytes,
+        "an identity with an account elsewhere and one with none are indistinguishable"
+    );
+    assert_eq!(device_key_rows(&admin, &device).await, 0);
+    assert!(
+        anchors_for(&admin, &identity().login_index_label(&nobody))
+            .await
+            .is_empty(),
+        "an enrolment never claims an anchor"
+    );
+    assert_eq!(tenant_count(&admin).await, tenants, "no tenant minted");
+    assert_eq!(linked_rows(&admin, &account.tenant).await, account_rows);
+
+    // Nothing in either reply names X or this account.
+    for reply in [&to_x, &to_nobody] {
+        let text = String::from_utf8_lossy(&reply.bytes).to_string();
+        for secret in [
+            x_tenant.as_str(),
+            x["account_id"].as_str().expect("account"),
+            &x_anchor,
+            account.tenant.as_str(),
+            &account.account_id.to_string(),
+            &h.anchor_hash(),
+        ] {
+            assert!(!text.contains(secret), "reply leaks an identifier");
+        }
+    }
+
+    // Label-only audit in the session's own tenant; none in X's.
+    assert_eq!(
+        audit_metadata(&admin, &account.tenant, "account_binding_failed").await,
+        vec![
+            serde_json::json!({ "stage": NEAR_AI_ACCOUNT_MISMATCH }),
+            serde_json::json!({ "stage": NEAR_AI_ACCOUNT_MISMATCH }),
+        ]
+    );
+    assert!(
+        audit_metadata(&admin, &x_tenant, "account_binding_failed")
+            .await
+            .is_empty()
+    );
+    assert_eq!(
+        binding_row(&admin, &account.tenant, account.account_id).await,
+        ("bound".to_string(), true)
+    );
+
+    drop_tenants(&admin, &[&account.tenant, &x_tenant]).await;
+}
+
+/// A ceremony started while the account was unbound is a bind; if another
+/// Mac binds the account before it finishes, it is refused rather than
+/// finished as an enrollment, and writes nothing.
+#[tokio::test]
+async fn pg_a_bind_ceremony_cannot_finish_as_an_enrolment() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let account = unbound_account(&h.backend).await;
+    let mac2 = second_mac_session(&h.backend, &account).await;
+    let device = Device::new();
+    let started = start(&h.state, BIND_START, Some(&mac2.token), &device).await;
+    let signature = device.sign(&started.signing_bytes);
+
+    let first = bind(&h, &account, &Device::new()).await;
+    assert_eq!(first.json()["outcome"], "bound");
+    let hits = h.hits();
+
+    let reply = finish(
+        &h.state,
+        BIND_FINISH,
+        Some(&mac2.token),
+        &started,
+        &device,
+        &signature,
+    )
+    .await;
+    assert_uniform_deny(
+        &reply,
+        "a bind ceremony finished after the account was bound",
+    )
+    .await;
+    assert_eq!(h.hits(), hits, "no NEAR AI token was spent");
+    assert_eq!(device_key_rows(&admin, &device).await, 0);
+    assert_eq!(linked_rows(&admin, &account.tenant).await, [1; 4]);
+
+    drop_tenants(&admin, &[&account.tenant]).await;
+}
+
+/// The enrollment runs as an ordinary runtime login provisioned exactly as
+/// `pg_bind_works_as_the_runtime_role_and_not_without_v100` provisions one
+/// (the operator's base-table grants plus `trace_ingest_runtime`), with
+/// nothing added for it: no migration is needed. The share lock on the
+/// binding row is what needs V100's column `UPDATE`.
+#[tokio::test]
+async fn pg_enrolment_works_as_the_runtime_role() {
+    let Some(h) = harness().await else {
+        return;
+    };
+    let admin = h.admin().await;
+    let runtime = format!("tc_second_mac_runtime_{}", std::process::id());
+    let tables = "trace_tenants, trace_accounts, trace_sessions, trace_account_audit, \
+                  trace_webauthn_credentials, trace_near_identities, trace_near_account_anchors, \
+                  trace_near_provisioned_devices, device_keys, trace_account_principals";
+    let _ = admin
+        .batch_execute(&format!(
+            "DROP OWNED BY {runtime}; DROP ROLE IF EXISTS {runtime};"
+        ))
+        .await;
+    admin
+        .batch_execute(&format!(
+            "CREATE ROLE {runtime} LOGIN NOSUPERUSER NOBYPASSRLS;
+             GRANT USAGE ON SCHEMA public TO {runtime};
+             GRANT SELECT, INSERT ON {tables} TO {runtime};
+             GRANT UPDATE (revoked_at) ON trace_sessions, trace_webauthn_credentials TO {runtime};
+             GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {runtime};
+             GRANT trace_ingest_runtime TO {runtime};"
+        ))
+        .await
+        .expect("runtime role");
+    let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("url");
+    let mut url = reqwest::Url::parse(&url).expect("url");
+    url.set_username(&runtime).expect("user");
+    url.set_password(None).expect("password");
+    let backend = PgBackend::new(&DatabaseConfig {
+        url: SecretString::from(url.to_string()),
+        pool_size: 2,
+        ssl_mode: trace_commons_server::config::SslMode::Prefer,
+        login_resolver_url:
+            trace_commons_server::config::DatabaseConfig::login_resolver_url_from_env(),
+        gate_driver_url: None,
+        pii_backstop_driver_url: None,
+        invite_registry_url: None,
+    })
+    .await
+    .expect("runtime backend");
+    let privileged: bool = backend
+        .raw_pool_for_tests_and_diagnostics()
+        .get()
+        .await
+        .expect("client")
+        .query_one(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+            &[],
+        )
+        .await
+        .expect("role")
+        .get(0);
+    assert!(!privileged, "the runtime backend is an ordinary login");
+
+    let (account, _mac2) = bound_on_another_mac(&h).await;
+    let login = trace_commons_server::near_ai_login::introspect_login(
+        &h.near_ai_base,
+        &SecretString::from("token".to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("stub introspection");
+    let hash = hash_secret(&generate_session_secret());
+    let device = Device::new();
+    let outcome = backend
+        .enrol_near_ai_login(
+            &account.tenant,
+            account.account_id,
+            &login,
+            &device.public_bytes(),
+            trace_commons_server::db::NewSession {
+                token_hash: &hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(1),
+            },
+            &identity(),
+        )
+        .await
+        .expect("enrol as the runtime role");
+    assert_eq!(outcome.account_id, account.account_id);
+    assert_eq!(device_key_rows(&admin, &device).await, 1);
+
+    // And the mismatch, as the same role, is the named refusal.
+    h.sign_in_to_near_ai_as(&fresh_subject());
+    let other = trace_commons_server::near_ai_login::introspect_login(
+        &h.near_ai_base,
+        &SecretString::from("token".to_string()),
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .expect("stub introspection");
+    let device = Device::new();
+    let hash = hash_secret(&generate_session_secret());
+    let error = backend
+        .enrol_near_ai_login(
+            &account.tenant,
+            account.account_id,
+            &other,
+            &device.public_bytes(),
+            trace_commons_server::db::NewSession {
+                token_hash: &hash,
+                client_kind: NATIVE_SESSION_CLIENT_KIND,
+                expires_at: Utc::now() + Duration::hours(1),
+            },
+            &identity(),
+        )
+        .await
+        .expect_err("another identity");
+    assert!(
+        trace_commons_server::account_onboarding::is_near_ai_enrol_account_mismatch(&error),
+        "{error:?}"
+    );
+    assert_eq!(device_key_rows(&admin, &device).await, 0);
+
+    drop(backend);
+    drop_tenants(&admin, &[&account.tenant]).await;
+    admin
+        .batch_execute(&format!("DROP OWNED BY {runtime}; DROP ROLE {runtime};"))
+        .await
+        .expect("drop role");
 }

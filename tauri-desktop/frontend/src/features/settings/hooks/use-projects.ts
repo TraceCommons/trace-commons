@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { coreKeys } from "../../../lib/tauri/query-keys";
+import { useShellStatusLines } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import {
   changeProjectMode,
@@ -9,6 +10,7 @@ import {
 import { settingsKeys } from "../api/query-keys";
 
 export function useProjects() {
+  const lines = useShellStatusLines();
   const core = useCoreStatus();
   const queryClient = useQueryClient();
   const query = useQuery({
@@ -48,7 +50,7 @@ export function useProjects() {
           ? "error"
           : "ready") as "busy" | "loading" | "ready" | "error",
     error: query.isError
-      ? "Projects unavailable. Refresh after Rust core starts."
+      ? lines.readUnavailable
       : mutation.isError
         ? "Project mode was not changed."
         : null,
