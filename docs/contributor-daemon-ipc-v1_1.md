@@ -2904,14 +2904,14 @@ in the local queue file and never reach the wire, a log line, an audit row,
 history or a notification.
 
 ```json
-"credit_estimate": { "low": 1.0, "high": 3.0, "calibration": "lef1.t1/cq3", "basis": "built_in" }
-"credit_estimate": { "low": 2.0, "high": 4.5, "tier": "higher", "calibration": "lef1.t2/cq3", "basis": "published" }
+"credit_estimate": { "low": 1.0, "high": 3.0, "calibration": "lef1.t1/cq3", "basis": "built_in", "drawn": false }
+"credit_estimate": { "low": 2.0, "high": 4.5, "tier": "higher", "calibration": "lef1.t2/cq3", "basis": "published", "drawn": true }
 ```
 
 | Field | Present when | Value |
 |---|---|---|
 | `list_pending` entry `credit_estimate` | the entry has recorded features, a table is in force, and the entry is neither uploading nor uploaded | the band for this entry |
-| `status.idle_sessions.credit_estimate` | `idle_sessions` is present and at least one candidate has an estimate | `{low, high, known, calibration}`: band ends summed over the `known` candidates that have one (OWNER DECISION E8) |
+| `status.idle_sessions.credit_estimate` | `idle_sessions` is present and at least one candidate has an estimate | `{low, high, known, calibration, drawn}`: band ends summed over the `known` candidates that have one (OWNER DECISION E8) |
 | `status.nudge.credit_estimate` | `nudge.lead` is `idle_sessions` or `review_backlog` and at least one of its subjects has an estimate | the same, over the leading kind's subjects |
 
 - `low` / `high`: displayed-credit units, `low` floored and `high` ceiled to
@@ -2923,6 +2923,11 @@ history or a notification.
 - `basis`: `"built_in"` while the daemon's built-in table is in force
   (OWNER DECISION E2: one tier, about 1 to 3), `"published"` once a fetched
   table has been accepted.
+- `drawn`: whether a shell draws this estimate at all, and whether core copy
+  carries an estimate clause. `true` only under a published table with two or
+  more tiers (owner decision, 2026-10-08): the built-in band and a published
+  one-tier band are the same for every session, so they say nothing about the
+  one in front of the contributor. The estimate stays on the wire either way.
 - `known` (status only): how many subjects had an estimate. A shell compares
   it with `count` to choose the full or the partial sentence. Subjects without
   one are left out, never summed as 0; with none, the object is absent.

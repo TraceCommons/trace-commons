@@ -1088,6 +1088,20 @@ impl EstimateTableSlot {
     }
 }
 
+/// The fewest tiers a table needs before an estimate is drawn. A one-tier
+/// band is the same for every session, so it tells a contributor nothing
+/// about the one in front of them. OWNER DECISION 2026-10-08.
+pub const ESTIMATE_MIN_DRAWN_TIERS: usize = 2;
+
+/// Whether shells draw estimates made under this slot's table, and whether
+/// core copy carries an estimate clause: only a published table with at
+/// least [`ESTIMATE_MIN_DRAWN_TIERS`] tiers. On the wire as `drawn`; the
+/// estimate itself stays on the wire either way.
+#[must_use]
+pub fn estimate_is_drawn(slot: &EstimateTableSlot) -> bool {
+    slot.basis == ESTIMATE_BASIS_PUBLISHED && slot.table.tier_count() >= ESTIMATE_MIN_DRAWN_TIERS
+}
+
 /// The local estimate for one queue entry, or `None` (unknown, never 0).
 /// The one computation behind both a row's `credit_estimate` and its
 /// suggested-order tier, so the tier shown and the tier sorted on agree.
@@ -1119,6 +1133,7 @@ pub fn credit_estimate_value(
     let estimate = local_credit_estimate_for(e, slot)?;
     let mut value = serde_json::to_value(&estimate).ok()?;
     value["basis"] = serde_json::Value::from(slot.basis);
+    value["drawn"] = serde_json::Value::from(estimate_is_drawn(slot));
     Some(value)
 }
 
@@ -1152,6 +1167,7 @@ pub fn credit_estimate_sum(
             "high": high,
             "known": known,
             "calibration": slot.table.calibration_label(),
+            "drawn": estimate_is_drawn(slot),
         })
     })
 }
@@ -18851,6 +18867,7 @@ mod tests {
                     "high": BUILT_IN_HIGH,
                     "calibration": "lef1.t1/cq3",
                     "basis": ESTIMATE_BASIS_BUILT_IN,
+                    "drawn": false,
                 }),
                 "{estimate}"
             );
@@ -18879,6 +18896,66 @@ mod tests {
                 trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
             table.version = "t9".to_string();
             table
+        }
+
+        /// A published two-tier table: the band a shell may draw.
+        fn tiered_table() -> trace_commons_protocol::local_credit_estimate::LocalEstimateTable {
+            use trace_commons_protocol::local_credit_estimate::EstimateBand;
+            let mut table = fetched_table();
+            table.cut_offs = vec![0.5];
+            table.bands = vec![
+                EstimateBand {
+                    low: 1.0,
+                    high: 2.0,
+                },
+                EstimateBand {
+                    low: 2.0,
+                    high: 3.5,
+                },
+            ];
+            assert_eq!(table.validate(), Ok(()));
+            table
+        }
+
+        /// OWNER DECISION 2026-10-08: the estimate is drawn only under a
+        /// published table with two or more tiers. The built-in band, and a
+        /// published one-tier band, say the same thing about every session,
+        /// so they stay on the wire with `drawn: false` and nothing draws
+        /// them. Row and status agree.
+        #[test]
+        fn the_estimate_is_drawn_only_under_a_published_tiered_table() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let drawn = |s: &DaemonShared| {
+                let rows = list_rows(s, serde_json::json!({}));
+                let status = status_of(s);
+                (
+                    rows[0]["credit_estimate"]["drawn"].clone(),
+                    status["idle_sessions"]["credit_estimate"]["drawn"].clone(),
+                )
+            };
+            let no = (serde_json::json!(false), serde_json::json!(false));
+            assert_eq!(drawn(&s), no, "built-in");
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), Utc::now());
+            assert_eq!(drawn(&s), no, "published, one tier");
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(tiered_table()), Utc::now());
+            assert_eq!(
+                drawn(&s),
+                (serde_json::json!(true), serde_json::json!(true)),
+                "published, two tiers"
+            );
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(
+                rows[0]["credit_estimate"].get("tier").is_some(),
+                "{}",
+                rows[0]
+            );
         }
 
         /// An accepted fetch replaces the table in force and marks it
@@ -19027,6 +19104,7 @@ mod tests {
                 "high": 2.0 * BUILT_IN_HIGH,
                 "known": 2,
                 "calibration": "lef1.t1/cq3",
+                "drawn": false,
             });
             assert_eq!(status["idle_sessions"]["credit_estimate"], want);
             assert_eq!(status["nudge"]["lead"], "idle_sessions");
@@ -19070,6 +19148,7 @@ mod tests {
                     "high": n * BUILT_IN_HIGH,
                     "known": NUDGE_BACKLOG_THRESHOLD,
                     "calibration": "lef1.t1/cq3",
+                    "drawn": false,
                 })
             );
         }
