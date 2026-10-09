@@ -543,7 +543,7 @@ fn no_fold_while_the_counter_pass_is_off_even_with_the_feed_on() {
     assert_eq!(s.insights_counter.tallied_sessions_for_test(), 2);
 }
 
-/// Owner decision D3, open: with the ledger feed off nothing reads the
+/// Owner decision D3: with the ledger feed turned off nothing reads the
 /// ledger for Insights, so with the counter pass on, its store and key
 /// there, the daemon's fold reads no ledger row and writes nothing.
 #[test]

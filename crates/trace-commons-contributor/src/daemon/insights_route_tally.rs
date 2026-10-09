@@ -9,8 +9,9 @@
 //!   by the keyed harness-session digest under the counter key, the same
 //!   digest a counter row stores, so the two join inside the daemon and
 //!   nowhere else.
-//! - Owner decision D3, open and unchanged: nothing is folded while
-//!   `insights_ledger_feed` is off.
+//! - Owner decision D3, settled 2026-10-09: `insights_ledger_feed` is on by
+//!   default, so the fold runs by default; nothing is folded while a
+//!   contributor has turned it off.
 //! - Owner decision D5, open: `cost_usd` is never read.
 //!
 //! Every label here comes from IronWire's proof label and never from a

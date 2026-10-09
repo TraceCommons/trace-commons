@@ -111,8 +111,9 @@ pub const UNREADABLE_STORE: &str = "store_unreadable";
 /// The folder rules could not be read, so the Never folders are unknown;
 /// nothing is shown in their place.
 pub const UNREADABLE_POLICY: &str = "policy_unreadable";
-/// `routing_unavailable`: the `insights_ledger_feed` setting is off (owner
-/// decision D3, open), so no row carries a route.
+/// `routing_unavailable`: the contributor turned the `insights_ledger_feed`
+/// setting off (on by default, owner decision D3, settled 2026-10-09), so
+/// no row carries a route.
 pub const ROUTING_LEDGER_FEED_OFF: &str = "ledger_feed_off";
 /// `routing_unavailable`: no proxy ledger is declared, so no row carries a
 /// route.
@@ -308,8 +309,8 @@ pub(crate) struct WeekOptions {
     pub recap_card_enabled: bool,
     /// `insights_context_threshold`; unset, nothing is counted against one.
     pub context_threshold: Option<u32>,
-    /// `insights_ledger_feed` (owner decision D3, open). Off, no row carries
-    /// a route.
+    /// `insights_ledger_feed` (on by default, owner decision D3, settled
+    /// 2026-10-09). Off, no row carries a route.
     pub ledger_feed: bool,
     /// Whether a proxy ledger is declared. Absent, no row carries a route.
     pub ledger_present: bool,
@@ -563,7 +564,7 @@ impl CounterPass {
             Ok(store) => store,
             Err(label) => return unreadable(label),
         };
-        // Owner decision D3, open: with the ledger feed off no route is
+        // Owner decision D3: with the ledger feed turned off no route is
         // shown, not even a tally folded while it was on. With no proxy
         // ledger a stored tally may lack every call since, so none is shown
         // either.
@@ -781,7 +782,7 @@ impl CounterPass {
     /// Fold the ledger's new calls into the route tallies.
     ///
     /// `enabled` is asked first: off, nothing is read, not the ledger, the
-    /// store, the key or the tools (owner decision D3, open, and D4). The
+    /// store, the key or the tools (owner decision D3, on by default, and D4). The
     /// window is the ledger's own 24 hours, and the store's cursor (the
     /// highest id passed and the latest start taken) says which rows were
     /// folded already, so a call counts once across ticks, reloads, restarts
@@ -1114,8 +1115,8 @@ fn prune_routing(store: &mut CounterStore, gone: &BTreeSet<KeyedDigest>, cutoff:
 }
 
 /// After the routing ledger's refresh: fold its new calls into the route
-/// tallies, only while both `insights_ledger_feed` (owner decision D3, open)
-/// and `insights_counter_pass` (D4, open) are on. Gated on the pass too
+/// tallies, only while both `insights_ledger_feed` (owner decision D3, on by
+/// default) and `insights_counter_pass` (D4, open) are on. Gated on the pass too
 /// because the tallies live in its store: unenroll turns the pass off and
 /// clears the store, and a fold gated on the feed alone would write it back.
 /// A poisoned settings lock reads as off. Failures are logged inside, by
@@ -2314,7 +2315,7 @@ mod tests {
         }
     }
 
-    /// Owner decision D3, open: with the ledger feed off no row carries a
+    /// Owner decision D3: with the ledger feed turned off no row carries a
     /// route, even one folded while it was on; nor with no proxy ledger,
     /// where a stored tally may be missing every call since. The
     /// first-event time (owner question Q1) does not depend on either.
@@ -2348,8 +2349,9 @@ mod tests {
                 (written() - Duration::hours(1)).to_rfc3339()
             );
         }
-        // The default is the feed's default: off.
-        assert_eq!(f.week(&[])["routing_unavailable"], "ledger_feed_off");
+        // The default is the feed's default, on (owner decision D3): with no
+        // ledger declared the reason is the ledger, never the setting.
+        assert_eq!(f.week(&[])["routing_unavailable"], "no_ledger");
     }
 
     /// The join happens at answer time and never in the engine, so the
@@ -2571,14 +2573,19 @@ mod tests {
             .result
             .unwrap()
         };
-        let off = ask();
-        assert_eq!(off["routing_available"], false);
-        assert_eq!(off["routing_unavailable"], "ledger_feed_off");
-        s.settings.lock().unwrap().insights_ledger_feed = true;
+        // On by default (owner decision D3): with no ledger declared the
+        // reason is the ledger, never the setting.
+        assert!(s.settings.lock().unwrap().insights_ledger_feed);
         assert!(s.routing_ledger().is_none());
         let none = ask();
         assert_eq!(none["routing_available"], false);
         assert_eq!(none["routing_unavailable"], "no_ledger");
+        // Only a contributor turning it off answers `ledger_feed_off`.
+        s.settings.lock().unwrap().insights_ledger_feed = false;
+        let off = ask();
+        assert_eq!(off["routing_available"], false);
+        assert_eq!(off["routing_unavailable"], "ledger_feed_off");
+        s.settings.lock().unwrap().insights_ledger_feed = true;
         s.install_routing_ledger_for_test(
             crate::routing::ironwire::IronWireLedger::with_rows_for_test(Vec::new()),
         );
