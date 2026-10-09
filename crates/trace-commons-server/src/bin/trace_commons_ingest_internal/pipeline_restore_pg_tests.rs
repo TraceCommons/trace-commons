@@ -44,6 +44,14 @@
 //!   `filesystem_restore_local_only`: a local filesystem copy is not a
 //!   remote restore.
 //!
+//! `pipeline.py promote remote-restore` (spec B-D2) runs the same two tests
+//! with a remote store in place of the artifact root
+//! (`TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE`): the seed writes into the
+//! live store under a namespace of its own, `pipeline_remote_restore_run`
+//! copies that namespace into the scratch store as ciphertext, and the resume
+//! runs on the scratch store and writes a report for `promote` instead of
+//! emitting `pipeline_restore_drill`.
+//!
 //! The fingerprints port `ef97a459:scripts/operator/pipeline-backup-restore-smoke.sh`:
 //! the authoritative SQL (lines 134-173), run here in tenant transactions as
 //! the runtime login, and the artifact tree hash (lines 191-205), taken here

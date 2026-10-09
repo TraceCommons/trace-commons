@@ -495,7 +495,7 @@ record` refuses to start when `CI` is set (`promote_refused_in_ci`).
 | `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
 | `promote package-checks --run-id R` | Refuses with `harness_production_assembly_unavailable` until the qualification harness can run on the production assembly. |
 | `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). |
-| `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix]` | `pipeline_remote_restore`. Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. The restore harness it drives is not built yet: today it refuses with `remote_restore_harness_unavailable`. |
+| `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix] [--postgres-admin-url URL]` | `pipeline_remote_restore`: runs the remote restore drill (below). Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. |
 | `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
 | `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
 | `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. |
@@ -510,6 +510,80 @@ blocker still blocks.
 The child processes `promote` starts see only the allowlisted environment
 (`child_environment`): no cloud credential variable reaches them. On the pilot
 host, Application Default Credentials come from the metadata server.
+
+### The remote restore drill (`promote remote-restore`)
+
+`promote remote-restore` runs the local restore drill's order with a remote
+store in place of the artifact root, in a PostgreSQL of its own (a container,
+or the loopback server `--postgres-admin-url` names; never the production
+database):
+
+1. **Seed.** `pipeline_restore_seed` serves the ingest app on the drill's own
+   database with the deployment's artifact store (the GCS client and the key
+   wrapper `TRACE_COMMONS_KEK_PROVIDER` selects) and writes its objects into
+   the **source** store, under a namespace fresh for each invocation:
+   `<source prefix>/pipeline-remote-restore-<run>-<random>/`. The live
+   objects sit under `trace_commons_service_owned_remote/`, so the drill never
+   writes among them, and it lists only its own namespace. Its
+   tenants (`tenant-a`, `tenant-b`, `tenant-c`) exist only in the drill's
+   database.
+2. **Database restore.** The seed's database is dumped and restored into a
+   second database, as in `restore-drill`.
+3. **Copy** (`pipeline_remote_restore_run`). Every object in the namespace is
+   read from the source and written into the same namespace of the **scratch**
+   store at the provider (`read_encrypted_artifact`, then
+   `put_encrypted_artifact`), as ciphertext with its object ref unchanged. A
+   copy that decrypted and stored again would encrypt under a fresh DEK and
+   never match. It refuses a scratch namespace that already holds objects
+   (`remote_restore_scratch_not_empty`). It measures: the stored-object
+   fingerprint of the source before the copy and of the scratch store after it
+   (SHA-256 over each object's key under the store and the SHA-256 of its
+   stored bytes, in key order); how many restored objects decrypt under the
+   configured key wrapper (the DEK unwrapped, the ciphertext decrypted in
+   memory, the plaintext dropped, nothing written); and whether **both**
+   buckets report object versioning on.
+4. **Resume.** `pipeline_restore_resume` runs against the restored database
+   with the scratch store as its artifact store: it refuses a scratch store
+   whose fingerprint is not the seed's, then resumes the seed's pending run
+   once.
+
+The result passes only on a `gcs` store with at least one object, equal
+fingerprints, every object unwrapped, versioning on in both buckets, and the
+resumed database equal to the seed's with one pending run resumed and no
+duplicate effect. The source fingerprint the copy read must be the one the
+seed took (`remote_restore_source_changed` otherwise).
+
+Only `TRACE_COMMONS_KEK_PROVIDER` and `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME` are
+passed from the operator's environment to the children; set them as the
+deployment does. Credentials come from Application Default Credentials. The
+drill's objects stay in both stores: nothing in the drill deletes from a
+bucket. Remove the `pipeline-remote-restore-*` namespaces by hand (or with a
+lifecycle rule on that prefix) when the run is done.
+
+**What the operator creates (O-B1).** A scratch target that is not the live
+store and not inside it: a separate bucket (preferred: its IAM and lifecycle
+stay apart from the live data), or a prefix in the live bucket beside the live
+objects, which requires naming the live store with a prefix too, because a
+bare bucket name overlaps every prefix in it. Object versioning must be on in
+both buckets, or the result fails with `remote_restore_versioning_disabled`.
+The identity the drill runs as needs:
+
+- on the source bucket: `storage.objects.create`, `storage.objects.get`,
+  `storage.objects.list`, and `storage.buckets.get` (for the versioning read);
+- on the scratch bucket: the same four;
+- on the KMS key: encrypt and decrypt (`roles/cloudkms.cryptoKeyEncrypterDecrypter`),
+  because the seed wraps DEKs and the copy unwraps them.
+
+No delete permission is needed.
+
+**What only a live run proves.** Every test in the repository runs the drill
+over an in-memory client or a directory double, with the local master key.
+Those show the copy keeps the stored bytes, the unwrap count and the resume.
+They cannot show that the production client lists every page of a real
+bucket, that `get_bucket` reports the bucket's real versioning policy, that
+the operator's identity holds the permissions above, or that GCP KMS unwraps
+what it wrapped. A run against the double reports its kind
+(`gcs_directory_double`) and no versioning, so it can never pass.
 
 ## Package trust and `qualify_bundle`
 
