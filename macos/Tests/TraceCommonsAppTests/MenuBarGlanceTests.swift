@@ -12,10 +12,12 @@ import XCTest
 /// popover.
 @MainActor
 final class MenuBarGlanceTests: XCTestCase {
-    // Recorded verbatim by `RUSTFLAGS="-D warnings" cargo test -p
+    // `glanceOff` and `glanceUnreadable` are `handle_glance`'s two fixed
+    // answers (`insights_glance.rs`), which `DaemonDataKeyCoverageTests`
+    // reads from a running daemon. `glanceData`, `glanceStale` and `tipLit`
+    // are recorded verbatim by `RUSTFLAGS="-D warnings" cargo test -p
     // trace-commons-contributor --lib a_recorded_ -- --nocapture`
-    // (`insights_glance.rs` `a_recorded_glance_for_the_shells`); never
-    // written by hand.
+    // (`a_recorded_glance_for_the_shells`); never written by hand.
     static let glanceOff = #"{"enabled":false,"feed":"ledger"}"#
     static let glanceUnreadable = #"{"enabled":true,"feed":"ledger","readable":false}"#
     static let glanceData = #"{"enabled":true,"feed":"ledger","readable":true,"updated_at":"2026-10-08T10:00:00+00:00","stale":false,"date":"2026-10-08","tools":[{"tool":"claude-code","calls":2,"known_calls":1,"tokens":1050,"cache_share":{"numerator":800,"denominator":1000,"permille":800}},{"tool":"codex","calls":1,"known_calls":1,"tokens":1025,"cache_share":{"numerator":600,"denominator":1000,"permille":600}},{"tool":"unknown","calls":1,"known_calls":0,"tokens":null,"cache_share":null}],"coverage":{"calls":4,"known":2,"unknown":2,"unreadable_rows":0},"context_tip":{"state":"held"}}"#
@@ -206,6 +208,17 @@ final class MenuBarGlanceTests: XCTestCase {
         let pinned = try XCTUnwrap(panel.range(
             of: "        .task { await store.load() }\n        .onAppear { model.refreshAll() }\n"))
         XCTAssertLessThan(follow.lowerBound, pinned.lowerBound)
+    }
+
+    /// The popover only reads the glance: neither the card nor the store
+    /// behind it turns the ledger feed on or off.
+    func test_thePopoverNeverWritesTheLedgerFeed() throws {
+        for file in ["Views/Monitor/InsightsGlanceCard.swift", "Views/Monitor/MenuPanelStore.swift"] {
+            let source = try MonitorNavigationTests.text(file)
+            for forbidden in ["setInsightsLedgerFeed(", "insights_ledger_feed"] {
+                XCTAssertFalse(source.contains(forbidden), "\(file) contains \(forbidden)")
+            }
+        }
     }
 
     func test_usageChangedReReadsTheGlance() throws {
