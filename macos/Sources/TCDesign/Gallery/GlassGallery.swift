@@ -394,8 +394,8 @@ public struct GlassGallery: View {
                 VStack(spacing: 2) {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
                     GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
                 }
             }
             .frame(width: 420, height: 190)
@@ -406,7 +406,7 @@ public struct GlassGallery: View {
                     Text("content").glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassConsentBlock("consent")
-                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Sessions", "18")])
+                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Traces", "18")])
                 GlassNotice(tone: .ask, title: "notice") {
                     Text("body")
                 }

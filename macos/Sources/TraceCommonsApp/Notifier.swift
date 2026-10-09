@@ -330,7 +330,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         // rather than one merged sentence.
         var lines: [String] = []
         if pendingCount > 0 {
-            let noun = pendingCount == 1 ? "session" : "sessions"
+            let noun = pendingCount == 1 ? "trace" : "traces"
             let from = projects.isEmpty ? "" : " from " + Self.joined(projects)
             lines.append("\(pendingCount) \(noun) ready\(from).")
             lines.append("Nothing is sent until you review them.")

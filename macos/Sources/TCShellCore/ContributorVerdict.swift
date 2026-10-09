@@ -1,6 +1,6 @@
 import Foundation
 
-/// The contributor's own answer to "did this session do what you asked?",
+/// The contributor's own answer to "did this trace do what you asked?",
 /// carried as `approve`'s optional `outcome` parameter.
 ///
 /// Three cases and no fourth. The absence of an answer is NOT a case here:
@@ -39,7 +39,7 @@ public enum ContributorVerdict: String, CaseIterable, Sendable {
 /// `SUBMIT_ALL_AS`, `SUBMIT_ALL_AS_TOOLTIP`); these are those strings
 /// character for character.
 public enum VerdictCopy {
-    public static let question = "Did this session do what you asked?"
+    public static let question = "Did this trace do what you asked?"
     public static let worked = "Worked"
     public static let partly = "Partly"
     public static let failed = "Failed"
@@ -56,5 +56,5 @@ public enum VerdictCopy {
     /// once for the whole group.
     public static let submitAllAs = "Submit all as..."
     public static let submitAllAsTooltip =
-        "Record the same outcome for every session in this group."
+        "Record the same outcome for every trace in this group."
 }

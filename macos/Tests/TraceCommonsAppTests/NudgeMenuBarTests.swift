@@ -51,8 +51,8 @@ final class NudgeMenuBarTests: XCTestCase {
         XCTAssertEqual(MenuPanelStatus.mark(store.status?.nudge, available: false), GlassMenuBarStrip.Mark.none)
         let drawn = MenuPanelStatus.markWords(store.status?.nudge, available: true, badge: 2, condition: .live)
         XCTAssertEqual(
-            MenuPanelStatus.markAccessibility(base: "Trace Commons. 2 sessions waiting for your decision.", words: drawn),
-            "Trace Commons. 2 sessions waiting for your decision. 2 of them have been idle for 3 days or more.")
+            MenuPanelStatus.markAccessibility(base: "Trace Commons. 2 traces waiting for your decision.", words: drawn),
+            "Trace Commons. 2 traces waiting for your decision. 2 of them have been idle for 3 days or more.")
         let unavailable = MenuPanelStatus.markWords(store.status?.nudge, available: false, badge: 2, condition: .live)
         XCTAssertEqual(MenuPanelStatus.markAccessibility(base: "Base.", words: unavailable), "Base.")
         let quiet = MenuPanelStore(client: SampleDaemonClient(.empty))

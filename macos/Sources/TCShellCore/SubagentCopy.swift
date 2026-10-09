@@ -37,7 +37,7 @@ public enum SubagentCopy {
         let count = max(count, 0)
         let dropped = max(dropped, 0)
         let trimmed =
-            "left out to keep this session within its size limit; "
+            "left out to keep this trace within its size limit; "
             + "the conversation itself is complete."
         switch (count, dropped) {
         case (0, 0):
