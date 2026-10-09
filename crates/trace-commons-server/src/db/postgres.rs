@@ -1693,6 +1693,13 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "versioned_pipeline_attempt_artifacts",
         include_str!("../../../../migrations/V108__versioned_pipeline_attempt_artifacts.sql"),
     ),
+    // V109: the versioned pipeline's follow-ups after #1143 -- the legacy
+    // V94 payouts, and the schema checks and indexes V105 and V106 left out.
+    (
+        109,
+        "versioned_pipeline_followups",
+        include_str!("../../../../migrations/V109__versioned_pipeline_followups.sql"),
+    ),
     // V110 (PR 5) adds each tenant's committed routing record, the immutable
     // activation event history, and the permanent per-submission receipt
     // owner, which the upload route reads before it chooses the legacy or the
@@ -1738,6 +1745,24 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         114,
         "external_account_trust_evaluations",
         include_str!("../../../../migrations/V114__external_account_trust_evaluations.sql"),
+    ),
+    // V114's frontier backfill read trace_accounts with no tenant context, so a
+    // migrator without BYPASSRLS seeded no row for any existing account. Re-run
+    // it as the evaluation guard under a policy that lives only for the
+    // statement; rows the trigger made since V114 keep their generations.
+    (
+        115,
+        "account_trust_frontier_backfill",
+        include_str!("../../../../migrations/V115__account_trust_frontier_backfill.sql"),
+    ),
+    // V116 (spec 2026-10-08, Slice C) marks the trace_gate_decisions rows
+    // the pipeline's Settle writes: `source` and `pipeline_run_id`, both
+    // defaulted so main's writers are unchanged, one pipeline row per
+    // submission, and the gate driver's read of `source`.
+    (
+        116,
+        "pipeline_gate_decision_rows",
+        include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
     ),
 ];
 
@@ -5495,6 +5520,16 @@ impl Database for PgBackend {
                  FROM trace_submissions s
                  JOIN trace_gate_decisions d
                    ON d.tenant_id = s.tenant_id AND d.submission_id = s.submission_id
+                 -- A submission the pipeline's Settle wrote a row for is left
+                 -- out, even if it also holds a legacy row: the re-score would
+                 -- rewrite the verdict its Score awarded credit on (spec
+                 -- 2026-10-08, Slice C, O-C3). V116 grants trace_gate_driver
+                 -- this column.
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM trace_gate_decisions p
+                      WHERE p.tenant_id = s.tenant_id
+                        AND p.submission_id = s.submission_id
+                        AND p.source = 'pipeline_settle')
                  ORDER BY s.received_at ASC
                  LIMIT $1",
                 &[&limit],
@@ -5535,6 +5570,12 @@ impl Database for PgBackend {
                  -- leaves credit quality NULL; scoring it here would hand
                  -- every skipped duplicate the graded-floor product.
                  WHERE COALESCE(perplexity_micros, 0) > 0
+                   -- A row the pipeline's Settle wrote already holds the
+                   -- credit quality its Score computed under the bundle's
+                   -- pinned calibration; rescoring it here would overwrite
+                   -- that (spec 2026-10-08, Slice C, O-C3). V116 grants
+                   -- trace_gate_driver this column.
+                   AND source <> 'pipeline_settle'
                  ORDER BY decided_at ASC
                  LIMIT $1",
                 &[&limit],

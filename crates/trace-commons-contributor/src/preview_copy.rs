@@ -218,7 +218,8 @@ pub struct MonitorTracesCopy {
 
 /// Every placeholder the monitor tables use, each written `{name}`:
 /// Ron's, and History's and Inference's (`shown`, `hours`) before them.
-/// `uploads` and `megabytes` are the daily limit's two remainders.
+/// `uploads` and `megabytes` are the daily limit's two remainders, and
+/// `section` is the part of the app an edge rail peek links into.
 pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "count",
     "total",
@@ -237,6 +238,7 @@ pub const MONITOR_PLACEHOLDERS: &[&str] = &[
     "megabytes",
     "amount",
     "days",
+    "section",
 ];
 
 /// The Traces tree (`traces-tree.tsx`).
@@ -260,7 +262,7 @@ pub struct MonitorTreeCopy {
     pub review_tip: &'static str,
     /// An ignored folder's sub line.
     pub ignored_folder: &'static str,
-    /// The folder row menu's one item.
+    /// The folder row menu's one item. Approved 2026-10-08 (button rule).
     pub ignore_folder: &'static str,
     /// The folder and tool switches' accessible names.
     pub watch_folder: &'static str,
@@ -323,6 +325,7 @@ pub struct MonitorInspectorCopy {
     /// eligible count.
     pub waiting_sessions_one: &'static str,
     pub waiting_sessions: &'static str,
+    /// `{count}`: the eligible sessions. Approved 2026-10-08 (button rule).
     pub submit_all_eligible: &'static str,
 }
 
@@ -370,7 +373,7 @@ pub struct MonitorSessionReviewCopy {
     pub outcome_unavailable: &'static str,
     pub outcome_loading: &'static str,
     pub look_inside: &'static str,
-    /// Contribute's label when it cannot be pressed.
+    /// Contribute's label when it cannot be pressed. Approved 2026-10-08 (button rule).
     pub enroll_to_approve: &'static str,
     pub not_eligible: &'static str,
     pub checking_eligibility: &'static str,
@@ -390,8 +393,12 @@ pub struct MonitorLookInsideCopy {
     pub search_original: &'static str,
     pub turn_index: &'static str,
     pub transcript_caption: &'static str,
-    /// `{size}`: what is left to load.
+    /// The button that loads the next part. Approved 2026-10-08 (button rule).
     pub load_more: &'static str,
+    /// The caption beside [`Self::load_more`]; `{size}`: what is left to
+    /// load. Approved 2026-10-08 (button rule).
+    pub load_more_remaining: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub add_turn_separators: &'static str,
     pub search_caption: &'static str,
     pub search_label: &'static str,
@@ -400,6 +407,7 @@ pub struct MonitorLookInsideCopy {
     pub original_match_one: &'static str,
     pub original_matches: &'static str,
     pub turns_need_full_read: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub load_turn_index: &'static str,
     pub turn_index_eyebrow: &'static str,
     /// A turn that names no tool.
@@ -410,6 +418,7 @@ pub struct MonitorLookInsideCopy {
     pub native_review: &'static str,
     pub native_review_caption: &'static str,
     pub prepare_admission: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub request_witness_review: &'static str,
     /// The witness consent checkbox's line and accessible name.
     pub witness_confirm_line: &'static str,
@@ -473,6 +482,7 @@ pub struct MonitorSafeguardsCopy {
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct MonitorHistoryActionsCopy {
     /// Asks the daemon to check the server sooner (`refresh_history`).
+    /// Approved 2026-10-08 (button rule).
     pub request_refresh: &'static str,
     pub requesting: &'static str,
     pub refresh_requested: &'static str,
@@ -480,6 +490,7 @@ pub struct MonitorHistoryActionsCopy {
     /// The account session has not been read yet.
     pub checking_account: &'static str,
     /// In Withdraw's place on a row while no account session is active.
+    /// Approved 2026-10-08 (button rule).
     pub sign_in_to_withdraw: &'static str,
     pub waiting_for_sign_in: &'static str,
     pub complete_sign_in: &'static str,
@@ -532,7 +543,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
             ignored_folder: "ignored \u{00b7} never queued",
-            ignore_folder: "Ignore folder / repo",
+            ignore_folder: "Ignore folder",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
             dismiss_session: "Dismiss session",
@@ -571,7 +582,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             cancel: "Cancel",
             waiting_sessions_one: "1 waiting session",
             waiting_sessions: "{count} waiting sessions",
-            submit_all_eligible: "Submit all eligible ({count})",
+            submit_all_eligible: "Submit {count}",
         },
         summary_panel: MonitorSummaryCopy {
             tools_watched: "{count} of {total} tools watched",
@@ -611,7 +622,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
                 Contribution is disabled.",
             outcome_loading: "Loading outcome and correction disclosure\u{2026}",
             look_inside: "Look inside",
-            enroll_to_approve: "Enroll to approve",
+            enroll_to_approve: "Enroll",
             not_eligible: "Not eligible",
             checking_eligibility: "Checking eligibility\u{2026}",
         },
@@ -628,8 +639,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             turn_index: "Turn index",
             transcript_caption: "These are the exact redacted bytes an approval covers. \
                 Markers show where local scrubbing fired.",
-            load_more: "Load more ({size} remaining)",
-            add_turn_separators: "Add turn separators",
+            load_more: "Load more",
+            load_more_remaining: "{size} remaining",
+            add_turn_separators: "Show turns",
             search_caption: "Search checks the original session locally and returns a count \
                 only. It never renders original text.",
             search_label: "Search original session",
@@ -638,7 +650,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             original_match_one: "1 original match",
             original_matches: "{count} original matches",
             turns_need_full_read: "Read transcript fully before loading turn index.",
-            load_turn_index: "Load turn index",
+            load_turn_index: "Load turns",
             turn_index_eyebrow: "TURN INDEX",
             turn_event: "event",
             turn_bytes: "bytes {start}\u{2013}{end}",
@@ -647,7 +659,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             native_review_caption: "Optional daemon-backed checks stay local until you \
                 explicitly confirm.",
             prepare_admission: "Prepare admission",
-            request_witness_review: "Request witness review",
+            request_witness_review: "Request review",
             witness_confirm_line: "I understand and want to send this session for review.",
             witness_confirm_label: "Confirm sending unredacted session to witness",
             witness_reviewing: "Reviewing\u{2026}",
@@ -812,7 +824,7 @@ pub struct MonitorScreensCopy {
     pub credit_pending: &'static str,
     /// Home's status-card link to the Traces tab.
     pub open_traces: &'static str,
-    /// Quits the app.
+    /// Quits the app. Approved 2026-10-08 (button rule).
     pub quit: &'static str,
     /// The core did not answer; see [`MONITOR_CORE_UNREACHABLE`].
     pub core_unreachable: &'static str,
@@ -880,6 +892,51 @@ pub struct MonitorScreensCopy {
     /// The Settings modal's section list and section rules (#1146
     /// `features/settings/sections.ts`).
     pub settings_nav: MonitorSettingsNavCopy,
+    /// The edge rail (Claude Design "Run 1 OS-level Explorations", 1b):
+    /// its switch in Settings, its icons' names and its peeks.
+    pub edge_rail: MonitorEdgeRailCopy,
+}
+
+/// The edge rail's words: the optional rail on the right edge of the
+/// screen, from the "Run 1 OS-level Explorations" design (1b, "The edge
+/// rail, and the menu bar"). Its Tools, Private AI and Compute icons take
+/// their names from [`MonitorSettingsNavCopy`], so a section is called the
+/// same thing on the rail as in Settings. A singular is its own line;
+/// numbers are `{count}` holes and a section's name is `{section}`.
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+pub struct MonitorEdgeRailCopy {
+    /// The switch in Settings' system integrations card, and what it does.
+    pub setting_toggle: &'static str,
+    pub setting_caption: &'static str,
+    /// The rail's accessible name, and the closed rail's handle's.
+    pub rail_label: &'static str,
+    pub handle_label: &'static str,
+    /// The icons this table names; the other three are Settings' names.
+    pub waiting: &'static str,
+    pub balance: &'static str,
+    pub privacy: &'static str,
+    /// The mark at the foot of the rail.
+    pub open_app: &'static str,
+    /// Each peek's link into the app, and its accessible name.
+    pub open_section: &'static str,
+    pub open_section_label: &'static str,
+    /// The Waiting peek's button.
+    pub review: &'static str,
+    /// The Tools peek with no tool found.
+    pub tools_empty: &'static str,
+    /// The Compute peek before the core has reported.
+    pub compute_unreported: &'static str,
+    /// The Privacy peek: its title, then what is on this Mac and what was
+    /// contributed.
+    pub privacy_title: &'static str,
+    pub on_this_mac: &'static str,
+    pub on_this_mac_line_one: &'static str,
+    pub on_this_mac_line: &'static str,
+    pub in_the_library: &'static str,
+    pub in_the_library_line_one: &'static str,
+    pub in_the_library_line: &'static str,
+    /// Under every peek: the rail reads, and sends nothing.
+    pub nothing_sent: &'static str,
 }
 
 /// Ron's #1146 words for the Traces graph footer (`traces-graph.tsx`,
@@ -976,6 +1033,7 @@ pub struct MonitorSettingsNavCopy {
     pub connection: &'static str,
     pub startup: &'static str,
     pub watching: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub uses: &'static str,
     pub profile: &'static str,
     pub folders: &'static str,
@@ -983,6 +1041,8 @@ pub struct MonitorSettingsNavCopy {
     pub private_ai: &'static str,
     pub witness: &'static str,
     pub projects: &'static str,
+    /// The section list's name; the section's own heading stays
+    /// `changes_heading`. Approved 2026-10-08 (button rule).
     pub log: &'static str,
     pub compute: &'static str,
 }
@@ -1035,8 +1095,8 @@ pub struct MonitorShellCopy {
     /// A History row's way into its details.
     pub open: &'static str,
     /// The menu's pause and resume (#1146 `tray.rs`), and the pause
-    /// lengths. "Until tomorrow morning" is native's own: #1146 has no
-    /// counterpart.
+    /// lengths. "Until morning" is native's own: #1146 has no
+    /// counterpart. The three lengths: Approved 2026-10-08 (button rule).
     pub pause_watcher: &'static str,
     pub resume_watcher: &'static str,
     pub pause_hour: &'static str,
@@ -1156,13 +1216,13 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         priced: "Priced",
         unknown: "Unknown",
         proof_verified: "Verified",
-        proof_gateway_only: "Gateway",
-        proof_unattested: "Unattested",
+        proof_gateway_only: "Gateway only",
+        proof_unattested: "No proof",
         proof_pending: "Pending",
         proof_unavailable: "Unavailable",
-        proof_failed: "Failed",
-        proof_outside: "Outside",
-        proof_unrecorded: "Unrecorded",
+        proof_failed: "Check failed",
+        proof_outside: "External",
+        proof_unrecorded: "Not recorded",
         history: "History",
         contributed: "Contributed",
         watching: "Watching",
@@ -1202,9 +1262,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         focus: "Focus",
         previous: "Previous period",
         next: "Next period",
-        credit_pending: "Credit pending",
+        credit_pending: "Credit",
         open_traces: "Open Traces",
-        quit: "Quit Trace Commons",
+        quit: "Quit",
         core_unreachable: MONITOR_CORE_UNREACHABLE,
         request_failed: MONITOR_REQUEST_FAILED,
         held_for_review: crate::history_copy::HELD_FOR_PRIVACY_REVIEW,
@@ -1240,12 +1300,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             routing_unknown: "Unknown",
         },
         history_actions: MonitorHistoryActionsCopy {
-            request_refresh: "Request server refresh",
+            request_refresh: "Refresh",
             requesting: "Requesting\u{2026}",
             refresh_requested: "Asked Trace Commons for the latest results. Changes show here when they arrive.",
             refresh_failed: "Could not ask for updates. Nothing changed; try again.",
             checking_account: "Checking account session\u{2026}",
-            sign_in_to_withdraw: "Sign in to withdraw",
+            sign_in_to_withdraw: "Sign in",
             waiting_for_sign_in: "Waiting for sign-in\u{2026}",
             complete_sign_in: "Complete sign-in in your browser. This may take up to five minutes.",
             // #1146's sentences (`use-history-withdrawal.ts`); none names
@@ -1285,12 +1345,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             open: "Open",
             pause_watcher: "Pause watcher",
             resume_watcher: "Resume watcher",
-            pause_hour: "For 1 hour",
-            pause_morning: "Until tomorrow morning",
-            pause_until_resumed: "Until I turn it back on",
+            pause_hour: "1 hour",
+            pause_morning: "Until morning",
+            pause_until_resumed: "Until resumed",
             start_at_login: "Start Trace Commons at login",
             projects_empty: "No projects seen yet. Sessions appear here after discovery.",
-            changes_heading: "Changes on this machine",
+            changes_heading: "Change log",
             tab_home: "Home",
             tab_inference: "Inference",
             tab_traces: "Traces",
@@ -1389,15 +1449,38 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             connection: "Connection",
             startup: "Startup & notifications",
             watching: "Watching",
-            uses: "How traces may be used",
+            uses: "Data uses",
             profile: "Public profile",
             folders: "Watched folders",
             tools: "Tools",
             private_ai: "Private AI",
             witness: "Redaction witness",
             projects: "Projects",
-            log: "Changes on this machine",
+            log: "Change log",
             compute: "Compute",
+        },
+        edge_rail: MonitorEdgeRailCopy {
+            setting_toggle: "Show the edge rail",
+            setting_caption: "Rest the pointer on the right edge of the screen to glance at sessions waiting, tools, balance, Private AI, compute and privacy.",
+            rail_label: "Edge rail",
+            handle_label: "Open the edge rail",
+            waiting: "Waiting",
+            balance: "Balance",
+            privacy: "Privacy",
+            open_app: concat!("Open ", crate::app_name!()),
+            open_section: "Open {section}",
+            open_section_label: concat!("Open {section} in ", crate::app_name!()),
+            review: "Review",
+            tools_empty: "No tools found on this Mac yet.",
+            compute_unreported: "Compute has not reported yet.",
+            privacy_title: "What is where, right now",
+            on_this_mac: "On this Mac",
+            on_this_mac_line_one: "1 session waiting here. Nothing leaves until you send it.",
+            on_this_mac_line: "{count} sessions waiting here. Nothing leaves until you send it.",
+            in_the_library: "In the library",
+            in_the_library_line_one: "1 contribution sent from this Mac.",
+            in_the_library_line: "{count} contributions sent from this Mac.",
+            nothing_sent: "Nothing is sent from the rail.",
         },
     }
 }
@@ -1535,10 +1618,7 @@ mod tests {
         let traces = monitor_traces_copy();
         assert_eq!(traces.tree.submit_count, "Submit \u{00b7} {count}");
         // `waiting-project-folder.tsx`'s Decisions card.
-        assert_eq!(
-            traces.inspector.submit_all_eligible,
-            "Submit all eligible ({count})"
-        );
+        assert_eq!(traces.inspector.submit_all_eligible, "Submit {count}");
         assert_eq!(
             traces.inspector.waiting_sessions,
             "{count} waiting sessions"
@@ -1589,10 +1669,10 @@ mod tests {
     fn history_actions_speak_in_rons_words() {
         let copy = monitor_screens_copy().history_actions;
         assert_eq!(words_of(&copy).len(), 11, "every history action is read");
-        assert_eq!(copy.request_refresh, "Request server refresh");
+        assert_eq!(copy.request_refresh, "Refresh");
         assert_eq!(copy.requesting, "Requesting\u{2026}");
         assert_eq!(copy.checking_account, "Checking account session\u{2026}");
-        assert_eq!(copy.sign_in_to_withdraw, "Sign in to withdraw");
+        assert_eq!(copy.sign_in_to_withdraw, "Sign in");
         assert_eq!(copy.waiting_for_sign_in, "Waiting for sign-in\u{2026}");
         assert_eq!(
             copy.complete_sign_in,
@@ -1680,11 +1760,13 @@ mod tests {
         let names: Vec<String> = words_of(nav).into_iter().map(|(_, word)| word).collect();
         assert_eq!(names.len(), 12, "#1146 lists twelve sections: {names:?}");
         assert_eq!(nav.startup, "Startup & notifications");
-        assert_eq!(nav.uses, "How traces may be used");
+        assert_eq!(nav.uses, "Data uses");
         assert_eq!(nav.profile, "Public profile");
         assert_eq!(nav.private_ai, "Private AI");
         assert_eq!(nav.compute, "Compute");
-        assert_eq!(nav.log, screens.shell.changes_heading);
+        assert_eq!(nav.log, "Change log");
+        // The section's own heading matches its name (owner ruling, 2026-10-08).
+        assert_eq!(screens.shell.changes_heading, nav.log);
         for name in &names {
             assert!(!name.ends_with('.') && name.chars().count() <= 24, "{name}");
         }

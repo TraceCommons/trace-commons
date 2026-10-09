@@ -72,9 +72,9 @@ public enum FirstRunNavigation {
     /// The near.ai login did not finish, or the enrollment through it was
     /// refused (Kristi's review of #1261), or, with an invite, the sign-in to
     /// the account it enrolled did not go through (owner, 2026-10-07); the
-    /// invite and its enrollment are kept. With no Back on Folders or Tools,
-    /// staying there would retry the same sign-in at every Continue, so the
-    /// person goes back to Join with the near.ai choice cleared, to choose
+    /// invite and its enrollment are kept. Staying on Folders or Tools would
+    /// retry the same sign-in at every Continue, so the person is taken back
+    /// to Join with the near.ai choice cleared, to choose
     /// again: near.ai, a passkey, or watch only. Every other answer is kept,
     /// as after a dead invite, and the daemon is not started again. Clearing
     /// the choice also means a near.ai session the daemon still keeps is
@@ -95,11 +95,13 @@ public enum FirstRunNavigation {
     /// - Rules: true here, since every choice there is optional; the
     ///   screen itself holds Continue until its folders have loaded
     ///   (`RulesScreenLayout.canContinue`), which this state cannot see.
-    /// - Uses: the required use ticked, and something Start can do: finish
+    /// - Uses: the required use known, and something Start can do: finish
     ///   watching only (not while the daemon holds an enrollment, which
     ///   watching only cannot finish under), reopen a chosen passkey's
-    ///   sheets, or finish an enrollment the daemon holds. With no required use known, Start stays
-    ///   disabled.
+    ///   sheets, or finish an enrollment the daemon holds. With no required
+    ///   use known, Start stays disabled. The required use is not waited
+    ///   on: it is always included (`FirstRunState.includingRequiredScope`,
+    ///   owner 2026-10-08), so there is no tick to wait for.
     public static func canContinue(
         _ state: FirstRunState,
         candidates: [SourceCandidate],
@@ -116,10 +118,9 @@ public enum FirstRunNavigation {
         case .rules:
             return true
         case .uses:
-            guard let requiredScope else { return false }
+            guard requiredScope != nil else { return false }
             let watchesOnly = state.account == .watchOnly && !state.daemonHoldsEnrolment
-            let startable = watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
-            return startable && state.scopes.contains(requiredScope)
+            return watchesOnly || state.account == .passkeyChosen || state.holdsEnrolment
         }
     }
 

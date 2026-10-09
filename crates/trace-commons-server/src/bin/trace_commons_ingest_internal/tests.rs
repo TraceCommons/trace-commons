@@ -274,6 +274,23 @@ pub(super) fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
 
+/// `postgres_backend_for_ingest_test`, for a test that must not pass by
+/// skipping (poldsam P-11): with no database URL set it skips, as every
+/// database test does, and once one is set a database that cannot be
+/// reached or migrated fails the test instead.
+async fn required_postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
+    let configured = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .is_ok();
+    let backend = postgres_backend_for_ingest_test().await;
+    assert!(
+        backend.is_some() || !configured,
+        "a test database URL is set, but the database is unavailable or its \
+         migrations failed: this test must not skip"
+    );
+    backend
+}
+
 async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -5491,7 +5508,7 @@ fn append_ranking_backfill_fixture_for_submissions(
     }
 }
 
-fn test_state_with_options(
+pub(crate) fn test_state_with_options(
     root: PathBuf,
     db_mirror: Option<Arc<dyn Database>>,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
@@ -6141,6 +6158,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -11266,8 +11284,9 @@ fn qualified_compatibility_pipeline_service(
 /// compatibility configuration's `is_qualifiable`, so a runtime otherwise
 /// qualified in every dependency is not production-qualified while its
 /// compatibility bundle binds the local reference configuration (all-zero
-/// floors, not qualifiable), and is with a production-compatible one --
-/// including `main`'s pilot shape, a zero tail-fraction floor.
+/// floors, not qualifiable), and is with a production-compatible one: one
+/// with a zero tail-fraction floor (`TEST_MAIN_GATE`: 2000000, 0, 500000),
+/// and one with the pilot template's floors (0, 0, 500000; poldsam P-4).
 #[tokio::test]
 async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate() {
     use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
@@ -11306,21 +11325,37 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     );
 
     let reference = CompatibilityBundleConfig::local_reference();
-    let pilot = CompatibilityBundleConfig::production_compatible(
-        reference.scorer_model_id.clone(),
-        reference.projection_id.clone(),
-        reference.index_id.clone(),
-        &TEST_MAIN_GATE,
-    )
-    .expect("main's pilot floors validate");
-    let production = service(&pilot);
-    assert!(
-        production
-            .bundle_qualification(production.default_package())
-            .expect("the pilot package resolves")
-            .configuration_qualifiable
-    );
-    assert!(pipeline_runtime_is_production_qualified(&production));
+    // The pilot template's floors: `deploy/pilot-gcp/ingest.env.template`.
+    let pilot_gate = trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        ..TEST_MAIN_GATE
+    };
+    for (gate, floors) in [
+        (&TEST_MAIN_GATE, "a zero tail-fraction floor alone"),
+        (&pilot_gate, "the pilot template's floors"),
+    ] {
+        let config = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id.clone(),
+            reference.projection_id.clone(),
+            reference.index_id.clone(),
+            gate,
+        )
+        .unwrap_or_else(|error| panic!("{floors} validate: {error}"));
+        let production = service(&config);
+        assert!(
+            production
+                .bundle_qualification(production.default_package())
+                .unwrap_or_else(|error| panic!("the {floors} package resolves: {error}"))
+                .configuration_qualifiable,
+            "{floors}"
+        );
+        assert!(
+            pipeline_runtime_is_production_qualified(&production),
+            "{floors}"
+        );
+    }
 }
 
 /// Builds a qualified compatibility service through the seam from the
@@ -12678,6 +12713,167 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
     ));
 }
 
+/// poldsam P-12: the pipeline's test doubles are compiled into the library
+/// (the integration tests and these tests link it built without
+/// `cfg(test)`), so what keeps one out of production is the qualification
+/// gate. An otherwise fully qualified service fails the gate with any one of
+/// them in place, under that dependency's own blocker and no other:
+/// `IsolatedPipelineIndex` as the index, `RecordingSettlementAdapter` as the
+/// adapter of the instrument the package pins, or
+/// `StaticPipelineAuthorityProvider::test_only` as the authority.
+/// (`RecordingNearAdapter`:
+/// `pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`.)
+#[tokio::test]
+async fn each_pipeline_test_double_fails_the_qualification_gate() {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_authority::{
+        PipelineAuthorityProvider, StaticPipelineAuthorityProvider,
+    };
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::{
+        RecordingSettlementAdapter, SettlementAdapterRegistry,
+    };
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Double {
+        None,
+        Index,
+        SettlementAdapter,
+        Authority,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let build = |double: Double| -> Arc<PipelineService> {
+        let scorer = Arc::new(QualifiedTestScorer(
+            trace_commons_gate_api::ReferencePerplexityScorer::new(),
+        ));
+        let embedder = Arc::new(QualifiedTestEmbedder(
+            trace_commons_gate_api::ReferenceEmbedder::new(),
+        ));
+        // The package pins the Trace Credit instrument, so its adapter is
+        // one of the bundle's dependencies (decision P4-D7).
+        let package = MinimalPolicyBundle::minimal_package(
+            &PipelineBundleConfig {
+                instrument_awards: vec![qualified_test_trace_credit_award()],
+                include_index: false,
+                variant: None,
+            },
+            scorer.as_ref(),
+            embedder.as_ref(),
+        )
+        .unwrap();
+        let adapter: Arc<dyn SettlementAdapter> = if double == Double::SettlementAdapter {
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            )
+        } else {
+            Arc::new(QualifiedTestSettlementAdapter {
+                instrument_id: InstrumentId::trace_credit(),
+            })
+        };
+        let registry = SettlementAdapterRegistry::new(vec![adapter]).unwrap();
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        };
+        let builder = if double == Double::Index {
+            let index = IsolatedPipelineIndex::new();
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        } else {
+            let index = Arc::new(QualifiedTestIndex(IsolatedPipelineIndex::new()));
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        };
+        let authority: Arc<dyn PipelineAuthorityProvider> = if double == Double::Authority {
+            Arc::new(StaticPipelineAuthorityProvider::test_only(
+                SubmissionAuthority {
+                    tenant: SubmissionAllowlists::default(),
+                    policy: None,
+                    require_policy: false,
+                },
+            ))
+        } else {
+            Arc::new(QualifiedTestAuthority)
+        };
+        Arc::new(
+            builder
+                .with_scorer(scorer)
+                .with_embedder(embedder)
+                .with_authority(authority)
+                .with_privacy(Arc::new(QualifiedTestPrivacy))
+                .build()
+                .expect("build the pipeline service"),
+        )
+    };
+
+    // (the double, its blockers, the gate's answer)
+    let answers = [
+        Double::None,
+        Double::Index,
+        Double::SettlementAdapter,
+        Double::Authority,
+    ]
+    .map(|double| {
+        let service = build(double);
+        let blockers = service
+            .bundle_qualification(service.default_package())
+            .expect("the package resolves")
+            .blockers();
+        (
+            double,
+            blockers,
+            pipeline_runtime_is_production_qualified(&service),
+        )
+    });
+    assert_eq!(
+        answers,
+        [
+            (Double::None, vec![], true),
+            (
+                Double::Index,
+                vec![
+                    "runtime_index_reader_not_production",
+                    "runtime_index_writer_not_production"
+                ],
+                false
+            ),
+            (
+                Double::SettlementAdapter,
+                vec!["runtime_settlement_not_production"],
+                false
+            ),
+            (
+                Double::Authority,
+                vec!["runtime_authority_not_production"],
+                false
+            ),
+        ]
+    );
+}
+
 /// No routed tenants, no required flag, an unqualified
 /// runtime -- starts, because no receipt can reach it.
 #[tokio::test]
@@ -12926,6 +13122,29 @@ fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed()
     assert_eq!(
         without_audits(cadence.due_steps("tenant-b", unwoken, payout_interval, at(84))),
         steps(true, true),
+        "each tenant has its own clock"
+    );
+
+    // The owner's runtime lens on poldsam P-2: the lost follow-up recovery
+    // has its own clock, once a minute, and no step's wakeup runs it.
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(84)),
+        "a tenant's first pass runs the recovery"
+    );
+    cadence.due_steps("tenant-a", steps(true, true), payout_interval, at(85));
+    assert!(
+        !cadence.lost_follow_ups_due("tenant-a", at(143)),
+        "not again within a minute, whatever was woken"
+    );
+    assert!(cadence.lost_follow_ups_due("tenant-a", at(144)));
+    assert!(!cadence.lost_follow_ups_due("tenant-a", at(145)));
+    cadence.run_again("tenant-a", PipelineFollowUpStep::LostFollowUps);
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(146)),
+        "a full recovery batch leaves it due on the next pass"
+    );
+    assert!(
+        cadence.lost_follow_ups_due("tenant-b", at(146)),
         "each tenant has its own clock"
     );
     assert_eq!(
@@ -28850,6 +29069,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -70710,6 +70930,10 @@ struct PerplexityDriverTestDb {
     /// submission_ids)`, so a test can assert the contributor status lookup
     /// batched its ids rather than reading once per record.
     gate_credit_reads: std::sync::RwLock<Vec<(String, Vec<Uuid>)>>,
+    /// Submissions with a pipeline (`source = 'pipeline_settle'`) row, as
+    /// `(tenant_id, submission_id)`. The two re-score writers leave them
+    /// alone and report 0 rows, as the Postgres guard does.
+    pipeline_settled: std::sync::RwLock<std::collections::HashSet<(String, Uuid)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -70727,7 +70951,23 @@ impl PerplexityDriverTestDb {
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
             audit_events: std::sync::RwLock::new(Vec::new()),
             gate_credit_reads: std::sync::RwLock::new(Vec::new()),
+            pipeline_settled: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Marks `submission_id` as one the pipeline's Settle wrote a row for.
+    fn mark_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) {
+        self.pipeline_settled
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id));
+    }
+
+    fn is_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) -> bool {
+        self.pipeline_settled
+            .read()
+            .unwrap()
+            .contains(&(tenant_id.to_string(), submission_id))
     }
 
     /// Seed a `DuplicatePrecheck` derived record for `submission_id` with the
@@ -71772,7 +72012,9 @@ impl_ingest_test_corpus_store! {
         /// `find_gate_decision_by_canonical_hash` and the real Postgres SQL —
         /// otherwise a re-score would corrupt the audit trail on historical rows
         /// stamped with an older gate policy/version. This is what the re-score
-        /// unit + integration tests assert against.
+        /// unit + integration tests assert against. A pipeline-settled
+        /// submission is left alone, and every call reports the rows it
+        /// touched, as the Postgres guard does.
         async fn update_trace_gate_decision_perplexity(
             &self,
             tenant_id: &str,
@@ -71780,7 +72022,10 @@ impl_ingest_test_corpus_store! {
             perplexity_micros: i64,
             peak_perplexity_micros: Option<i64>,
             perplexity_passed: bool,
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -71793,20 +72038,24 @@ impl_ingest_test_corpus_store! {
                         row.perplexity_micros = perplexity_micros;
                         row.peak_perplexity_micros = peak_perplexity_micros;
                         row.perplexity_passed = perplexity_passed;
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres impl: the five V73 columns on the
-        /// latest decision row for the submission, nothing else.
+        /// latest decision row for the submission, nothing else; a
+        /// pipeline-settled submission is left alone (0 rows).
         async fn update_trace_gate_decision_author_perplexity(
             &self,
             tenant_id: &str,
             submission_id: Uuid,
             columns: [Option<i64>; 5],
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -71821,11 +72070,11 @@ impl_ingest_test_corpus_store! {
                         row.tool_result_perplexity_micros = columns[2];
                         row.tool_result_tokens = columns[3];
                         row.attributed_token_fraction_micros = columns[4];
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
         /// impl: record the three credit-quality values in a side table keyed by
@@ -76511,6 +76760,37 @@ async fn the_default_rescore_clears_author_columns_it_cannot_recompute() {
             .expect("decision still present");
         assert_eq!(after.perplexity_micros, RESCORED_PERPLEXITY_MICROS as i64);
         assert_eq!(author_columns_of(&after), [None; 5]);
+    }
+}
+
+/// Review of #1294: a submission the pipeline's Settle wrote a row for after
+/// the pass enumerated it is not rewritten (the writers' guard touches 0
+/// rows), and the pass counts it as `pipeline_row_skipped`, never as
+/// `rescored`, in both writing modes.
+#[tokio::test]
+async fn rescore_counts_a_pipeline_row_as_skipped_not_rescored() {
+    for mode in [RescoreMode::Full, RescoreMode::AuthorOnly] {
+        let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(Some(
+            MEASURED_AUTHOR,
+        )))))
+        .await;
+        let pipeline = fx.snapshot[0].submission_id;
+        fx.db.mark_pipeline_settled("tenant-a", pipeline);
+
+        let summary = run_rescore_perplexity_pass(fx.state.clone(), None, mode)
+            .await
+            .expect("the pass succeeds");
+        assert_eq!(summary.rescored, 2, "{mode:?} {summary:?}");
+        assert_eq!(summary.failed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.author_unattributed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.pipeline_row_skipped, 1, "{mode:?} {summary:?}");
+
+        let row = fx
+            .db
+            .gate_decision_for("tenant-a", pipeline)
+            .expect("decision still present");
+        assert_eq!(row.perplexity_micros, 0, "{mode:?}");
+        assert_eq!(author_columns_of(&row), AUTHOR_SENTINEL, "{mode:?}");
     }
 }
 
@@ -86155,7 +86435,7 @@ async fn near_outbox_row_text(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn near_credit_outbox_workers_never_touch_a_pipeline_payout_row() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
         return;
     };
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -98186,13 +98466,19 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     assert_eq!(pipeline.responsible_phase.as_deref(), Some("settle"));
     assert_eq!(pipeline.instruments.len(), 2);
     assert_eq!(pipeline.instruments[0].instrument_id, "storage_rebate");
-    assert_eq!(pipeline.instruments[0].atomic_units, u128::MAX.to_string());
+    assert_eq!(
+        pipeline.instruments[0].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(u128::MAX))
+    );
     assert_eq!(
         pipeline.instruments[0].internal_settlement_state,
         "not_applicable"
     );
     assert_eq!(pipeline.instruments[0].payout_state, "disabled");
-    assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+    assert_eq!(
+        pipeline.instruments[1].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+    );
     assert_eq!(pipeline.instruments[1].operation_state, "complete");
     assert_eq!(
         pipeline.instruments[1].internal_settlement_state,
@@ -98265,7 +98551,7 @@ fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
         assert_eq!(projected.credit_points_final, None);
         assert_eq!(
             projected.pipeline.unwrap().instruments[1].atomic_units,
-            "2500000",
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000)),
             "the pipeline block still carries the award"
         );
     }
@@ -98397,7 +98683,10 @@ fn a_forfeited_or_failed_leg_reports_no_pending_points() {
         );
         assert_eq!(projected.credit_points_final, None, "{operation_state}");
         let pipeline = projected.pipeline.expect("the pipeline block");
-        assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+        assert_eq!(
+            pipeline.instruments[1].atomic_units,
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+        );
         assert_eq!(pipeline.instruments[1].operation_state, operation_state);
     }
 }
@@ -98432,7 +98721,7 @@ fn legacy_and_pipeline_status_documents_remain_wire_compatible() {
         reason_label: None,
         instruments: vec![TraceInstrumentStatusUpdate {
             instrument_id: "trace_credit".to_string(),
-            atomic_units: "7".to_string(),
+            atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(7)),
             operation_state: "pending".to_string(),
             internal_settlement_state: "pending".to_string(),
             payout_rail: "near".to_string(),
@@ -98464,6 +98753,42 @@ async fn unreachable_pipeline_product() -> Arc<PipelineProductStore> {
     .await
     .expect("a lazy pool builds without connecting");
     Arc::new(PipelineProductStore::new(Arc::new(backend)))
+}
+
+/// Multi-lens review C11: `main`'s reviewer routes read the tenant's
+/// pipeline submissions only when the reviewer view comes from the database.
+/// A view read from files holds no pipeline submission, so with file reads
+/// they answer from the files, as on `main`, and do not need the pipeline's
+/// database: the store here cannot reach it, so a read would be a 500.
+#[tokio::test]
+async fn mains_review_routes_from_files_do_not_read_the_pipeline_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        "postgres://unused@127.0.0.1:9/unused",
+        1,
+    ))
+    .await
+    .expect("a lazy pool builds without connecting");
+    Arc::make_mut(&mut state).pipeline_store =
+        Some(Arc::new(PgPipelineStore::new(Arc::new(backend))));
+    assert!(!state.db_reviewer_reads_for_tenant("tenant-a"));
+    for uri in [
+        "/v1/review/quarantine",
+        "/v1/review/active-learning",
+        "/v1/review/routing-summary",
+    ] {
+        let (status, body) = pipeline_product_request(
+            state.clone(),
+            "GET",
+            uri,
+            Some("review-token-a"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
 }
 
 /// Sends one request through the router and returns its status and JSON

@@ -71,7 +71,7 @@ public sealed class VerdictTests
         Assert.Equal(
             "Optional. This is recorded as the trace outcome; the preview above does not show it.",
             VerdictCopy.Caption);
-        Assert.Equal("Submit all as...", VerdictCopy.SubmitAllAs);
+        Assert.Equal("Submit as...", VerdictCopy.SubmitAllAs);
         Assert.Equal(
             "Record the same outcome for every session in this group.",
             VerdictCopy.SubmitAllAsTooltip);

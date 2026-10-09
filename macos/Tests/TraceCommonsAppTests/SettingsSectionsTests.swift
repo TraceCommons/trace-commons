@@ -10,7 +10,7 @@ final class SettingsSectionsTests: XCTestCase {
     /// drawn in the body; Notifications and Updates follow Startup.
     func test_theSectionsAreTheSpecsInItsOrder() {
         XCTAssertEqual(SettingsSection.allCases, [
-            .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
+            .general, .connection, .startup, .notifications, .updates, .watching, .consent, .publicProfile,
             .watchedFolders, .tools, .privateAI, .witness, .projects, .changes, .compute,
         ])
         XCTAssertEqual(Set(SettingsSection.allCases.map(\.symbol)).count, SettingsSection.allCases.count)
@@ -21,14 +21,14 @@ final class SettingsSectionsTests: XCTestCase {
     /// notifications", and nothing truncates to "Private AI on this com…".
     func test_theListIsRonsTwelveInTheCoresWords() throws {
         XCTAssertEqual(SettingsSection.listed, [
-            .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
+            .general, .connection, .startup, .watching, .consent, .publicProfile, .watchedFolders, .tools,
             .privateAI, .witness, .projects, .changes, .compute,
         ])
         let nav = try XCTUnwrap(MonitorWords.table?.settingsNav)
         XCTAssertEqual(SettingsSection.listed.map { $0.listRow(nav).text }, [
-            "Connection", "Startup & notifications", "Watching", "How traces may be used", "Public profile",
+            "General", "Connection", "Startup & notifications", "Watching", "Data uses", "Public profile",
             "Watched folders", "Tools", "Private AI", "Redaction witness", "Projects",
-            "Changes on this machine", "Compute",
+            "Change log", "Compute",
         ])
         XCTAssertNil(SettingsSection.notifications.navName(nav))
         XCTAssertNil(SettingsSection.updates.navName(nav))
@@ -111,6 +111,7 @@ final class SettingsSectionsTests: XCTestCase {
     /// the modal's section rule still names each by the list's word.
     func test_eachSectionIsHeadedByTheListsTitleSource() throws {
         let headings: [SettingsSection: (file: String, source: String)] = [
+            .general: ("GeneralSection", "GlassEyebrowCard(SettingsWords.appearance)"),
             .connection: ("ConnectionSection", "GlassEyebrowCard(SettingsWords.connection, title: connectionTitle)"),
             .startup: ("StartupSection",
                        "GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle)"),

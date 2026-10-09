@@ -43,8 +43,8 @@ final class DaemonDataKeyCoverageTests: XCTestCase {
             "token_storage.cancel_label", "token_storage.capture_confirmation", "token_storage.capture_enabled",
             "token_storage.capture_label", "token_storage.capture_notice", "token_storage.cleanup_label",
             "token_storage.cleanup_pending", "token_storage.confirm_label", "token_storage.discard_confirmation",
-            "token_storage.discard_label", "token_storage.failure_line", "token_storage.lease_expires_at_unix",
-            "token_storage.oldest_pending_seconds", "token_storage.renewal_failures", "token_storage.retained_bytes",
+            "token_storage.discard_label", "token_storage.discard_title", "token_storage.failure_line",
+            "token_storage.lease_expires_at_unix", "token_storage.oldest_pending_seconds", "token_storage.renewal_failures", "token_storage.retained_bytes",
             "token_storage.scope_note", "token_storage.state_line", "token_storage.unsubmitted_reviews",
         ]
         return ["get_settings": settings, "set_settings": settings]

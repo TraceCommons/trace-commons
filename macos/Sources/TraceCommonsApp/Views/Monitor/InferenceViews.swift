@@ -17,6 +17,9 @@ import TCShellCore
 /// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
+    /// For the prompts (offers, undos, the first-contribution note), which
+    /// head this page now that the inspector stays closed on it.
+    let traces: TracesStore
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
@@ -47,14 +50,24 @@ struct InferenceTabView: View {
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // #1146's Private AI page leads the tab: the subtitle, the
-                // Inference access / Runtime pair, the tools, the switch,
-                // sign-in, balance and funding, in the main pane above the
-                // ledger (owner ruling on #1241). Drawn only while the daemon
-                // runs, which every one of them needs: the ledger is.
-                // The managed cards (O3) are drawn inside it, above the
-                // global heading.
+                // The owner's order (2026-10-09), with the inspector closed on
+                // this tab: the prompts, then the Private AI summary the
+                // inspector used to hold, then the calls, then the managed
+                // cards, the tools, the switch, sign-in, balance and funding.
+                InspectorPrompts(store: traces)
+                PrivateAIInspectorView(
+                    store: store, destinationLabel: model.privateInferenceCopy?.destination)
+                ledgerSections
                 InferenceAccountSection(store: store)
+            }
+        }
+        .scrollIndicators(.never)
+    }
+
+    /// The window's totals, the models and the calls, as the core read them.
+    @ViewBuilder
+    private var ledgerSections: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -74,9 +87,7 @@ struct InferenceTabView: View {
                 } else if store.failures["inference_calls"] == nil {
                     GlassSpinner(standalone: true).frame(maxWidth: .infinity)
                 }
-            }
         }
-        .scrollIndicators(.never)
     }
 
     // MARK: Totals
@@ -292,13 +303,14 @@ struct InferenceTabView: View {
     }
 }
 
-/// The inspector on the Inference tab: the Private AI summary, as #1146's
-/// `inference-inspector.tsx` draws it. A 17pt bold title with "N of M tools
-/// connected" under it, the connected / not connected legend pair, three
-/// rows -- the listener's state in the core's sentence (never the switch:
-/// what was asked for is not what happened), the credential's state, and
-/// which tools are connected -- and the balance panel. Its other controls
-/// are in the main pane (`InferenceAccountSection`).
+/// The Private AI summary at the top of the Inference tab's main pane
+/// (owner, 2026-10-09; it was the tab's inspector, as #1146's
+/// `inference-inspector.tsx` draws it, and the inspector now stays closed
+/// there). A 17pt bold title with "N of M tools connected" under it, the
+/// connected / not connected legend pair, and three rows -- the listener's
+/// state in the core's sentence (never the switch: what was asked for is
+/// not what happened), the credential's state, and which tools are
+/// connected. The balance card is the main pane's, further down.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     let destinationLabel: String?
@@ -328,25 +340,22 @@ struct PrivateAIInspectorView: View {
 
     var body: some View {
         let copy = runningCopy
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
-                        .glassType(GlassTokens.TypeScale.heading.weight(.bold))
-                        .foregroundStyle(GlassColor.textPrimary)
-                        .accessibilityAddTraits(.isHeader)
-                    if let copy, let sub = Self.subLine(Self.rows(harnesses), copy: copy) {
-                        Text(sub)
-                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
-                if let copy {
-                    summary(copy)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
+                    .glassType(GlassTokens.TypeScale.heading.weight(.bold))
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                if let copy, let sub = Self.subLine(Self.rows(harnesses), copy: copy) {
+                    Text(sub)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
             }
+            if let copy {
+                summary(copy)
+            }
         }
-        .scrollIndicators(.never)
     }
 
     /// The core's words, only while the daemon runs: every row reads it.
@@ -379,7 +388,6 @@ struct PrivateAIInspectorView: View {
                 InspectorFactRow(label: copy.inspectorConnectedTools, value: Self.names(rows, copy: copy))
             }
             .padding(.horizontal, GlassTokens.Space.s2)
-            PrivateAIBalanceCard(copy: copy)
         }
     }
 

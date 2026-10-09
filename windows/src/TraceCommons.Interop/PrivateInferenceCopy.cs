@@ -54,6 +54,17 @@ public sealed record PrivateInferenceCopy
     [JsonPropertyName("offer_exposure")]
     public string OfferExposure { get; init; } = string.Empty;
 
+    /// <summary>
+    /// <see cref="OfferExposure"/> in one line, for an offer that shows its
+    /// longer paragraphs behind <see cref="OfferLearnMore"/>.
+    /// </summary>
+    [JsonPropertyName("offer_exposure_short")]
+    public string OfferExposureShort { get; init; } = string.Empty;
+
+    /// <summary>The offer's link to its longer paragraphs.</summary>
+    [JsonPropertyName("offer_learn_more")]
+    public string OfferLearnMore { get; init; } = string.Empty;
+
     [JsonPropertyName("offer_no_repoint")]
     public string OfferNoRepoint { get; init; } = string.Empty;
 
@@ -731,6 +742,8 @@ public sealed record PrivateInferenceCopy
             OfferTitle,
             OfferWhat,
             OfferExposure,
+            OfferExposureShort,
+            OfferLearnMore,
             OfferNoRepoint,
             OfferAccept,
             OfferDecline,

@@ -237,6 +237,19 @@ hardened systemd unit. Always set `TRACE_COMMONS_DATA_DIR` explicitly
 `ReadWritePaths` on the unit. Failure mode is a 500 with
 `failed to create trace contribution metadata dir`.
 
+### The versioned pipeline's paths
+
+A production pipeline boot (`TRACE_COMMONS_PIPELINE_RUNTIME=production`)
+writes two more places, and the unit lists both under `ReadWritePaths`:
+`TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` (the pilot uses
+`/var/lib/trace-commons-pipeline-index`) and
+`TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR`, the one-boot result directory for
+`pipeline_production_adapters` (under `/var/lib/trace-commons-pipeline-checks`).
+Create each, owned by `tracecommons`, before the boot that uses it. A path
+outside these is read-only under `ProtectSystem=strict`: a result directory
+ingest cannot write refuses the start with `pipeline_check_write_failed`, and
+the unit restarts in a loop until the variables are removed.
+
 ### Caddy log directory
 
 `/var/log/caddy` must exist and be owned `caddy:caddy` before
