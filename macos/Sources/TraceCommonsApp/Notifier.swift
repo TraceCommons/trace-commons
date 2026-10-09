@@ -85,17 +85,53 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     /// notification without words.
     static func plan(_ due: DaemonData.ReengageDue) -> NudgePlan? {
         guard let note = NudgeSurface.notification(due) else { return nil }
-        let buttons = note.actions.map { action -> Button in
-            let opens: Bool = if case .notNow = action.intent { false } else { true }
-            return Button(
-                identifier: nudgeActionPrefix + action.intent.actionId, label: action.label, opensApp: opens)
-        }
+        let set = nudgeCategory(note.actions.map { (id: $0.intent.actionId, label: $0.label) })
         var info = [kindKey: note.kind.rawValue]
         if let fallback = note.defaultIntent { info[defaultActionKey] = fallback.actionId }
         return NudgePlan(
             title: note.title, body: note.body,
-            categoryIdentifier: nudgeActionPrefix + note.actions.map(\.intent.actionId).joined(separator: "+"),
-            buttons: buttons, userInfo: info)
+            categoryIdentifier: set.identifier,
+            buttons: set.buttons, userInfo: info)
+    }
+
+    /// One category's identifier and buttons.
+    struct CategorySpec: Equatable {
+        let identifier: String
+        let buttons: [Button]
+    }
+
+    /// The category for a set of re-engagement buttons, by action id and
+    /// label: one identifier per set of ids, and every button but `not_now`
+    /// brings the app forward.
+    static func nudgeCategory(_ actions: [(id: String, label: String)]) -> CategorySpec {
+        CategorySpec(
+            identifier: nudgeActionPrefix + actions.map(\.id).joined(separator: "+"),
+            buttons: actions.map {
+                Button(identifier: nudgeActionPrefix + $0.id, label: $0.label, opensApp: $0.id != notNowActionId)
+            })
+    }
+
+    /// The action id that only records an answer and opens nothing.
+    private static let notNowActionId = "not_now"
+
+    /// Every category registered at launch: the digest's, then each
+    /// re-engagement button set the daemon sends today (idle: review and
+    /// not now; verdicts: see history), in the core's words.
+    ///
+    /// `setNotificationCategories` replaces the whole registered set, and a
+    /// notification still in Notification Center after a relaunch keeps its
+    /// buttons only while its category is registered, so launch registers
+    /// them all rather than the digest's alone. A set whose words are
+    /// missing is left out; `postReengage` registers whatever it posts.
+    static func launchCategories(_ copy: NudgeCopy?) -> [CategorySpec] {
+        var specs = [CategorySpec(identifier: categoryIdentifier, buttons: digestButtons(copy))]
+        if let review = copy?[.notifyActionReviewIdle], let notNow = copy?[.notifyActionNotNow] {
+            specs.append(nudgeCategory([(id: "review", label: review), (id: notNowActionId, label: notNow)]))
+        }
+        if let history = copy?[.notifyActionSeeHistory] {
+            specs.append(nudgeCategory([(id: "see_history", label: history)]))
+        }
+        return specs
     }
 
     /// The intent a response to a re-engagement notification means; nil
@@ -141,7 +177,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         Bundle.main.bundleIdentifier != nil && Bundle.main.bundleURL.pathExtension == "app"
     }
 
-    /// Registers the two-action category. Deliberately does NOT ask for
+    /// Registers the digest's category and every re-engagement one
+    /// (`launchCategories`). Deliberately does NOT ask for
     /// authorization: it is asked with a sentence saying what notifications
     /// are for, not sprung at first launch before the app has said what it
     /// is. See `requestAuthorization`, which Settings' `StartupSection`
@@ -150,7 +187,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         guard available else { return }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        center.setNotificationCategories([Self.category(Self.categoryIdentifier, Self.digestButtons(Self.nudgeCopy))])
+        center.setNotificationCategories(
+            Set(Self.launchCategories(Self.nudgeCopy).map { Self.category($0.identifier, $0.buttons) }))
     }
 
     /// Adds `category` beside the ones already registered, replacing one

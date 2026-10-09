@@ -32,6 +32,9 @@ public struct NudgeCopy: Equatable, Sendable {
         case digestTitle = "DIGEST_TITLE"
         case digestActionReview = "DIGEST_ACTION_REVIEW"
         case digestActionNotNow = "DIGEST_ACTION_NOT_NOW"
+        case notifyActionReviewIdle = "NOTIFY_ACTION_REVIEW_IDLE"
+        case notifyActionSeeHistory = "NOTIFY_ACTION_SEE_HISTORY"
+        case notifyActionNotNow = "NOTIFY_ACTION_NOT_NOW"
     }
 
     public let table: [String: String]

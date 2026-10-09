@@ -75,6 +75,34 @@ final class NudgeNotificationTests: XCTestCase {
         XCTAssertNotNil(Notifier.digestBody(text: "", pendingCount: 1, projects: ["api"]))
     }
 
+    /// Launch registers every category a delivered notification can name:
+    /// `setNotificationCategories` replaces the whole set, so a
+    /// re-engagement notification still in Notification Center after a
+    /// relaunch keeps its buttons only while its category is registered.
+    /// The re-engagement sets are the ones the daemon sends today, in the
+    /// core's words, under the identifiers a post uses.
+    func testLaunchRegistersTheDigestAndEveryReengagementButtonSet() throws {
+        let copy = NudgeCopy(table: [
+            "DIGEST_ACTION_REVIEW": "Review", "DIGEST_ACTION_NOT_NOW": "Not now",
+            "NOTIFY_ACTION_REVIEW_IDLE": "Review", "NOTIFY_ACTION_NOT_NOW": "Not now",
+            "NOTIFY_ACTION_SEE_HISTORY": "See history",
+        ])
+        let launch = Notifier.launchCategories(copy)
+        XCTAssertEqual(launch.map(\.identifier),
+                       ["trace-commons.digest", "trace-commons.nudge.review+not_now", "trace-commons.nudge.see_history"])
+
+        let idle = try XCTUnwrap(Notifier.plan(Self.idle))
+        let verdicts = try XCTUnwrap(Notifier.plan(.init(
+            kind: "verdicts_landed", title: "Trace Commons", body: "B",
+            actions: [.init(id: "see_history", label: "See history")])))
+        for plan in [idle, verdicts] {
+            let registered = try XCTUnwrap(launch.first { $0.identifier == plan.categoryIdentifier })
+            XCTAssertEqual(registered.buttons, plan.buttons)
+        }
+        // A set without its words is not registered; the post registers it.
+        XCTAssertEqual(Notifier.launchCategories(NudgeCopy(table: [:])).map(\.identifier), ["trace-commons.digest"])
+    }
+
     /// The digest's two buttons are the core's words.
     func testTheDigestButtonsAreTheCoresWords() {
         let copy = NudgeCopy(table: ["DIGEST_ACTION_REVIEW": "Review", "DIGEST_ACTION_NOT_NOW": "Not now"])
