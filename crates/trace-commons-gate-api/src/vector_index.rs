@@ -197,11 +197,24 @@ pub trait VectorIndex: Send + Sync {
     fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Persist the pending writes of `tenant_storage_ref`'s shard only.
+    ///
+    /// A caller that persists after every write (the pipeline's index) uses
+    /// this so one tenant's write does not save every open shard. The
+    /// default persists everything, which is correct for any implementation
+    /// that cannot persist one shard alone; a per-shard implementation
+    /// (`UsearchVectorIndex`) overrides it.
+    fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        let _ = tenant_storage_ref;
+        self.flush()
+    }
 }
 
-/// Shares one index between holders. Forwards all five methods, the two
-/// defaulted ones (`snapshot`, `flush`) included: without the overrides an
-/// `Arc` would report no shard and never persist its corpus.
+/// Shares one index between holders. Forwards all six methods, the three
+/// defaulted ones (`snapshot`, `flush`, `flush_tenant`) included: without
+/// the overrides an `Arc` would report no shard, never persist its corpus,
+/// and turn a one-tenant flush into a flush of every tenant.
 impl<T: VectorIndex + ?Sized> VectorIndex for std::sync::Arc<T> {
     fn snapshot(&self, tenant_storage_ref: &str) -> Option<VectorIndexSnapshot> {
         (**self).snapshot(tenant_storage_ref)
@@ -231,6 +244,10 @@ impl<T: VectorIndex + ?Sized> VectorIndex for std::sync::Arc<T> {
 
     fn flush(&self) -> anyhow::Result<()> {
         (**self).flush()
+    }
+
+    fn flush_tenant(&self, tenant_storage_ref: &str) -> anyhow::Result<()> {
+        (**self).flush_tenant(tenant_storage_ref)
     }
 }
 
@@ -294,6 +311,7 @@ mod pipeline_index_tests {
     #[derive(Default)]
     struct CountingIndex {
         flushed: std::sync::atomic::AtomicUsize,
+        flushed_tenant: std::sync::atomic::AtomicUsize,
         inserted: std::sync::atomic::AtomicUsize,
         deleted: std::sync::atomic::AtomicUsize,
     }
@@ -343,11 +361,19 @@ mod pipeline_index_tests {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }
+
+        fn flush_tenant(&self, _tenant_storage_ref: &str) -> anyhow::Result<()> {
+            self.flushed_tenant
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
     }
 
-    /// An `Arc` (sized or `dyn`) forwards all five methods, including the
-    /// two the trait defaults (`snapshot`, `flush`): a shared index must
-    /// neither stop describing its shard nor stop persisting its corpus.
+    /// An `Arc` (sized or `dyn`) forwards all six methods, including the
+    /// three the trait defaults (`snapshot`, `flush`, `flush_tenant`): a
+    /// shared index must neither stop describing its shard nor stop
+    /// persisting its corpus, and a one-tenant flush through an `Arc` must
+    /// not become a flush of every tenant.
     #[test]
     fn arc_forwarding_keeps_index_snapshot_and_flush() {
         fn exercise<V: VectorIndex + ?Sized>(index: &V) -> Option<VectorIndexSnapshot> {
@@ -355,6 +381,7 @@ mod pipeline_index_tests {
             assert_eq!(index.nearest("t", &[1.0], 2).unwrap().len(), 2);
             assert!(index.delete("t", Uuid::nil()).unwrap());
             index.flush().unwrap();
+            index.flush_tenant("t").unwrap();
             index.snapshot("t")
         }
         let sized = std::sync::Arc::new(CountingIndex::default());
@@ -369,6 +396,11 @@ mod pipeline_index_tests {
             counter.load(std::sync::atomic::Ordering::SeqCst)
         };
         assert_eq!(load(&sized.flushed), 2, "flush is forwarded");
+        assert_eq!(
+            load(&sized.flushed_tenant),
+            2,
+            "flush_tenant is forwarded, not answered by flush"
+        );
         assert_eq!(load(&sized.inserted), 2);
         assert_eq!(load(&sized.deleted), 2);
     }
