@@ -73,7 +73,7 @@ pub fn second_look_line(reason: &str) -> Option<&'static str> {
             "Something here looks like an email, phone number or key that was not matched; that is why this one waits.",
         ),
         crate::daemon::second_look::REASON_TRIMMED_TO_FIT => Some(
-            "Trimmed to fit the upload limit, so part of this session is not in what would be sent. That is why this one waits.",
+            "Trimmed to fit the upload limit, so part of this trace is not in what would be sent. That is why this one waits.",
         ),
         _ => None,
     }
@@ -522,12 +522,12 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         dismiss_action: "Dismiss",
         optional_automation: "OPTIONAL AUTOMATION",
         tree: MonitorTreeCopy {
-            tree_label: "Tools, folders and sessions",
+            tree_label: "Tools, folders and traces",
             reading_queue: "Reading local queue\u{2026}",
             submit: "Submit",
             submit_count: "Submit \u{00b7} {count}",
             submitting: "Submitting\u{2026}",
-            submit_tip: "Sends every eligible waiting session here.",
+            submit_tip: "Sends every eligible waiting trace here.",
             eligible_count: "{count} eligible",
             reviewing: "Reviewing",
             review_tip: "Opens what would be sent. Nothing leaves until you contribute.",
@@ -535,22 +535,22 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             ignore_folder: "Ignore folder / repo",
             watch_folder: "Watch this folder",
             watch_tool: "Watch {tool}",
-            dismiss_session: "Dismiss session",
-            dismiss_session_title: "Dismiss this session?",
-            dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the sessions \
+            dismiss_session: "Dismiss trace",
+            dismiss_session_title: "Dismiss this trace?",
+            dismiss_session_body: "{when} \u{00b7} {size}. Dismissing removes it from the traces \
                 waiting for you, without sending it.",
             dismiss_session_keep: "Keep it",
             dismissing: "Dismissing\u{2026}",
-            dismiss_session_failed: "Could not dismiss session.",
+            dismiss_session_failed: "Could not dismiss trace.",
             session_trimmed: "trimmed to fit",
             session_waiting: "waiting",
             folder_mark: "dir",
-            unresolved_bucket_note: "These sessions cannot be contributed automatically. \
+            unresolved_bucket_note: "These traces cannot be contributed automatically. \
                 You'll always be asked.",
         },
         counts: MonitorCountsCopy {
-            sessions_waiting_one: "1 session waiting",
-            sessions_waiting: "{count} sessions waiting",
+            sessions_waiting_one: "1 trace waiting",
+            sessions_waiting: "{count} traces waiting",
             waiting_count: "{count} waiting",
             contributed_count: "{count} contributed",
             project_count_one: "1 project",
@@ -559,18 +559,18 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
         inspector: MonitorInspectorCopy {
             decisions: "Decisions",
             not_set: "Not set",
-            sessions_folder: "Sessions folder",
+            sessions_folder: "Traces folder",
             project: "Project",
             project_of: "Project \u{00b7} {tool}",
-            session_of: "Session \u{00b7} {tool}",
+            session_of: "Trace \u{00b7} {tool}",
             path: "Path",
             contribution_rule: "Contribution rule",
             no_rule: "This folder has no rule of its own yet.",
-            apply_outcome_one: "Apply one outcome to 1 eligible session.",
-            apply_outcome: "Apply one outcome to {count} eligible sessions.",
+            apply_outcome_one: "Apply one outcome to 1 eligible trace.",
+            apply_outcome: "Apply one outcome to {count} eligible traces.",
             cancel: "Cancel",
-            waiting_sessions_one: "1 waiting session",
-            waiting_sessions: "{count} waiting sessions",
+            waiting_sessions_one: "1 waiting trace",
+            waiting_sessions: "{count} waiting traces",
             submit_all_eligible: "Submit all eligible ({count})",
         },
         summary_panel: MonitorSummaryCopy {
@@ -581,9 +581,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             statistics: "Statistics",
             top_projects: "Top projects",
             top_tools: "Top tools",
-            no_longer_waiting: "Sessions no longer waiting ({count})",
-            no_longer_waiting_scope: "This covers sessions that reached the queue. \
-                Sessions never queued are not counted here.",
+            no_longer_waiting: "Traces no longer waiting ({count})",
+            no_longer_waiting_scope: "This covers traces that reached the queue. \
+                Traces never queued are not counted here.",
         },
         session_review: MonitorSessionReviewCopy {
             eyebrow: "LOCAL PREVIEW",
@@ -595,7 +595,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             events: "{count} events",
             building_preview: "Building local privacy preview\u{2026}",
             cannot_show_title: "This one can't be shown.",
-            cannot_show_body: "The session file changed while it was being read. Nothing has been \
+            cannot_show_body: "The trace file changed while it was being read. Nothing has been \
                 sent, and nothing will be until it can be shown to you.",
             preparing_redactions: "Preparing redaction summary\u{2026}",
             redactions_unavailable: "Redaction summary unavailable. Contribution is disabled.",
@@ -619,7 +619,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
             eyebrow: "LOOK INSIDE",
             title: "Exactly what would be sent",
             description: "This is the redacted envelope. It stays local while you read it. \
-                Original-session search returns only a count; it never returns raw text.",
+                Original-trace search returns only a count; it never returns raw text.",
             would_send: "{size} would send",
             on_disk: "{size} on disk",
             load_transcript: "Load redacted transcript",
@@ -630,9 +630,9 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
                 Markers show where local scrubbing fired.",
             load_more: "Load more ({size} remaining)",
             add_turn_separators: "Add turn separators",
-            search_caption: "Search checks the original session locally and returns a count \
+            search_caption: "Search checks the original trace locally and returns a count \
                 only. It never renders original text.",
-            search_label: "Search original session",
+            search_label: "Search original trace",
             search_placeholder: "Client, hostname, token label\u{2026}",
             check_count: "Check count",
             original_match_one: "1 original match",
@@ -648,8 +648,8 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
                 explicitly confirm.",
             prepare_admission: "Prepare admission",
             request_witness_review: "Request witness review",
-            witness_confirm_line: "I understand and want to send this session for review.",
-            witness_confirm_label: "Confirm sending unredacted session to witness",
+            witness_confirm_line: "I understand and want to send this trace for review.",
+            witness_confirm_label: "Confirm sending unredacted trace to witness",
             witness_reviewing: "Reviewing\u{2026}",
         },
         undo: MonitorUndoCopy {
@@ -1229,9 +1229,9 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             rows_unavailable_one: "1 row unavailable",
             rows_unavailable: "{count} rows unavailable",
             remaining: "{uploads} uploads left \u{00b7} {megabytes} MB left",
-            held_by_limit_one: "1 queued session held by limit",
-            held_by_limit: "{count} queued sessions held by limit",
-            capacity_unreadable: "Some approved sessions may be waiting and have not been sent, \
+            held_by_limit_one: "1 queued trace held by limit",
+            held_by_limit: "{count} queued traces held by limit",
+            capacity_unreadable: "Some approved traces may be waiting and have not been sent, \
                 but this build could not read how many or why.",
             routing_not_declared: "Not declared",
             routing_awaiting_rows: "Waiting for Private AI records",
@@ -1263,14 +1263,14 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             hide_map: "Hide the flow map",
             show_inspector: "Show the inspector",
             hide_inspector: "Hide the inspector",
-            focus_needs_selection: "Select a tool, project or session first",
+            focus_needs_selection: "Select a tool, project or trace first",
             focus_whole_map: "Back to the whole map",
             back_to_home: "Back to Home",
             focus_tool: "Show {tool} in the map",
             watching_tools_one: "Watching 1 tool",
             watching_tools: "Watching {count} tools",
-            waiting_for_you_one: "1 session waiting for you",
-            waiting_for_you: "{count} sessions waiting for you",
+            waiting_for_you_one: "1 trace waiting for you",
+            waiting_for_you: "{count} traces waiting for you",
             worth_a_second_look: "{count} worth a second look",
             nothing_waiting: "Nothing waiting for you",
             nothing_contributed: "Nothing contributed from this machine yet.",
@@ -1289,7 +1289,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             pause_morning: "Until tomorrow morning",
             pause_until_resumed: "Until I turn it back on",
             start_at_login: "Start Trace Commons at login",
-            projects_empty: "No projects seen yet. Sessions appear here after discovery.",
+            projects_empty: "No projects seen yet. Traces appear here after discovery.",
             changes_heading: "Changes on this machine",
             tab_home: "Home",
             tab_inference: "Inference",
@@ -1301,12 +1301,12 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             desktop_eyebrow: "Desktop",
             desktop_title: "System integrations",
             discovery_eyebrow: "Watcher",
-            discovery_title: "Session discovery",
+            discovery_title: "Trace discovery",
             watcher_eyebrow: "Daemon",
             watcher_title: "Contribution watcher",
             watcher_watching: "Watching",
             watcher_paused: "Paused",
-            watcher_caption: "Pausing stops contribution processing. It does not delete queued sessions or change consent.",
+            watcher_caption: "Pausing stops contribution processing. It does not delete queued traces or change consent.",
             connection_ready: "Ready",
             connection_local_only: "Local only",
         },
@@ -1329,23 +1329,23 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             map_label: "Flow map",
             zoom_label: "Map zoom",
             hint: "hover to peek \u{00b7} click to pin",
-            sessions_one: "1 session",
-            sessions: "{count} sessions",
+            sessions_one: "1 trace",
+            sessions: "{count} traces",
             traces_one: "1 trace",
             traces: "{count} traces",
             folders_one: "1 folder",
             folders: "{count} folders",
             tools_one: "1 tool",
             tools: "{count} tools",
-            hub: "Sessions are collected here. {label} waiting for you; {count} contributed.",
+            hub: "Traces are collected here. {label} waiting for you; {count} contributed.",
             library: "{label} contributed from this machine. Folders set to contribute \
-                automatically send scrubbed sessions here; folders set to Ask me wait for you.",
+                automatically send scrubbed traces here; folders set to Ask me wait for you.",
             tool_title: "{tool} \u{00b7} {label}",
-            tool_watched: "Watched: new sessions are collected on this computer.",
+            tool_watched: "Watched: new traces are collected on this computer.",
             tool_waiting: "{count} waiting for you.",
             tool_nothing_waiting: "Nothing waiting.",
             tool_off: "Not watched: nothing new is read from this tool.",
-            tool_unset: "No sessions folder set for this tool yet.",
+            tool_unset: "No traces folder set for this tool yet.",
             folder_rule: "Rule: {label}.",
             folder_rule_unset: "Rule: not set.",
             folder_counts: "{label} waiting, {count} contributed.",
@@ -1539,11 +1539,8 @@ mod tests {
             traces.inspector.submit_all_eligible,
             "Submit all eligible ({count})"
         );
-        assert_eq!(
-            traces.inspector.waiting_sessions,
-            "{count} waiting sessions"
-        );
-        assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting session");
+        assert_eq!(traces.inspector.waiting_sessions, "{count} waiting traces");
+        assert_eq!(traces.inspector.waiting_sessions_one, "1 waiting trace");
         // `queue-status-panel.tsx`'s daily limit row and its held line.
         assert_eq!(
             monitor_screens_copy().safeguards.remaining,
@@ -1551,12 +1548,12 @@ mod tests {
         );
         assert_eq!(
             monitor_screens_copy().safeguards.held_by_limit,
-            "{count} queued sessions held by limit"
+            "{count} queued traces held by limit"
         );
         assert_eq!(traces.optional_automation, "OPTIONAL AUTOMATION");
         assert_eq!(
             traces.inspector.apply_outcome,
-            "Apply one outcome to {count} eligible sessions."
+            "Apply one outcome to {count} eligible traces."
         );
         assert_eq!(
             traces.inspector.no_rule,
@@ -1569,12 +1566,12 @@ mod tests {
         assert_eq!(traces.undo.approved, "{label} approved");
         assert_eq!(
             traces.look_inside.witness_confirm_line,
-            "I understand and want to send this session for review."
+            "I understand and want to send this trace for review."
         );
         assert!(traces.summary_panel.no_longer_waiting.contains("{count}"));
         assert_eq!(
             traces.summary_panel.no_longer_waiting_scope,
-            "This covers sessions that reached the queue. Sessions never queued are not counted here."
+            "This covers traces that reached the queue. Traces never queued are not counted here."
         );
         // A singular is its own line, never a plural with a 1 in it.
         assert!(!traces.counts.sessions_waiting_one.contains('{'));
@@ -1770,16 +1767,16 @@ mod tests {
         // Ron's exact words (2026-10-07, after the #1273 review).
         assert_eq!(
             map.hub,
-            "Sessions are collected here. {label} waiting for you; {count} contributed."
+            "Traces are collected here. {label} waiting for you; {count} contributed."
         );
         assert_eq!(
             map.tool_watched,
-            "Watched: new sessions are collected on this computer."
+            "Watched: new traces are collected on this computer."
         );
         assert_eq!(
             map.library,
             "{label} contributed from this machine. Folders set to contribute automatically \
-             send scrubbed sessions here; folders set to Ask me wait for you."
+             send scrubbed traces here; folders set to Ask me wait for you."
         );
         // Watched sessions are queued unscrubbed until preview, and the
         // tools record them: the hub and a watched tool claim neither.

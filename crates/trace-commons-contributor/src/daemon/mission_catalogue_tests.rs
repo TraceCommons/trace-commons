@@ -162,7 +162,7 @@ async fn mission_catalogue_relays_exact_page_anonymously_without_mutating_consen
     assert_eq!(result["kind"], "skill_evaluation");
     assert_eq!(
         result["disclosure"],
-        "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit."
+        "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no traces. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit."
     );
     assert_eq!(result["catalogue"], mission_page());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -243,7 +243,7 @@ async fn mission_catalogue_default_fetch_can_return_verified_empty_catalogue() {
         assert_eq!(result["kind"], "skill_evaluation");
         assert_eq!(
             result["disclosure"],
-            "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no sessions. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit."
+            "These are published skill-evaluation tasks. Matching stays on this Mac; no activity profile or match result is sent. Viewing or selecting a mission changes no capture or contribution permissions and sends no traces. Contributions still require your existing consent. Corpus credit remains pending and conditional until settlement. Skill-evaluation awards are separate from corpus credit."
         );
         assert_eq!(result["catalogue"], empty);
     }
