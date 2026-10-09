@@ -758,7 +758,7 @@ pub struct LocalInsightStore {
 /// -- surface as a busy store. The bound keeps a genuinely stuck holder (a
 /// hung process, another window mid-import) from blocking the caller for
 /// long, and `Busy` still means what it meant: retry later.
-const STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
+pub(crate) const STORE_LOCK_WAIT: Duration = Duration::from_secs(2);
 const STORE_LOCK_FIRST_BACKOFF: Duration = Duration::from_millis(1);
 const STORE_LOCK_MAX_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -775,7 +775,7 @@ const STORE_LOCK_MAX_BACKOFF: Duration = Duration::from_millis(50);
 /// Insights store. `std::fs::File` has no timed lock, so this polls
 /// `try_lock` with a capped exponential backoff rather than calling the
 /// unbounded blocking `lock`.
-fn lock_within(file: &File, bound: Duration) -> Result<()> {
+pub(crate) fn lock_within(file: &File, bound: Duration) -> Result<()> {
     let deadline = Instant::now() + bound;
     let mut backoff = STORE_LOCK_FIRST_BACKOFF;
     loop {

@@ -373,10 +373,11 @@ pub fn default_digest_key_store(store_dir: PathBuf) -> Box<dyn DigestKeyStore + 
     if cfg!(test) {
         return Box::new(InMemoryDigestKeyStore::with_seed([0x5a; 32]));
     }
-    match DIGEST_KEY_CUSTODY {
+    let custody: Box<dyn DigestKeyStore + Send + Sync> = match DIGEST_KEY_CUSTODY {
         DigestKeyCustody::OsKeychain => Box::new(OsDigestKeyStore),
-        DigestKeyCustody::KeyFileInStore => Box::new(FileDigestKeyStore::new(store_dir)),
-    }
+        DigestKeyCustody::KeyFileInStore => Box::new(FileDigestKeyStore::new(store_dir.clone())),
+    };
+    Box::new(CreationLocked::new(custody, store_dir))
 }
 
 /// A test build never reaches a keychain or writes a key file outside a
@@ -452,6 +453,63 @@ impl DigestKeyStore for OsDigestKeyStore {
         }
     }
 }
+
+/// Serializes first-time key creation among every handle on one store
+/// directory. No custody offers create-if-absent (`set_secret` and the key
+/// file's atomic rename both replace), so two processes that both found no
+/// key could each write one, and the first would keep making digests under a
+/// key no longer stored. Holding a lock file in the store directory across
+/// load, generate, write and reload makes the second wait and read the
+/// first's key.
+pub(crate) struct CreationLocked {
+    inner: Box<dyn DigestKeyStore + Send + Sync>,
+    dir: PathBuf,
+}
+
+impl CreationLocked {
+    pub(crate) fn new(inner: Box<dyn DigestKeyStore + Send + Sync>, dir: PathBuf) -> Self {
+        Self { inner, dir }
+    }
+}
+
+impl DigestKeyStore for CreationLocked {
+    fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
+        self.inner.load()
+    }
+
+    fn load_or_create(&self) -> Result<DigestKey, DigestKeyError> {
+        if let Some(key) = self.inner.load()? {
+            return Ok(key);
+        }
+        let unavailable = || DigestKeyError::Unavailable("insights_digest_key_lock");
+        std::fs::create_dir_all(&self.dir).map_err(|_| unavailable())?;
+        let lock_path = self.dir.join(KEY_LOCK_FILE_NAME);
+        match std::fs::symlink_metadata(&lock_path) {
+            Ok(metadata) if !metadata.is_file() => return Err(unavailable()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(unavailable()),
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let lock = options.open(&lock_path).map_err(|_| unavailable())?;
+        super::lock_within(&lock, super::STORE_LOCK_WAIT).map_err(|_| unavailable())?;
+        // Loads again under the lock: a key made meanwhile is taken, not
+        // replaced. Released when `lock` drops.
+        self.inner.load_or_create()
+    }
+
+    fn clear(&self) -> Result<(), DigestKeyError> {
+        self.inner.clear()
+    }
+}
+
+const KEY_LOCK_FILE_NAME: &str = "digest-key.lock";
 
 /// The alternative custody under D16: a 0600 key file inside the store
 /// directory. Weaker, since a copied store directory carries its key. It
@@ -858,5 +916,56 @@ mod tests {
             OsDigestKeyStore.load(),
             Err(DigestKeyError::Unavailable(_))
         ));
+    }
+
+    /// Two processes sharing a store that both find no key: the second waits
+    /// for the first and takes its key, rather than overwriting a key the
+    /// first already saved series under.
+    #[test]
+    fn first_time_key_creation_is_serialized_across_store_handles() {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::{Arc, Barrier, Mutex};
+        #[derive(Default)]
+        struct Racy {
+            stored: Mutex<Option<[u8; 32]>>,
+            next: AtomicU8,
+        }
+        struct Shared(Arc<Racy>);
+        impl DigestKeyStore for Shared {
+            fn load(&self) -> Result<Option<DigestKey>, DigestKeyError> {
+                Ok(self.0.stored.lock().unwrap().map(DigestKey::from_bytes))
+            }
+            // Load, generate, overwrite: the shape of `set_secret`.
+            fn load_or_create(&self) -> Result<DigestKey, DigestKeyError> {
+                if let Some(key) = self.load()? {
+                    return Ok(key);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let bytes = [self.0.next.fetch_add(1, Ordering::SeqCst); 32];
+                *self.0.stored.lock().unwrap() = Some(bytes);
+                Ok(DigestKey::from_bytes(bytes))
+            }
+            fn clear(&self) -> Result<(), DigestKeyError> {
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let racy = Arc::new(Racy::default());
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let store =
+                    CreationLocked::new(Box::new(Shared(Arc::clone(&racy))), dir.path().into());
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    key_fingerprint(&store.load_or_create().unwrap())
+                })
+            })
+            .collect();
+        let made: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let stored = key_fingerprint(&DigestKey::from_bytes(racy.stored.lock().unwrap().unwrap()));
+        assert_eq!(made, vec![stored, stored]);
+        assert_eq!(racy.next.load(Ordering::SeqCst), 1, "one key made");
     }
 }
