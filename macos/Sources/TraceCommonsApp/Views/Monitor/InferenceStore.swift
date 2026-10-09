@@ -105,10 +105,13 @@ final class InferenceStore {
         }
     }
 
-    /// The tab came into view: everything is read again, so a call loaded
-    /// before the ledger feed was turned off in Settings stops drawing its
-    /// tokens now rather than when the next call arrives. Reads only.
+    /// The tab came into view, or the ledger feed's switch moved: everything
+    /// is read again, so a call loaded before the feed was turned off in
+    /// Settings stops drawing its tokens now rather than when the next call
+    /// arrives. Reads only; while the daemon is still starting it reads
+    /// nothing, as `run()` does.
     func appeared() async {
+        guard !awaiting else { return }
         await load()
     }
 

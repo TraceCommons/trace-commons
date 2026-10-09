@@ -51,7 +51,9 @@ struct InferenceTabView: View {
         .onAppear { model.refreshAll() }
         // The settings refresh re-reads the ledger feed's switch; this
         // re-reads the calls, so tokens the daemon stopped sending go too.
-        .task { await store.appeared() }
+        // Keyed on the switch: Settings is its own window, so this tab can
+        // stay in view while the feed is turned off there.
+        .task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }
     }
 
     private var ledger: some View {

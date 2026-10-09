@@ -113,15 +113,29 @@ final class InferenceTokensTests: XCTestCase {
     }
 
     /// The tab calls the reload each time it appears, beside the settings
-    /// refresh that re-reads the ledger feed's switch; it writes nothing.
+    /// refresh that re-reads the ledger feed's switch, and again each time
+    /// that switch moves: Settings is its own window, so the tab can stay
+    /// in view while the feed is turned off there. It writes nothing.
     func test_theTabReloadsTheStoreWhenItAppears() throws {
         let views = try MonitorNavigationTests.text("Views/Monitor/InferenceViews.swift")
-        XCTAssertTrue(views.contains(".task { await store.appeared() }"))
+        XCTAssertTrue(views.contains(".task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }"))
+        XCTAssertFalse(views.contains(".task { await store.appeared() }"), "a reload that misses the switch moving")
         XCTAssertTrue(views.contains(".onAppear { model.refreshAll() }"))
         let store = try MonitorNavigationTests.text("Views/Monitor/InferenceStore.swift")
         let start = try XCTUnwrap(store.range(of: "func appeared() async {"))
         let body = store[start.upperBound...].prefix { $0 != "}" }
         XCTAssertFalse(body.contains("set"), "the reload on appear writes: \(body)")
+    }
+
+    /// While the daemon is still starting there is nothing to read, and
+    /// start-up is not the core being down: the tab appearing then reads
+    /// nothing and records no failure, as `run()` does.
+    func test_appearingWhileTheDaemonStartsRecordsNoFailure() async {
+        let store = InferenceStore(client: nil)
+        store.attach(nil, awaiting: true)
+        await store.appeared()
+        XCTAssertTrue(store.failures.isEmpty, "start-up drawn as the core down: \(store.failures)")
+        XCTAssertTrue(store.awaiting)
     }
 
     // MARK: Source rules

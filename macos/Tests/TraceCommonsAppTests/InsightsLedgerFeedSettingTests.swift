@@ -123,9 +123,13 @@ final class InsightsLedgerFeedSettingTests: XCTestCase {
     }
 
     /// The Inference tab draws the tokens and no switch for them; nothing
-    /// there reads or writes the setting any more.
+    /// there writes the setting. Its one read is the key that reloads the
+    /// calls when the switch moves in Settings (`InferenceTokensTests`).
     func test_theInferenceTabHasNoLedgerFeedSwitch() throws {
-        let views = try MonitorNavigationTests.text("Views/Monitor/InferenceViews.swift")
+        let reloadKey = ".task(id: model.daemonSettings?.insightsLedgerFeed) { await store.appeared() }"
+        let source = try MonitorNavigationTests.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertEqual(source.components(separatedBy: reloadKey).count, 2, "the reload key, once")
+        let views = source.replacingOccurrences(of: reloadKey, with: "")
         let store = try MonitorNavigationTests.text("Views/Monitor/InferenceStore.swift")
         XCTAssertFalse(views.contains("InsightsLedgerFeedSwitch"))
         XCTAssertFalse(views.contains("analytics_setting_ledger_feed"))
