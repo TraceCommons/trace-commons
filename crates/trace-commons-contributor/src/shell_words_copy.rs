@@ -424,6 +424,9 @@ pub struct SettingsWords {
     pub extra_scan_configured: &'static str,
     pub session_finished_after: &'static str,
     pub at_most_one_notification: &'static str,
+    /// [`Self::at_most_one_notification`] at one hour, the shortest interval
+    /// the daemon allows, so it never reads "every 1 hours".
+    pub at_most_one_notification_one: &'static str,
     pub undecided_dropped: &'static str,
     /// A state row's accessible name: `{title}` then the value.
     pub state_yes: &'static str,
@@ -478,6 +481,7 @@ pub fn settings_words() -> SettingsWords {
         extra_scan_configured: "Extra privacy scan configured",
         session_finished_after: "A session counts as finished after {seconds} seconds of quiet.",
         at_most_one_notification: "At most one notification every {hours} hours, and none when nothing is waiting.",
+        at_most_one_notification_one: "At most one notification an hour, and none when nothing is waiting.",
         undecided_dropped: "Undecided sessions are dropped after {days} days. Dropped means never sent.",
         state_yes: "{title}: yes",
         state_no: "{title}: no",
