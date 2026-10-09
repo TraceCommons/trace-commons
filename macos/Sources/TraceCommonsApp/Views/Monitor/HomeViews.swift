@@ -417,6 +417,14 @@ private struct HistoryPage: View {
                 if let failure = store.failures["history_rollup"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
+                // Verdict news, in the daemon's words. See history
+                // acknowledges it; this page is already the history.
+                if let card = store.verdictsCard {
+                    NudgeGlassCard(
+                        card: card, busy: store.nudgeBusy,
+                        refusal: store.nudgeError.flatMap { MonitorWords.table?.line(for: $0) }
+                    ) { intent in Task { await store.perform(intent) } }
+                }
                 HistoryStats(store: store)
                 HistoryCommunityCard(store: store)
                 GlassCard {
