@@ -725,7 +725,7 @@ enum RestoreDependencies {
     /// the drill counts settlement from the ledger instead. `rebuilt` is a
     /// second, empty index the resume rebuilds into for its last comparison.
     Production {
-        package: BundlePackage,
+        package: Box<BundlePackage>,
         dependencies: HarnessDependencies,
         rebuilt: Option<HarnessDependencies>,
     },
@@ -752,7 +752,7 @@ impl RestoreDependencies {
             Self::Reference { .. } => {
                 qualification_candidate_package().expect("restore_candidate_package_invalid")
             }
-            Self::Production { package, .. } => package.clone(),
+            Self::Production { package, .. } => package.as_ref().clone(),
         }
     }
 
@@ -915,7 +915,7 @@ async fn production_restore_dependencies_from_env(indexes: &[&str]) -> RestoreDe
         }
     });
     RestoreDependencies::Production {
-        package,
+        package: Box::new(package),
         dependencies,
         rebuilt,
     }
@@ -2121,7 +2121,7 @@ fn production_restore_doubles(package: BundlePackage) -> RestoreDependencies {
         }
     };
     RestoreDependencies::Production {
-        package,
+        package: Box::new(package),
         dependencies: doubles(),
         rebuilt: Some(doubles()),
     }
