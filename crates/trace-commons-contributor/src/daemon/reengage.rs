@@ -544,6 +544,30 @@ mod tests {
         );
     }
 
+    /// The same news, unchanged, is never announced twice, even once its
+    /// kind's interval has passed: only news that grew is news again.
+    #[test]
+    fn unchanged_news_is_not_announced_again_after_its_interval() {
+        let s = live();
+        let _r = renderer(&s);
+        let landed = noon() - Duration::hours(1);
+        s.state.lock().unwrap().verdicts_pending = Some(super::super::nudge::VerdictDelta {
+            newly_accepted: 1,
+            newly_held: 0,
+            newly_final: 0,
+            credit_final_delta: 0.0,
+            since: landed,
+            newest_at: landed,
+        });
+        assert_eq!(
+            tick(&s, noon(), &Utc, digest(false, 0)).standalone,
+            Some(Kind::VerdictsLanded)
+        );
+        let next_day = noon() + Duration::hours(26);
+        s.state.lock().unwrap().last_history_poll_at = Some(next_day);
+        assert_eq!(tick(&s, next_day, &Utc, digest(false, 0)).standalone, None);
+    }
+
     /// Paused, nothing is a candidate; the digest's own decision is
     /// unchanged.
     #[test]
