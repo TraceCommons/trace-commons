@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** Draft of 2026-10-09. Not approved. The section "Questions for the owner" is open. Write no code before the owner approves the plan.
+**Status:** Approved by the owner on 2026-10-09 ("plan approved, all recommendations accepted; start Phase B"). Each question of the section "Questions for the owner" has its recommended answer.
 
 **Goal:** Close the 12 open boxes of TraceCommons/trace-commons#1185 with one PR against `main` (`vp/pipeline-routing-blockers`), so that no item of #1185 blocks the routing of a tenant or the NEAR payout of the pipeline.
 
@@ -20,7 +20,7 @@
 - All 12 boxes are open at `6c3932b8`. The evidence is in the ledger (`.superpowers/sdd/2026-10-09-pipeline-routing-blockers-plan/research-a.md` to `research-d.md`). Line numbers in this plan are hints at `6c3932b8`. Find each site by its function name.
 - Short names: `ingest` = `crates/trace-commons-server/src/bin/trace-commons-ingest.rs`; `internal/` = `crates/trace-commons-server/src/bin/trace_commons_ingest_internal/`; `runtime` = `internal/pipeline_runtime.rs`; `http_tests` = `internal/pipeline_http_pg_tests.rs`; `act_tests` = `internal/pipeline_activation_pg_tests.rs`; `tests` = `internal/tests.rs`; `vp` = `crates/trace-commons-server/src/versioned_pipeline.rs`; `credit` = `.../versioned_pipeline_credit.rs`; `product` = `.../versioned_pipeline_product.rs`; `rt_tests` = `crates/trace-commons-server/tests/versioned_pipeline_runtime_pg.rs`; `runbook` = `docs/operator/pipeline-activation.md`.
 
-## Questions for the owner
+## Questions for the owner (answered on 2026-10-09: each recommendation is accepted)
 
 Each question has a recommendation. The plan is written for the recommended answers.
 
