@@ -16,8 +16,9 @@
 //! Placeholders are `{name}`, filled by the daemon:
 //!
 //! - `{n}`, `{a}`, `{h}`, `{c}`, `{k}`: counts.
-//! - `{x}` in an idle string: the idle threshold in days (owner decision
-//!   26), never a session's own growing age.
+//! - `{days}`: the idle threshold (owner decision 26), filled by
+//!   [`days_phrase`] as "1 day" or "{x} days" -- never a session's own
+//!   growing age, and never a bare number before a hard-coded "days".
 //! - `{x}` in a credit string: credit to one decimal, half away from zero.
 //! - `{date}`: a calendar date.
 //! - `{tool}`: one tool's display name, or [`TOOL_LIST_TWO`] /
@@ -28,9 +29,12 @@
 //!   (multiples of 0.5). Every string carrying them says "estimate".
 //! - `{known}`: how many of a batch have a local credit estimate.
 //!
-//! The spec gives plural forms only ("{a} sessions accepted"). A count of
-//! one needs singular forms, which are not written yet and need the same
-//! approval.
+//! The spec gives plural forms only ("{a} sessions accepted"). Each string
+//! whose count can be one has a `_ONE` sibling, listed in [`PLURAL_FORMS`],
+//! and [`pick`] chooses between them; a string whose wording is the same
+//! for every count is listed in the tests' count-neutral set instead. A
+//! test fails when a counted string is in neither. The singular forms need
+//! the same approval as the rest.
 //!
 //! The words a nudge must never use are pinned by this module's tests:
 //! nothing that calls pending credit money ("earned", "paid", "settled",
@@ -49,13 +53,20 @@ use crate::project_copy::folder_mode_ask_label;
 /// Ron's draft card title (`native-app-design-data-audit.md:86`).
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_TITLE_RON: &str = "{n} unpurposed traces are waiting";
+/// [`NUDGE_BACKLOG_TITLE_RON`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_TITLE_RON_ONE: &str = "1 unpurposed trace is waiting";
 /// The plain-wording alternative to [`NUDGE_BACKLOG_TITLE_RON`].
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_TITLE_PLAIN: &str = "{n} previewed sessions are waiting for a decision";
+/// [`NUDGE_BACKLOG_TITLE_PLAIN`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_TITLE_PLAIN_ONE: &str = "1 previewed session is waiting for a decision";
 /// The U1 card's title. Owner decision 9 picks between Ron's wording and
-/// plain wording; this selects Ron's until it is ruled, and changing the
-/// pick is this one line. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_RON;
+/// plain wording. Plain wording, picked 2026-10-08: "unpurposed traces" is
+/// jargon a contributor has no reason to know. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_TITLE: &str = NUDGE_BACKLOG_TITLE_PLAIN;
+/// [`NUDGE_BACKLOG_TITLE`] for one, following the same pick. DRAFT, NEEDS
+/// APPROVAL.
+pub const NUDGE_BACKLOG_TITLE_ONE: &str = NUDGE_BACKLOG_TITLE_PLAIN_ONE;
 /// DRAFT, NEEDS APPROVAL. The mode is named by its one spelling.
 pub const NUDGE_BACKLOG_BODY: &str = concat!(
     "They are in folders set to ",
@@ -63,55 +74,87 @@ pub const NUDGE_BACKLOG_BODY: &str = concat!(
     " and have been through the preview. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer."
 );
+/// [`NUDGE_BACKLOG_BODY`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_BODY_ONE: &str = concat!(
+    "It is in a folder set to ",
+    folder_mode_ask_label!(),
+    " and has been through the preview. Nothing is sent until you decide, \
+     and keeping it on this computer is just as good an answer."
+);
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_REVIEW: &str = "Review";
 /// Ron's draft (`native-app-design-data-audit.md:182`). DRAFT, NEEDS
 /// APPROVAL.
 pub const NUDGE_BACKLOG_REVIEW_IN_TRACES: &str = "Review the {n} in Traces";
+/// [`NUDGE_BACKLOG_REVIEW_IN_TRACES`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE: &str = "Review it in Traces";
 /// Every card's dismissal. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_NOT_NOW: &str = "Not now";
 /// The panel row for U1. Carries no number: the badge already does.
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_PANEL_BACKLOG: &str = "Previewed sessions are waiting for a decision";
+/// [`NUDGE_PANEL_BACKLOG`] when one is waiting. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_PANEL_BACKLOG_ONE: &str = "A previewed session is waiting for a decision";
 
 // ---------------------------------------------------------------------
 // Idle sessions (U4): the primary phase-1 trigger.
 // ---------------------------------------------------------------------
 
 /// The panel row for U4. No number. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_PANEL_IDLE: &str = "Some sessions have been idle for {x} days or more";
+pub const NUDGE_PANEL_IDLE: &str = "Some sessions have been idle for {days} or more";
+/// [`NUDGE_PANEL_IDLE`] when one is idle. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_PANEL_IDLE_ONE: &str = "A session has been idle for {days} or more";
 /// The Traces card's title. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_IDLE_TITLE: &str = "{n} sessions from {tool} have been idle for {x} days or more";
+pub const NUDGE_IDLE_TITLE: &str = "{n} sessions from {tool} have been idle for {days} or more";
+/// [`NUDGE_IDLE_TITLE`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_IDLE_TITLE_ONE: &str = "1 session from {tool} has been idle for {days} or more";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_BODY: &str = "They look finished. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer.";
+/// [`NUDGE_IDLE_BODY`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_IDLE_BODY_ONE: &str = "It looks finished. Nothing is sent until you decide, \
+     and keeping it on this computer is just as good an answer.";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_REVIEW: &str = "Review";
 /// The owner's draft of the N1 notification body (decision 28).
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_OWNER_DRAFT: &str =
-    "{n} sessions from {tool} have been idle for {x} days. Contribute them?";
+    "{n} sessions from {tool} have been idle for {days}. Contribute them?";
+/// [`NOTIFY_IDLE_BODY_OWNER_DRAFT`] for one. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE: &str =
+    "1 session from {tool} has been idle for {days}. Contribute it?";
 /// The alternative to [`NOTIFY_IDLE_BODY_OWNER_DRAFT`]: a notification may
 /// only open Review, so it names what Review offers -- send or keep --
 /// instead of asking a question its one action cannot answer.
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY_ALTERNATIVE: &str =
-    "{n} sessions from {tool} have been idle for {x} days or more. Review them to send or keep.";
+    "{n} sessions from {tool} have been idle for {days} or more. Review them to send or keep.";
+/// [`NOTIFY_IDLE_BODY_ALTERNATIVE`] for one. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
+    "1 session from {tool} has been idle for {days} or more. Review it to send or keep.";
 /// The N1 notification body. Owner decision 28 picks between the owner's
 /// draft and the alternative; this selects the alternative the spec
 /// recommends until it is ruled, and changing the pick is this one line.
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
+/// [`NOTIFY_IDLE_BODY`] for one, following the same pick. DRAFT, NEEDS
+/// APPROVAL.
+pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_ALTERNATIVE_ONE;
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
 /// Folded into a due digest after its first sentence, never a separate
 /// notification while the digest is on. DRAFT, NEEDS APPROVAL.
 pub const DIGEST_IDLE_SENTENCE: &str =
-    "{n} of them, from {tool}, have been idle for {x} days or more.";
+    "{n} of them, from {tool}, have been idle for {days} or more.";
+/// [`DIGEST_IDLE_SENTENCE`] for one. DRAFT, NEEDS APPROVAL.
+pub const DIGEST_IDLE_SENTENCE_ONE: &str =
+    "1 of them, from {tool}, has been idle for {days} or more.";
 /// Appended to the badge's accessibility sentence. DRAFT, NEEDS APPROVAL.
-pub const MARK_A11Y_IDLE: &str = "{n} of them have been idle for {x} days or more.";
+pub const MARK_A11Y_IDLE: &str = "{n} of them have been idle for {days} or more.";
+/// [`MARK_A11Y_IDLE`] for one. DRAFT, NEEDS APPROVAL.
+pub const MARK_A11Y_IDLE_ONE: &str = "1 of them has been idle for {days} or more.";
 /// The Windows tooltip clause. DRAFT, NEEDS APPROVAL.
-pub const MARK_TOOLTIP_IDLE: &str = "{n} idle for {x}+ days.";
+pub const MARK_TOOLTIP_IDLE: &str = "{n} idle for {days} or more.";
 /// `{tool}` when a batch spans exactly two tools. DRAFT, NEEDS APPROVAL.
 pub const TOOL_LIST_TWO: &str = "{a} and {b}";
 /// `{tool}` when a batch spans three or more. DRAFT, NEEDS APPROVAL.
@@ -136,11 +179,17 @@ pub const NUDGE_PANEL_VERDICTS: &str = "{a} accepted, {h} held since {date}";
 /// when the credit is non-zero. Never reports accepted sessions without
 /// the held count. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_VERDICTS_BODY: &str = "{a} sessions accepted and {h} held for privacy review.";
+/// [`NOTIFY_VERDICTS_BODY`] when one was accepted. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 session accepted and {h} held for privacy review.";
 /// The verdict sentence folded into a due digest: [`NOTIFY_VERDICTS_BODY`]
 /// and [`NUDGE_VERDICTS_FINAL_CLAUSE`]. Changes approved K9 digest copy
 /// (owner decision 6). DRAFT, NEEDS APPROVAL.
 pub const DIGEST_VERDICT_SENTENCE: &str =
     "{a} sessions accepted and {h} held for privacy review. {x} credit is now final.";
+/// [`DIGEST_VERDICT_SENTENCE`] when one was accepted. DRAFT, NEEDS
+/// APPROVAL.
+pub const DIGEST_VERDICT_SENTENCE_ONE: &str =
+    "1 session accepted and {h} held for privacy review. {x} credit is now final.";
 
 // ---------------------------------------------------------------------
 // The news mark.
@@ -295,31 +344,106 @@ pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the session's siz
      Nothing about the session is sent to make it. The credit a session gets is set when \
      the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
 
+/// Each counted string's key and its `_ONE` sibling's. The count the pair
+/// turns on is the string's first count placeholder (`{n}`, `{a}` or
+/// `{m}`), or for a panel row with no number, the count behind the row.
+pub const PLURAL_FORMS: &[(&str, &str)] = &[
+    ("NUDGE_BACKLOG_TITLE", "NUDGE_BACKLOG_TITLE_ONE"),
+    ("NUDGE_BACKLOG_TITLE_RON", "NUDGE_BACKLOG_TITLE_RON_ONE"),
+    ("NUDGE_BACKLOG_TITLE_PLAIN", "NUDGE_BACKLOG_TITLE_PLAIN_ONE"),
+    ("NUDGE_BACKLOG_BODY", "NUDGE_BACKLOG_BODY_ONE"),
+    (
+        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
+        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
+    ),
+    ("NUDGE_PANEL_BACKLOG", "NUDGE_PANEL_BACKLOG_ONE"),
+    ("NUDGE_PANEL_IDLE", "NUDGE_PANEL_IDLE_ONE"),
+    ("NUDGE_IDLE_TITLE", "NUDGE_IDLE_TITLE_ONE"),
+    ("NUDGE_IDLE_BODY", "NUDGE_IDLE_BODY_ONE"),
+    ("NOTIFY_IDLE_BODY", "NOTIFY_IDLE_BODY_ONE"),
+    (
+        "NOTIFY_IDLE_BODY_OWNER_DRAFT",
+        "NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE",
+    ),
+    (
+        "NOTIFY_IDLE_BODY_ALTERNATIVE",
+        "NOTIFY_IDLE_BODY_ALTERNATIVE_ONE",
+    ),
+    ("DIGEST_IDLE_SENTENCE", "DIGEST_IDLE_SENTENCE_ONE"),
+    ("MARK_A11Y_IDLE", "MARK_A11Y_IDLE_ONE"),
+    ("NOTIFY_VERDICTS_BODY", "NOTIFY_VERDICTS_BODY_ONE"),
+    ("DIGEST_VERDICT_SENTENCE", "DIGEST_VERDICT_SENTENCE_ONE"),
+    ("NUDGE_MISSION_FIT_CLAUSE", "NUDGE_MISSION_FIT_CLAUSE_ONE"),
+];
+
+/// `one` when `count` is exactly 1, else `many`. Zero takes the plural:
+/// "0 sessions".
+#[must_use]
+pub fn pick(count: u64, many: &'static str, one: &'static str) -> &'static str {
+    if count == 1 { one } else { many }
+}
+
+/// `{days}`: "1 day" or "{days} days".
+#[must_use]
+pub fn days_phrase(days: u32) -> String {
+    if days == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{days} days")
+    }
+}
+
 /// Every nudge string, as `(key, text)`, including both candidates of each
 /// owner pick so the word rules hold whichever is chosen. The later C ABI
 /// export is built from this table.
 pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE", NUDGE_BACKLOG_TITLE),
+    ("NUDGE_BACKLOG_TITLE_ONE", NUDGE_BACKLOG_TITLE_ONE),
     ("NUDGE_BACKLOG_TITLE_RON", NUDGE_BACKLOG_TITLE_RON),
+    ("NUDGE_BACKLOG_TITLE_RON_ONE", NUDGE_BACKLOG_TITLE_RON_ONE),
     ("NUDGE_BACKLOG_TITLE_PLAIN", NUDGE_BACKLOG_TITLE_PLAIN),
+    (
+        "NUDGE_BACKLOG_TITLE_PLAIN_ONE",
+        NUDGE_BACKLOG_TITLE_PLAIN_ONE,
+    ),
     ("NUDGE_BACKLOG_BODY", NUDGE_BACKLOG_BODY),
+    ("NUDGE_BACKLOG_BODY_ONE", NUDGE_BACKLOG_BODY_ONE),
     ("NUDGE_BACKLOG_REVIEW", NUDGE_BACKLOG_REVIEW),
     (
         "NUDGE_BACKLOG_REVIEW_IN_TRACES",
         NUDGE_BACKLOG_REVIEW_IN_TRACES,
     ),
+    (
+        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
+        NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE,
+    ),
     ("NUDGE_NOT_NOW", NUDGE_NOT_NOW),
     ("NUDGE_PANEL_BACKLOG", NUDGE_PANEL_BACKLOG),
+    ("NUDGE_PANEL_BACKLOG_ONE", NUDGE_PANEL_BACKLOG_ONE),
     ("NUDGE_PANEL_IDLE", NUDGE_PANEL_IDLE),
+    ("NUDGE_PANEL_IDLE_ONE", NUDGE_PANEL_IDLE_ONE),
     ("NUDGE_IDLE_TITLE", NUDGE_IDLE_TITLE),
+    ("NUDGE_IDLE_TITLE_ONE", NUDGE_IDLE_TITLE_ONE),
     ("NUDGE_IDLE_BODY", NUDGE_IDLE_BODY),
+    ("NUDGE_IDLE_BODY_ONE", NUDGE_IDLE_BODY_ONE),
     ("NUDGE_IDLE_REVIEW", NUDGE_IDLE_REVIEW),
     ("NOTIFY_IDLE_BODY", NOTIFY_IDLE_BODY),
+    ("NOTIFY_IDLE_BODY_ONE", NOTIFY_IDLE_BODY_ONE),
     ("NOTIFY_IDLE_BODY_OWNER_DRAFT", NOTIFY_IDLE_BODY_OWNER_DRAFT),
+    (
+        "NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE",
+        NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE,
+    ),
     ("NOTIFY_IDLE_BODY_ALTERNATIVE", NOTIFY_IDLE_BODY_ALTERNATIVE),
+    (
+        "NOTIFY_IDLE_BODY_ALTERNATIVE_ONE",
+        NOTIFY_IDLE_BODY_ALTERNATIVE_ONE,
+    ),
     ("NOTIFY_ACTION_REVIEW_IDLE", NOTIFY_ACTION_REVIEW_IDLE),
     ("DIGEST_IDLE_SENTENCE", DIGEST_IDLE_SENTENCE),
+    ("DIGEST_IDLE_SENTENCE_ONE", DIGEST_IDLE_SENTENCE_ONE),
     ("MARK_A11Y_IDLE", MARK_A11Y_IDLE),
+    ("MARK_A11Y_IDLE_ONE", MARK_A11Y_IDLE_ONE),
     ("MARK_TOOLTIP_IDLE", MARK_TOOLTIP_IDLE),
     ("TOOL_LIST_TWO", TOOL_LIST_TWO),
     ("TOOL_LIST_MANY", TOOL_LIST_MANY),
@@ -328,7 +452,9 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_VERDICTS_SEE", NUDGE_VERDICTS_SEE),
     ("NUDGE_PANEL_VERDICTS", NUDGE_PANEL_VERDICTS),
     ("NOTIFY_VERDICTS_BODY", NOTIFY_VERDICTS_BODY),
+    ("NOTIFY_VERDICTS_BODY_ONE", NOTIFY_VERDICTS_BODY_ONE),
     ("DIGEST_VERDICT_SENTENCE", DIGEST_VERDICT_SENTENCE),
+    ("DIGEST_VERDICT_SENTENCE_ONE", DIGEST_VERDICT_SENTENCE_ONE),
     ("MARK_A11Y_VERDICTS", MARK_A11Y_VERDICTS),
     ("MARK_A11Y_RECAP", MARK_A11Y_RECAP),
     ("MARK_TOOLTIP_VERDICTS", MARK_TOOLTIP_VERDICTS),
@@ -506,6 +632,7 @@ mod tests {
             .replace("{known}", MAX_KNOWN)
             .replace("{date}", MAX_DATE)
             .replace("{tool}", &max_tool())
+            .replace("{days}", &days_phrase(MAX_IDLE_DAYS.parse().unwrap()))
             .replace("{x}", x);
         assert!(
             !filled.contains('{'),
@@ -629,6 +756,26 @@ mod tests {
                 "NOTIFY_IDLE_BODY_ALTERNATIVE",
                 fill_max(NOTIFY_IDLE_BODY_ALTERNATIVE, false),
             ),
+            (
+                "NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE",
+                fill_max(NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE, false),
+            ),
+            (
+                "NOTIFY_IDLE_BODY_ALTERNATIVE_ONE",
+                fill_max(NOTIFY_IDLE_BODY_ALTERNATIVE_ONE, false),
+            ),
+            (
+                "NOTIFY_VERDICTS_BODY_ONE + NUDGE_VERDICTS_FINAL_CLAUSE",
+                format!(
+                    "{} {}",
+                    fill_max(NOTIFY_VERDICTS_BODY_ONE, true),
+                    fill_max(NUDGE_VERDICTS_FINAL_CLAUSE, true)
+                ),
+            ),
+            (
+                "DIGEST_IDLE_SENTENCE_ONE",
+                fill_max(DIGEST_IDLE_SENTENCE_ONE, false),
+            ),
             ("NOTIFY_RECAP_BODY", fill_max(NOTIFY_RECAP_BODY, false)),
             (
                 "DIGEST_IDLE_SENTENCE",
@@ -715,10 +862,164 @@ mod tests {
         for (key, text) in NUDGE_COPY {
             if text.contains("idle for") && !text.contains("a few days") {
                 assert!(
-                    text.contains("{x}"),
+                    text.contains("{days}"),
                     "{key} must name the threshold: {text}"
                 );
             }
+        }
+    }
+
+    /// Strings whose wording is the same for every count: no counted noun
+    /// or verb agrees with a placeholder. `{k}` in `TOOL_LIST_MANY` is
+    /// always 3 or more, and `{a}` in `TOOL_LIST_TWO` is a tool's name.
+    /// "1 of them has been" is singular: the verb carries it.
+    const COUNT_NEUTRAL: &[&str] = &[
+        "MARK_TOOLTIP_IDLE",
+        "TOOL_LIST_MANY",
+        "TOOL_LIST_TWO",
+        "NUDGE_VERDICTS_TITLE",
+        "NUDGE_PANEL_VERDICTS",
+        "MARK_A11Y_VERDICTS",
+        "NOTIFY_RECAP_BODY",
+        "DIGEST_RECAP_SENTENCE",
+        "SETTING_DIGEST_HELP_INTERVAL",
+        "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
+    ];
+
+    fn text_of(key: &str) -> &'static str {
+        NUDGE_COPY
+            .iter()
+            .find(|(k, _)| *k == key)
+            .unwrap_or_else(|| panic!("{key} is not in NUDGE_COPY"))
+            .1
+    }
+
+    /// A counted string has a singular sibling or is listed as count
+    /// neutral, so "1 sessions" cannot reach a contributor. A new counted
+    /// string fails here until it is given one or the other.
+    #[test]
+    fn every_counted_string_has_a_singular_or_is_count_neutral() {
+        let ones: Vec<&str> = PLURAL_FORMS.iter().map(|(_, one)| *one).collect();
+        for (key, text) in NUDGE_COPY {
+            if ones.contains(key) {
+                continue;
+            }
+            let counted = ["{n}", "{a}", "{m}", "{k}", "{c}", "{hours}", "{known}"]
+                .iter()
+                .any(|p| text.contains(p))
+                || text.starts_with("Some ")
+                || text.starts_with("Previewed sessions");
+            if !counted {
+                continue;
+            }
+            let paired = PLURAL_FORMS.iter().any(|(many, _)| many == key);
+            assert!(
+                paired || COUNT_NEUTRAL.contains(key),
+                "{key} is counted but has no singular and is not count neutral: {text}"
+            );
+            assert!(
+                !(paired && COUNT_NEUTRAL.contains(key)),
+                "{key} is both paired and count neutral"
+            );
+        }
+    }
+
+    /// A singular sibling exists, keeps every placeholder but the count,
+    /// and reads singular.
+    #[test]
+    fn singular_forms_read_singular() {
+        for (many, one) in PLURAL_FORMS {
+            let (many_text, one_text) = (text_of(many), text_of(one));
+            for placeholder in ["{tool}", "{days}", "{h}", "{x}"] {
+                assert_eq!(
+                    many_text.contains(placeholder),
+                    one_text.contains(placeholder),
+                    "{one} must keep {placeholder} as {many} does: {one_text}"
+                );
+            }
+            for counted in ["{n}", "{a}", "{m}"] {
+                assert!(!one_text.contains(counted), "{one}: {one_text}");
+            }
+            for plural in ["sessions", "traces", "They ", " have been", " are "] {
+                assert!(
+                    !one_text.contains(plural),
+                    "{one} reads plural ({plural:?}): {one_text}"
+                );
+            }
+        }
+        assert_eq!(
+            pick(1, NUDGE_IDLE_TITLE, NUDGE_IDLE_TITLE_ONE),
+            NUDGE_IDLE_TITLE_ONE
+        );
+        assert_eq!(
+            pick(0, NUDGE_IDLE_TITLE, NUDGE_IDLE_TITLE_ONE),
+            NUDGE_IDLE_TITLE
+        );
+        assert_eq!(
+            pick(2, NUDGE_IDLE_TITLE, NUDGE_IDLE_TITLE_ONE),
+            NUDGE_IDLE_TITLE
+        );
+    }
+
+    /// An owner pick and its singular follow the same candidate.
+    #[test]
+    fn singular_picks_follow_their_plural_picks() {
+        fn follows(pick: &str, ones: [(&'static str, &'static str); 2]) -> Option<&'static str> {
+            ones.into_iter()
+                .find(|(many, _)| *many == pick)
+                .map(|(_, one)| one)
+        }
+        assert_eq!(
+            follows(
+                NUDGE_BACKLOG_TITLE,
+                [
+                    (NUDGE_BACKLOG_TITLE_RON, NUDGE_BACKLOG_TITLE_RON_ONE),
+                    (NUDGE_BACKLOG_TITLE_PLAIN, NUDGE_BACKLOG_TITLE_PLAIN_ONE),
+                ]
+            ),
+            Some(NUDGE_BACKLOG_TITLE_ONE)
+        );
+        assert_eq!(
+            follows(
+                NOTIFY_IDLE_BODY,
+                [
+                    (
+                        NOTIFY_IDLE_BODY_OWNER_DRAFT,
+                        NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE
+                    ),
+                    (
+                        NOTIFY_IDLE_BODY_ALTERNATIVE,
+                        NOTIFY_IDLE_BODY_ALTERNATIVE_ONE
+                    ),
+                ]
+            ),
+            Some(NOTIFY_IDLE_BODY_ONE)
+        );
+        assert_eq!(
+            DIGEST_VERDICT_SENTENCE_ONE,
+            format!("{NOTIFY_VERDICTS_BODY_ONE} {NUDGE_VERDICTS_FINAL_CLAUSE}")
+        );
+    }
+
+    /// The backlog title is the plain wording (2026-10-08).
+    #[test]
+    fn the_backlog_title_is_plain() {
+        assert_eq!(NUDGE_BACKLOG_TITLE, NUDGE_BACKLOG_TITLE_PLAIN);
+        assert!(!NUDGE_BACKLOG_TITLE.contains("unpurposed"));
+        assert!(!NUDGE_BACKLOG_TITLE_ONE.contains("unpurposed"));
+    }
+
+    /// The threshold is a phrase, so "1 day" never reads "1 days", and no
+    /// string spells a number before a hard-coded "days".
+    #[test]
+    fn idle_days_are_a_phrase() {
+        assert_eq!(days_phrase(1), "1 day");
+        assert_eq!(days_phrase(3), "3 days");
+        for (key, text) in NUDGE_COPY {
+            assert!(
+                !text.contains("{x} day") && !text.contains("{x}+ day"),
+                "{key} spells days by hand: {text}"
+            );
         }
     }
 
