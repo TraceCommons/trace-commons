@@ -489,13 +489,12 @@ What a passing report does not show:
   baseline state in code, and it does not start the server through the
   production start function, which reads the configuration from the
   environment. One gate configuration gives the two sides: the derived
-  floors, and the values of `CompatibilityBundleConfig::local_reference()`
-  (insert threshold 50,000 micros, `top_k` 8, chunk target 2,048 tokens,
-  chunk maximum 3,072 tokens, chunk cap 16, chunk minimum 64 tokens). Three
-  values are not the default values of `main`
+  floors, `top_k` 5 (the default of `main`, `TRACE_COMMONS_GATE_DEFAULT_TOP_K`),
+  and the other values of `CompatibilityBundleConfig::local_reference()`
+  (insert threshold 50,000 micros, chunk target 2,048 tokens, chunk maximum
+  3,072 tokens, chunk cap 16, chunk minimum 64 tokens). Two values are not
+  the default values of `main`
   (`crates/trace-commons-server/src/bin/trace-commons-ingest.rs`):
-  - `top_k` is 8. The default of `main` is 5
-    (`TRACE_COMMONS_GATE_DEFAULT_TOP_K`).
   - The credit for novelty is 2.5 credits on the two sides, so that the
     credit branch gets evidence. The default of `main` is 0
     (`DEFAULT_NOVELTY_UTILITY_CREDIT_POINTS_DELTA`).

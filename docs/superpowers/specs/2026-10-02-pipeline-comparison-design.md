@@ -160,10 +160,11 @@ change.
 ### 6.2 Shared configuration
 
 One `MainGateConfig` value holds the derived floors and the other gate
-settings. The other settings are the values of
-`CompatibilityBundleConfig::local_reference`: insert threshold 50,000,
-`top_k` 8, chunk target 2,048 tokens, chunk maximum 3,072 tokens, chunk cap
-16, chunk minimum 64 tokens.
+settings. `top_k` is 5, the default of `main`
+(`TRACE_COMMONS_GATE_DEFAULT_TOP_K`, owner decision PC-D23). The other
+settings are the values of `CompatibilityBundleConfig::local_reference`:
+insert threshold 50,000, chunk target 2,048 tokens, chunk maximum 3,072
+tokens, chunk cap 16, chunk minimum 64 tokens.
 
 The `NoveltyUtility` delta is not zero, so the credit branch gets evidence.
 It has the value of the current parity test
