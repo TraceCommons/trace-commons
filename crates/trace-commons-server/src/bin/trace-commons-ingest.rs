@@ -56823,6 +56823,11 @@ struct RescorePerplexitySummary {
     /// backfill either -- a pass that reports only this has a scorer that
     /// supplies no usable token lengths.
     author_unattributed: usize,
+    /// Submissions whose writer touched no row: the pipeline's Settle wrote
+    /// a row for the submission after the pass enumerated it (spec
+    /// 2026-10-08, Slice C, O-C3), so the row is left as Settle wrote it.
+    /// Not a failure and not a re-score.
+    pipeline_row_skipped: usize,
     /// Dry-run mode only: every score the pass computed, held in memory for
     /// the length of the pass and summarized into aggregates when it ends.
     /// Never persisted and never logged row by row.
@@ -56940,6 +56945,9 @@ enum RescoreOneOutcome {
     DryRunScored(trace_commons_server::trace_gate_service::PerplexityOnlyGateOutcome),
     /// Author-only mode, and the scorer attributed nothing: nothing written.
     AuthorUnattributed,
+    /// A writer touched no row: the submission has a pipeline row, which a
+    /// re-score never rewrites.
+    PipelineRowSkipped,
 }
 
 async fn rescore_perplexity_one(
@@ -56982,27 +56990,47 @@ async fn rescore_perplexity_one(
     if author_only && outcome.author_perplexity.is_none() {
         return Ok(RescoreOneOutcome::AuthorUnattributed);
     }
+    // A writer that touches no row met the pipeline-row guard: Settle wrote
+    // a row for the submission after the pass enumerated it. That is a skip,
+    // logged and counted as one, never a re-score.
+    let pipeline_row_skipped = || {
+        tracing::info!(
+            tenant_hash = %sha256_prefixed(&item.tenant_id),
+            submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+            author_only,
+            "perplexity re-score skipped one submission with a pipeline row"
+        );
+        Ok(RescoreOneOutcome::PipelineRowSkipped)
+    };
     if !author_only {
-        db.update_trace_gate_decision_perplexity(
-            &item.tenant_id,
-            item.submission_id,
-            perplexity_micros,
-            peak_perplexity_micros,
-            outcome.perplexity_passed,
-        )
-        .await?;
+        let updated = db
+            .update_trace_gate_decision_perplexity(
+                &item.tenant_id,
+                item.submission_id,
+                perplexity_micros,
+                peak_perplexity_micros,
+                outcome.perplexity_passed,
+            )
+            .await?;
+        if updated == 0 {
+            return pipeline_row_skipped();
+        }
     }
     // Both modes write the per-author columns: a full re-score is a superset
     // of the author-only backfill. In full mode an absent value is written
     // as NULL on purpose: the row's perplexity was just rewritten under the
     // current scorer, so per-author values from an older scoring no longer
     // describe the row and must not be left to disagree with it.
-    db.update_trace_gate_decision_author_perplexity(
-        &item.tenant_id,
-        item.submission_id,
-        author_cols,
-    )
-    .await?;
+    let updated = db
+        .update_trace_gate_decision_author_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            author_cols,
+        )
+        .await?;
+    if updated == 0 {
+        return pipeline_row_skipped();
+    }
     // Hash-only: identify the submission by hash, never the perplexity value.
     tracing::info!(
         tenant_hash = %sha256_prefixed(&item.tenant_id),
@@ -57040,6 +57068,7 @@ async fn run_rescore_perplexity_pass(
         match rescore_perplexity_one(state.as_ref(), item, mode).await {
             Ok(RescoreOneOutcome::Updated) => summary.rescored += 1,
             Ok(RescoreOneOutcome::AuthorUnattributed) => summary.author_unattributed += 1,
+            Ok(RescoreOneOutcome::PipelineRowSkipped) => summary.pipeline_row_skipped += 1,
             Ok(RescoreOneOutcome::DryRunScored(outcome)) => summary
                 .dry_run
                 .get_or_insert_with(DryRunScores::default)
@@ -57097,6 +57126,7 @@ async fn rescore_perplexity_handler(
                     rescored = summary.rescored,
                     failed = summary.failed,
                     author_unattributed = summary.author_unattributed,
+                    pipeline_row_skipped = summary.pipeline_row_skipped,
                     // Aggregates only, and none at all for a small pass; see
                     // `DryRunReport`. Empty outside dry-run mode.
                     dry_run_report = %summary
