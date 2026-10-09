@@ -25,13 +25,15 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let undo: String
         /// What an unanswered picker reads (Ron's `Picker` placeholder).
         public let choose: String
+        /// The footer's Back on every step after Join, and the passkey
+        /// popups' Back.
+        public let back: String
     }
 
     public struct Join: Decodable, Equatable, Sendable {
         public let titleLight: String
         public let titleBold: String
         public let body: String
-        public let bodyEmphasis: String
         public let inviteEyebrow: String
         public let invitePlaceholder: String
         public let lookUp: String
@@ -106,7 +108,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
             guard let url = URL(string: raw), url.scheme == "https" else { return nil }
             return url
         }
-        public let notInstalled: String
         /// Discovery returned no row the shell could read.
         public let discoveryFailed: String
         public let retry: String
@@ -193,7 +194,8 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let sharing: String
         public let sharingLoading: String
         public let sharingUnavailable: String
-        public let baseUseNote: String
+        /// `{title}`: the info button's accessible name.
+        public let moreAbout: String
         public let start: String
         /// Start's failures, one per call that can stop it, and the refused
         /// grant, which finishes on Ask me.
@@ -206,7 +208,6 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
     }
 
     public struct Passkey: Decodable, Equatable, Sendable {
-        public let back: String
         public let close: String
         public let cancel: String
         public let chooseTitle: String
@@ -243,6 +244,11 @@ public struct FirstRunCopy: Decodable, Equatable, Sendable {
         public let loading: String
         public let unavailable: String
         public let toggleLoading: String
+        /// The offer's first two sentences, shown before "Learn more".
+        public let offerLead: String
+        /// The rest of the offer's first paragraph, disclosed by "Learn more".
+        public let offerMore: String
+        public let learnMore: String
     }
 
     public let frame: Frame

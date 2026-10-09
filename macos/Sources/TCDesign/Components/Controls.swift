@@ -19,23 +19,103 @@ public enum GlassButtonKind: Sendable, Equatable {
     case destructive
 }
 
+/// Where a button sits, which sets its size (owner ruling, 2026-10-08).
+///
+/// In a window's action bar -- the footer row that holds the primary CTA,
+/// in a window, a sheet or a modal -- every button is the primary CTA's
+/// size. Only inline buttons, inside cards, rows, fields, popovers and
+/// toolbars, take the smaller size. Text about taking the bar's action sits
+/// directly above the bar (`GlassActionBar`).
+public enum GlassButtonSize: Sendable, Equatable {
+    /// Everywhere but an action bar: each kind's own compact size (the glass
+    /// and destructive pills are `size.controlLarge`, the label type, 12pt
+    /// of padding). The default.
+    case inline
+    /// A window's action bar, beside the primary CTA: the CTA's height
+    /// (`size.cta`), its type size and its horizontal padding, so Back,
+    /// Cancel or Customize stand as tall as Continue. Each kind keeps its
+    /// own fill, edge, ink, weight, hover, pressed and disabled look.
+    /// `.primary` is bar-sized already and reads the same either way.
+    case bar
+}
+
+/// The box a button kind draws its label in: minimum height, horizontal
+/// padding and type. `nil` is none (the link has no container).
+struct GlassButtonMetrics: Equatable {
+    let minHeight: CGFloat?
+    let horizontalPadding: CGFloat?
+    let type: GlassTypeStyle
+}
+
 /// `Button("Start watching") {}.buttonStyle(GlassButtonStyle(.primary))`.
+///
+/// Size: `.primary` is the action bar's CTA. Any other button in the same
+/// action bar takes `size: .bar` (`GlassButtonStyle(.glass, size: .bar)`);
+/// every button anywhere else stays `.inline`, the default. `small` is the
+/// compact CTA (a card's or a modal's): a `.bar` button with `small` matches
+/// the small CTA, never the full one.
 public struct GlassButtonStyle: ButtonStyle {
     private let kind: GlassButtonKind
+    private let size: GlassButtonSize
     private let small: Bool
     private let selected: Bool
 
     /// `selected` is a glass button that is the chosen one of a set (#1146's
     /// `aria-pressed`): it reads purple, the CTA fill and white label, and
     /// says selected to assistive tech. Other kinds ignore it.
-    public init(_ kind: GlassButtonKind, small: Bool = false, selected: Bool = false) {
+    public init(_ kind: GlassButtonKind, size: GlassButtonSize = .inline, small: Bool = false, selected: Bool = false) {
         self.kind = kind
+        self.size = size
         self.small = small
         self.selected = selected
     }
 
+    /// The small CTA's height and padding (#1146 `.tc-btn--sm`).
+    static let smallCTAHeight: CGFloat = 30
+    static let smallCTAPadding: CGFloat = 14
+    /// The full CTA's horizontal padding (#1146 `.tc-btn--primary`).
+    static let ctaPadding: CGFloat = 16
+    /// An inline pill's horizontal padding (#1146 `.tc-btn--glass`).
+    static let inlinePadding: CGFloat = 12
+    /// The submit pill's horizontal padding.
+    static let submitPadding: CGFloat = 10
+
+    /// The CTA's box, full or small: what `.primary` draws and what every
+    /// `.bar` button matches.
+    static func ctaMetrics(small: Bool, weight: GlassWeight = .bold) -> GlassButtonMetrics {
+        small
+            ? GlassButtonMetrics(minHeight: smallCTAHeight, horizontalPadding: smallCTAPadding,
+                                 type: GlassTokens.TypeScale.label.weight(weight))
+            : GlassButtonMetrics(minHeight: GlassTokens.Size.cta, horizontalPadding: ctaPadding,
+                                 type: GlassTokens.TypeScale.bodyStrong.weight(weight))
+    }
+
+    /// A kind's box at a size. A `.bar` button takes the CTA's box in its
+    /// own weight; an `.inline` one keeps the kind's own.
+    static func metrics(_ kind: GlassButtonKind, size: GlassButtonSize, small: Bool = false) -> GlassButtonMetrics {
+        switch (kind, size) {
+        case (.primary, _), (.secondary, .bar):
+            return ctaMetrics(small: small)
+        case (.secondary, .inline):
+            let cta = ctaMetrics(small: small)
+            return GlassButtonMetrics(minHeight: cta.minHeight, horizontalPadding: smallCTAPadding, type: cta.type)
+        case (.glass, .bar), (.destructive, .bar), (.link, .bar):
+            return ctaMetrics(small: small, weight: .semibold)
+        case (.glass, .inline), (.destructive, .inline):
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.controlLarge, horizontalPadding: inlinePadding,
+                                      type: GlassTokens.TypeScale.label.weight(.semibold))
+        case (.link, .inline):
+            return GlassButtonMetrics(minHeight: nil, horizontalPadding: nil,
+                                      type: GlassTokens.TypeScale.label.weight(.semibold))
+        case (.submit, _):
+            // The tree row's pill; never in an action bar.
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.submitPill, horizontalPadding: submitPadding,
+                                      type: GlassTokens.TypeScale.caption.weight(.bold))
+        }
+    }
+
     public func makeBody(configuration: Configuration) -> some View {
-        GlassButtonBody(kind: kind, small: small, selected: selected, configuration: configuration)
+        GlassButtonBody(kind: kind, metrics: Self.metrics(kind, size: size, small: small), selected: selected, configuration: configuration)
     }
 
     /// The fill a kind gets under the pointer, in place of its own fill
@@ -71,7 +151,7 @@ public struct GlassButtonStyle: ButtonStyle {
 
 private struct GlassButtonBody: View {
     let kind: GlassButtonKind
-    let small: Bool
+    let metrics: GlassButtonMetrics
     let selected: Bool
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
@@ -93,61 +173,50 @@ private struct GlassButtonBody: View {
     private var label: some View {
         switch kind {
         case .primary:
-            configuration.label
-                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, small ? 14 : 16)
-                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
                 .glassEdge(isEnabled ? GlassTokens.Shadow.ctaEdge : Array(GlassTokens.Shadow.ctaEdge.prefix(2)), in: Capsule())
         case .secondary:
-            configuration.label
-                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, 14)
-                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaSecondaryFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaSecondaryEdge, in: Capsule())
         case .glass where selected:
             // One of a set, chosen: the CTA's purple (#1146 glass.css,
             // `.tc-btn--glass[aria-pressed="true"]`).
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaEdge, in: Capsule())
         case .glass:
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassColor.textPrimary)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .glassSurface(.control, hover: GlassButtonStyle.hoverFill(kind, selected: selected))
         case let .submit(done):
-            configuration.label
-                .glassType(GlassTokens.TypeScale.caption.weight(.bold))
+            box
                 .foregroundStyle(GlassButtonStyle.submitInk(done: done, enabled: isEnabled).color)
-                .padding(.horizontal, 10)
-                .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
         case .destructive:
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassButtonStyle.destructiveInk.color)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .glassSurface(.control, hover: GlassButtonStyle.hoverFill(kind, selected: selected))
         case .link:
             // No fill to darken: the text takes the press instead, and the
             // pointer underlines it.
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassColor.accentText)
                 .underline(hovering && isEnabled)
                 .glassPressedFill()
         }
+    }
+
+    /// The label in its kind's box at its size (`GlassButtonStyle.metrics`).
+    private var box: some View {
+        configuration.label
+            .glassType(metrics.type)
+            .padding(.horizontal, metrics.horizontalPadding ?? 0)
+            .frame(minHeight: metrics.minHeight)
     }
 }
 

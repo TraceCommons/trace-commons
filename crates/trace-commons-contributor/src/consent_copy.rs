@@ -637,11 +637,40 @@ pub const AUTO_SCOPE_REQUIRED: &str = "Automatic contributing needs your choice 
 /// armed when its first one lands.
 pub const AUTO_PATH_AUTOMATIC: &str = "Contribute automatically from projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
 
+/// The automatic path's first line, which a shell shows on its own with
+/// [`AUTO_PATH_AUTOMATIC_DETAIL`] behind an info button.
+///
+/// Approved 2026-10-08 (owner, dictated).
+pub const AUTO_PATH_AUTOMATIC_TITLE: &str =
+    "Contribute automatically from projects that first appear.";
+
+/// The rest of [`AUTO_PATH_AUTOMATIC`], behind the title line's info
+/// button, so the K3/K4 meaning is all still said: only projects that first
+/// appear after the grant are armed, and a project with sessions on disk
+/// keeps asking.
+///
+/// First sentence: approved 2026-10-08 -- written from the owner's example, to keep "after you turn this on" now that the title
+/// line drops it. Second sentence: [`AUTO_PATH_AUTOMATIC`]'s own, approved
+/// 2026-10-06.
+pub const AUTO_PATH_AUTOMATIC_DETAIL: &str = "Only projects that first appear after you turn this on. Projects that already have sessions on this computer keep asking first.";
+
 /// The ask-first path, as the path question offers it.
 ///
-/// Approved 2026-10-06. "Contributed", not "sent": reviewing with a
-/// witness or the privacy scan sends a session somewhere before approval.
-pub const AUTO_PATH_ASK_FIRST: &str = "Review each session yourself. Nothing is contributed until you approve it, and you can set a project to contribute automatically later.";
+/// Approved 2026-10-06; the closing clause ("and you can set a project to
+/// contribute automatically later") removed by the owner 2026-10-08.
+/// "Contributed", not "sent": reviewing with a witness or the privacy scan
+/// sends a session somewhere before approval.
+pub const AUTO_PATH_ASK_FIRST: &str =
+    "Review each session yourself. Nothing is contributed until you approve it.";
+
+/// The ask-first path's first line, shown on its own with
+/// [`AUTO_PATH_ASK_FIRST_DETAIL`] behind an info button. Approved
+/// 2026-10-08 (owner, dictated).
+pub const AUTO_PATH_ASK_FIRST_TITLE: &str = "Review each session yourself.";
+
+/// The rest of [`AUTO_PATH_ASK_FIRST`]. Approved 2026-10-08 (owner,
+/// dictated).
+pub const AUTO_PATH_ASK_FIRST_DETAIL: &str = "Nothing is contributed until you approve it.";
 
 /// The short tag beside the floor scope (`consent_options`' `always_on`).
 /// One spelling, read by `consent_options` and the first-run Uses screen
@@ -731,6 +760,13 @@ pub struct AutomaticGrantCopy {
     pub scope_required: &'static str,
     pub path_automatic: &'static str,
     pub path_ask_first: &'static str,
+    /// The path answers split for a shell that shows one line and puts the
+    /// rest behind an info button (the first run's Sharing card). Together
+    /// each pair says what its whole sentence says.
+    pub path_automatic_title: &'static str,
+    pub path_automatic_detail: &'static str,
+    pub path_ask_first_title: &'static str,
+    pub path_ask_first_detail: &'static str,
     pub raw_send: &'static str,
 }
 
@@ -766,6 +802,10 @@ pub fn automatic_grant_copy(
         scope_required: AUTO_SCOPE_REQUIRED,
         path_automatic: AUTO_PATH_AUTOMATIC,
         path_ask_first: AUTO_PATH_ASK_FIRST,
+        path_automatic_title: AUTO_PATH_AUTOMATIC_TITLE,
+        path_automatic_detail: AUTO_PATH_AUTOMATIC_DETAIL,
+        path_ask_first_title: AUTO_PATH_ASK_FIRST_TITLE,
+        path_ask_first_detail: AUTO_PATH_ASK_FIRST_DETAIL,
         raw_send: AUTO_RAW_SEND_BOTH_ENCLAVES,
     }
 }
@@ -2844,6 +2884,32 @@ mod tests {
         // not every folder that exists: an empty one is armed.
         assert!(AUTO_PATH_AUTOMATIC.contains("already have sessions"));
         assert!(!AUTO_PATH_AUTOMATIC.contains("already on this computer"));
+    }
+
+    /// The split path answers (owner, 2026-10-08) lose nothing: the
+    /// ask-first pair is its sentence exactly, and the automatic detail
+    /// still says the grant arms only projects that appear after it and
+    /// that a project with sessions on disk keeps asking.
+    #[test]
+    fn the_split_path_answers_keep_their_whole_meaning() {
+        assert_eq!(
+            format!("{AUTO_PATH_ASK_FIRST_TITLE} {AUTO_PATH_ASK_FIRST_DETAIL}"),
+            AUTO_PATH_ASK_FIRST
+        );
+        assert!(!AUTO_PATH_ASK_FIRST.contains("later"));
+        assert!(AUTO_PATH_AUTOMATIC.starts_with(AUTO_PATH_AUTOMATIC_TITLE.trim_end_matches('.')));
+        assert!(AUTO_PATH_AUTOMATIC_DETAIL.contains("after you turn this on"));
+        assert!(AUTO_PATH_AUTOMATIC_DETAIL.contains("already have sessions"));
+        assert!(
+            AUTO_PATH_AUTOMATIC_DETAIL.ends_with(
+                "Projects that already have sessions on this computer keep asking first."
+            )
+        );
+        let copy = automatic_grant_copy(crate::daemon::automatic_gate::Disclosure::PatternsOnly);
+        assert_eq!(copy.path_ask_first_title, AUTO_PATH_ASK_FIRST_TITLE);
+        assert_eq!(copy.path_ask_first_detail, AUTO_PATH_ASK_FIRST_DETAIL);
+        assert_eq!(copy.path_automatic_title, AUTO_PATH_AUTOMATIC_TITLE);
+        assert_eq!(copy.path_automatic_detail, AUTO_PATH_AUTOMATIC_DETAIL);
     }
 
     /// The statement, character for character.

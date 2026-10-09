@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -651,7 +652,8 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(forwarded.holdsEnrolment)
 
         let signedOut = FirstRunState(account: .none, signedOutOfEnrolment: true)
-        XCTAssertEqual(JoinScreenLayout.footerTitle(signedOut, copy: copy), copy.frame.continueButton)
+        // Nothing signed into: "Skip", with no watch-only note, held back.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(signedOut, copy: copy), copy.join.skip)
         XCTAssertNil(JoinScreenLayout.footerNote(signedOut, copy: copy))
         XCTAssertFalse(JoinScreenLayout.canForward(signedOut))
         XCTAssertEqual(JoinScreenLayout.forward(signedOut), signedOut, "nothing to go on as")
@@ -749,7 +751,10 @@ final class JoinScreenTests: XCTestCase {
         // watch-only Start would act under it and could never finish (the
         // marker is refused while the daemon is logged in).
         XCTAssertTrue(out.daemonHoldsEnrolment)
-        XCTAssertNotEqual(JoinScreenLayout.footerTitle(out, copy: copy), copy.join.skip)
+        // No account is signed into, so the button reads "Skip" (owner
+        // ruling, 2026-10-08), but it cannot go on until one is chosen.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(out, copy: copy), copy.join.skip)
+        XCTAssertNil(JoinScreenLayout.footerNote(out, copy: copy))
         XCTAssertFalse(JoinScreenLayout.canForward(out))
         var watching = out
         watching.account = .watchOnly
@@ -870,6 +875,81 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(runner.state.signedOutOfEnrolment)
     }
 
+    /// An enrollment recorded with no invite (an earlier run joined through
+    /// near.ai or a passkey, or the daemon was enrolled already: the demo's
+    /// pre-seeded config) once read "Joined Unknown · Unknown" on the invite
+    /// card. It joined no invite the shell knows of, so the card shows its
+    /// invite field, closed, and no joined line. A real joined invite still
+    /// reads Joined, with its field gone.
+    func test_anEnrolmentWithNoInviteShowsTheFieldAndNoJoinedLine() throws {
+        let copy = try coreCopy()
+        let resumed = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
+        XCTAssertEqual(resumed.enrolledInvite, "")
+        XCTAssertFalse(JoinScreenLayout.joinedInvite(resumed))
+        XCTAssertEqual(JoinScreenLayout.inviteLine(resumed, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(resumed))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(resumed), "no second invite over the enrollment")
+
+        var joined = resumed
+        joined.enrolledInvite = "invite:issuer.example"
+        joined.issuerHost = "issuer.example"
+        XCTAssertTrue(JoinScreenLayout.joinedInvite(joined))
+        guard case .joined(let line) = JoinScreenLayout.inviteLine(joined, lookup: nil, failure: nil, copy: copy.join)
+        else { return XCTFail("a joined invite reads Joined") }
+        XCTAssertTrue(line.contains("issuer.example"))
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(joined))
+
+        // A fresh Join shows the open field; a held passkey shows none.
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(FirstRunState()))
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(FirstRunState()))
+        var passkey = FirstRunState()
+        passkey.account = .passkey(name: "Mine")
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(passkey))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("if JoinScreenLayout.showsInviteField(runner.state) {"))
+        XCTAssertTrue(source.contains(".disabled(!editable)"))
+        let lookUp = try XCTUnwrap(source.range(of: "private func lookUp() {"))
+        XCTAssertTrue(
+            String(source[lookUp.upperBound...].prefix(120))
+                .contains("guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }"))
+    }
+
+    /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, an
+    /// extra gap sets the cards apart from the body, and the no-sharing line
+    /// is an action note: directly above the action bar through the frame's
+    /// slot, not in the cards (owner ruling, 2026-10-08).
+    func test_joinLaysOutItsBodyAndCardsAsRuled() throws {
+        let source = try Self.source()
+        // One paragraph, in the body's regular weight and ink (owner
+        // ruling, 2026-10-08).
+        XCTAssertEqual(source.components(separatedBy: "Text(copy.join.body").count - 1, 1)
+        let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
+        let bodyStyle = String(source[body.upperBound...].prefix(200))
+        XCTAssertTrue(bodyStyle.contains(".glassType(GlassTokens.TypeScale.body)\n"))
+        XCTAssertTrue(bodyStyle.contains(".foregroundStyle(GlassColor.textSecondary)"))
+
+        // The no-sharing line is the frame's action note, in no card and
+        // not in the scrolling content (owner ruling, 2026-10-08).
+        XCTAssertFalse(source.contains("GlassCard(quiet: true)"))
+        XCTAssertFalse(source.contains("Text(copy.join.noSharing)"), "drawn in the content")
+        XCTAssertEqual(source.components(separatedBy: "copy.join.noSharing").count - 1, 1)
+        XCTAssertTrue(source.contains("actionNote: copy.join.noSharing,"))
+        let frameCall = try XCTUnwrap(source.range(of: "FirstRunFrame("))
+        let content = try XCTUnwrap(source.range(of: "} content: {", range: frameCall.upperBound..<source.endIndex))
+        let note = try XCTUnwrap(source.range(of: "actionNote: copy.join.noSharing"))
+        XCTAssertLessThan(frameCall.lowerBound, note.lowerBound)
+        XCTAssertLessThan(note.lowerBound, content.lowerBound, "an argument of the frame, not content")
+
+        // The extra gap, a spacing token, above the invite card, and
+        // nowhere else.
+        XCTAssertEqual(JoinScreenLayout.extraGap, GlassTokens.Space.s4)
+        XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 1)
+        let invite = try XCTUnwrap(source.range(of: "inviteCard\n                .padding(.top, JoinScreenLayout.extraGap)"))
+        let passkey = try XCTUnwrap(source.range(of: "passkeyCard\n            nearAICard"))
+        XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
+    }
+
     /// Every word on Join is the core's: the file holds no literal of two or
     /// more words, and reads each card's words from `copy.join`.
     func test_joinAuthorsNoSentence() throws {
@@ -890,7 +970,7 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertLessThan(words.count, 2, "authored: \(text)")
         }
         for field in [
-            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
+            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
             "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
             "copy.passkeyChosen", "copy.frame.undo",
