@@ -34,6 +34,11 @@ has no `--bundle` option and no `--archive` option, and it writes nothing
 to the lab catalog. It is independent of `pipeline.py qualify` and adds no
 check to the required check set.
 
+The command needs Docker for its PostgreSQL container, or
+`--postgres-admin-url URL` for a server that exists. The two work as they
+do for `pipeline.py run`; see
+[pipeline-qualification.md](pipeline-qualification.md#the-environment-container-digest---postgres-admin-url-one-server-at-a-time).
+
 ### The pins
 
 `--corpus` takes a comparison pin. A comparison pin is an HF pin descriptor
@@ -66,22 +71,13 @@ gives `pipeline_comparison_hf`.
    `holdout-compare.jsonl` (one trace on each line) and
    `source-manifest.json`. Each digest that the pin has must equal the
    digest of the manifest. This step comes before any database starts.
-3. It opens one `Environment` (see
-   [pipeline-qualification.md](pipeline-qualification.md#the-environment-container-digest---postgres-admin-url-one-server-at-a-time)).
-   `--postgres-admin-url URL` works as it does for `pipeline.py run`.
-4. It runs the harness, the ignored Rust test
+3. It runs the harness, the ignored Rust test
    `pipeline_compare_pg_tests::pipeline_compare_run`. The harness checks the
    two corpus files against the manifest, derives the floors, starts one app
    with two tenants, and sends each trace through the two sides in the order
    of the files. It writes two records for each trace and one report.
-5. It requires 5 or more committed transactions in the scenario database.
-6. It validates the report, and it requires that the report is the report
-   of this run (the check id, the five pin digests, the trace count).
-7. For a full run, it requires a current pass result whose evidence agrees
-   with the report.
-8. It examines the tree again. A file that changed during the run gives
-   `code_revision_changed`.
-9. It writes the latest report under `.local/` and prints one line.
+4. It checks the report against this run, writes the latest report under
+   `.local/`, and prints one line.
 
 A pass prints one line to stdout and exits with 0:
 
@@ -89,8 +85,8 @@ A pass prints one line to stdout and exits with 0:
 PipelineCompareOK: traces=10 equal=10 permitted=0 unexplained=0 partial=false seconds=12 run=q0af28b7a report=.local/pipeline-comparison-pipeline_comparison_local.json
 ```
 
-`seconds=` is the time of steps 4 to 6. It includes the build of the test
-binary when the command builds, so it is not the time of the comparison.
+`seconds=` is the time of step 3. It includes the build of the test binary
+when the command builds, so it is not the time of the comparison.
 The timing file of the run (`compare_run-timing.jsonl` in the run
 directory) has the time of each trace; see
 [Where the files are](#where-the-files-are).
@@ -144,17 +140,13 @@ for an activation: it emits no check result, and it writes no report under
 and for the harness. `compare --self-test` uses the debug build. There is
 no option for this.
 
-Measured on a 12-core server:
+Measured on one machine, a 12-core server:
 
-- The first `compare --corpus` makes the optimized build: about 5 minutes.
+- The first optimized build in a checkout takes about 5 minutes.
 - `compare --corpus` on `pin-local.json` takes about 12 s after the build.
 - `compare --self-test` takes about 45 s after the build.
-- One trace takes about 0.6 s in the debug build. The pipeline worker
-  starts a pass each 200 ms, and that interval, not the harness, sets the
-  time of the candidate side.
 
-The optimized build and the debug build gave the same floors and the same
-digests on `pin-local.json`.
+The times of the network pin are in [Time and memory](#time-and-memory).
 
 ## What is compared
 
@@ -195,15 +187,16 @@ Rules of the comparison:
 - `admission` has five values: `admit`, `quarantine`, `reject`, `refused`
   (the receipt did not answer 200), and `other` (a state that is none of
   the three decisions).
-- Two records that are not of one trace give the field name `record_pair`.
 
 Each trace gets one result: `equal`, `permitted` with the rule names, or
 `unexplained` with the field names. No rule permits a difference in a
 compared field today, so the tool never gives `permitted`.
 
-A record also has fields that are not compared: `position`, `partition`,
-`trace_hash`, `side`, `review`, `review_source`, and
-`gate_skipped_by_alignment`.
+Three fields of a record are not compared: `review`, `review_source`, and
+`gate_skipped_by_alignment`. The fields `position`, `partition`,
+`trace_hash`, and `side` identify the pair. If they do not agree, or if
+`scored` does not agree with the gate values of a record, the result names
+`record_pair` only.
 
 Three groups of values are not in a record and are not compared. Each has a
 named rule, and each report lists the three rules in `excluded_rules`:
@@ -321,6 +314,50 @@ up to `compared_count`. A position counts through the two partitions, from
 public dataset. This is intended, so that a person can reproduce a
 difference. Do not use the comparison on a corpus that is not public.
 
+### Find the trace of a difference
+
+An entry of `unexplained` names a trace by `position` and `trace_hash`. To
+find the input of that trace:
+
+1. Take the two corpus files of the run, in `compare/corpus/` of the run
+   directory. If you removed them, make them again with the export command
+   of [The download](#the-download), which writes them to
+   `.local/pipeline/compare-pin-check-hf/`. The export of one pin gives the
+   same bytes each time.
+2. Count through the two files, bootstrap first, from 0. The positions 0 to
+   `bootstrap_count - 1` are the lines of `bootstrap-compare.jsonl`, in
+   order. Each later position is a line of `holdout-compare.jsonl`. For the
+   network pin, position 1,003 is line 4 of `holdout-compare.jsonl`.
+3. Check the line: `trace_hash` is `sha256:` and the SHA-256 of the
+   `trace_id` text of that line.
+
+This command does steps 2 and 3. It prints the file, the line number, and
+the hash, and no trace text:
+
+```bash
+CORPUS=.local/pipeline/runs/q0af28b7a/compare/corpus  # the directory of step 1
+POSITION=4                                            # `position` in the report
+python3 - "$CORPUS" "$POSITION" <<'EOF'
+import hashlib, json, sys
+corpus = sys.argv[1]
+position = int(sys.argv[2])
+bootstrap = json.load(open(f"{corpus}/source-manifest.json"))["bootstrap_count"]
+name, index = ("bootstrap", position) if position < bootstrap else ("holdout", position - bootstrap)
+with open(f"{corpus}/{name}-compare.jsonl") as lines:
+    for number, line in enumerate(lines):
+        if number == index:
+            trace_id = json.loads(line)["trace_id"]
+            print(f"{name}-compare.jsonl line {index + 1}")
+            print("sha256:" + hashlib.sha256(trace_id.encode()).hexdigest())
+EOF
+```
+
+The line holds the recorded trace (`trace_file`) that the run sent to the
+two sides. It does not hold the name of the dataset file: line `n` of the
+sample is the `n`-th file, in name order, that the export accepted. The two
+records of the trace are the lines `2 * position + 1` (baseline) and
+`2 * position + 2` (candidate) of the records file.
+
 ### When a run is evidence
 
 A run fails when its report names one of these, in this order:
@@ -364,7 +401,8 @@ no named failure is kept under the name with the suffix `-failed`. Such a
 report reads as the report of a pass, and no check result exists for it.
 The name without a suffix is written only for a full run that passed, or
 for a full run whose report names its own failure. The line
-`PipelineCompareOK` is the proof of a pass.
+`PipelineCompareOK` is the proof that the run passed. It is evidence only
+when it says `partial=false`.
 
 The run directory `.local/pipeline/runs/<run id>/` holds:
 
@@ -374,13 +412,9 @@ The run directory `.local/pipeline/runs/<run id>/` holds:
 - `compare_run-records.jsonl`: two lines of canonical JSON for each trace,
   the baseline record and then the candidate record. A record holds only
   numbers, enumerations, hashes, and labels.
-- `compare_run-timing.jsonl`: the timing file. Its first line has
-  `calibration_seconds`. Each later line has the `position` of one trace,
-  its `chunk_count`, and five times in milliseconds:
-  `baseline_receipt_ms`, `baseline_gate_ms`, `candidate_receipt_ms`,
-  `candidate_wait_ms`, and `reads_ms`. The timing file is not part of the
-  report or of a digest. A write error of this file prints
-  `compare_timing_write_failed` to the step log and does not fail the run.
+- `compare_run-timing.jsonl`: the timing file. It has the time of the
+  calibration and the time of each trace. It is not part of the report or
+  of a digest.
 - `logs/compare_export_corpus.log` and `logs/compare_run.log`: the
   protected logs of the two steps.
 - `results/`: the check result and its evidence, for a full run that
@@ -393,9 +427,9 @@ The run directory `.local/pipeline/runs/<run id>/` holds:
 
 ### Results that a second run can fail to repeat
 
-Two runs of one pin on one machine, one checkout path, and one date give
-the same `records_digest` and the same `report_digest`. Three conditions
-can change a result:
+Two runs of one pin on one machine, one checkout path, and one date
+normally give the same `records_digest` and the same `report_digest`. Three
+conditions can change a result:
 
 - The two credit-quality values (`credit_quality_micros` and
   `credit_quality_version`) depend on the run date, because each side
@@ -478,13 +512,6 @@ What a passing report does not show:
 
   A deployment that sets other values has a different old path, and the
   report says nothing about it.
-- **What identifies the baseline of one run.** The code: the code revision
-  hash in the check result. The gate configuration: `configuration_digest`,
-  `bundle_id`, and `floors` in the report. The fixed state values of the
-  items above are constants in the harness code, so the code revision
-  covers them.
-- **Two build profiles.** `compare --corpus` uses Cargo's optimized build,
-  and `--self-test` uses the debug build.
 - **An early stop.** A run stops at the first pair after which the two
   indexes can differ (see [Alignment](#alignment)). The traces after that
   pair are not compared, and the report is partial unless that pair is the
@@ -500,8 +527,9 @@ What a passing report does not show:
 
 `pipeline.py` never prints a child command's own output. A failure is one
 safe label on stderr, as `PipelineFailure: <label>`. See
-[pipeline-lab.md](pipeline-lab.md#failure-labels) for the form of the line
-and for the labels that all commands share.
+[pipeline-lab.md](pipeline-lab.md#failure-labels) for the form of the line.
+The labels that `compare` shares with the other commands are in
+[Labels of the shared tooling](#labels-of-the-shared-tooling).
 
 The harness is a child. `pipeline.py` shows a harness failure in one of two
 ways:
@@ -531,7 +559,7 @@ Printed by `pipeline.py` before the export:
 | `compare_limit_invalid` | `--limit` is below 1. The harness also gives this label for a limit variable that is not a positive integer. |
 | `comparison_pin_unreadable` | The pin file cannot be read, or it is not a JSON object. |
 | `comparison_pin_without_events` | The pin does not have `with_events: true`. |
-| `comparison_pin_digest_missing` | The pin lacks one of the five digests, and the run is not a partial run. The report builder also gives this label when the manifest lacks a digest. |
+| `comparison_pin_digest_missing` | The pin lacks one of `configuration_digest`, `bootstrap_corpus_digest`, and `holdout_corpus_digest`, and the run is not a partial run. |
 | `comparison_pin_field_needs_local_dir` | The pin has `session_names` or `declared_privacy_risk` and no `local_jsonl_dir`. |
 
 ### The export
@@ -543,42 +571,23 @@ Printed by `pipeline.py` after the export:
 | `comparison_manifest_malformed` | The export left no `source-manifest.json`, or the manifest is not a JSON object, or it lacks one of the five digests or a whole `sample_count`. |
 | `comparison_manifest_without_events` | The manifest does not say that the export had `--with-events`. |
 
-A digest of the manifest that differs from the pin gives
-`hf_<field>_mismatch`, for example `hf_bootstrap_corpus_digest_mismatch`. A
-source or an order that changed fails in the export itself
-(`step_failed:compare_export_corpus`).
-
-### The harness: its input
+### The harness: before the first trace
 
 In the log of the step:
 
 | Label | Cause |
 |---|---|
-| `compare_bootstrap_path_missing`, `compare_holdout_path_missing`, `compare_manifest_path_missing`, `compare_check_id_missing`, `compare_report_path_missing`, `compare_records_path_missing` | A harness variable is not set or is empty. `pipeline.py` sets each one. |
-| `compare_check_id_invalid` | The check id is not one of the two check ids. |
-| `compare_skew_invalid` | The skew variable is not `baseline_quality_floor`. |
-| `compare_database_url_missing` | `TRACE_COMMONS_PG_TEST_DATABASE_URL` is not set. A configured run never skips. |
-| `compare_manifest_invalid` | The manifest cannot be read or parsed, or it lacks a digest or `sample_count`. |
-| `compare_manifest_without_events` | The manifest is of an export without `--with-events`. |
+| `compare_bootstrap_path_missing`, `compare_holdout_path_missing`, `compare_manifest_path_missing`, `compare_check_id_missing`, `compare_report_path_missing`, `compare_records_path_missing`, `compare_check_id_invalid`, `compare_skew_invalid`, `compare_database_url_missing` | A harness variable is not set, is empty, or has a value that is not valid. `pipeline.py` sets each one. |
+| `compare_manifest_invalid`, `compare_manifest_without_events` | The manifest cannot be read or parsed, it lacks a digest or `sample_count`, or it is of an export without `--with-events`. |
 | `compare_corpus_read_failed` | A corpus file cannot be opened or read. |
 | `compare_corpus_digest_mismatch` | A corpus file does not have the digest of the manifest. The harness checks this before the first trace and again after the last. |
 | `compare_trace_count_mismatch` | The two corpus files do not have `sample_count` lines together, or the run compared a number of traces that is not the limit or the trace count. |
 | `compare_corpus_line_invalid` | A line of a corpus file is not a valid fixture. The log has `partition=` and `line=` (the line number in that file, from 1). |
 | `compare_output_write_failed` | The records file or the report directory cannot be created or written. |
-
-### The harness: the calibration and the app
-
-| Label | Cause |
-|---|---|
-| `compare_envelope_failed` | The redactor gave an error, or an envelope could not be serialized. |
-| `comparison_calibration_failed` | The gate evaluation of a bootstrap trace failed. |
-| `comparison_calibration_invalid` | The three lists of measured values do not have one length. |
-| `comparison_calibration_empty` | The bootstrap partition has no trace. |
+| `compare_envelope_failed` | The redactor gave an error, or an envelope could not be serialized, in the calibration or for one trace. |
+| `comparison_calibration_failed`, `comparison_calibration_invalid`, `comparison_calibration_empty` | The calibration could not measure the bootstrap partition: a gate evaluation failed, the three lists of values do not have one length, or the partition has no trace. |
 | `comparison_floors_all_zero` | Each of the three derived floors is zero. |
-| `compare_pipeline_assembly_failed` | The candidate's pipeline runtime could not be assembled, for example because ingest refused the bundle. |
-| `compare_submission_quota_enabled` | The test state has a submission quota. The harness requires none. |
-| `compare_driver_configured` | The test state has a perplexity score driver or a PII backstop driver. The harness requires none. |
-| `compare_http_client_failed` | The HTTP client could not be built. |
+| `compare_pipeline_assembly_failed`, `compare_submission_quota_enabled`, `compare_driver_configured`, `compare_http_client_failed` | The app could not start as the harness requires: the pipeline runtime could not be assembled, the test state has a submission quota, a perplexity score driver, or a PII backstop driver, or the HTTP client could not be built. |
 | `compare_candidate_bundle_mismatch` | The candidate tenant's active bundle is not the bundle of this run. A tenant keeps its first bundle, so the database held that tenant already, with other floors. |
 
 ### The harness: the run
@@ -596,10 +605,7 @@ fails. A probe label is different: the harness panics at once.
 | `compare_baseline_scored_twice` | The baseline has more than one gate decision for the trace, so its index holds the trace twice. |
 | `compare_baseline_derived_clear_failed` | An I/O error while the harness removed the baseline tenant's derived files. |
 | `compare_record_value_unsafe` | A record holds a text that is not a hash, a risk label, or a safe label. The record is not written. |
-| `compare_probe_in_request` | A request body holds a harness token. The harness panics at once. |
-| `compare_probe_in_response` | A response body holds a token, the `secret_probe` of the trace, or the start of its text. The harness panics at once. |
-| `compare_probe_in_record` | A record holds one of these probes. The harness panics at once. |
-| `compare_probe_in_report` | The report holds one of these probes. The report is not written. |
+| `compare_probe_in_request`, `compare_probe_in_response`, `compare_probe_in_record`, `compare_probe_in_report` | A request body holds a harness token; or a response body, a record, or the report holds a token, the `secret_probe` of the trace, or the start of its text. That record or report is not written. |
 | `comparison_report_invalid` | The report could not be built as canonical JSON. |
 | `compare_app_stop_failed` | The app stopped before the harness stopped it. |
 | `compare_timing_write_failed` | The timing file cannot be created or written. This is one line in the log, and the run continues. |
@@ -615,30 +621,19 @@ fails. A probe label is different: the harness panics at once.
 
 ### The report and the check result
 
-Printed by `pipeline.py` after the harness:
+Printed by `pipeline.py` after the harness. Each label of this table is a
+defect of the harness or of the tooling, not a difference between the two
+sides. Keep the run directory.
 
 | Label | Cause |
 |---|---|
-| `comparison_report_missing` | The harness passed and left no report. |
-| `comparison_report_malformed` | The report is not JSON, lacks a field, has a field that the harness does not write, or holds a value of the wrong type. |
-| `comparison_count_mismatch` | The counts of the report do not agree: the three result counts and `compared_count`, the length of `unexplained`, or `compared_count` above `trace_count`. |
-| `comparison_partial_mismatch` | `partial` does not agree with `compared_count` and `trace_count`. |
-| `comparison_report_check_mismatch` | The report names another check id. |
-| `comparison_report_pin_mismatch` | The report does not name the five digests of the export manifest. |
-| `comparison_report_trace_count_mismatch` | `trace_count` is not `sample_count` of the manifest. |
-| `comparison_report_skew_mismatch` | The report names a skew that this run did not set, or it lacks the skew that the run set. |
-| `comparison_skew_with_check_result` | A report with a skew, and a check result exists. |
-| `comparison_compared_count_mismatch` | A harness that passed compared a number of traces that is not the limit or the trace count. |
-| `comparison_check_results_unexpected` | A partial run left a check result, or a full run left a result that is not its own. |
-| `comparison_report_package_mismatch` | The check result and the report name different package digests. |
-| `comparison_evidence_malformed` | The evidence file cannot be read, or it is not JSON. |
-| `comparison_evidence_mismatch` | The evidence does not equal the counts of the report and the hashes of the records file and the report file. |
-| `comparison_records_missing` | The records file cannot be read. |
+| `comparison_report_missing`, `comparison_report_malformed`, `comparison_count_mismatch`, `comparison_partial_mismatch` | The harness passed, but its report is absent or not valid: it is not JSON, it lacks a field or has a field that the harness does not write, a value has the wrong type, or its counts do not agree with each other. |
+| `comparison_report_check_mismatch`, `comparison_report_pin_mismatch`, `comparison_report_trace_count_mismatch`, `comparison_report_skew_mismatch`, `comparison_compared_count_mismatch` | The report is not the report of this run: it names another check id, other pin digests than the export manifest, another trace count, or another skew, or a pass compared a number of traces that is not the limit or the trace count. |
+| `comparison_check_results_unexpected`, `comparison_skew_with_check_result` | A check result exists where none can: for a partial run, for a report with a skew, or a result that is not the result of this check. |
+| `comparison_report_package_mismatch`, `comparison_evidence_malformed`, `comparison_evidence_mismatch`, `comparison_records_missing` | For a full run that passed, the check result does not agree with the report: the package digests differ, the evidence file cannot be read, the evidence does not equal the counts and the two file hashes, or the records file cannot be read. |
 
-The privacy checks of the report give the labels of a corpus report, for
-example `unsafe_report`, `report_digest_mismatch`, and
-`invalid_report_hash`. An invalid report of a harness that failed is left
-out, and the step failure is shown.
+An invalid report of a harness that failed is left out, and the step
+failure is shown.
 
 ### The self-test
 
@@ -650,6 +645,26 @@ out, and the step failure is shown.
 | `compare_self_test_skew_passed` | Scenario 3 passed. The comparison did not find the changed floor. |
 | `compare_self_test_skew_fields` | Scenario 3 failed, but its report lacks the skew, the alignment position, or `quality_passed`. |
 | `compare_self_test_not_deterministic` | Scenario 4 gave a `report_digest` that is not the digest of scenario 1. |
+
+### Labels of the shared tooling
+
+`compare` can also give these labels, which it shares with `pipeline.py run`
+and `qualify`:
+
+| Label | Cause |
+|---|---|
+| `unsupported_pin_schema`, `pin_missing_field` | The pin does not have the schema `trace_commons.pipeline_hf_corpus_pin.v1`, or it lacks a required field, for example `source_digest` or `order_digest`. |
+| `step_failed:<step>` | A child step, an export or the harness, exited with a code that is not 0. The line also has `exit=` and `log=`. |
+| `cargo_test_list_failed:<step>`, `cargo_filter_matched_zero_tests` | The list step of `cargo test` failed, usually with a compile error, or the name of the harness test matched no test. |
+| `hf_<field>_mismatch`, `hf_manifest_contains_raw_trace_text` | A digest of the export manifest is not the digest of the pin (for example `hf_bootstrap_corpus_digest_mismatch`), or the manifest does not say `contains_raw_trace_text: false`. A source or an order that changed fails earlier, in the export itself (`step_failed:compare_export_corpus`). |
+| `pipeline_tooling_container_start_failed`, `pipeline_tooling_container_not_ready`, `pipeline_tooling_container_port_unavailable`, `pipeline_tooling_admin_url_invalid`, `pipeline_tooling_server_busy` | The environment could not start. Docker could not start the container, its server did not get ready, or its port could not be read; or the admin URL does not have the host `127.0.0.1` and the user `trace`; or another `pipeline.py` command holds that server. |
+| `database_check_executed_nothing:<step>` | The harness passed, but the scenario database shows fewer than 5 committed transactions. |
+| `unsupported_report_schema`, `invalid_report_scope`, `payout_enabled`, `missing_local_blockers`, `unsafe_report`, `unsafe_report_field`, `unsafe_report_value`, `private_report_field`, `invalid_report_check_id`, `invalid_report_hash`, `report_digest_mismatch` | The report of a harness that passed fails a check that it shares with a corpus report: the schema, the scope, the payout flag, the blockers, a field name or a value that is not safe, the check id, the form of a hash, or the digest of the report. |
+| `check_result_missing:<check id>`, and each other `check_result_*` or `check_evidence_*` label | A full run that passed did not leave a valid, current pass result of its own. See [pipeline-qualification.md](pipeline-qualification.md#the-result-contract-and-what-makes-a-result-invalid). |
+| `code_revision_changed` | A file of the tree changed while the command ran. The report is not written under `.local/`. |
+| `cleanup_failed` | The environment could not remove its container or its databases. |
+| `pipeline_check_environment_invalid`, `pipeline_check_environment_incomplete`, `pipeline_check_already_emitted` | In the log of the harness step. The check result variables are not valid or not complete, or a result of this check id exists already in the results directory. |
+| `pipeline_output_directory_unwritable`, `pipeline_output_unwritable` | In the log of the harness step. The harness could not write its report file. |
 
 ## The full run
 
@@ -675,12 +690,12 @@ The first export of the network pin cannot complete in one run. Hugging
 Face limits a client with no token to 3,000 file requests in each window
 of 300 s. The server states this policy in a response header:
 `ratelimit-policy: "fixed window";"resolvers";q=3000;w=300` (read on
-2026-10-09; the limit is theirs and can change). The export uses about
-three requests for each new file. It thus gets 1,000 to 1,600 new files,
-and then a download fails with `429 Too Many Requests`. The export does not
-wait for the next window: it makes one more attempt at once, and then it
-stops with exit code 1. The files that it got stay in the cache, and the
-next run continues from the cache.
+2026-10-08; the limit is theirs and can change). In one window of 3,000
+requests, the export got about 1,000 to 1,500 new files, and then a
+download failed with `429 Too Many Requests`. The export does not wait for
+the next window: it makes one more attempt at once, and then it stops with
+exit code 1. The files that it got stay in the cache, and the next run
+continues from the cache.
 
 Thus the first export needs several runs of the export command, one for
 each window. Run this command from the repository root, with `HF_ENDPOINT`
@@ -707,17 +722,13 @@ curl -sI https://huggingface.co/datasets/jedisct1/security-audits/resolve/6d527f
   | grep -i '^ratelimit:'
 ```
 
-In `ratelimit: "resolvers";r=0;t=211`, `r` is the number of requests that
-are left, and `t` is the number of seconds to the reset. Do not start a run
-when `r` is 0.
-
-A download can also fail with a transport error, for example
-`error decoding response body`. Run the command again in the next window.
-
-On 2026-10-09, with an empty cache, the download took 11 runs and 57
-minutes. Eight runs stopped at the rate limit. Two runs stopped with a
-transport error on one file, which the content network did not give for
-about 10 minutes. The last run passed.
+`r=` is the number of requests that are left, and `t=` is the number of
+seconds to the reset. Do not start a run when `r` is 0. A run can also stop
+with a transport error on a download: run the command again in the next
+window. With an empty cache, the download took 11 runs and 57 minutes (the
+night of 2026-10-08 to 2026-10-09, UTC). Two of those runs stopped with a
+transport error on one file, which the server did not send for about 10
+minutes.
 
 After the pass, remove the directory
 `.local/pipeline/compare-pin-check-hf/`: its two corpus files hold the
@@ -731,8 +742,37 @@ the export of `compare` fails in the same way:
 neither `HF_ENDPOINT` nor `HF_HOME`.
 
 Also with a full cache, the export asks Hugging Face for the list of the
-files, so it needs the network. It then takes about 80 s in the debug
-build, and the export process has a peak memory of 33 MB.
+files, so it needs the network.
+
+### Time and memory
+
+These values are from one machine, a 12-core server, with the optimized
+build and a full cache. They are measurements of two partial runs, not of
+the full run.
+
+| Run | Wall time |
+|---|---|
+| `--limit 100`, no build | 59 s |
+| `--limit 1000`, no build | 6 min 14 s |
+
+- A run that must build the optimized test binary first takes about 3.5
+  minutes more.
+- The calibration of the 1,000 bootstrap traces takes about 7 s. Each run
+  does it, also with `--limit`.
+- One trace takes about 350 ms: about 75 ms for the baseline receipt, 27 ms
+  for the baseline gate call, 52 ms for the candidate receipt, 186 ms for
+  the candidate wait, and 7 ms for the reads.
+- The time of one trace shows no clear growth up to 1,000 traces: the mean
+  of each block of 100 traces stays between 338 and 360 ms.
+- The peak memory of the largest child process is 139 MB, for 100 traces
+  and for 1,000 traces.
+- Two runs of `--limit 100` gave the same `report_digest` and the same
+  `records_digest`.
+
+The full run of 10,000 traces is estimated at 1 to 1.5 hours. This is an
+estimate from the 1,000-trace run, not a measurement. Some costs grow with
+the number of traces: the two index scans, and the file reads of the old
+path. They are small at 1,000 traces and are not measured beyond it.
 
 ### Disk space
 
@@ -741,12 +781,14 @@ build, and the export process has a peak memory of 33 MB.
 | The cache `.local/pipeline/hf-cache/` with the 10,128 session files | 478 MB |
 | The two corpus files of one export | 56 MB (bootstrap) and 289 MB (holdout) |
 | The optimized build under `target/release/` | about 2.2 GB |
+| One run directory, `--limit 100` | 358 MB |
+| One run directory, `--limit 1000` | 638 MB |
 
 Each run makes its own export, so each run directory holds a full copy of
-the two corpus files under `compare/corpus/`. It also holds the encrypted
-artifacts of the two tenants under `artifacts/`: each side stores each
-trace. A run directory of `pin-local.json` (10 traces) has about 0.8 MB, of
-which the corpus is 68 KB and the artifacts are about 650 KB.
+the two corpus files under `compare/corpus/` (344 MB). It also holds the
+encrypted artifacts of the two tenants under `artifacts/`: about 290 MB for
+each 1,000 traces. A run directory of the full run is thus about 3.3 GB;
+this is an estimate from the two measured runs.
 
 Nothing under `.local/pipeline/runs/` is deleted automatically. After a
 run, remove the corpus files under `runs/<id>/compare/` and the directory
