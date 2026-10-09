@@ -35,7 +35,7 @@ The tool does not depend on PR 5. It depends on PR 4
 | D7 | Approach: one app, two tenants, full HTTP. |
 | D8 | Envelope: multi-event, built from the translator's session events. |
 | D9 | Sample: 10,000 traces, word filter 200 to 20,000. |
-| D10 | The two admission differences that the code already shows (section 8.3) get no rule now. The owner makes a ruling after the 100-trace run. |
+| D10 | The two admission differences that the code already shows (section 8.3) get no rule now. The owner makes a ruling after the 100-trace run. Update of 2026-10-09: the owner ruled for row 3 (PC-D22, section 10.3). Row 4 has no ruling. |
 | D11 | The command has no `--bundle` option now. A later version compares two bundles (section 18). |
 
 ## 3. Current state
@@ -287,9 +287,17 @@ A receipt that one side refuses is a difference in the field
 | Medium, a different basis | accepted | quarantine |
 | High | quarantined | reject |
 
-No written ruling exists for the last two rows. The tool reports them as
-`unexplained`. The 100-trace run gives their counts on real traces. The
-owner then decides for each row: a named rule or a defect (D10).
+No written ruling existed for the last two rows when the tool was built.
+The 100-trace run gave their counts on real traces. The owner then decides
+for each row: a named rule or a defect (D10).
+
+Ruling of 2026-10-09 (PC-D22) for row 3: the quarantine of a trace whose
+medium risk has a cause other than the consent flag alone is intended. The
+tool permits this difference under the rule `medium_risk_privacy_review`
+(section 10.3). Row 4 has no ruling, and the first 1,000 traces of the
+sample have no trace of row 4. The tool reports row 4 as `unexplained`. Any
+other pair that does not meet the exact condition of the rule stays
+`unexplained`.
 
 ## 9. Records
 
@@ -357,9 +365,21 @@ Each exclusion has a named rule:
   has no database, no HTTP, and no clock.
 - Each rule has an identifier that matches `^[a-z0-9_]{1,64}$` and cites its
   source.
+- A rule of this section either excludes a field from the comparison (section
+  10.2) or permits a difference in a compared field (a permitted difference).
+  A permitted difference applies only when its exact condition holds.
 - A new rule is a reviewed change to the code. If the rule also changes the
   compatibility mapping, that text goes to `main` as its own small upstream
   PR (flow rule 1 of the workstream rules).
+
+Permitted differences:
+
+| Rule | Field | Condition | Source |
+|---|---|---|---|
+| `medium_risk_privacy_review` | `admission` | The privacy risk is `medium` on the two records. The privacy basis is equal on the two records and is not exactly `consent_content_flag`. The baseline admission is `admit` and the candidate admission is `quarantine`. | ruling PC-D22 (2026-10-09) |
+
+The rule permits no other field. If another compared field also differs,
+the pair is `unexplained` with that field only.
 
 ### 10.4 Result
 
@@ -423,6 +443,9 @@ Fields:
   `configuration_digest`, `dependency_digest`, and the derived floors.
 - Counts: `trace_count`, `equal_count`, `permitted_counts` for each rule,
   `unexplained_counts` for each field.
+- `excluded_rules` and `permitted_rules`: each rule with its `rule`,
+  `source`, and `fields`. A report holds exactly the closed list of
+  permitted rules.
 - `distribution` for each side: admission decisions, gate passes and
   failures, membership, and capped traces.
 - `unexplained`: the trace hash and the field names of each unexplained

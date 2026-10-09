@@ -131,7 +131,7 @@ pub struct ComparisonRecord {
 }
 
 /// The exclusions of spec section 10.2. No variant permits a difference in a
-/// compared field (PC-D12).
+/// compared field (PC-D12). [`PermittedDifference`] holds those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ComparisonRule {
     DeterministicIndexKeys,
@@ -177,6 +177,62 @@ impl ComparisonRule {
     }
 }
 
+/// A difference in a compared field that an owner ruling permits (spec
+/// section 8.3). A rule permits a difference only when its exact condition
+/// holds. Any other pair stays unexplained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PermittedDifference {
+    /// PC-D22. The server-side risk is `medium` for a cause other than the
+    /// consent flag alone. The old path admits the trace and the pipeline
+    /// quarantines it for review.
+    MediumRiskPrivacyReview,
+}
+
+impl PermittedDifference {
+    pub const ALL: [PermittedDifference; 1] = [PermittedDifference::MediumRiskPrivacyReview];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            PermittedDifference::MediumRiskPrivacyReview => "medium_risk_privacy_review",
+        }
+    }
+
+    pub fn source(self) -> &'static str {
+        match self {
+            PermittedDifference::MediumRiskPrivacyReview => "ruling.PC-D22",
+        }
+    }
+
+    pub fn fields(self) -> &'static [&'static str] {
+        match self {
+            PermittedDifference::MediumRiskPrivacyReview => &["admission"],
+        }
+    }
+
+    pub fn permits(
+        self,
+        field: &str,
+        baseline: &ComparisonRecord,
+        candidate: &ComparisonRecord,
+    ) -> bool {
+        if !self.fields().contains(&field) {
+            return false;
+        }
+        match self {
+            PermittedDifference::MediumRiskPrivacyReview => {
+                let medium =
+                    |record: &ComparisonRecord| record.privacy_risk.as_deref() == Some("medium");
+                medium(baseline)
+                    && medium(candidate)
+                    && baseline.privacy_basis == candidate.privacy_basis
+                    && baseline.privacy_basis != ["consent_content_flag"]
+                    && baseline.admission == AdmissionLabel::Admit
+                    && candidate.admission == AdmissionLabel::Quarantine
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TraceComparison {
     Equal,
@@ -184,12 +240,18 @@ pub enum TraceComparison {
     Unexplained { fields: Vec<&'static str> },
 }
 
-/// The production comparison: no rule permits a difference.
+/// The production comparison: only a [`PermittedDifference`] permits a
+/// difference. The first rule that permits the field gives its id.
 pub fn compare_records(
     baseline: &ComparisonRecord,
     candidate: &ComparisonRecord,
 ) -> TraceComparison {
-    compare_records_with(baseline, candidate, &|_, _, _| None)
+    compare_records_with(baseline, candidate, &|field, baseline, candidate| {
+        PermittedDifference::ALL
+            .into_iter()
+            .find(|rule| rule.permits(field, baseline, candidate))
+            .map(PermittedDifference::id)
+    })
 }
 
 fn record_pair_refused() -> TraceComparison {
@@ -619,6 +681,16 @@ pub fn comparison_report(
             })
         })
         .collect();
+    let permitted_rules: Vec<serde_json::Value> = PermittedDifference::ALL
+        .iter()
+        .map(|rule| {
+            serde_json::json!({
+                "rule": rule.id(),
+                "source": rule.source(),
+                "fields": rule.fields(),
+            })
+        })
+        .collect();
     let branch_gaps = if input.partial {
         Vec::new()
     } else {
@@ -656,6 +728,7 @@ pub fn comparison_report(
         "first_unexplained_position": summary.first_unexplained_position,
         "alignment_lost_position": input.alignment_lost_position,
         "excluded_rules": excluded_rules,
+        "permitted_rules": permitted_rules,
         "distribution": {
             "baseline": serde_json::to_value(&summary.baseline).map_err(invalid)?,
             "candidate": serde_json::to_value(&summary.candidate).map_err(invalid)?,
@@ -1463,5 +1536,162 @@ mod tests {
         let kept = build_report(&summary, false, None);
         assert_eq!(lost["alignment_lost_position"], 4);
         assert_ne!(lost["report_digest"], kept["report_digest"]);
+    }
+
+    /// A pair that holds the exact condition of `MediumRiskPrivacyReview`.
+    fn medium_pair(basis: &[&str]) -> (ComparisonRecord, ComparisonRecord) {
+        let (mut b, mut c) = pair();
+        for r in [&mut b, &mut c] {
+            r.privacy_risk = Some("medium".into());
+            r.privacy_basis = basis.iter().map(|label| label.to_string()).collect();
+        }
+        b.admission = AdmissionLabel::Admit;
+        c.admission = AdmissionLabel::Quarantine;
+        (b, c)
+    }
+
+    fn permitted_medium() -> TraceComparison {
+        TraceComparison::Permitted {
+            rules: vec!["medium_risk_privacy_review"],
+        }
+    }
+
+    #[test]
+    fn the_medium_risk_rule_permits_its_exact_condition() {
+        for basis in [
+            &["consent_content_flag", "found_and_removed"][..],
+            &["found_and_removed"][..],
+            &[][..],
+        ] {
+            let (b, c) = medium_pair(basis);
+            assert_eq!(compare_records(&b, &c), permitted_medium(), "{basis:?}");
+        }
+    }
+
+    #[test]
+    fn the_medium_risk_rule_permits_nothing_near_its_condition() {
+        let only_admission = unexplained(&["admission"]);
+        let (b, c) = medium_pair(&["consent_content_flag"]);
+        assert_eq!(compare_records(&b, &c), only_admission);
+        for risk in ["low", "high"] {
+            let (mut b, mut c) = medium_pair(&["found_and_removed"]);
+            b.privacy_risk = Some(risk.into());
+            c.privacy_risk = Some(risk.into());
+            assert_eq!(compare_records(&b, &c), only_admission, "{risk}");
+        }
+        let (mut b, mut c) = medium_pair(&["found_and_removed"]);
+        b.privacy_risk = None;
+        c.privacy_risk = None;
+        assert_eq!(compare_records(&b, &c), only_admission);
+        let (b, mut c) = medium_pair(&["found_and_removed"]);
+        c.privacy_basis = vec!["entropy_flag".into()];
+        assert_eq!(
+            compare_records(&b, &c),
+            unexplained(&["privacy_basis", "admission"])
+        );
+        let directions = [
+            (AdmissionLabel::Quarantine, AdmissionLabel::Admit),
+            (AdmissionLabel::Admit, AdmissionLabel::Reject),
+            (AdmissionLabel::Quarantine, AdmissionLabel::Reject),
+        ];
+        for (baseline, candidate) in directions {
+            let (mut b, mut c) = medium_pair(&["found_and_removed"]);
+            b.admission = baseline;
+            c.admission = candidate;
+            assert_eq!(compare_records(&b, &c), only_admission, "{baseline:?}");
+        }
+    }
+
+    #[test]
+    fn the_medium_risk_rule_does_not_hide_another_field() {
+        let (b, mut c) = medium_pair(&["found_and_removed"]);
+        gate(&mut c).chunk_count += 1;
+        assert_eq!(compare_records(&b, &c), unexplained(&["chunk_count"]));
+    }
+
+    #[test]
+    fn permitted_difference_ids_and_sources_are_labels() {
+        let exclusions: Vec<&str> = ComparisonRule::ALL.iter().map(|r| r.id()).collect();
+        for rule in PermittedDifference::ALL {
+            assert!(is_safe_label(rule.id()), "{}", rule.id());
+            assert!(is_wide_label(rule.source()), "{}", rule.source());
+            assert!(!exclusions.contains(&rule.id()), "{}", rule.id());
+            assert!(!rule.fields().is_empty());
+            for field in rule.fields() {
+                assert!(COMPARED.contains(field), "{field}");
+            }
+        }
+        assert_eq!(
+            PermittedDifference::MediumRiskPrivacyReview.id(),
+            "medium_risk_privacy_review"
+        );
+        assert_eq!(
+            PermittedDifference::MediumRiskPrivacyReview.source(),
+            "ruling.PC-D22"
+        );
+        assert_eq!(
+            PermittedDifference::MediumRiskPrivacyReview.fields(),
+            &["admission"]
+        );
+    }
+
+    #[test]
+    fn each_permitted_pair_is_counted_one_time() {
+        let mut summary = ComparisonSummary::default();
+        let mut position = 0;
+        let mut observe = |b: ComparisonRecord, c: ComparisonRecord| {
+            let result = compare_records(&b, &c);
+            summary.observe(&b, &c, &result);
+        };
+        for _ in 0..2 {
+            let (mut b, mut c) = medium_pair(&["found_and_removed"]);
+            b.position = position;
+            c.position = position;
+            position += 1;
+            observe(b, c);
+        }
+        for _ in 0..3 {
+            let (mut b, mut c) = pair();
+            b.position = position;
+            c.position = position;
+            position += 1;
+            observe(b, c);
+        }
+        let (mut b, mut c) = medium_pair(&["consent_content_flag"]);
+        b.position = position;
+        c.position = position;
+        observe(b, c);
+        let report = build_report(&summary, false, None);
+        assert_eq!(
+            report["permitted_counts"],
+            serde_json::json!({"medium_risk_privacy_review": 2})
+        );
+        let count = |key: &str| report[key].as_u64().expect("a number");
+        let permitted: u64 = report["permitted_counts"]
+            .as_object()
+            .expect("a map")
+            .values()
+            .map(|n| n.as_u64().expect("a number"))
+            .sum();
+        assert_eq!(count("equal_count"), 3);
+        assert_eq!(count("unexplained_total"), 1);
+        assert_eq!(
+            count("equal_count") + permitted + count("unexplained_total"),
+            count("compared_count")
+        );
+    }
+
+    #[test]
+    fn the_report_lists_the_permitted_rules() {
+        let summary = ComparisonSummary::default();
+        let report = build_report(&summary, false, None);
+        assert_eq!(
+            report["permitted_rules"],
+            serde_json::json!([{
+                "rule": "medium_risk_privacy_review",
+                "source": "ruling.PC-D22",
+                "fields": ["admission"],
+            }])
+        );
     }
 }

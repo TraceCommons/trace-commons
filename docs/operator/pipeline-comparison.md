@@ -17,8 +17,9 @@
 For each trace, the command compares the content-dependent decisions of the
 two sides: the privacy risk, the admission, the gate results, the measured
 values, the chunk counts, the index membership, and the credit. Each
-compared value must be exactly equal. No rule permits a difference today,
-so one difference fails the run. The design is in
+compared value must be exactly equal. One named rule permits one known
+difference (see [What is compared](#what-is-compared)). Any other
+difference fails the run. The design is in
 [the comparison spec](../superpowers/specs/2026-10-02-pipeline-comparison-design.md).
 
 ## Run a comparison
@@ -56,7 +57,7 @@ Three pins are committed:
 | Pin | Traces | Use |
 |---|---|---|
 | [`pin-local.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json) | 10 (4 bootstrap, 6 holdout) | A local pin: it names a `local_jsonl_dir` with committed session files, and it needs no network. It must pass. Check id `pipeline_comparison_local`. |
-| [`pin-local-risk.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json) | 8 (4 bootstrap, 4 holdout) | A local pin with one declared `medium` trace and one declared `high` trace. It must fail with two `admission` differences. `--self-test` uses it. |
+| [`pin-local-risk.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json) | 8 (4 bootstrap, 4 holdout) | A local pin with one declared `medium` trace and one declared `high` trace. It must fail with one unexplained `admission` difference (the `high` trace) and one permitted pair (the `medium` trace). `--self-test` uses it. |
 | [`versioned-pipeline-comparison-hf-pin-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json) | 10,000 (1,000 bootstrap, 9,000 holdout) | The network pin: it has no `local_jsonl_dir`, and its export reads the public Hugging Face dataset `jedisct1/security-audits`. Word filter 200 to 20,000. Check id `pipeline_comparison_hf`. See [The full run](#the-full-run). |
 
 ### What one run does
@@ -95,7 +96,7 @@ A run that fails after the harness wrote a valid report prints the run and
 the report, and then the failure label:
 
 ```text
-PipelineCompareReport: unexplained=2 alignment_lost=none partial=false run=q0af28b7a report=.local/pipeline-comparison-pipeline_comparison_local-failed.json
+PipelineCompareReport: unexplained=1 alignment_lost=none partial=false run=q0af28b7a report=.local/pipeline-comparison-pipeline_comparison_local-failed.json
 PipelineFailure: comparison_has_unexplained_differences
 ```
 
@@ -122,10 +123,12 @@ times in one environment, with the two local pins, and it passes only when
 each run gives its expected result:
 
 1. `pin-local.json` passes and compares each of its traces.
-2. `pin-local-risk.json` fails with exactly two `admission` differences and
-   nothing else. The baseline accepts the declared `medium` trace and the
-   candidate quarantines it. The baseline quarantines the declared `high`
-   trace and the candidate rejects it. The alignment keeps the two indexes
+2. `pin-local-risk.json` fails with exactly one unexplained `admission`
+   difference, one permitted pair, and nothing else. The baseline accepts
+   the declared `medium` trace and the candidate quarantines it. The rule
+   `medium_risk_privacy_review` permits this pair. The baseline quarantines
+   the declared `high` trace and the candidate rejects it. No rule permits
+   this pair, so it fails the run. The alignment keeps the two indexes
    equal, so no later trace differs and the run does not stop early.
 3. `pin-local.json` with the baseline's quality floor changed fails. The
    report names the skew (`skew: "baseline_quality_floor"`), the pair at
@@ -190,8 +193,39 @@ Rules of the comparison:
   the three decisions).
 
 Each trace gets one result: `equal`, `permitted` with the rule names, or
-`unexplained` with the field names. No rule permits a difference in a
-compared field today, so the tool never gives `permitted`.
+`unexplained` with the field names. The run passes only when no trace is
+`unexplained`.
+
+### The permitted difference
+
+One rule permits a difference in a compared field. The owner ruled on it
+on 2026-10-09 (decision PC-D22).
+
+| Rule | Field | Source |
+|---|---|---|
+| `medium_risk_privacy_review` | `admission` | ruling PC-D22 |
+
+The old path accepts a trace with a `medium` risk, because the harness
+sets `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true`. The pipeline
+quarantines the same trace for review. The owner ruled that this is
+intended.
+
+The rule permits a pair only when all of these are true:
+
+- The field is `admission`.
+- `privacy_risk` is `medium` on the two records.
+- `privacy_basis` is equal on the two records, and it is not exactly
+  `["consent_content_flag"]`.
+- The baseline admission is `admit` and the candidate admission is
+  `quarantine`.
+
+A pair that meets the condition and has no other difference is
+`permitted`. A pair with a difference in another field is `unexplained`
+with that other field only. A pair that does not meet the condition stays
+`unexplained`: the reverse direction, a `low` or `high` risk, a basis that
+differs between the sides, or a candidate that rejects. A trace with a
+`high` risk (the baseline quarantines it and the candidate rejects it) has
+no ruling, and the tool reports it as `unexplained`.
 
 Three fields of a record are not compared: `review`, `review_source`, and
 `gate_skipped_by_alignment`. The fields `position`, `partition`,
@@ -294,13 +328,14 @@ name, no secret-shaped value. The report has no time field.
 | `trace_count` | the number of traces in the pin (`sample_count` of the manifest) |
 | `compared_count` | the number of traces that the run compared |
 | `equal_count` | the traces with the result `equal` |
-| `permitted_counts` | for each rule, the traces that it permitted. Always `{}` today. |
+| `permitted_counts` | for each rule, the traces that it permitted. A key is the id of a rule in `permitted_rules`. |
 | `unexplained_counts` | for each compared field, the traces in which it differs |
 | `unexplained_total` | the traces with the result `unexplained` |
 | `unexplained` | the first 1,000 unexplained traces in sample order, each with `position`, `trace_hash`, and `fields` |
 | `first_unexplained_position` | the position of the first unexplained trace, or `null` |
 | `alignment_lost_position` | the position of the pair at which the run stopped, or `null` |
 | `excluded_rules` | the three rules of [What is compared](#what-is-compared), each with `rule`, `source`, and `fields` |
+| `permitted_rules` | the closed list of the rules that permit a difference (see [The permitted difference](#the-permitted-difference)), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
 | `distribution` | for `baseline` and for `candidate`: the counts `admit`, `quarantine`, `reject`, `refused`, `other`, `scored`, `quality_passed`, `quality_failed`, `novelty_passed`, `novelty_failed`, `member`, `not_member`, `chunks_capped`. `member` and `not_member` count scored traces only. |
 | `branch_gaps` | the gate branches with no evidence on the baseline side: any of `quality_passed_true`, `quality_passed_false`, `novelty_passed_true`, `novelty_passed_false`, `member_true`, `member_false`. Always empty for a partial run. |
 | `records_digest` | the SHA-256 of the records file |
@@ -501,7 +536,8 @@ What a passing report does not show:
   - The baseline accepts medium-risk submissions, as
     `deploy/pilot-gcp/ingest.env.template` sets it. The default of `main`
     is to quarantine them (`TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS`
-    not set).
+    not set). The rule `medium_risk_privacy_review` permits the resulting
+    `admission` difference.
 
   A deployment that sets other values has a different old path, and the
   report says nothing about it.

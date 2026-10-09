@@ -120,6 +120,12 @@ _BRANCH_GAPS = frozenset(
         "member_false",
     }
 )
+# The rules that permit a difference (`PermittedDifference::ALL`, spec
+# section 8.3). A report holds exactly this list: a rule that the harness
+# does not write is not evidence.
+PERMITTED_RULES = (
+    {"rule": "medium_risk_privacy_review", "source": "ruling.PC-D22", "fields": ["admission"]},
+)
 _REPORT_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "records_digest")
 _REPORT_COUNTS = ("trace_count", "compared_count", "equal_count", "unexplained_total")
 _SKEWS = (None, "baseline_quality_floor")
@@ -144,6 +150,7 @@ _REPORT_KEYS = frozenset(
         "first_unexplained_position",
         "alignment_lost_position",
         "excluded_rules",
+        "permitted_rules",
         "distribution",
         "branch_gaps",
         "report_digest",
@@ -315,6 +322,8 @@ def _validate_comparison_report(report):
     require(all(_is_count(report[field]) for field in _REPORT_COUNTS), malformed)
     require(_is_count_map(report["permitted_counts"]) and _is_count_map(report["unexplained_counts"]), malformed)
     require(set(report["unexplained_counts"]) <= _COMPARED_FIELDS, malformed)
+    require(set(report["permitted_counts"]) <= {rule["rule"] for rule in PERMITTED_RULES}, malformed)
+    require(report["permitted_rules"] == list(PERMITTED_RULES), malformed)
     for field in ("first_unexplained_position", "alignment_lost_position"):
         require(report[field] is None or _is_count(report[field]), malformed)
     # The pair that lost the alignment is the last compared pair.
@@ -407,6 +416,13 @@ def markdown(report):
         f"| Equal | {report['equal_count']} |",
         f"| Permitted | {sum(report['permitted_counts'].values())} |",
         f"| Unexplained | {report['unexplained_total']} |",
+        "",
+        "## Permitted differences",
+        "",
+        *(
+            f"- `{rule['rule']}` ({rule['source']}): {report['permitted_counts'].get(rule['rule'], 0)}"
+            for rule in report["permitted_rules"]
+        ),
         "",
         "## Distribution",
         "",

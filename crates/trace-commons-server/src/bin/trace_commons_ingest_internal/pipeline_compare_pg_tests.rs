@@ -2869,11 +2869,11 @@ async fn a_declared_medium_trace_is_aligned() {
     assert!(pair.candidate.terminal);
     assert!(pair.candidate.scored);
     // The admission is the one difference: each gate value, the membership,
-    // and the credit event are equal after the alignment.
+    // and the credit event are equal after the alignment. PC-D22 permits it.
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
-        TraceComparison::Unexplained {
-            fields: vec!["admission"]
+        TraceComparison::Permitted {
+            rules: vec!["medium_risk_privacy_review"]
         }
     );
     app.shutdown().await;
@@ -3225,8 +3225,8 @@ async fn twenty_quarantined_traces_all_complete() {
         assert!(pair.baseline.terminal, "trace {number}");
         assert_eq!(
             compare_records(&pair.baseline, &pair.candidate),
-            TraceComparison::Unexplained {
-                fields: vec!["admission"]
+            TraceComparison::Permitted {
+                rules: vec!["medium_risk_privacy_review"]
             },
             "trace {number}"
         );

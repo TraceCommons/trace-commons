@@ -4449,16 +4449,23 @@ def _comparison_side(**overrides):
     return side
 
 
-def _compared_fields(compared=10, unexplained=None, trace_count=10):
+_PERMITTED_RULE = "medium_risk_privacy_review"
+_PERMITTED_RULES = [{"rule": _PERMITTED_RULE, "source": "ruling.PC-D22", "fields": ["admission"]}]
+
+
+def _compared_fields(compared=10, unexplained=None, trace_count=10, permitted=None):
     """The count fields of a report that compared `compared` of its
     `trace_count` traces. `unexplained` maps a compared field to its count;
-    the pairs that differ are the last pairs."""
+    the pairs that differ are the last pairs. `permitted` maps a rule id to
+    its count; those pairs come before the unexplained pairs."""
     unexplained = dict(unexplained or {})
+    permitted = dict(permitted or {})
     total = max(unexplained.values(), default=0)
     return {
         "compared_count": compared,
         "partial": compared < trace_count,
-        "equal_count": compared - total,
+        "equal_count": compared - total - sum(permitted.values()),
+        "permitted_counts": permitted,
         "unexplained_counts": unexplained,
         "unexplained_total": total,
         "unexplained": [
@@ -4492,7 +4499,6 @@ def _comparison_report(check_id, **overrides):
         },
         "trace_count": 10,
         **_compared_fields(),
-        "permitted_counts": {},
         "alignment_lost_position": None,
         "excluded_rules": [
             {
@@ -4501,6 +4507,7 @@ def _comparison_report(check_id, **overrides):
                 "fields": ["index_entry_id", "nearest_neighbor_hash"],
             }
         ],
+        "permitted_rules": json.loads(json.dumps(_PERMITTED_RULES)),
         "distribution": {"baseline": _comparison_side(), "candidate": _comparison_side()},
         "branch_gaps": [],
         "records_digest": _fake_hash("records"),
@@ -4513,6 +4520,7 @@ def _write_compare_outputs(
     env,
     *,
     unexplained=None,
+    permitted=None,
     branch_gaps=(),
     emit=True,
     compared=None,
@@ -4525,7 +4533,7 @@ def _write_compare_outputs(
     report, and, for a full run, one check result and its evidence (the
     emitter does nothing without its three variables). The pin digests and
     the trace count are those of the export manifest. `unexplained` maps a
-    compared field to its count. `compared` is the number of pairs before an
+    compared field to its count and `permitted` maps a rule id to its count. `compared` is the number of pairs before an
     early stop (default: the limit, or each trace). `overrides` replaces
     report fields, and `unexplained_list` the report's `unexplained` list.
     Returns the report."""
@@ -4539,7 +4547,7 @@ def _write_compare_outputs(
     fields = {
         "pin": {field: manifest[field] for field in _COMPARE_DIGEST_FIELDS},
         "trace_count": trace_count,
-        **_compared_fields(compared, unexplained, trace_count),
+        **_compared_fields(compared, unexplained, trace_count, permitted),
         "skew": env.get("TRACE_COMMONS_PIPELINE_COMPARE_SKEW"),
         "branch_gaps": list(branch_gaps),
         "records_digest": _digest(records),
@@ -4602,6 +4610,16 @@ class ComparisonReportValidationTests(unittest.TestCase):
             distribution={"baseline": _comparison_side(), "candidate": _comparison_side(admit=9, refused=1)},
         )
         comparison.validate_comparison_report(failed)
+        # A report with permitted pairs is valid, and its Markdown view names
+        # the rule with its source.
+        with_permitted = _comparison_report(
+            _COMPARE_LOCAL, **_compared_fields(10, {"admission": 1}, permitted={_PERMITTED_RULE: 2})
+        )
+        comparison.validate_comparison_report(with_permitted)
+        text = comparison.markdown(with_permitted)
+        self.assertIn("| Permitted | 2 |", text)
+        self.assertIn(f"- `{_PERMITTED_RULE}` (ruling.PC-D22): 2", text)
+        self.assertIn(f"- `{_PERMITTED_RULE}` (ruling.PC-D22): 0", comparison.markdown(_comparison_report(_COMPARE_LOCAL)))
         # The list of unexplained traces stops at 1,000 entries.
         long_list = _comparison_report(
             _COMPARE_LOCAL,
@@ -4673,7 +4691,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
         two = _compared_fields(10, {"admission": 2})
         cases = (
             ("comparison_count_mismatch", {"equal_count": 9}),
-            ("comparison_count_mismatch", {"permitted_counts": {"deterministic_index_keys": 1}}),
+            ("comparison_count_mismatch", {"permitted_counts": {_PERMITTED_RULE: 1}}),
             ("comparison_count_mismatch", {**two, "equal_count": 9}),
             # The list holds each unexplained trace, up to 1,000.
             ("comparison_count_mismatch", {**two, "unexplained": two["unexplained"][:1]}),
@@ -4691,12 +4709,12 @@ class ComparisonReportValidationTests(unittest.TestCase):
                 self._refused(_comparison_report(_COMPARE_LOCAL, **overrides), label)
         # A permitted pair is in the sum.
         comparison.validate_comparison_report(
-            _comparison_report(_COMPARE_LOCAL, equal_count=9, permitted_counts={"deterministic_index_keys": 1})
+            _comparison_report(_COMPARE_LOCAL, equal_count=9, permitted_counts={_PERMITTED_RULE: 1})
         )
 
     def test_the_digest_is_checked(self):
         report = _comparison_report(_COMPARE_LOCAL)
-        self._refused({**report, "equal_count": 9, "permitted_counts": {"ledger_reason_text": 1}}, "report_digest_mismatch")
+        self._refused({**report, "equal_count": 9, "permitted_counts": {_PERMITTED_RULE: 1}}, "report_digest_mismatch")
         self._refused({**report, "report_digest": _fake_hash("another")}, "report_digest_mismatch")
 
     def test_the_blockers_and_the_scope_are_required(self):
@@ -4723,7 +4741,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
 
     def test_a_malformed_report_gives_a_label(self):
         base = _comparison_report(_COMPARE_LOCAL)
-        self.assertEqual(len(base), 28)
+        self.assertEqual(len(base), 29)
         for field in base:
             with self.subTest(missing=field):
                 report = {key: value for key, value in base.items() if key != field}
@@ -4751,6 +4769,17 @@ class ComparisonReportValidationTests(unittest.TestCase):
             {**_compared_fields(10, {"admission": 1}), "unexplained": [None]},
             {**_compared_fields(10, {"admission": 1}), "unexplained": [{"position": 9}]},
             {"excluded_rules": [None]},
+            # The list of permitted rules is the closed list, and the counts
+            # name a rule of it.
+            {"permitted_rules": []},
+            {"permitted_rules": None},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "rule": "another_rule"}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "source": "ruling.PC-D99"}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "fields": ["admission", "member"]}]},
+            {"permitted_rules": [*_PERMITTED_RULES, {"rule": "another_rule", "source": "ruling.PC-D99", "fields": ["member"]}]},
+            {"permitted_rules": [{**_PERMITTED_RULES[0], "extra": 1}]},
+            _compared_fields(10, permitted={"another_rule": 1}),
+            _compared_fields(10, permitted={"deterministic_index_keys": 1}),
             {"skew": "another_skew"},
             {"partial": 0},
             {"trace_count": "10"},
@@ -4991,7 +5020,7 @@ class CompareExportTests(unittest.TestCase):
 class CompareCommandTests(_CorpusRunCase):
     _SELF_TEST = {
         "compare_self_pass": {},
-        "compare_self_risk": {"fail": True, "unexplained": {"admission": 2}},
+        "compare_self_risk": {"fail": True, "unexplained": {"admission": 1}, "permitted": {_PERMITTED_RULE: 1}},
         # The skew stops the run at its first pair (PC-D20).
         "compare_self_skew": {
             "fail": True,
@@ -5664,21 +5693,24 @@ class CompareCommandTests(_CorpusRunCase):
             ({"compare_self_risk": {**risk, "unexplained": {"privacy_risk": 2}}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {"fail": True, "branch_gaps": ["member_true"]}}, "compare_self_test_risk_fields"),
             ({"compare_self_repeat": {"records_digest": _fake_hash("other-records")}}, "compare_self_test_not_deterministic"),
-            # The risk scenario has one exact result: the two declared risks
-            # as two `admission` differences, in a run that compares each
-            # trace and keeps the alignment. A run that stops at the first
-            # risk trace, or that finds one risk of the two, is another result.
+            # The risk scenario has one exact result: the declared high risk
+            # as one `admission` difference, the declared medium risk as one
+            # permitted pair, in a run that compares each trace and keeps the
+            # alignment. A run that stops at the first risk trace, or that
+            # finds one of the two, is another result.
             (
                 {"compare_self_risk": {"fail": True, "compared": 3, "unexplained": {"admission": 1}, "alignment_lost_position": 2}},
                 "compare_self_test_risk_fields",
             ),
-            ({"compare_self_risk": {**risk, "unexplained": {"admission": 1}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "permitted": {}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "permitted": {_PERMITTED_RULE: 2}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "unexplained": {"admission": 2}, "permitted": {}}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "unexplained": {"admission": 3}}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "unexplained_counts": {"admission": 3}}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "compared": 7}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "alignment_lost_position": 7}}, "compare_self_test_risk_fields"),
             (
-                {"compare_self_risk": {**risk, "unexplained_total": 3, "equal_count": 5, "unexplained_list": three_entries}},
+                {"compare_self_risk": {**risk, "unexplained_total": 3, "equal_count": 4, "unexplained_list": three_entries}},
                 "compare_self_test_risk_fields",
             ),
             ({"compare_self_risk": {**risk, "distribution": refused("baseline")}}, "compare_self_test_risk_fields"),

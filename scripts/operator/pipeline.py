@@ -825,10 +825,12 @@ def _compare_self_test(args, run):
 
     1. The local pin passes, and compares each of its traces
        (`compare_self_test_pass_incomplete`).
-    2. The risk pin fails (`compare_self_test_risk_passed`) with its two
-       declared risks as two `admission` differences and nothing else: no
-       other field, no refused receipt, no alignment loss, and each trace
-       compared (`compare_self_test_risk_fields`).
+    2. The risk pin fails (`compare_self_test_risk_passed`) with its declared
+       high risk as one unexplained `admission` difference and its declared
+       medium risk as one pair that the rule `medium_risk_privacy_review`
+       permits, and nothing else: no other field, no other rule, no refused
+       receipt, no alignment loss, and each trace compared
+       (`compare_self_test_risk_fields`).
     3. The local pin with the baseline's quality floor skewed fails
        (`compare_self_test_skew_passed`), and its report names the pair at
        which the run stopped and `quality_passed`
@@ -874,8 +876,9 @@ def _compare_self_test(args, run):
         # The alignment keeps the two indexes equal after an admission
         # difference: no chain of later differences, and no early stop.
         require(
-            risk["unexplained_counts"] == {"admission": 2}
-            and risk["unexplained_total"] == 2
+            risk["unexplained_counts"] == {"admission": 1}
+            and risk["unexplained_total"] == 1
+            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
             and not risk["partial"]
             and risk["alignment_lost_position"] is None
             and not any(risk["distribution"][side]["refused"] for side in SIDES),
