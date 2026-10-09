@@ -8,10 +8,11 @@
 //! these and never compose a sentence of their own.
 //!
 //! **Every string in this module is DRAFT, NEEDS APPROVAL.** None of it is
-//! approved core copy. Nothing here reaches a shell yet: there is no C ABI
-//! export, no IPC field and no caller. The export (`tc_nudge_copy_json`)
-//! and the pins in the shells' copy-surface tests arrive with the approved
-//! text, in a later slice.
+//! approved core copy. It reaches shells two ways: composed into sentences
+//! by [`crate::nudge_render`] (on `status.nudge.text`, `mark_text`,
+//! `reengage_due` and `digest_due`), and as the whole table through the C
+//! ABI's `tc_nudge_copy_json`. The pins in the shells' copy-surface tests
+//! arrive with the approved text.
 //!
 //! Placeholders are `{name}`, filled by the daemon:
 //!
