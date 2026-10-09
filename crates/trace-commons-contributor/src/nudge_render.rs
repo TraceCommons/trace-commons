@@ -27,7 +27,8 @@ pub struct Action {
 pub const ACTION_REVIEW: &str = "review";
 /// Opens History.
 pub const ACTION_SEE_HISTORY: &str = "see_history";
-/// The in-app "Not now": `nudge_decline`.
+/// "Not now". On an in-app card it sends `nudge_decline`; on a notification
+/// it only dismisses the notification and sends nothing.
 pub const ACTION_NOT_NOW: &str = "not_now";
 
 /// The text of an in-app card and its menu-bar panel row.

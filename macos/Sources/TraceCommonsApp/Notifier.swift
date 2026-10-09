@@ -10,8 +10,9 @@ import UserNotifications
 /// makes the notification feel non-coercive, and the absence of any third
 /// action is what keeps a misclick from contributing a transcript. A
 /// re-engagement notification's buttons are the daemon's (`review`,
-/// `see_history`, `not_now`), and each only opens a place or records an
-/// answer (`NudgeSurface.effect`).
+/// `see_history`, `not_now`): `review` and `see_history` open a place, and
+/// `not_now` only dismisses the notification. It records nothing, so the
+/// in-app suggestion stays where it was.
 ///
 /// The app sets `local_notifications: false` in daemon settings and renders
 /// these itself, precisely so it -- not the daemon -- controls that action
@@ -135,8 +136,9 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
     }
 
     /// The intent a response to a re-engagement notification means; nil
-    /// for a dismissal, for a notification that is not one (the digest), or
-    /// for an id the kind does not define.
+    /// for a dismissal, for its own Not now (which dismisses and records
+    /// nothing, so the in-app card is not silenced), for a notification
+    /// that is not one (the digest), or for an id the kind does not define.
     static func nudgeIntent(actionIdentifier: String, userInfo: [AnyHashable: Any]) -> NudgeSurface.Intent? {
         guard let raw = userInfo[kindKey] as? String, let kind = NudgeSurface.Kind(rawValue: raw) else { return nil }
         let actionId: String?
@@ -147,7 +149,8 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         } else {
             actionId = nil
         }
-        return actionId.flatMap { NudgeSurface.intent(actionId: $0, kind: kind) }
+        guard let actionId, actionId != notNowActionId else { return nil }
+        return NudgeSurface.intent(actionId: actionId, kind: kind)
     }
 
     /// The digest's buttons, in the core's words; none without them.

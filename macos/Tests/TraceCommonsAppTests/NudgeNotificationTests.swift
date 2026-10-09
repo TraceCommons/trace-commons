@@ -44,13 +44,14 @@ final class NudgeNotificationTests: XCTestCase {
     }
 
     /// Each button, and a click on the notification itself, resolves to
-    /// the intent its id names on that kind; a dismissal resolves to none.
+    /// the intent its id names on that kind; a dismissal resolves to none,
+    /// and so does a notification's own Not now: it dismisses the
+    /// notification and leaves the in-app suggestion where it was.
     func testEachResponseResolvesToItsIntent() throws {
         let info = try XCTUnwrap(Notifier.plan(Self.idle)).userInfo
         XCTAssertEqual(Notifier.nudgeIntent(actionIdentifier: "trace-commons.nudge.review", userInfo: info),
                        .review(.idleSessions))
-        XCTAssertEqual(Notifier.nudgeIntent(actionIdentifier: "trace-commons.nudge.not_now", userInfo: info),
-                       .notNow(.idleSessions))
+        XCTAssertNil(Notifier.nudgeIntent(actionIdentifier: "trace-commons.nudge.not_now", userInfo: info))
         XCTAssertEqual(Notifier.nudgeIntent(actionIdentifier: UNNotificationDefaultActionIdentifier, userInfo: info),
                        .review(.idleSessions))
         XCTAssertNil(Notifier.nudgeIntent(actionIdentifier: UNNotificationDismissActionIdentifier, userInfo: info))
