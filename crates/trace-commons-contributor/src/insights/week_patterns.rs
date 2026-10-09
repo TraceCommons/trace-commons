@@ -160,7 +160,7 @@ fn week_data(
     tz: &FixedOffset,
 ) -> PatternWeekData {
     let rollup = week_rollup(feed, sessions, week_start, tz);
-    let counted = counted_claude_turns(sessions, week_start, tz);
+    let counted = counted_claude_turns(feed, sessions, week_start, tz);
     let mut found = Vec::new();
     for (row_index, row) in rollup.sessions.iter().enumerate() {
         if row.source != Some(AnalyticsSource::ClaudeCode) || row.state == CoverageState::Unknown {
@@ -388,7 +388,7 @@ pub fn week_figures(
         figures.reread_files = Some(week.reread_files.len() as u32);
     }
     figures.past_threshold = threshold.map(|threshold| {
-        let counted = counted_claude_turns(sessions, data.rollup.week_start, &tz);
+        let counted = counted_claude_turns(data.rollup.feed, sessions, data.rollup.week_start, &tz);
         let sessions = sessions
             .iter()
             .zip(&counted)

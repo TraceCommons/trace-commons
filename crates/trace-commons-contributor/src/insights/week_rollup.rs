@@ -285,7 +285,7 @@ struct Prepared<'a> {
     reimport_overlap: bool,
 }
 
-fn prepare(sessions: &[SessionInput]) -> Vec<Prepared<'_>> {
+fn prepare(feed: Feed, sessions: &[SessionInput]) -> Vec<Prepared<'_>> {
     let mut order: Vec<usize> = (0..sessions.len()).collect();
     order.sort_by_key(|&index| (sessions[index].import_seq, index));
     let mut prepared: Vec<Option<Prepared<'_>>> = (0..sessions.len()).map(|_| None).collect();
@@ -314,22 +314,27 @@ fn prepare(sessions: &[SessionInput]) -> Vec<Prepared<'_>> {
         });
     }
     // The overlap rule, for any pair where either side is not keyed: the
-    // older of two overlapping snapshots of one harness is not counted.
-    for (rank, &older) in order.iter().enumerate() {
-        let older_input = &sessions[older];
-        let Some((older_low, older_high)) = older_input.dated_range() else {
-            continue;
-        };
-        let overlapped = order[rank + 1..].iter().any(|&newer| {
-            let newer_input = &sessions[newer];
-            newer_input.source() == older_input.source()
-                && (!older_input.keyed() || !newer_input.keyed())
-                && newer_input
-                    .dated_range()
-                    .is_some_and(|(low, high)| low <= older_high && older_low <= high)
-        });
-        if overlapped {
-            prepared[older].as_mut().expect("prepared").reimport_overlap = true;
+    // older of two overlapping snapshots of one harness is not counted. Not
+    // in feed T, whose rows are keyed by the session's address and replaced
+    // in place on a re-read, so a reimport cannot happen there and two rows
+    // that overlap in time are two sessions.
+    if feed != Feed::CounterPass {
+        for (rank, &older) in order.iter().enumerate() {
+            let older_input = &sessions[older];
+            let Some((older_low, older_high)) = older_input.dated_range() else {
+                continue;
+            };
+            let overlapped = order[rank + 1..].iter().any(|&newer| {
+                let newer_input = &sessions[newer];
+                newer_input.source() == older_input.source()
+                    && (!older_input.keyed() || !newer_input.keyed())
+                    && newer_input
+                        .dated_range()
+                        .is_some_and(|(low, high)| low <= older_high && older_low <= high)
+            });
+            if overlapped {
+                prepared[older].as_mut().expect("prepared").reimport_overlap = true;
+            }
         }
     }
     prepared.into_iter().map(|p| p.expect("prepared")).collect()
@@ -373,7 +378,7 @@ pub fn week_rollup<Tz: TimeZone>(
     let mut models: BTreeMap<String, u64> = BTreeMap::new();
     let mut unknown_label_tokens: Option<u64> = None;
 
-    for prepared in prepare(sessions) {
+    for prepared in prepare(feed, sessions) {
         let input = prepared.input;
         let placed_in_week = input.placed_at.as_ref().map(&in_week);
         let mut contribution = Contribution::default();
@@ -619,12 +624,13 @@ pub fn week_rollup<Tz: TimeZone>(
 /// The Patterns figures read tool calls on these turns only, so a reimported
 /// turn's calls are counted once, like its tokens.
 pub fn counted_claude_turns<Tz: TimeZone>(
+    feed: Feed,
     sessions: &[SessionInput],
     week_start: NaiveDate,
     tz: &Tz,
 ) -> Vec<Option<BTreeSet<u32>>> {
     let week_start = monday_of(week_start);
-    prepare(sessions)
+    prepare(feed, sessions)
         .into_iter()
         .map(|prepared| {
             if prepared.reimport_overlap
@@ -1060,6 +1066,31 @@ mod tests {
             source(&rollup, AnalyticsSource::Codex).tokens,
             Some(2 * 1_200)
         );
+    }
+
+    #[test]
+    fn the_counter_pass_counts_concurrent_codex_sessions_once_each() {
+        // Feed T rows are keyed by the session's address and a re-read
+        // replaces its row, so no reimport is possible: overlap in time is
+        // two sessions.
+        let one = codex("one", 1, at(6, 1), at(6, 5));
+        let two = codex("two", 2, at(6, 4), at(6, 8));
+        let rollup = week_rollup(Feed::CounterPass, &[one, two], monday(), &Utc);
+        assert_eq!(session(&rollup, "one").state, CoverageState::Known);
+        assert_eq!(session(&rollup, "two").state, CoverageState::Known);
+        assert_eq!(
+            source(&rollup, AnalyticsSource::Codex).tokens,
+            Some(2 * 1_200)
+        );
+    }
+
+    #[test]
+    fn the_counter_pass_counts_overlapping_unkeyed_claude_turns() {
+        let one = claude("one", 1, vec![turn(0, Some(at(6, 1)), None)]);
+        let two = claude("two", 2, vec![turn(0, Some(at(6, 1)), None)]);
+        let sessions = [one, two];
+        let counted = counted_claude_turns(Feed::CounterPass, &sessions, monday(), &Utc);
+        assert!(counted.iter().all(Option::is_some), "{counted:?}");
     }
 
     #[test]
