@@ -13752,7 +13752,8 @@ impl PipelineService {
     /// or `main`'s submitter holds it, this is refused with
     /// `payout_lock_held`. `None` when the run does not exist; a run with no
     /// completed, payout-eligible leg is returned untouched. Unlike the
-    /// pass, this also takes up a `failed` payout again, does not wait for
+    /// pass, this also takes up a `failed` payout again (each `failed` line
+    /// but one that failed on chain), does not wait for
     /// the confirmation interval, and returns a per-run error to its caller
     /// instead of recording it.
     ///
@@ -13938,7 +13939,9 @@ impl PipelineService {
     /// - A failed submit marks the line and the payout `failed` under
     ///   `near_submit_failed`; the pass does not list it again.
     /// - `retry_failed` is true only from a direct `process_payout`
-    ///   (Ruling F-I3). Without it, a `failed` payout, or a `failed` line of
+    ///   (Ruling F-I3). It takes up each `failed` line again, apart from a
+    ///   line that failed on chain (`near_transaction_failed`), which no
+    ///   pass submits again. Without it, a `failed` payout, or a `failed` line of
     ///   a payout still `pending`, is never submitted again: another replica
     ///   can fail a payout after this pass listed it as `pending`, and the
     ///   re-read here sees that.
@@ -14029,53 +14032,60 @@ impl PipelineService {
                     batch_id,
                     &line.credit_account_hash,
                 );
-                let (status, submission_mode, call) = match near_outbox_line(client, run, outbox_id)
-                    .await?
-                {
-                    Some((status, stored_call)) => {
-                        // Multi-lens review C3 (owner decision): a line with
-                        // no key was submitted by code from before the key.
-                        // It reads as `http`, so `http` confirms it and the
-                        // dry-run adapter never puts a synthetic hash on it.
-                        let submission_mode = Some(
-                            stored_call
-                                .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label())
-                                .to_string(),
-                        );
-                        let call: crate::near_credit::NearCreditReceiptCall =
-                            serde_json::from_value(stored_call)
+                let (status, chain_failed, submission_mode, call) =
+                    match near_outbox_line(client, run, outbox_id).await? {
+                        Some((status, last_error_hash, stored_call)) => {
+                            let chain_failed = status == "failed"
+                                && last_error_hash.as_deref()
+                                    == Some(near_transaction_failed_hash().as_str());
+                            // Multi-lens review C3 (owner decision): a line with
+                            // no key was submitted by code from before the key.
+                            // It reads as `http`, so `http` confirms it and the
+                            // dry-run adapter never puts a synthetic hash on it.
+                            let submission_mode = Some(
+                                stored_call
+                                    .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label())
+                                    .to_string(),
+                            );
+                            let call: crate::near_credit::NearCreditReceiptCall =
+                                serde_json::from_value(stored_call).map_err(|_| {
+                                    anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL)
+                                })?;
+                            call.validate()
                                 .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
-                        call.validate()
-                            .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
-                        (Some(status), submission_mode, call)
-                    }
-                    None => (
-                        None,
-                        None,
-                        disabled_near_call(
-                            near_contract_id,
-                            batch_id,
-                            &line.credit_account_hash,
-                            &batch_source_list_hash,
-                            line.settled_credit_delta_micros,
-                        )
-                        .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?,
-                    ),
-                };
-                work.push((line, call, outbox_id, status, submission_mode));
+                            (Some(status), chain_failed, submission_mode, call)
+                        }
+                        None => (
+                            None,
+                            false,
+                            None,
+                            disabled_near_call(
+                                near_contract_id,
+                                batch_id,
+                                &line.credit_account_hash,
+                                &batch_source_list_hash,
+                                line.settled_credit_delta_micros,
+                            )
+                            .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?,
+                        ),
+                    };
+                work.push((line, call, outbox_id, status, chain_failed, submission_mode));
             }
 
             let mut contract_changed = false;
             let mut held_payout = None;
             let mut dispatch_held = false;
             let mode = config.controls.settlement_mode.as_label();
-            for (line, call, outbox_id, status, submission_mode) in &work {
+            for (line, call, outbox_id, status, chain_failed, submission_mode) in &work {
                 let outbox_id = *outbox_id;
                 let mut submission_mode = submission_mode.clone();
                 match status.as_deref() {
                     Some("confirmed") | Some("disabled") => continue,
+                    // A line that failed on chain is final: not even a direct
+                    // `process_payout` submits it again.
+                    Some("failed") if *chain_failed => continue,
                     Some("failed") if !retry_failed => continue,
                     Some("submitted") => {}
                     _ => {
@@ -14179,9 +14189,7 @@ impl PipelineService {
                                 &[
                                     &run.tenant_id,
                                     &outbox_id,
-                                    &sha256_prefixed(
-                                        PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes(),
-                                    ),
+                                    &near_transaction_failed_hash(),
                                     &mode,
                                     &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
                                 ],
@@ -14380,22 +14388,35 @@ async fn load_payout_batch(
     Ok((row.get("source_list_hash"), lines))
 }
 
-/// The status and stored call of one outbox line, or `None` when it has no
-/// row yet.
+/// The hash an outbox line stores in `last_error_hash` when its transaction
+/// failed on chain (`PIPELINE_NEAR_TRANSACTION_FAILED_LABEL`).
+fn near_transaction_failed_hash() -> String {
+    sha256_prefixed(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes())
+}
+
+/// The status, `last_error_hash` and stored call of one outbox line, or
+/// `None` when it has no row yet.
 async fn near_outbox_line(
     client: &mut deadpool_postgres::Client,
     run: &PipelineRunRecord,
     outbox_id: Uuid,
-) -> anyhow::Result<Option<(String, serde_json::Value)>> {
+) -> anyhow::Result<Option<(String, Option<String>, serde_json::Value)>> {
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let line = tx
         .query_opt(
-            "SELECT status, near_call_json FROM trace_near_credit_outbox
+            "SELECT status, last_error_hash, near_call_json
+               FROM trace_near_credit_outbox
               WHERE tenant_id = $1 AND near_outbox_id = $2",
             &[&run.tenant_id, &outbox_id],
         )
         .await?
-        .map(|row| (row.get("status"), row.get("near_call_json")));
+        .map(|row| {
+            (
+                row.get("status"),
+                row.get("last_error_hash"),
+                row.get("near_call_json"),
+            )
+        });
     tx.commit().await?;
     Ok(line)
 }
@@ -14557,15 +14578,18 @@ async fn record_payout_state_on(
         })
         .collect::<Vec<_>>();
     tx.commit().await?;
-    let transaction_failed_hash =
-        sha256_prefixed(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes());
+    let transaction_failed_hash = near_transaction_failed_hash();
     let (payout, label) =
         if !statuses.is_empty() && statuses.iter().all(|(status, _)| status == "confirmed") {
             (TraceCreditSettlementNearStatus::Confirmed, None)
         } else if statuses.iter().any(|(status, _)| status == "failed") {
-            let transaction_failed = statuses.iter().any(|(status, hash)| {
-                status == "failed" && hash.as_deref() == Some(transaction_failed_hash.as_str())
-            });
+            // A pipeline batch has one line now, so a leg cannot hold both
+            // failure hashes. If it ever does, the leg reads `near_submit_failed`:
+            // the runbook has the operator check that line against NEAR by hand.
+            let transaction_failed = statuses
+                .iter()
+                .filter(|(status, _)| status == "failed")
+                .all(|(_, hash)| hash.as_deref() == Some(transaction_failed_hash.as_str()));
             (
                 TraceCreditSettlementNearStatus::Failed,
                 Some(if transaction_failed {

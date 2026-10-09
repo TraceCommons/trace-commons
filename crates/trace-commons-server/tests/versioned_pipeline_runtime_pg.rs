@@ -23760,6 +23760,8 @@ struct NearOutboxRow {
     amount_micros: Option<i64>,
     near_call_json: serde_json::Value,
     near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+    confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Every `trace_near_credit_outbox` row of `tenant_id`.
@@ -23774,7 +23776,8 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
         .query(
             "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
                     (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
-                    near_call_json, near_transaction_hash
+                    near_call_json, near_transaction_hash, last_error_hash,
+                    confirmed_at
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1
               ORDER BY created_at, near_outbox_id",
@@ -23792,6 +23795,8 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
             amount_micros: row.get("amount_micros"),
             near_call_json: row.get("near_call_json"),
             near_transaction_hash: row.get("near_transaction_hash"),
+            last_error_hash: row.get("last_error_hash"),
+            confirmed_at: row.get("confirmed_at"),
         })
         .collect()
 }
@@ -23928,6 +23933,14 @@ async fn payout_submits_once_and_confirms() {
     );
 }
 
+/// The hash a line that failed on chain stores in `last_error_hash`.
+fn near_transaction_failed_hash_text() -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes())
+    )
+}
+
 /// A submitted line whose transaction the adapter reports as failed on
 /// chain becomes `failed` and keeps its transaction hash; the leg's payout
 /// is `failed` under `near_transaction_failed`, and no later pass submits
@@ -23969,6 +23982,11 @@ async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again()
         outbox[0].near_transaction_hash, transaction_hash,
         "the failed line keeps its transaction hash"
     );
+    assert!(outbox[0].confirmed_at.is_none());
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
     let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
     assert_eq!(settlement.payout_state, "failed");
     assert_eq!(
@@ -23980,6 +23998,53 @@ async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again()
         service.process_payouts(&tenant, 32).await.unwrap(),
         0,
         "a failed payout is not listed again"
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
+}
+
+/// A direct `process_payout` takes up a `failed` line again, but not one
+/// that failed on chain: no second submit, and the line keeps its marker.
+#[tokio::test]
+async fn a_direct_payout_does_not_submit_a_line_that_failed_on_chain_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-direct-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let transaction_hash = near_outbox_rows(&backend, &tenant).await[0]
+        .near_transaction_hash
+        .clone();
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(outbox[0].near_transaction_hash, transaction_hash);
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
     );
     assert_eq!(near.submits(), 1, "the line was submitted once");
 }

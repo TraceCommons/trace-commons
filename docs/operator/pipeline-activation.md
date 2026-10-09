@@ -2157,10 +2157,11 @@ below). With payout disabled, nothing is submitted to NEAR.
 - This release has no operator route or tool that retries a `failed`
   payout: nothing an operator can reach calls `process_payout`. A submitted
   line whose transaction the adapter reports as failed on chain becomes
-  `failed` under `near_transaction_failed`. The contributor is not paid. The
-  pass does not submit that line again, and no route pays or closes it in
-  this release. A payment by hand goes into the operator's own record. An
-  operator
+  `failed` under `near_transaction_failed`. The contributor is not paid. No
+  pass submits that line again, and no route pays or closes it in this
+  release. The label is the `reason_label` of the `trace_credit` entry in
+  `instruments` of the run's forensic trace. A payment by hand goes into the
+  operator's own record. An operator
   sees the leg's payout as `failed` with its label (for example
   `near_submit_failed`) in the run's forensic trace
   (`GET /v1/admin/pipeline/runs/{run_id}/forensic`) and in the contributor

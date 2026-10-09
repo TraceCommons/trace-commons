@@ -202,8 +202,9 @@ pub struct NearLogicalRequest {
 /// A test NEAR adapter with no network effect. It records each idempotency
 /// key once, answers a repeated key with the same result, and refuses a
 /// repeated key with a different method. A confirmation exists only once a
-/// test records one (`record_confirmation`). `fail_next` makes the next
-/// submit fail. It presents no credential unless built `authenticated`.
+/// test records one (`record_confirmation`) or a failure on chain
+/// (`record_failure`); a recorded failure wins over a recorded
+/// confirmation. `fail_next` makes the next submit fail. It presents no credential unless built `authenticated`.
 ///
 /// It is in the library, not behind `#[cfg(test)]`, because the integration
 /// tests and the ingest binary's tests link the library built without
@@ -233,6 +234,10 @@ pub struct NearConfirmationEvidence {
 pub enum NearPayoutConfirmation {
     Pending,
     Confirmed(NearConfirmationEvidence),
+    /// The result is final on chain and the transfer did not occur. It is
+    /// terminal for the line: the pass marks it `failed` and never submits
+    /// it again. An error of the lookup, a timeout, or a transaction that is
+    /// not known is `Pending`, never `Failed`.
     Failed,
 }
 
@@ -263,6 +268,10 @@ pub trait NearPayoutAdapter: Send + Sync {
         false
     }
     async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String>;
+    /// `Failed` only when the result is final on chain and the transfer did
+    /// not occur; it is terminal, and the pass does not submit the line
+    /// again. An error of the lookup, a timeout, or an unknown transaction
+    /// is `Pending`.
     async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation;
 }
 
