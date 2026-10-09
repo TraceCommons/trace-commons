@@ -640,6 +640,10 @@ async fn supervise_passes(shared: &Arc<ipc::DaemonShared>, dry_run: bool) -> Res
                         tracing::warn!(pass = "community", "daemon pass failed");
                     }
                 }
+                // Last, after every pass that announces its own changes: what
+                // the clock alone moved in `status` this tick. Outside the
+                // `!dry_run` block, since the clock moves in a dry run too.
+                shared.publish_time_driven_status(now);
             }
             _ = &mut sigterm => {
                 tracing::info!("daemon stopping on signal");

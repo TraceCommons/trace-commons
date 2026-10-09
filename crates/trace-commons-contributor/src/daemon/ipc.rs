@@ -850,6 +850,10 @@ pub struct DaemonShared {
     /// subscribers (the FFI's `tc_subscribe` without a socket) never count
     /// and never receive an opt-in event.
     pub(crate) renderers: Arc<RendererCounts>,
+    /// The parts of `status` the clock alone can move, as the last daemon
+    /// tick read them; `None` until the first tick. See
+    /// [`Self::publish_time_driven_status`].
+    time_driven_status: Mutex<Option<serde_json::Value>>,
     /// The daemon-wide bound on concurrent preview work.
     ///
     /// `Arc` rather than a plain field because the worker pool outlives any
@@ -1128,6 +1132,7 @@ impl DaemonShared {
             shutdown_signal: Arc::new(Notify::new()),
             events,
             renderers,
+            time_driven_status: Mutex::new(None),
             previews: Arc::new(PreviewScheduler::default()),
             routing,
             private_inference_endpoint: Mutex::new(None),
@@ -1976,9 +1981,47 @@ impl DaemonShared {
         }
     }
 
+    /// Publish `status_changed` when what `status` says has moved since the
+    /// last daemon tick, for the changes nothing else announces because no
+    /// request or pass made them: the clock made them. An idle threshold
+    /// crossed (`status.idle_sessions`, the halo), a "Not now" lapsing, the
+    /// news mark ageing past `NEWS_MARK_TTL`, and the history poll going
+    /// stale all move `status.nudge` or `status.idle_sessions` with time
+    /// alone, as a lapsed timed pause moves `paused` (see
+    /// [`Self::is_paused`]).
+    ///
+    /// Compares those two objects with the previous tick's. The first tick
+    /// records them and publishes nothing; a tick that finds them unchanged
+    /// publishes nothing. A change some other path already announced is
+    /// announced once more at the next tick, which costs a shell one
+    /// idempotent `status` read.
+    pub(crate) fn publish_time_driven_status(&self, now: chrono::DateTime<Utc>) {
+        let status = self.status_value_at(now);
+        let view = serde_json::json!({
+            "nudge": status.get("nudge"),
+            "idle_sessions": status.get("idle_sessions"),
+        });
+        let changed = {
+            let mut last = self
+                .time_driven_status
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = last.as_ref().is_some_and(|before| *before != view);
+            *last = Some(view);
+            changed
+        };
+        if changed {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
-        let now = Utc::now();
+        self.status_value_at(Utc::now())
+    }
+
+    /// [`Self::status_value`] as of `now`.
+    pub(crate) fn status_value_at(&self, now: chrono::DateTime<Utc>) -> serde_json::Value {
         // Taken before the queue lock below, and released with it, because
         // `daily_budget` takes the queue, state, and settings locks itself.
         let budget = self.daily_budget(now);
@@ -18140,9 +18183,9 @@ mod tests {
 
             let source = include_str!("ipc.rs");
             let body = source
-                .split("pub fn status_value(&self)")
+                .split("pub(crate) fn status_value_at(&self")
                 .nth(1)
-                .expect("status_value exists");
+                .expect("status_value_at exists");
             let snapshot = body.find("self.nudge_snapshot()").expect("snapshot taken");
             let policy_lock = body
                 .find("let policy = self.policy.lock()")
@@ -18357,6 +18400,124 @@ mod tests {
                     .declined_at
                     .is_some()
             );
+        }
+
+        // ---- Time-driven status changes ----
+
+        fn status_changes(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> usize {
+            let mut n = 0;
+            while let Ok(event) = rx.try_recv() {
+                n += usize::from(event.event == EVENT_STATUS_CHANGED);
+            }
+            n
+        }
+
+        /// A history poll at `at`, as `record_history_poll` stamps it, so a
+        /// later tick reads history as fresh and only the change under test
+        /// moves `status`.
+        fn polled_at(s: &DaemonShared, at: chrono::DateTime<Utc>) {
+            s.state.lock().unwrap().last_history_poll_at = Some(at);
+        }
+
+        /// The first tick only records what `status` says; a tick that finds
+        /// it unchanged publishes nothing.
+        #[test]
+        fn an_unchanged_tick_publishes_no_status_changed() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            land_verdicts(&s, 1, 0, Utc::now() - chrono::Duration::hours(1));
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            let mut rx = s.events.subscribe();
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_changes(&mut rx), 0, "the first tick only records");
+            s.publish_time_driven_status(t0 + chrono::Duration::minutes(1));
+            s.publish_time_driven_status(t0 + chrono::Duration::minutes(2));
+            assert_eq!(status_changes(&mut rx), 0);
+        }
+
+        /// The history poll going stale turns `status.nudge` to `unknown`.
+        #[test]
+        fn a_history_poll_going_stale_publishes_status_changed_once() {
+            let s = live();
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            let poll_secs = s.settings.lock().unwrap().history_poll_secs as i64;
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["nudge"]["state"], "none");
+            let mut rx = s.events.subscribe();
+            let stale = t0 + chrono::Duration::seconds(poll_secs * 3);
+            s.publish_time_driven_status(stale);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(stale + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// A "Not now" lapsing puts the backlog suggestion back.
+        #[test]
+        fn a_lapsed_not_now_publishes_status_changed_once() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert!(declined.error.is_none(), "{:?}", declined.error);
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            let mut rx = s.events.subscribe();
+            let ttl = s.settings.lock().unwrap().queue_ttl_days;
+            let lapsed = t0 + decline_cooldown(ttl) + chrono::Duration::minutes(1);
+            polled_at(&s, lapsed);
+            s.publish_time_driven_status(lapsed);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(lapsed + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// The news mark ageing past `NEWS_MARK_TTL` goes dark.
+        #[test]
+        fn the_news_mark_ageing_out_publishes_status_changed_once() {
+            let s = live();
+            let t0 = Utc::now();
+            land_verdicts(&s, 1, 0, t0 - chrono::Duration::hours(1));
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["nudge"]["mark"], "news");
+            let mut rx = s.events.subscribe();
+            let aged = t0 + crate::daemon::nudge::NEWS_MARK_TTL;
+            polled_at(&s, aged);
+            s.publish_time_driven_status(aged);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(aged + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// A session crossing the idle threshold becomes an idle candidate.
+        #[test]
+        fn an_idle_threshold_crossed_publishes_status_changed_once() {
+            let s = live();
+            seed_idle(
+                &s,
+                ASK,
+                crate::source::SOURCE_CLAUDE_CODE,
+                crate::daemon::nudge::IDLE_DAYS - 1,
+            );
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["idle_sessions"]["count"], 0);
+            let mut rx = s.events.subscribe();
+            let crossed = t0 + chrono::Duration::days(1) + chrono::Duration::minutes(1);
+            polled_at(&s, crossed);
+            s.publish_time_driven_status(crossed);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(crossed + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
         }
 
         // ---- A3: the news mark and the halo ----

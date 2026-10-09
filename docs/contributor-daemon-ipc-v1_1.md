@@ -1035,8 +1035,10 @@ or a session's own age.
 counts, computed by the same function (`queue::idle_candidates`) under the
 same guards, so a card's Review shows the set its sentence named.
 
-The count can grow with nothing but time passing: no event is published when
-a session crosses the threshold. A shell reads it with the rest of `status`.
+The count can grow with nothing but time passing. When a session crosses the
+threshold, the next daemon tick (every `poll_interval_secs`) sees `status`
+change and publishes `status_changed`; a shell reads the count with the rest
+of `status`.
 
 #### `status.nudge`
 
@@ -1221,9 +1223,11 @@ expired, or its folder set to Never or armed), or on a mute or a "Not now" as
 above.
 
 **No event of its own.** `mark` changes with `status_changed` like the rest
-of `status.nudge`, but it can also change with nothing but time passing --
-the news ages out, or a session crosses the idle threshold -- and no event is
-published for that. A shell reads it with the rest of `status`.
+of `status.nudge`. When it changes with nothing but time passing -- the news
+ages out, or a session crosses the idle threshold -- the next daemon tick
+publishes `status_changed` for it, as for every time-driven change to
+`status.nudge` (see the events table). A shell reads it with the rest of
+`status`.
 
 **Older daemons.** A daemon predating A3 sends no `mark`. A shell draws no
 ring and no halo for an absent `mark`, for `none` or for `unknown`: absent
@@ -6849,7 +6853,7 @@ relaxation of origin/CORS/CSP controls.
 |---|---|---|
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
-| `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, or a history poll found verdict news or made a stale `status.nudge` readable again (a routine poll publishes nothing) | `{}` |
+| `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, a history poll found verdict news, dropped waiting news that was taken back or moved to a Never folder, or made a stale `status.nudge` readable again (a routine poll publishes nothing), or a daemon tick found `status.nudge` or `status.idle_sessions` moved by time alone -- an idle threshold crossed, a "Not now" lapsed, the news mark aged out, or the history poll gone stale. The tick compares with the previous tick, so it publishes at most once per change, at most once per `poll_interval_secs`, and never when nothing moved; a change another path already announced may be announced once more | `{}` |
 | `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
