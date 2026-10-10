@@ -65,18 +65,132 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::contribution_missions::{
-    ContributionMissionCatalogue, LANGUAGE_MARKERS, LocalFacts, SessionFact, match_missions,
+    CatalogueError, ContributionMissionCatalogue, LANGUAGE_MARKERS, LocalFacts, SessionFact,
+    match_missions, missions_fitting,
 };
 
 use super::history::{HistoryCache, is_taken_back};
 use super::ipc::{DaemonShared, ERR_BAD_PARAMS, Request, Response};
 use super::policy::{ProjectMode, ProjectPolicy, UNKNOWN_PROJECT_KEY};
+use super::queue::QueueEntry;
 
 /// The one log line matching writes: a label, nothing about what was read
 /// or found (M1).
 pub const LOG_LABEL: &str = "mission-matches-answered";
+
+/// How long a received contribution-mission catalogue stays live. Past
+/// this, the slot reads as empty: `mission_fit` goes absent (unknown), never
+/// to zero.
+///
+/// OWNER DECISION V2 (nudge value addendum): 24 hours.
+pub const MISSION_CATALOGUE_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The contribution-mission catalogue this daemon holds, for counting how
+/// many matched missions each waiting session fits (`list_pending`'s
+/// `mission_fit`).
+///
+/// - **Memory only.** Never persisted: a restarted daemon starts empty, and
+///   `unenroll` empties it. Empty means unknown.
+/// - **One writer.** The daemon's scheduled refresh
+///   ([`super::activity_missions::refresh_mission_slot`]) fills it from the
+///   published activity catalogue's missions that carry a supported
+///   predicate, and empties it when none do. `mission_matches` never writes
+///   it -- its catalogue is a parameter, and matching changes nothing (M2).
+///   Tests also seed it with [`receive_catalogue`].
+/// - **Holds the parsed catalogue, when it arrived, and a per-folder
+///   language cache** -- nothing derived from which sessions exist.
+///   Replacing the catalogue drops the cache.
+/// - **Ages out** after [`MISSION_CATALOGUE_MAX_AGE`], or sooner at the end
+///   of the policy it came from; an expired slot reads as empty.
+#[derive(Debug, Clone)]
+pub struct MissionCatalogueSlot {
+    catalogue: ContributionMissionCatalogue,
+    received_at: DateTime<Utc>,
+    /// The instant the published policy's missions stop being on offer
+    /// (its `ends_before`, at 00:00 UTC), when the catalogue came from one.
+    /// The slot is not live from then on, whatever its age.
+    not_after: Option<DateTime<Utc>>,
+    /// Languages of the folders the join has already looked at. Filled with
+    /// no lock held, the first time `list_pending` sees a folder, and only
+    /// while the catalogue asks about languages.
+    folder_languages: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl MissionCatalogueSlot {
+    /// Whether this catalogue may still be read at `now`. A `received_at`
+    /// in the future (the clock moved back) is not live either: unknown,
+    /// the safe direction.
+    fn is_live(&self, now: DateTime<Utc>) -> bool {
+        let age = now.signed_duration_since(self.received_at);
+        age >= chrono::TimeDelta::zero()
+            && chrono::TimeDelta::from_std(MISSION_CATALOGUE_MAX_AGE).is_ok_and(|max| age <= max)
+            && self.not_after.is_none_or(|end| now < end)
+    }
+}
+
+/// Put a catalogue into the slot, read with
+/// [`ContributionMissionCatalogue::from_value`]. A catalogue that is read
+/// replaces whatever was there, cache included, never merging into it. One
+/// that is refused (newer schema, malformed, over a bound) empties the
+/// slot: a stale catalogue is never kept in its place.
+pub fn receive_catalogue(
+    slot: &Mutex<Option<MissionCatalogueSlot>>,
+    raw: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> Result<(), CatalogueError> {
+    receive_catalogue_until(slot, raw, now, None)
+}
+
+/// [`receive_catalogue`] for a catalogue that is on offer only until
+/// `not_after`: from then on the slot reads as empty, even inside
+/// [`MISSION_CATALOGUE_MAX_AGE`].
+pub fn receive_catalogue_until(
+    slot: &Mutex<Option<MissionCatalogueSlot>>,
+    raw: &serde_json::Value,
+    now: DateTime<Utc>,
+    not_after: Option<DateTime<Utc>>,
+) -> Result<(), CatalogueError> {
+    let read = ContributionMissionCatalogue::from_value(raw);
+    let mut slot = slot.lock().expect("mission catalogue lock");
+    match read {
+        Ok(catalogue) => {
+            *slot = Some(MissionCatalogueSlot {
+                catalogue,
+                received_at: now,
+                not_after,
+                folder_languages: BTreeMap::new(),
+            });
+            Ok(())
+        }
+        Err(e) => {
+            *slot = None;
+            Err(e)
+        }
+    }
+}
+
+/// Empty the slot. `unenroll` calls this: a next account starts unknown.
+pub fn clear_catalogue(slot: &Mutex<Option<MissionCatalogueSlot>>) {
+    *slot.lock().expect("mission catalogue lock") = None;
+}
+
+/// The catalogue the slot holds, when it is live at `now`.
+pub fn live_catalogue(
+    slot: &Mutex<Option<MissionCatalogueSlot>>,
+    now: DateTime<Utc>,
+) -> Option<ContributionMissionCatalogue> {
+    let slot = slot.lock().expect("mission catalogue lock");
+    slot.as_ref()
+        .filter(|s| s.is_live(now))
+        .map(|s| s.catalogue.clone())
+}
 
 /// A session the daemon has seen, as its cwd cache records it: the
 /// self-declared tool (display only), the adapter that actually read it,
@@ -182,23 +296,18 @@ pub fn languages_at(root: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// `mission_matches {catalogue}`: the ids of the catalogue's missions that
-/// this contributor's local work fits, and how many tools and folders
-/// matching was allowed to read -- counts only.
-///
-/// The catalogue is a parameter until Z7/Z8's server catalogue exists; the
-/// daemon fetches nothing here. Every input is read under its own lock and
-/// released, none mutably: no policy, queue, state or file is written, no
-/// audit row is appended, and the log gets [`LOG_LABEL`] and nothing else
-/// (M1, M2). The answer goes back over the local socket only.
-pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response {
-    let Some(raw) = req.params.get("catalogue") else {
-        return Response::err(req.id, ERR_BAD_PARAMS, "catalogue-required");
-    };
-    let catalogue = match ContributionMissionCatalogue::from_value(raw) {
-        Ok(catalogue) => catalogue,
-        Err(e) => return Response::err(req.id, ERR_BAD_PARAMS, e.label()),
-    };
+/// What M1 and M2 gate reading on, read out of the daemon: the adapters
+/// the contributor has left on, and the paths of the sessions that are
+/// kept or whose upload was withdrawn. Handed to [`readable_sessions`],
+/// which is where the rules themselves live; nothing here filters.
+pub(crate) struct ReadGates {
+    pub(crate) tools_on: BTreeSet<String>,
+    pub(crate) excluded_paths: BTreeSet<String>,
+}
+
+/// Read the [`ReadGates`] in force, each input under its own lock and
+/// released, none mutably.
+pub(crate) fn read_gates(shared: &DaemonShared) -> ReadGates {
     let tools_on: BTreeSet<String> = {
         let settings = shared.settings.lock().expect("settings lock");
         settings
@@ -235,6 +344,39 @@ pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response 
             .map(|e| e.path.to_string_lossy().to_string())
             .collect()
     };
+    ReadGates {
+        tools_on,
+        excluded_paths,
+    }
+}
+
+/// Where a folder's language markers are looked for: the unfolded path the
+/// policy recorded for it, else the project key itself (the case-folded
+/// fallback the module doc describes, which under-reports).
+fn language_root(policy: &ProjectPolicy, folder: &str) -> PathBuf {
+    let shown = policy
+        .projects
+        .get(folder)
+        .and_then(|e| e.display_path.clone())
+        .unwrap_or_else(|| folder.to_string());
+    PathBuf::from(shown)
+}
+
+/// The facts matching gets from this daemon's cwd cache: the sessions
+/// [`readable_sessions`] lets through under `gates`, and, when
+/// `needs_languages`, the languages `languages_of` gives for each of their
+/// folders. `languages_of` is called with no lock held, with the folder's
+/// key and its [`language_root`].
+///
+/// Shared by `mission_matches`, which probes the folder live, and the
+/// per-entry join behind `list_pending`'s `mission_fit`, which reads the
+/// catalogue slot's cache first.
+pub(crate) fn current_facts(
+    shared: &DaemonShared,
+    gates: &ReadGates,
+    needs_languages: bool,
+    mut languages_of: impl FnMut(&str, &Path) -> BTreeSet<String>,
+) -> LocalFacts {
     // A key the cache has not filled in yet is worked out here and not
     // written back: matching leaves the cache as it found it.
     let seen: Vec<SeenSession> = {
@@ -255,25 +397,212 @@ pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response 
     };
     let (sessions, roots) = {
         let policy = shared.policy.lock().expect("policy lock");
-        let sessions = readable_sessions(&policy, &tools_on, &excluded_paths, &seen);
+        let sessions = readable_sessions(&policy, &gates.tools_on, &gates.excluded_paths, &seen);
         let roots: BTreeMap<String, PathBuf> = sessions
             .iter()
-            .map(|s| {
-                let shown = policy
-                    .projects
-                    .get(&s.folder)
-                    .and_then(|e| e.display_path.clone())
-                    .unwrap_or_else(|| s.folder.clone());
-                (s.folder.clone(), PathBuf::from(shown))
-            })
+            .map(|s| (s.folder.clone(), language_root(&policy, &s.folder)))
             .collect();
         (sessions, roots)
     };
-    let facts = local_facts(sessions, catalogue.needs_languages(), |folder| {
+    local_facts(sessions, needs_languages, |folder| {
         roots
             .get(folder)
-            .map(|root| languages_at(root))
+            .map(|root| languages_of(folder, root))
             .unwrap_or_default()
+    })
+}
+
+/// How many of the live catalogue's matched missions each pending queue
+/// entry fits, by entry id: `list_pending`'s `mission_fit`. `None` when the
+/// slot holds no live catalogue -- unknown, which a caller renders as an
+/// absent field, never as zero.
+pub(crate) fn pending_mission_fit(
+    shared: &DaemonShared,
+    now: DateTime<Utc>,
+) -> Option<BTreeMap<Uuid, usize>> {
+    let join = MissionJoin::read(shared, now, Probe::Folders)?;
+    let policy = shared.policy.lock().expect("policy lock");
+    let queue = shared.queue.lock().expect("queue lock");
+    Some(
+        queue
+            .pending()
+            .into_iter()
+            .map(|e| (e.entry_id, join.fit(&policy, e)))
+            .collect(),
+    )
+}
+
+/// Whether building a [`MissionJoin`] may look at folder roots for their
+/// languages (OWNER DECISION V4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Probe {
+    /// `list_pending`: a folder the slot's cache has not seen is looked at,
+    /// with no lock held, and the answer is written back to the cache.
+    Folders,
+    /// `status`: the cache only. A folder it has not seen has no known
+    /// language, so it fits no language criterion.
+    CacheOnly,
+}
+
+/// Everything needed to count, per queue entry, the live catalogue's
+/// matched missions it fits, read once with every lock released again.
+/// Built before the caller takes the policy and queue locks it renders
+/// under; [`MissionJoin::fit`] then needs only those guards.
+pub(crate) struct MissionJoin {
+    catalogue: ContributionMissionCatalogue,
+    matched: Vec<String>,
+    facts: LocalFacts,
+    gates: ReadGates,
+}
+
+impl MissionJoin {
+    /// `None` when the slot holds no live catalogue: unknown, which every
+    /// caller renders as an absent field, never as zero.
+    pub(crate) fn read(shared: &DaemonShared, now: DateTime<Utc>, probe: Probe) -> Option<Self> {
+        // The slot is a leaf lock: cloned out and released straight away.
+        let (catalogue, received_at, cached) = {
+            let slot = shared
+                .mission_catalogue
+                .lock()
+                .expect("mission catalogue lock");
+            let slot = slot.as_ref().filter(|s| s.is_live(now))?;
+            (
+                slot.catalogue.clone(),
+                slot.received_at,
+                slot.folder_languages.clone(),
+            )
+        };
+        let needs_languages = catalogue.needs_languages();
+        let gates = read_gates(shared);
+        let mut probed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut languages_of = |folder: &str, root: &Path| -> BTreeSet<String> {
+            if let Some(known) = cached.get(folder).or_else(|| probed.get(folder)) {
+                return known.clone();
+            }
+            match probe {
+                Probe::CacheOnly => BTreeSet::new(),
+                Probe::Folders => {
+                    let found = languages_at(root);
+                    probed.insert(folder.to_string(), found.clone());
+                    found
+                }
+            }
+        };
+        let mut facts = current_facts(shared, &gates, needs_languages, &mut languages_of);
+        if needs_languages {
+            // The waiting entries' folders as well: an entry can sit in a
+            // folder the cwd cache holds no readable session for. Adding
+            // their languages cannot change `match_missions`, which looks
+            // a language up only for a readable session's own folder.
+            //
+            // An entry's folder is probed only when `readable_sessions` lets
+            // the entry itself through, the same gate `fit` applies: never
+            // for an entry whose adapter is off, in a Never folder or under
+            // a Never override, or kept or withdrawn. Checking which files
+            // exist at a folder's root is reading it (M1). An entry queued
+            // before its folder went Never, or before its adapter was
+            // switched off, is still waiting.
+            let roots: Vec<(String, PathBuf)> = {
+                let entries: Vec<SeenSession> = {
+                    let queue = shared.queue.lock().expect("queue lock");
+                    queue
+                        .pending()
+                        .into_iter()
+                        .filter(|e| e.project_key != UNKNOWN_PROJECT_KEY)
+                        .filter(|e| !facts.folder_languages.contains_key(&e.project_key))
+                        .map(|e| SeenSession {
+                            tool: Some(e.displayed_source().to_string()),
+                            adapter: Some(e.source.clone()),
+                            folder: e.project_key.clone(),
+                            path: e.path.to_string_lossy().to_string(),
+                        })
+                        .collect()
+                };
+                let policy = shared.policy.lock().expect("policy lock");
+                let entry_folders: BTreeSet<String> =
+                    readable_sessions(&policy, &gates.tools_on, &gates.excluded_paths, &entries)
+                        .into_iter()
+                        .map(|s| s.folder)
+                        .collect();
+                entry_folders
+                    .into_iter()
+                    .map(|f| {
+                        let root = language_root(&policy, &f);
+                        (f, root)
+                    })
+                    .collect()
+            };
+            for (folder, root) in roots {
+                let langs = languages_of(&folder, &root);
+                facts.folder_languages.insert(folder, langs);
+            }
+        }
+        if !probed.is_empty() {
+            // Written back only into the catalogue it was probed for: a slot
+            // replaced or emptied meanwhile keeps its own (empty) cache.
+            let mut slot = shared
+                .mission_catalogue
+                .lock()
+                .expect("mission catalogue lock");
+            if let Some(slot) = slot
+                .as_mut()
+                .filter(|s| s.received_at == received_at && s.catalogue == catalogue)
+            {
+                slot.folder_languages.extend(probed);
+            }
+        }
+        let matched = match_missions(&catalogue, &facts);
+        Some(MissionJoin {
+            catalogue,
+            matched,
+            facts,
+            gates,
+        })
+    }
+
+    /// How many matched missions `entry` fits. An entry
+    /// [`readable_sessions`] would not let through -- adapter off, folder
+    /// Never, session kept or withdrawn -- fits none: a known zero.
+    pub(crate) fn fit(&self, policy: &ProjectPolicy, entry: &QueueEntry) -> usize {
+        let seen = SeenSession {
+            tool: Some(entry.displayed_source().to_string()),
+            adapter: Some(entry.source.clone()),
+            folder: entry.project_key.clone(),
+            path: entry.path.to_string_lossy().to_string(),
+        };
+        readable_sessions(
+            policy,
+            &self.gates.tools_on,
+            &self.gates.excluded_paths,
+            std::slice::from_ref(&seen),
+        )
+        .first()
+        .map_or(0, |session| {
+            missions_fitting(&self.catalogue, &self.matched, session, &self.facts)
+        })
+    }
+}
+
+/// `mission_matches {catalogue}`: the ids of the catalogue's missions that
+/// this contributor's local work fits, and how many tools and folders
+/// matching was allowed to read -- counts only.
+///
+/// The catalogue is a parameter; the daemon fetches nothing here, and the
+/// slot the scheduled refresh fills is neither read nor written. Every input is read under its own lock and
+/// released, none mutably: no policy, queue, state or file is written, no
+/// audit row is appended, and the log gets [`LOG_LABEL`] and nothing else
+/// (M1, M2). The answer goes back over the local socket only.
+pub fn handle_mission_matches(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(raw) = req.params.get("catalogue") else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "catalogue-required");
+    };
+    let catalogue = match ContributionMissionCatalogue::from_value(raw) {
+        Ok(catalogue) => catalogue,
+        Err(e) => return Response::err(req.id, ERR_BAD_PARAMS, e.label()),
+    };
+    let gates = read_gates(shared);
+    let facts = current_facts(shared, &gates, catalogue.needs_languages(), |_, root| {
+        languages_at(root)
     });
     let matches = match_missions(&catalogue, &facts);
     tracing::debug!("{LOG_LABEL}");
@@ -989,5 +1318,452 @@ mod tests {
             label(ask(&s, json!({"catalogue": "missions"}))),
             "catalogue-invalid"
         );
+    }
+
+    // ---- list_pending's mission_fit (the catalogue slot) ----
+
+    fn list_pending(s: &DaemonShared) -> serde_json::Value {
+        let reply = handle_request(
+            s,
+            &Request {
+                id: 8,
+                method: "list_pending".to_string(),
+                params: json!({}),
+            },
+        );
+        reply.result.expect("list_pending answers")
+    }
+
+    /// `mission_fit` of the listed entry whose session hash is `hash`:
+    /// `None` when the field is absent.
+    fn fit_of(listed: &serde_json::Value, hash: &str) -> Option<u64> {
+        let row = listed["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["session_hash"] == hash)
+            .unwrap_or_else(|| panic!("{hash} is listed: {listed}"));
+        row.get("mission_fit").map(|v| v.as_u64().expect("a count"))
+    }
+
+    /// The project key `seeded()` gives a folder under its work directory.
+    fn key_under(work: &tempfile::TempDir, folder: &str) -> String {
+        super::super::policy::project_for(Some(work.path().join(folder).to_str().unwrap())).0
+    }
+
+    /// Queue one pending entry: `source` is the adapter, `hash` its session
+    /// hash, in `folder`'s project, at `path`.
+    fn pend(s: &DaemonShared, source: &str, hash: &str, folder: &str, path: &str) -> uuid::Uuid {
+        let entry_id = uuid::Uuid::new_v4();
+        s.queue
+            .lock()
+            .unwrap()
+            .upsert(
+                QueueEntry {
+                    entry_id,
+                    session_hash: hash.to_string(),
+                    source: source.to_string(),
+                    project_key: folder.to_string(),
+                    project_label: "seed".to_string(),
+                    path: PathBuf::from(path),
+                    size_bytes: 1,
+                    discovered_at: Utc::now(),
+                    ..Default::default()
+                },
+                500,
+            )
+            .unwrap();
+        entry_id
+    }
+
+    fn receive(s: &DaemonShared, raw: serde_json::Value) {
+        receive_catalogue(&s.mission_catalogue, &raw, Utc::now()).expect("catalogue is read");
+    }
+
+    /// No catalogue, an expired one and a refused one are all unknown: the
+    /// field is absent from every row, never 0. A refusal empties a slot
+    /// that held a live catalogue rather than leaving it in place.
+    #[test]
+    fn mission_fit_is_absent_without_a_live_catalogue() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(&s, "claude-code", "sha256:a", &ask, "/s/claude-ask-1.jsonl");
+
+        assert_eq!(fit_of(&list_pending(&s), "sha256:a"), None, "no slot");
+
+        let stale = Utc::now()
+            - chrono::TimeDelta::from_std(MISSION_CATALOGUE_MAX_AGE).unwrap()
+            - chrono::TimeDelta::minutes(1);
+        receive_catalogue(&s.mission_catalogue, &catalogue(), stale).unwrap();
+        assert_eq!(fit_of(&list_pending(&s), "sha256:a"), None, "expired");
+
+        receive(&s, catalogue());
+        assert_eq!(fit_of(&list_pending(&s), "sha256:a"), Some(1), "live");
+
+        let refused = receive_catalogue(
+            &s.mission_catalogue,
+            &json!({"schema_version": 2}),
+            Utc::now(),
+        );
+        assert_eq!(refused, Err(CatalogueError::SchemaUnsupported));
+        assert!(s.mission_catalogue.lock().unwrap().is_none());
+        assert_eq!(fit_of(&list_pending(&s), "sha256:a"), None, "refused");
+    }
+
+    /// A live catalogue with no missions is a known zero.
+    #[test]
+    fn mission_fit_is_zero_for_a_live_empty_catalogue() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(&s, "claude-code", "sha256:a", &ask, "/s/claude-ask-1.jsonl");
+        receive(&s, json!({"schema_version": 1, "missions": []}));
+        assert_eq!(fit_of(&list_pending(&s), "sha256:a"), Some(0));
+    }
+
+    /// An entry from a switched-off adapter, or in a Never folder, fits
+    /// nothing, while an Ask me Claude Code entry fits the one matched
+    /// mission its criteria meet. The Python mission's only folder is
+    /// Never, so it is never matched; `claude-3` asks for three sessions
+    /// and only two are readable.
+    #[test]
+    fn mission_fit_reads_entries_through_the_same_gates() {
+        let (_dir, s, work) = seeded();
+        let (ask, never) = (key_under(&work, "ask-repo"), key_under(&work, "never-repo"));
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        pend(&s, "codex", "sha256:codex", &ask, "/s/codex-ask.jsonl");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:never",
+            &never,
+            "/s/claude-never.jsonl",
+        );
+        receive(&s, catalogue());
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:ask"), Some(1), "{listed}");
+        assert_eq!(fit_of(&listed, "sha256:codex"), Some(0), "adapter off");
+        assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "Never folder");
+    }
+
+    /// Under a Never contribution override nothing is read, so every entry
+    /// fits nothing -- a known zero, since the catalogue is live.
+    #[test]
+    fn mission_fit_under_a_never_override_is_zero_everywhere() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        receive(
+            &s,
+            json!({"schema_version": 1, "missions": [{"mission_id": "any"}]}),
+        );
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(1));
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
+            .unwrap();
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(0));
+    }
+
+    /// OWNER DECISION V3: an entry whose criteria a mission meets does not
+    /// fit it while the readable sessions fall short of its `min_sessions`.
+    #[test]
+    fn mission_fit_needs_the_mission_matched_not_only_the_criteria_met() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        receive(
+            &s,
+            json!({"schema_version": 1, "missions": [
+                {"mission_id": "claude-3", "criteria": {"tools": ["claude-code"], "min_sessions": 3}},
+            ]}),
+        );
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(0));
+        receive(
+            &s,
+            json!({"schema_version": 1, "missions": [
+                {"mission_id": "claude-2", "criteria": {"tools": ["claude-code"], "min_sessions": 2}},
+            ]}),
+        );
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(1));
+    }
+
+    /// A pending entry for a session that is kept, or whose upload was
+    /// withdrawn, fits nothing: the same path-based M2 exclusion
+    /// `readable_sessions` applies to the cwd cache, with no second filter.
+    #[test]
+    fn mission_fit_excludes_kept_and_withdrawn_sessions() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        let one = json!({"schema_version": 1, "missions": [
+            {"mission_id": "claude", "criteria": {"tools": ["claude-code"]}},
+        ]});
+        // An earlier keep of the session at claude-ask-1, and a withdrawn
+        // upload of the one at claude-ask-2; each has a later pending entry.
+        let kept = pend(
+            &s,
+            "claude-code",
+            "sha256:kept",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        s.queue.lock().unwrap().keep(kept).unwrap();
+        let submission_id = uuid::Uuid::new_v4();
+        let uploaded = pend(
+            &s,
+            "claude-code",
+            "sha256:up",
+            &ask,
+            "/s/claude-ask-2.jsonl",
+        );
+        {
+            let mut queue = s.queue.lock().unwrap();
+            queue.set_state(uploaded, QueueState::Uploaded, None);
+            queue.set_submission_id(uploaded, submission_id);
+        }
+        HistoryCache::save(&s.store, &[history_record(submission_id, STATUS_WITHDRAWN)]).unwrap();
+        pend(
+            &s,
+            "claude-code",
+            "sha256:kept-again",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:withdrawn-again",
+            &ask,
+            "/s/claude-ask-2.jsonl",
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:fresh",
+            &ask,
+            "/s/claude-fresh.jsonl",
+        );
+        // A third Claude Code session in the Ask me folder stays readable,
+        // so the mission is matched and the fresh entry is the control.
+        s.state.lock().unwrap().cwd_cache.insert(
+            "/s/claude-fresh.jsonl".to_string(),
+            CwdCacheEntry {
+                size_bytes: 1,
+                modified_at: Utc::now(),
+                cwd: Some(work.path().join("ask-repo").to_str().unwrap().to_string()),
+                project_key: Some(ask.clone()),
+                tool: Some("claude-code".to_string()),
+                adapter: Some("claude-code".to_string()),
+            },
+        );
+        receive(&s, one);
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:fresh"), Some(1), "{listed}");
+        assert_eq!(fit_of(&listed, "sha256:kept-again"), Some(0), "{listed}");
+        assert_eq!(
+            fit_of(&listed, "sha256:withdrawn-again"),
+            Some(0),
+            "{listed}"
+        );
+    }
+
+    /// Counts only: no mission id or title reaches the wire, and no other
+    /// rendering of an entry (`list_kept`) carries the field.
+    #[test]
+    fn mission_fit_puts_no_mission_on_the_wire() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        let kept = pend(
+            &s,
+            "claude-code",
+            "sha256:kept",
+            &ask,
+            "/s/claude-ask-9.jsonl",
+        );
+        s.queue.lock().unwrap().keep(kept).unwrap();
+        receive(&s, catalogue());
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:ask"), Some(1));
+        let text = listed.to_string();
+        for named in [
+            "rust-claude",
+            "Rust with Claude",
+            "python",
+            "Python work",
+            "claude-3",
+            "Three Claude sessions",
+        ] {
+            assert!(!text.contains(named), "{named} is on the wire: {text}");
+        }
+        let kept_rows = handle_request(
+            &s,
+            &Request {
+                id: 9,
+                method: "list_kept".to_string(),
+                params: json!({}),
+            },
+        )
+        .result
+        .unwrap();
+        assert!(
+            kept_rows["kept"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("mission_fit").is_none()),
+            "{kept_rows}"
+        );
+    }
+
+    /// Folder languages are looked at once per catalogue and then read from
+    /// the slot's cache: a marker removed after the first look changes
+    /// nothing until the catalogue is replaced, which drops the cache.
+    #[test]
+    fn mission_fit_caches_folder_languages_per_catalogue() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        let rust = json!({"schema_version": 1, "missions": [
+            {"mission_id": "rust", "criteria": {"languages": ["rust"]}},
+        ]});
+        receive(&s, rust.clone());
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(1));
+        std::fs::remove_file(work.path().join("ask-repo").join("Cargo.toml")).unwrap();
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(1), "cached");
+        receive(&s, rust);
+        assert_eq!(fit_of(&list_pending(&s), "sha256:ask"), Some(0), "re-read");
+    }
+
+    /// `mission_matches` neither reads nor writes the slot: it answers from
+    /// its parameter alone, and a live slot is left exactly as it was (M2).
+    #[test]
+    fn mission_matches_neither_reads_nor_writes_the_slot() {
+        let (_dir, s, _work) = seeded();
+        let answer = ask(&s, json!({"catalogue": catalogue()})).result.unwrap();
+        assert!(s.mission_catalogue.lock().unwrap().is_none(), "not written");
+        receive(&s, json!({"schema_version": 1, "missions": []}));
+        let before = format!("{:?}", s.mission_catalogue.lock().unwrap());
+        assert_eq!(
+            ask(&s, json!({"catalogue": catalogue()})).result.unwrap(),
+            answer
+        );
+        assert_eq!(format!("{:?}", s.mission_catalogue.lock().unwrap()), before);
+    }
+
+    /// The languages the live slot has cached, by folder key.
+    fn cached_languages(s: &DaemonShared) -> BTreeMap<String, BTreeSet<String>> {
+        s.mission_catalogue
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("live catalogue")
+            .folder_languages
+            .clone()
+    }
+
+    /// Kristi's #1285 review, finding 1 (and #1298, poldsam 1): a waiting
+    /// entry's folder is probed for language markers only when
+    /// `readable_sessions` would let the entry through. Under a languages
+    /// catalogue, an entry in a Never folder and an entry whose adapter is
+    /// off (codex, in a folder no readable session ran in) each leave their
+    /// folder unprobed, while an Ask me entry with its adapter on is probed.
+    #[test]
+    fn waiting_entries_in_never_folders_or_off_adapters_are_not_language_probed() {
+        let (_dir, s, work) = seeded();
+        let off_dir = work.path().join("off-repo");
+        std::fs::create_dir_all(&off_dir).unwrap();
+        std::fs::write(off_dir.join("pyproject.toml"), "").unwrap();
+        let (ask, never, off) = (
+            key_under(&work, "ask-repo"),
+            key_under(&work, "never-repo"),
+            key_under(&work, "off-repo"),
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        pend(
+            &s,
+            "claude-code",
+            "sha256:never",
+            &never,
+            "/s/claude-never.jsonl",
+        );
+        pend(&s, "codex", "sha256:off", &off, "/s/codex-off.jsonl");
+        receive(&s, catalogue());
+        let listed = list_pending(&s);
+        assert_eq!(fit_of(&listed, "sha256:never"), Some(0), "{listed}");
+        assert_eq!(fit_of(&listed, "sha256:off"), Some(0), "{listed}");
+        let cached = cached_languages(&s);
+        assert!(
+            cached.contains_key(&ask),
+            "Ask me folder probed: {cached:?}"
+        );
+        assert!(
+            !cached.contains_key(&never),
+            "Never folder probed: {cached:?}"
+        );
+        assert!(
+            !cached.contains_key(&off),
+            "off adapter's folder probed: {cached:?}"
+        );
+    }
+
+    /// Under a Never contribution override every folder is Never, so no
+    /// waiting entry's folder is probed, whatever its own mode.
+    #[test]
+    fn no_waiting_entry_is_language_probed_under_a_never_override() {
+        let (_dir, s, work) = seeded();
+        let ask = key_under(&work, "ask-repo");
+        pend(
+            &s,
+            "claude-code",
+            "sha256:ask",
+            &ask,
+            "/s/claude-ask-1.jsonl",
+        );
+        s.policy
+            .lock()
+            .unwrap()
+            .set_contribution_override(ProjectMode::Ignore, Utc::now(), None)
+            .unwrap();
+        receive(&s, catalogue());
+        list_pending(&s);
+        let cached = cached_languages(&s);
+        assert!(cached.is_empty(), "probed under Never: {cached:?}");
     }
 }

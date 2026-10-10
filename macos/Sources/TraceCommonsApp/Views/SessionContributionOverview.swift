@@ -142,12 +142,16 @@ struct SessionWithdrawalAction: View {
             GlassEyebrowCard(copy.nextAction) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     if let result = model.withdrawals[record.submissionID] {
-                        WithdrawalOutcomeView(result: result)
+                        // A failure is said under Try again, the button it
+                        // is about; any other outcome heads the card.
+                        let failed = WithdrawalOutcomeView.isFailure(result)
+                        if !failed { WithdrawalOutcomeView(result: result) }
                         if shouldOfferRetry(result) {
                             Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }
+                        if failed { WithdrawalOutcomeView(result: result) }
                     } else if confirming {
                         WithdrawalConfirmationView(
                             status: currentStatus,
@@ -181,6 +185,13 @@ struct SessionWithdrawalAction: View {
 struct WithdrawalOutcomeView: View {
     let result: AppModel.WithdrawalResult
 
+    /// A failed withdrawal: the failed request's red line, drawn under the
+    /// retry it is about (Ron, 2026-10-09).
+    static func isFailure(_ result: AppModel.WithdrawalResult) -> Bool {
+        if case .failed = result { return true }
+        return false
+    }
+
     var body: some View {
         let (text, status): (String, GlassStatus) = {
             switch result {
@@ -199,8 +210,12 @@ struct WithdrawalOutcomeView: View {
                     .glassType(GlassTokens.TypeScale.bodyStrong)
                     .foregroundStyle(GlassColor.textPrimary)
             }
-            GlassStatusLabel(text, status: status)
-                .fixedSize(horizontal: false, vertical: true)
+            if Self.isFailure(result) {
+                GlassAlert(text)
+            } else {
+                GlassStatusLabel(text, status: status)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

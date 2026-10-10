@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::trace_artifact_store::{
@@ -30,6 +31,12 @@ pub trait GcsObjectClient: Send + Sync {
     fn get_object(&self, key: &str) -> anyhow::Result<GcsObjectFetch>;
     fn delete_object(&self, key: &str) -> anyhow::Result<bool>;
     fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool>;
+    /// The keys of every live object whose key starts with `prefix`, sorted.
+    /// Noncurrent versions are not listed.
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>>;
+    /// Whether the bucket's object versioning policy is on. A bucket that
+    /// reports no policy is `false`.
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool>;
 }
 
 impl<T: GcsObjectClient + ?Sized> GcsObjectClient for Arc<T> {
@@ -53,12 +60,29 @@ impl<T: GcsObjectClient + ?Sized> GcsObjectClient for Arc<T> {
     fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
         (**self).restore_deleted_object(key)
     }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        (**self).list_object_keys(prefix)
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        (**self).bucket_versioning_enabled()
+    }
 }
 
 #[derive(Default)]
 pub struct InMemoryGcsObjectClient {
     live: Mutex<BTreeMap<String, (Bytes, BTreeMap<String, String>)>>,
     deleted: Mutex<BTreeMap<String, (Bytes, BTreeMap<String, String>)>>,
+    /// The bucket policy `bucket_versioning_enabled` reports. Off by default:
+    /// a bucket whose policy nobody set is not versioned.
+    versioning_enabled: AtomicBool,
+}
+
+impl InMemoryGcsObjectClient {
+    pub fn set_versioning_enabled(&self, enabled: bool) {
+        self.versioning_enabled.store(enabled, Ordering::SeqCst);
+    }
 }
 
 impl GcsObjectClient for InMemoryGcsObjectClient {
@@ -108,6 +132,91 @@ impl GcsObjectClient for InMemoryGcsObjectClient {
         } else {
             Ok(false)
         }
+    }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        Ok(self
+            .live
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        Ok(self.versioning_enabled.load(Ordering::SeqCst))
+    }
+}
+
+/// A `GcsObjectClient` confined to one key prefix of a bucket: every key it
+/// is given is stored under `{prefix}/`, and the keys it lists come back
+/// without it. The remote restore drill (`versioned_pipeline_remote_restore`)
+/// names a store as `bucket[/prefix]` and writes only under that prefix;
+/// `GcsRemoteTraceArtifactProvider` itself has no prefix of its own.
+pub struct PrefixedGcsObjectClient<C> {
+    inner: C,
+    prefix: String,
+}
+
+impl<C: GcsObjectClient> PrefixedGcsObjectClient<C> {
+    /// `prefix` is one or more `/`-separated segments, none empty, `.` or
+    /// `..`; anything else is `gcs_object_prefix_invalid`.
+    pub fn new(inner: C, prefix: impl Into<String>) -> anyhow::Result<Self> {
+        let prefix = prefix.into();
+        anyhow::ensure!(
+            !prefix.is_empty()
+                && prefix
+                    .split('/')
+                    .all(|segment| !segment.is_empty() && segment != "." && segment != ".."),
+            "gcs_object_prefix_invalid"
+        );
+        Ok(Self { inner, prefix })
+    }
+
+    fn key(&self, key: &str) -> String {
+        format!("{}/{key}", self.prefix)
+    }
+}
+
+impl<C: GcsObjectClient> GcsObjectClient for PrefixedGcsObjectClient<C> {
+    fn put_object(
+        &self,
+        key: &str,
+        body: Bytes,
+        metadata: BTreeMap<String, String>,
+    ) -> anyhow::Result<()> {
+        self.inner.put_object(&self.key(key), body, metadata)
+    }
+
+    fn get_object(&self, key: &str) -> anyhow::Result<GcsObjectFetch> {
+        self.inner.get_object(&self.key(key))
+    }
+
+    fn delete_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.delete_object(&self.key(key))
+    }
+
+    fn restore_deleted_object(&self, key: &str) -> anyhow::Result<bool> {
+        self.inner.restore_deleted_object(&self.key(key))
+    }
+
+    fn list_object_keys(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        let own = format!("{}/", self.prefix);
+        self.inner
+            .list_object_keys(&self.key(prefix))?
+            .into_iter()
+            .map(|key| {
+                key.strip_prefix(&own)
+                    .map(str::to_string)
+                    .ok_or_else(|| anyhow::anyhow!("gcs_object_listed_outside_prefix"))
+            })
+            .collect()
+    }
+
+    fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        self.inner.bucket_versioning_enabled()
     }
 }
 
@@ -189,6 +298,59 @@ impl<C: GcsObjectClient> GcsRemoteTraceArtifactProvider<C> {
             artifact_kind.as_path_segment(),
             object_key,
         )
+    }
+
+    /// The key of every live object this provider stores (everything under
+    /// `{object_store_alias}/`), sorted.
+    pub fn stored_object_keys(&self) -> anyhow::Result<Vec<String>> {
+        let mut keys = self
+            .client
+            .list_object_keys(&format!("{}/", self.object_store_alias))?;
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// The bytes stored at `key`, as stored: the serialized record, not the
+    /// artifact's plaintext.
+    pub fn stored_object_bytes(&self, key: &str) -> anyhow::Result<Bytes> {
+        self.require_own_key(key)?;
+        Ok(self.client.get_object(key)?.body)
+    }
+
+    /// The object ref the record stored at `key` names. A record that does
+    /// not parse, or whose ref belongs at another key, is an integrity
+    /// failure.
+    pub fn stored_object_ref(&self, key: &str) -> anyhow::Result<TraceArtifactObjectRef> {
+        let body = self.stored_object_bytes(key)?;
+        let record: GcsRecord = serde_json::from_slice(&body).map_err(|_| {
+            anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: parse record".to_string(),
+                ),
+            )
+        })?;
+        if self.object_key(&record.object_ref) != key {
+            return Err(anyhow::Error::from(
+                crate::trace_artifact_store::TraceArtifactIntegrityError::new(
+                    "GcsGetFailed: remote trace artifact object ref mismatch".to_string(),
+                ),
+            ));
+        }
+        Ok(record.object_ref)
+    }
+
+    /// The bucket's versioning policy, as the bucket reports it.
+    pub fn bucket_versioning_enabled(&self) -> anyhow::Result<bool> {
+        self.client.bucket_versioning_enabled()
+    }
+
+    fn require_own_key(&self, key: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            key.strip_prefix(self.object_store_alias.as_str())
+                .is_some_and(|rest| rest.starts_with('/')),
+            "gcs_object_key_outside_store"
+        );
+        Ok(())
     }
 }
 
@@ -369,6 +531,8 @@ pub mod prod_client {
     use bytes::Bytes;
     use google_cloud_storage::client::{Client, ClientConfig};
     use google_cloud_storage::http::Error as GcsError;
+    use google_cloud_storage::http::buckets::Bucket;
+    use google_cloud_storage::http::buckets::get::GetBucketRequest;
     use google_cloud_storage::http::objects::Object;
     use google_cloud_storage::http::objects::delete::DeleteObjectRequest;
     use google_cloud_storage::http::objects::download::Range;
@@ -560,6 +724,66 @@ pub mod prod_client {
                 .map(|_| true)
                 .map_err(|err| anyhow::anyhow!("GcsRestoreFailed: rewrite: {err}"))
         }
+
+        fn list_object_keys(&self, prefix: &str) -> Result<Vec<String>> {
+            collect_listing_pages(|page_token| {
+                let request = ListObjectsRequest {
+                    bucket: self.bucket.clone(),
+                    prefix: Some(prefix.to_string()),
+                    page_token,
+                    ..Default::default()
+                };
+                let response = run_blocking(self.client.list_objects(&request))
+                    .map_err(|err| anyhow::anyhow!("GcsListFailed: {err}"))?;
+                Ok((
+                    response
+                        .items
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|object| object.name)
+                        .collect(),
+                    response.next_page_token,
+                ))
+            })
+        }
+
+        fn bucket_versioning_enabled(&self) -> Result<bool> {
+            let request = GetBucketRequest {
+                bucket: self.bucket.clone(),
+                ..Default::default()
+            };
+            let bucket = run_blocking(self.client.get_bucket(&request))
+                .map_err(|err| anyhow::anyhow!("GcsBucketGetFailed: {err}"))?;
+            Ok(versioning_enabled(&bucket))
+        }
+    }
+
+    /// Every page of a listing, in order, then sorted: `fetch` is called
+    /// with no token first and then with each `next_page_token` until a
+    /// page carries none. An empty token is the end too, never a loop.
+    fn collect_listing_pages(
+        mut fetch: impl FnMut(Option<String>) -> Result<(Vec<String>, Option<String>)>,
+    ) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        let mut page_token = None;
+        loop {
+            let (page, next) = fetch(page_token)?;
+            keys.extend(page);
+            match next {
+                Some(token) if !token.is_empty() => page_token = Some(token),
+                _ => break,
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    /// A bucket with no versioning block has never had versioning set: off.
+    fn versioning_enabled(bucket: &Bucket) -> bool {
+        bucket
+            .versioning
+            .as_ref()
+            .is_some_and(|versioning| versioning.enabled)
     }
 
     #[cfg(test)]
@@ -630,6 +854,42 @@ pub mod prod_client {
                     "{status} is transport"
                 );
             }
+        }
+
+        #[test]
+        fn a_listing_follows_every_page_token_and_sorts() {
+            let pages = std::cell::RefCell::new(vec![
+                (
+                    vec!["b".to_string(), "a".to_string()],
+                    Some("t1".to_string()),
+                ),
+                (vec!["d".to_string()], Some("t2".to_string())),
+                (vec!["c".to_string()], Some(String::new())),
+            ]);
+            let tokens = std::cell::RefCell::new(Vec::new());
+            let keys = collect_listing_pages(|token| {
+                tokens.borrow_mut().push(token);
+                Ok(pages.borrow_mut().remove(0))
+            })
+            .unwrap();
+            assert_eq!(keys, ["a", "b", "c", "d"]);
+            assert_eq!(
+                *tokens.borrow(),
+                [None, Some("t1".to_string()), Some("t2".to_string())]
+            );
+            let failed = collect_listing_pages(|_| anyhow::bail!("GcsListFailed: 503"));
+            assert!(failed.is_err());
+        }
+
+        #[test]
+        fn a_bucket_without_a_versioning_block_is_not_versioned() {
+            use google_cloud_storage::http::buckets::Versioning;
+            let mut bucket = Bucket::default();
+            assert!(!versioning_enabled(&bucket));
+            bucket.versioning = Some(Versioning { enabled: false });
+            assert!(!versioning_enabled(&bucket));
+            bucket.versioning = Some(Versioning { enabled: true });
+            assert!(versioning_enabled(&bucket));
         }
 
         #[tokio::test]

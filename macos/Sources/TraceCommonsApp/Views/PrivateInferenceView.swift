@@ -118,6 +118,17 @@ struct PrivateAISwitchCard: View {
                     Toggle(copy.settingsToggle, isOn: Binding(get: { isOn ?? false }, set: onSet))
                         .toggleStyle(GlassToggleStyle(.settings))
                         .disabled(busy || isOn == nil)
+                    // A refused switch: the failed request's red line,
+                    // unboxed, under the switch it is about, its Dismiss a
+                    // link after it (Ron, 2026-10-09).
+                    if let refusal {
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                            GlassAlert(refusal)
+                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)
+                                .buttonStyle(GlassButtonStyle(.link))
+                                .fixedSize()
+                        }
+                    }
                     if let serving = PrivateInferenceSurface.servingLine(state, calls: calls) {
                         Text(serving)
                             .glassType(GlassTokens.TypeScale.caption)
@@ -128,12 +139,6 @@ struct PrivateAISwitchCard: View {
                         .glassType(GlassTokens.TypeScale.caption)
                         .foregroundStyle(GlassColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if let refusal {
-                GlassNotice(tone: .outside, title: refusal) {
-                    Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)
-                        .buttonStyle(GlassButtonStyle(.glass))
                 }
             }
         }

@@ -12,7 +12,7 @@ final class WriteSurfacesBeforeOnboardingTests: XCTestCase {
     /// that ask nothing first run asks. Everything else, every write
     /// section included, is unavailable until onboarding is done.
     func test_onlyTheNonConsentSectionsAreAvailableBeforeOnboarding() {
-        let available: Set<SettingsSection> = [.connection, .startup, .notifications, .updates, .privateAI, .compute]
+        let available: Set<SettingsSection> = [.general, .connection, .startup, .notifications, .updates, .privateAI, .compute]
         for section in SettingsSection.allCases {
             XCTAssertEqual(section.availableBeforeOnboarding, available.contains(section), section.rawValue)
         }

@@ -602,7 +602,9 @@ final class PasskeySheetsTests: XCTestCase {
         let source = try Self.source()
         XCTAssertTrue(source.contains("GlassRoundButton(backLabel"))
         XCTAssertTrue(source.contains("GlassRoundButton(closeLabel"))
-        XCTAssertFalse(source.contains("Button(copy.passkey.back)"))
+        // The round Back reads the frame's one Back word.
+        XCTAssertTrue(source.contains("backLabel: copy.frame.back,"))
+        XCTAssertFalse(source.contains("Button(copy.frame.back)"))
         XCTAssertFalse(source.contains("Button(copy.passkey.close)"))
         XCTAssertTrue(source.contains(".multilineTextAlignment(.center)"))
         XCTAssertTrue(source.contains("GlassTokens.TypeScale.display"))

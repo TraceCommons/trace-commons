@@ -9,6 +9,8 @@ mod account_trust_growth_routes;
 mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/credit_estimate.rs"]
+mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
@@ -92,7 +94,17 @@ use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_authority::parse_storage_policy_values;
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
+use trace_commons_server::trace_summary_similarity::{
+    TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION, TRACE_SIMILARITY_NEIGHBOR_THRESHOLD,
+    trace_redacted_summary_embedding, trace_summary_embedding_similarity,
+    trace_summary_similarity_score,
+};
+// The gate variables the production pipeline assembly shares with the
+// legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
+// scorer and fastembed embedder (PR #1295 review round 2, Major 1).
+use trace_commons_server::versioned_pipeline_production::gate_env::*;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -265,10 +277,10 @@ use trace_commons_server::trace_score_attestation::{
 use trace_commons_server::versioned_pipeline::{
     AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
     PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore, PipelineAdmissionLimits,
-    PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig, PipelineNearPayoutControls,
-    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineDuplicateControls, PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig,
+    PipelineNearPayoutControls, PipelineNearSettlementMode, PipelineNoveltyUtilityChecks,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineRetentionAction, PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
     PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
     is_pipeline_score_object_ref,
 };
@@ -340,7 +352,6 @@ const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
     "TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY";
-const TRACE_COMMONS_GATE_SERVICE: &str = "TRACE_COMMONS_GATE_SERVICE";
 const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
     "TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT";
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
@@ -532,27 +543,14 @@ const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_
 #[cfg(feature = "local-gpu-models")]
 const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
 #[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
-    "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
-#[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B-Instruct";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
-#[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
 
-// NEAR AI Cloud-backed perplexity scorer (pilot deployment path). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_near_ai` AND the `near-ai-scorer` cargo
-// feature is compiled in. API key intentionally only read from env (never CLI)
-// so it never appears in process listings.
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_BASE_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// The NEAR AI scorer, fastembed embedder and vector index variables the
+// legacy `enclave_near_ai` gate shares with the production pipeline assembly
+// are defined in `trace_commons_server::versioned_pipeline_production::gate_env`
+// and imported above.
 // Where the per-model attestation registry is fetched from. OPTIONAL, and
 // deliberately a separate variable from TRACE_COMMONS_NEAR_AI_BASE_URL: that
 // one is the *direct-completions* endpoint (see `AppState::from_env`), e.g.
@@ -572,41 +570,6 @@ const TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL: &str =
 // fetch. Defaults to Intel's own service: the collateral is what a quote is
 // verified against, so the shorter the trust path to Intel the better.
 const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
-#[allow(dead_code)]
-// Chunked scoring sends one bounded request per chunk; perplexity needs
-// only the realized token's logprob, so k=1 cuts TEE backend memory and
-// response size ~5x vs the OpenAI-canonical 5 (large-trace OOM root cause).
-const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 1;
-// fastembed embedder (Phase A3). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MODEL_ID: &str = "TRACE_COMMONS_EMBEDDER_MODEL_ID";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_CACHE_DIR: &str = "TRACE_COMMONS_EMBEDDER_CACHE_DIR";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MAX_TOKENS: &str = "TRACE_COMMONS_EMBEDDER_MAX_TOKENS";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM: &str = "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID: &str = "BAAI/bge-large-en-v1.5";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR: &str = "/var/cache/trace-commons-embedder";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS: usize = 512;
-// usearch-backed vector index (Phase A4). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_VECTOR_INDEX_ROOT";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
 /// How long to let in-flight requests drain after SIGTERM before the shutdown
 /// flush runs anyway. Kept well under systemd's default `TimeoutStopSec=90s`
 /// so the flush always gets its turn before SIGKILL.
@@ -619,38 +582,9 @@ const TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS: usize = 20;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION: &str =
-    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH: &str = "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT: &str = "/var/lib/trace-commons-vector-index";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
 /// Matches the A4 design spec's "or on a periodic timer (every 60 s)".
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS: u64 = 60;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
-// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex` instance
-// from the novelty index above, so dedup lookups never pollute novelty's
-// nearest-neighbor results. Same dim/hnsw/ef params as the novelty index
-// (`TRACE_COMMONS_VECTOR_INDEX_*`); only the root path is independently
-// configurable. Read only under the `local-gpu-models`/`near-ai-scorer`
-// features (usearch is not compiled in otherwise).
-#[allow(dead_code)]
-const TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -1327,7 +1261,14 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run_ingest(None).await
+    // A subcommand (help, version, keypair, TLS self-check) reads no
+    // configuration, so it never sees the pipeline runtime selection.
+    let selection = if std::env::args().nth(1).is_some() {
+        PipelineRuntimeSelection::None
+    } else {
+        production_assembly::pipeline_runtime_selection_from_env()?
+    };
+    run_ingest(selection.assembler()).await
 }
 
 /// Starts ingest with an optional production pipeline assembly.
@@ -1429,9 +1370,95 @@ pub async fn run_ingest(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(
-        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    let (state, pipeline_gate_components) =
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?;
+    let state = Arc::new(state);
+    let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
+    let listener = finish_ingest_startup(
+        &state,
+        pipeline_gate_components.as_deref(),
+        &bind,
+        production_assembly::pipeline_check_vars_from_env(),
+        DEPLOYED_CODE_REVISION_HASH,
+    )
+    .await?;
+    spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
+    spawn_community_snapshot_recompute_task(&state);
+    spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
+    spawn_trace_near_credit_outbox_scheduler_task(
+        &state,
+        state.near_credit_outbox_scheduler.clone(),
     );
+    spawn_trace_retention_maintenance_scheduler_task(
+        &state,
+        state.retention_maintenance_scheduler.clone(),
+    );
+    spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
+    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
+    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
+    spawn_trace_benchmark_registry_scheduler_task(
+        &state,
+        state.benchmark_registry_scheduler.clone(),
+    );
+    spawn_trace_benchmark_pipeline_scheduler_task(
+        &state,
+        state.benchmark_pipeline_scheduler.clone(),
+    );
+    spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
+    spawn_trace_credit_settlement_scheduler_task(&state, state.credit_settlement_scheduler.clone());
+    spawn_trace_process_evaluation_scheduler_task(
+        &state,
+        state.process_evaluation_scheduler.clone(),
+    );
+    spawn_trace_revocation_propagation_scheduler_task(
+        &state,
+        state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
+    );
+    tracing::info!(
+        addr = %listener.local_addr()?,
+        "Trace Commons ingestion service listening"
+    );
+    let shutdown_state = Arc::clone(&state);
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
+    // Runs on the way out of BOTH a clean drain and an aborted one: the
+    // novelty corpus is the gate's memory of what "duplicate" means, and a
+    // restart that drops it silently re-scores every subsequent trace against
+    // an emptier corpus.
+    flush_vector_indexes_on_shutdown(&shutdown_state);
+    result
+}
+
+/// Everything that can refuse a start after `AppState` is built: the
+/// scheduler validations, the bind address and the bind. Only once all of
+/// them have passed is `pipeline_production_adapters` emitted (spec A-D11),
+/// when the operator set the `TRACE_COMMONS_PIPELINE_CHECK_*` variables, so
+/// a refused boot never leaves a result that the corrected boot would keep
+/// as `pipeline_production_adapters_already_emitted` (PR #1295 review,
+/// Minor 3). Returns the bound listener.
+async fn finish_ingest_startup(
+    state: &Arc<AppState>,
+    pipeline_gate_components: Option<&production_assembly::PipelineGateComponents>,
+    bind: &str,
+    check_vars: production_assembly::PipelineCheckVars,
+    deployed_code_revision: Option<&str>,
+) -> anyhow::Result<TcpListener> {
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1483,71 +1510,25 @@ pub async fn run_ingest(
         state.as_ref(),
         state.community_snapshot_invalidation_scheduler.as_ref(),
     )?;
-    spawn_managed_eddsa_keyset_refresh_task(&state);
-    // Say it out loud at boot. Publishing aggregates without a mechanism is
-    // a deliberate choice, and an operator reading the log should not have to
-    // infer it from the absence of something.
-    if state.community_analytics_publication_basis
-        == CommunityAnalyticsPublicationBasis::SuppressionOnly
-    {
-        tracing::warn!(
-            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
-            "community analytics publish under cell suppression alone; no noise \
-             mechanism is applied and totals are not suppressed"
-        );
-    }
-    spawn_community_snapshot_recompute_task(&state);
-    spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
-    spawn_trace_near_credit_outbox_scheduler_task(
-        &state,
-        state.near_credit_outbox_scheduler.clone(),
-    );
-    spawn_trace_retention_maintenance_scheduler_task(
-        &state,
-        state.retention_maintenance_scheduler.clone(),
-    );
-    spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
-    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
-    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
-    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
-    spawn_trace_benchmark_registry_scheduler_task(
-        &state,
-        state.benchmark_registry_scheduler.clone(),
-    );
-    spawn_trace_benchmark_pipeline_scheduler_task(
-        &state,
-        state.benchmark_pipeline_scheduler.clone(),
-    );
-    spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
-    spawn_trace_credit_settlement_scheduler_task(&state, state.credit_settlement_scheduler.clone());
-    spawn_trace_process_evaluation_scheduler_task(
-        &state,
-        state.process_evaluation_scheduler.clone(),
-    );
-    spawn_trace_revocation_propagation_scheduler_task(
-        &state,
-        state.revocation_propagation_scheduler.clone(),
-    );
-    spawn_community_snapshot_invalidation_scheduler_task(
-        &state,
-        state.community_snapshot_invalidation_scheduler.clone(),
-    );
-    let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid TRACE_COMMONS_BIND address: {bind}"))?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
-    tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_state = Arc::clone(&state);
-    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
-    // Runs on the way out of BOTH a clean drain and an aborted one: the
-    // novelty corpus is the gate's memory of what "duplicate" means, and a
-    // restart that drops it silently re-scores every subsequent trace against
-    // an emptier corpus.
-    flush_vector_indexes_on_shutdown(&shutdown_state);
-    result
+    if let (Some(service), Some(components)) =
+        (state.pipeline_service.as_deref(), pipeline_gate_components)
+    {
+        production_assembly::emit_production_adapters_check(
+            check_vars,
+            deployed_code_revision,
+            service,
+            components,
+            pipeline_activation::infrastructure_profile_from_state(state),
+            state.near_settlement_mode.as_label(),
+        )?;
+    }
+    Ok(listener)
 }
 
 /// Wait for SIGTERM (systemd's stop signal) or Ctrl-C.
@@ -1662,6 +1643,10 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 struct AppState {
     activity_missions_policy:
         Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
+    /// The local credit estimate table `GET /v1/credit-estimate/table`
+    /// serves: the operator-installed one, validated at boot, else the
+    /// protocol's built-in table. Never empty.
+    credit_estimate_table: Arc<trace_commons_protocol::local_credit_estimate::LocalEstimateTable>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -1750,6 +1735,9 @@ struct AppState {
     /// that does not), because its receipt transaction checks the routing
     /// again.
     pipeline_unqualified_routing: bool,
+    /// Which pipeline runtime this process started
+    /// (`TRACE_COMMONS_PIPELINE_RUNTIME`), reported by config-status.
+    pipeline_runtime_selection: PipelineRuntimeSelection,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -2696,6 +2684,30 @@ impl ConfiguredTraceArtifactStore {
     #[cfg(test)]
     fn legacy(store: Arc<LocalEncryptedTraceArtifactStore>) -> Self {
         Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
+    }
+
+    /// A service-owned remote store as `remote_gcs` configures one (no
+    /// plaintext compatibility, the provider's label, the key wrapper's
+    /// status), over a store the caller built: the remote restore drill's
+    /// seed and resume build theirs over a bucket prefix
+    /// (`pipeline_restore_pg_tests`). Versioning is not claimed: the drill
+    /// reads the bucket's own policy instead.
+    #[cfg(test)]
+    fn service_remote_for_test(
+        store: Arc<dyn TraceArtifactStore>,
+        provider_label: &'static str,
+        kek_status: KekWrapperStatus,
+    ) -> Self {
+        Self {
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
+            store,
+            object_io_enabled: true,
+            plaintext_compatibility_allowed: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
+            provider_label: Some(provider_label),
+            kek_status: Some(kek_status),
+        }
     }
 
     fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
@@ -3781,9 +3793,14 @@ impl AppState {
         )
     }
 
+    /// The state, and the gate components the production pipeline runtime
+    /// was assembled over (`None` unless that runtime was selected).
     async fn from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(
+        Self,
+        Option<Arc<production_assembly::PipelineGateComponents>>,
+    )> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -4013,6 +4030,11 @@ impl AppState {
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
             settlement_require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
             settlement_max_micros_per_account: credit_settlement_max_micros_per_account,
+            // `main`'s duplicate short-circuits, for a compatibility run's
+            // gate decision row and Trace Credit leg.
+            duplicate_controls: pipeline_duplicate_controls_from_env(
+                pipeline_runtime_assembler.is_some(),
+            )?,
         };
         // Zaki review 1, round 2, finding 2: `main`'s NEAR settlement mode and
         // adapter-auth requirement, resolved before the pipeline runtime is
@@ -4029,7 +4051,47 @@ impl AppState {
             pipeline_runtime_assembler.is_some(),
             novelty_utility_credit_points_delta,
         )?;
-        let pipeline_service = assemble_ingest_pipeline_runtime(
+        // Spec A-D2, A-D3: under the production selection, the legacy
+        // `enclave_near_ai` gate is built here, before the pipeline, from the
+        // same scorer, embedder and settings the pipeline then holds, so the
+        // embedder is loaded once. Otherwise the gate is built where it
+        // always was, below.
+        let pipeline_runtime_selection = if pipeline_runtime_assembler
+            .is_some_and(|assembler| assembler.needs_gate_components())
+        {
+            PipelineRuntimeSelection::Production
+        } else {
+            PipelineRuntimeSelection::None
+        };
+        let (prebuilt_gate_service, pipeline_gate_components) =
+            if pipeline_runtime_selection == PipelineRuntimeSelection::Production {
+                let rollout = tenant_rollout_gates.clone();
+                let (gate_service, components) =
+                    production_assembly::build_near_ai_gate_service_with_pipeline_components(
+                        production_assembly::PipelineComponentInputs {
+                            tenant_policies: production_assembly::tenant_policy_allowlists(
+                                &tenant_policies,
+                            ),
+                            require_tenant_submission_policy,
+                            db_policy_reads: Arc::new(move |tenant_id: &str| {
+                                rollout.enabled_for(
+                                    TraceTenantRolloutFeature::DbTenantPolicyReads,
+                                    db_tenant_policy_reads,
+                                    tenant_id,
+                                )
+                            }),
+                            db_policies: db_mirror.clone().map(|db| {
+                                Arc::new(production_assembly::DatabaseTenantPolicies(db))
+                                    as Arc<dyn production_assembly::TenantPolicyStore>
+                            }),
+                        },
+                    )
+                    .await?;
+                (Some(gate_service), Some(components))
+            } else {
+                (None, None)
+            };
+        let pipeline_service = assemble_ingest_pipeline_runtime_with_components(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
             artifact_store.as_ref(),
@@ -4046,6 +4108,7 @@ impl AppState {
             },
             &pipeline_novelty_utility_checks,
             pipeline_main_gate,
+            pipeline_gate_components.clone(),
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -4592,7 +4655,7 @@ impl AppState {
         let near_attestation_key_report_client =
             near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
 
-        Ok(Self {
+        let state = Self {
             root,
             near_attestation_client,
             near_attestation_key_report_client,
@@ -4627,6 +4690,7 @@ impl AppState {
             #[cfg(test)]
             pipeline_infrastructure_override: None,
             pipeline_unqualified_routing: pipeline_allow_test_dependencies,
+            pipeline_runtime_selection,
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
@@ -4743,7 +4807,10 @@ impl AppState {
             ranking_min_pairwise_accuracy_micros,
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
-            gate_service: build_trace_gate_service_from_env().await?,
+            gate_service: match prebuilt_gate_service {
+                Some(gate_service) => gate_service,
+                None => build_trace_gate_service_from_env().await?,
+            },
             revocation_propagation_max_attempts:
                 parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta,
@@ -4764,6 +4831,7 @@ impl AppState {
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
+            credit_estimate_table: credit_estimate::table_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -4776,7 +4844,10 @@ impl AppState {
             dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(test)]
             near_access_key_checker_override: None,
-        })
+        };
+        // `run_ingest` emits `pipeline_production_adapters` over these once
+        // the start has passed every refusal (spec A-D11).
+        Ok((state, pipeline_gate_components))
     }
 }
 
@@ -6227,16 +6298,45 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
 #[cfg(feature = "near-ai-scorer")]
 async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>>
 {
-    use std::time::Duration as StdDuration;
-    use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::vector_index_usearch::{
-        UsearchVectorIndex, UsearchVectorIndexConfig,
-    };
-    use trace_commons_gate_enclave::{
-        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, NearAiPerplexityScorer,
-        NearAiScorerConfig,
-    };
+    let wrapper = near_ai_gate_key_wrapper_from_env().await?;
+    let shared = NearAiGateSharedComponents::from_env().await?;
+    Ok(near_ai_gate_service_from_parts(near_ai_gate_parts(
+        wrapper, shared,
+    )?))
+}
 
+/// What `build_enclave_near_ai_gate_service_from_env` builds before the
+/// orchestrator: the NEAR AI scorer and the fastembed embedder (built once,
+/// by the library's `NearAiGateSharedComponents::from_env`, and held as
+/// shared trait objects, so the production pipeline assembly holds the same
+/// two (spec A-D3) instead of loading a second embedder), the novelty
+/// index, the key wrapper and the orchestrator configuration.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) struct NearAiGateParts {
+    pub(crate) scorer: Arc<dyn trace_commons_gate_api::PerplexityScorer>,
+    pub(crate) embedder: Arc<dyn trace_commons_gate_api::Embedder>,
+    pub(crate) vector_index: Arc<dyn trace_commons_gate_api::VectorIndex>,
+    pub(crate) wrapper: Arc<dyn KmsKeyWrapper>,
+    pub(crate) cfg: trace_commons_gate_enclave::EnclaveGateOrchestratorConfig,
+}
+
+/// The legacy `enclave_near_ai` gate over `parts`: the orchestrator holds
+/// the shared scorer, embedder and index through their `Arc` forwarding
+/// impls, which forward every method, so scoring is unchanged.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) fn near_ai_gate_service_from_parts(parts: NearAiGateParts) -> Arc<dyn TraceGateService> {
+    use trace_commons_gate_enclave::EnclaveGateOrchestrator;
+    let orchestrator =
+        EnclaveGateOrchestrator::new(parts.scorer, parts.embedder, parts.vector_index, parts.cfg);
+    Arc::new(EnclaveGateService::new(
+        orchestrator,
+        parts.wrapper,
+        "enclave_near_ai",
+    ))
+}
+
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) async fn near_ai_gate_key_wrapper_from_env() -> anyhow::Result<Arc<dyn KmsKeyWrapper>> {
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
         format!(
             "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
@@ -6251,162 +6351,40 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
     // "local_master_key"), keyed by the gate-service master key as before.
     let wrapper: Arc<dyn KmsKeyWrapper + Send + Sync> =
         Arc::from(build_selected_kek_wrapper_async(SecretString::from(master_key)).await?);
-    let wrapper: Arc<dyn KmsKeyWrapper> = wrapper;
+    Ok(wrapper)
+}
 
-    let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_BASE_URL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let model = std::env::var(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let api_key = std::env::var(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let timeout_seconds = match std::env::var(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS
-            } else {
-                trimmed.parse::<u64>().with_context(|| {
-                    format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
-                })?
-            }
-        }
-        Err(_) => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
-    };
-    anyhow::ensure!(
-        timeout_seconds > 0,
-        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
-    );
-    let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
-        Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
-            format!(
-                "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
-            )
-        })?,
-        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
-    };
-    anyhow::ensure!(
-        tail_cutoff.is_finite(),
-        "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
-    );
+/// The rest of the legacy gate over the shared scorer and embedder: the
+/// novelty index, the floors, the policy version and the chunking knobs.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) fn near_ai_gate_parts(
+    wrapper: Arc<dyn KmsKeyWrapper>,
+    shared: NearAiGateSharedComponents,
+) -> anyhow::Result<NearAiGateParts> {
+    use trace_commons_gate_enclave::EnclaveGateOrchestratorConfig;
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
-    let scorer_cfg = NearAiScorerConfig {
-        base_url,
-        model: model.clone(),
-        api_key,
-        tail_logprob_cutoff: tail_cutoff,
-        logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
-        timeout: StdDuration::from_secs(timeout_seconds),
-    };
-    // reqwest's blocking client owns an internal Tokio runtime and must not be
-    // constructed from this async startup task. Build it on the blocking pool,
-    // which is also where synchronous gate evaluation runs below.
-    let scorer = tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_cfg))
-        .await
-        .context("NearAiPerplexityScorerInitJoinFailed")?
-        .context("NearAiPerplexityScorerInitFailed")?;
-
-    // fastembed-rs embedder — same configuration surface as the local-GPU
-    // path. Runs locally on CPU; no GPU required.
-    let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
-    let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
-    let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
-        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
-            format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
-        })?,
-        Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
-    };
-    anyhow::ensure!(
-        embedder_max_tokens > 0,
-        "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
-    );
-    let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.parse::<usize>().with_context(|| {
-                    format!("{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer")
-                })?)
-            }
-        }
-        Err(_) => None,
-    };
-    if let Some(d) = embedder_matryoshka_dim {
-        anyhow::ensure!(
-            d > 0,
-            "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be greater than zero"
-        );
-    }
-    let embedder = FastEmbedTextEmbedder::try_new(
-        embedder_model_id.clone(),
-        &embedder_cache_dir,
-        embedder_matryoshka_dim,
-        embedder_max_tokens,
-    )
-    .await
-    .context("FastEmbedTextEmbedderInitFailed")?;
-
+    let NearAiGateSharedComponents {
+        scorer,
+        embedder,
+        pins,
+    } = shared;
     let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
         .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
-    let vector_index_dim = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_DIM,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
-    )?;
-    let vector_index_max_open = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
-    )?;
-    let vector_index_flush_every = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
-    )?;
-    let vector_index_hnsw_m = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
-    )?;
-    let vector_index_ef_construction = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
-    )?;
-    let vector_index_ef_search = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
-    )?;
-    let vector_index_flush_interval = vector_index_flush_interval_from_env()?;
-    let vector_index = UsearchVectorIndex::try_new(
-        &vector_index_root,
-        UsearchVectorIndexConfig {
-            dim: vector_index_dim,
-            hnsw_m: vector_index_hnsw_m,
-            ef_construction: vector_index_ef_construction,
-            ef_search: vector_index_ef_search,
-            max_open: vector_index_max_open,
-            flush_every: vector_index_flush_every,
-            flush_interval: vector_index_flush_interval,
-        },
-    )
-    .with_context(|| {
-        format!(
-            "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
-        )
-    })?;
+    let mut vector_index_config = usearch_index_config_from_env()?;
+    vector_index_config.flush_interval = vector_index_flush_interval_from_env()?;
+    let vector_index_dim = vector_index_config.dim;
+    let vector_index = UsearchVectorIndex::try_new(&vector_index_root, vector_index_config)
+        .with_context(|| {
+            format!(
+                "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
+            )
+        })?;
 
     anyhow::ensure!(
-        embedder.output_dim() == vector_index_dim,
+        pins.embedder_output_dim == vector_index_dim,
         "embedder output_dim ({}) must equal {} ({})",
-        embedder.output_dim(),
+        pins.embedder_output_dim,
         TRACE_COMMONS_VECTOR_INDEX_DIM,
         vector_index_dim,
     );
@@ -6449,12 +6427,12 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         tail_fraction_floor_micros,
         novelty_floor_micros,
         top_k,
-        &model,
+        &pins.model,
         0,
-        tail_cutoff,
-        &embedder_model_id,
-        embedder_max_tokens,
-        embedder_matryoshka_dim,
+        pins.tail_logprob_cutoff,
+        &pins.embedder_model_id,
+        pins.embedder_max_tokens,
+        pins.embedder_matryoshka_dim,
         vector_index_dim,
         chunking.chunk_target_tokens,
         chunking.chunk_max_tokens,
@@ -6479,12 +6457,13 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
             .qualifying_chunk_floor_micros
             .unwrap_or(perplexity_floor_micros),
     };
-    let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
-    Ok(Arc::new(EnclaveGateService::new(
-        orchestrator,
+    Ok(NearAiGateParts {
+        scorer,
+        embedder,
+        vector_index: Arc::new(vector_index),
         wrapper,
-        "enclave_near_ai",
-    )))
+        cfg,
+    })
 }
 
 /// Build the cross-trace dedup vector index (shadow-only). A SEPARATE
@@ -6788,29 +6767,6 @@ fn vector_index_flush_interval_from_env() -> anyhow::Result<Option<std::time::Du
     } else {
         Some(std::time::Duration::from_secs(seconds))
     })
-}
-
-/// Parse `T = usize` from an env var with a default fallback. Trim + strict
-/// integer parse; empty / unset → default; malformed → fail-closed.
-///
-/// Not feature-gated (unlike its sibling gate-config parsers): the chunk-knob
-/// parser that reuses this reads env unconditionally so its defaults are
-/// exercised by the plain `cargo test` CI path regardless of which optional
-/// gate-service feature (if any) is compiled in.
-fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
-    match std::env::var(var) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Ok(default)
-            } else {
-                trimmed
-                    .parse::<usize>()
-                    .with_context(|| format!("{var} must be a non-negative integer"))
-            }
-        }
-        Err(_) => Ok(default),
-    }
 }
 
 /// The NEAR credit outbox scheduler's tick interval: how often `main`
@@ -7239,6 +7195,42 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
     }))
 }
 
+/// The perplexity-scoring driver's two duplicate knobs
+/// (`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES`, default `true`, and
+/// `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS`,
+/// default `900000`, in `[0, 1000000]`), parsed once for the driver and the
+/// pipeline alike.
+fn parse_perplexity_driver_duplicate_controls_from_env() -> anyhow::Result<PipelineDuplicateControls>
+{
+    Ok(PipelineDuplicateControls {
+        skip_duplicates: parse_optional_scheduler_bool_env(
+            TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES,
+            true,
+        )?,
+        skip_duplicate_threshold_micros: parse_optional_scheduler_i64_env(
+            TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
+            TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
+            0,
+            1_000_000,
+        )?,
+    })
+}
+
+/// `main`'s duplicate short-circuits for an assembled pipeline runtime: the
+/// driver's knobs, read whether or not the driver itself is enabled,
+/// because a routed tenant's gate decision rows are the pipeline's, not the
+/// driver's. Read only when a runtime is assembled (Ruling F-I2): with no
+/// pipeline, a value `main` would refuse does not stop startup, and nothing
+/// reads the controls.
+fn pipeline_duplicate_controls_from_env(
+    pipeline_runtime_assembled: bool,
+) -> anyhow::Result<Option<PipelineDuplicateControls>> {
+    if !pipeline_runtime_assembled {
+        return Ok(None);
+    }
+    parse_perplexity_driver_duplicate_controls_from_env().map(Some)
+}
+
 /// Task 5: the in-process perplexity-scoring driver. Unlike the other
 /// schedulers in this file, it has no bearer-token gate — it drives
 /// `state.db_mirror`'s cross-tenant gate-driver enumeration directly, so
@@ -7268,14 +7260,10 @@ fn parse_perplexity_score_driver_config_from_env()
         1,
         1_000,
     )?;
-    let skip_duplicates =
-        parse_optional_scheduler_bool_env(TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES, true)?;
-    let skip_duplicate_threshold_micros = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
-        TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
-        0,
-        1_000_000,
-    )?;
+    let PipelineDuplicateControls {
+        skip_duplicates,
+        skip_duplicate_threshold_micros,
+    } = parse_perplexity_driver_duplicate_controls_from_env()?;
     let backoff_base_seconds = parse_optional_scheduler_i64_env(
         TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS,
         TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS,
@@ -8442,6 +8430,13 @@ fn app(state: Arc<AppState>) -> Router {
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
         .route("/v1/public/register-stats", get(register_stats_handler))
+        // Unauthenticated and outside tenant context for the same reason: the
+        // estimate table is public, non-personal data a client fetches before
+        // it has an account.
+        .route(
+            "/v1/credit-estimate/table",
+            get(credit_estimate::table_handler),
+        )
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -8928,6 +8923,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route("/v1/admin/rederive-dedup", post(rederive_dedup_handler))
+        .route(
+            "/v1/admin/credit-estimate-eval",
+            post(credit_estimate::eval_handler),
+        )
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",
             post(pii_backstop_requeue_quarantined_handler),
@@ -12916,6 +12915,8 @@ struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
     pipeline_runtime_configured: bool,
+    /// `none` or `production` (`TRACE_COMMONS_PIPELINE_RUNTIME`).
+    pipeline_runtime_selection: &'static str,
     pipeline_runtime_required: bool,
     pipeline_runtime_production_qualified: bool,
     /// Whether this process routes a listed tenant that has no routing row
@@ -13195,6 +13196,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
         pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_selection: state.pipeline_runtime_selection.label(),
         pipeline_runtime_required: state.pipeline_runtime_required,
         pipeline_runtime_production_qualified: state
             .pipeline_service
@@ -14879,6 +14881,33 @@ async fn decide_upload_route<'a>(
     }
 }
 
+/// The answer to a pipeline receipt that failed. Two refusals store nothing
+/// and are answered with their label as a 503, as the containment refusal
+/// is, so a contributor's client sees a blocked reason to retry later rather
+/// than an internal error:
+/// - an operator suspended the Admission policy of the tenant's bundle
+///   (`intervene_policy`, STA-002);
+/// - the tenant has no authority source (`authority_control_missing`): the
+///   production authority answers none for a tenant whose policy `main`
+///   reads from the database (PR #1295 review, Minor 5). The production
+///   start refuses a routed tenant in that state; this covers the rest.
+///
+/// The text is compared whole: only the label itself, never an error that
+/// carries it.
+fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    let text = error.to_string();
+    for label in [
+        PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+    ] {
+        if text == label {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
+        }
+    }
+    internal_error(error)
+}
+
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
 /// path (after its claim of the submission id, when it has one) or a receipt
 /// to the versioned pipeline instead of the legacy corpus path.
@@ -14940,22 +14969,7 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(|error| {
-            // An operator suspended the Admission policy of the tenant's
-            // bundle (`intervene_policy`): the receipt stored nothing and is
-            // refused with its label, as the containment refusal is, so a
-            // contributor's client sees a blocked reason to retry later
-            // rather than an internal error (STA-002). The text is compared
-            // whole: only the label itself, never an error that carries it.
-            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-                )
-            } else {
-                internal_error(error)
-            }
-        })?;
+        .map_err(pipeline_receipt_error)?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
@@ -17448,7 +17462,11 @@ fn submission_status_from_pipeline(
 /// `main`'s receipt reports for the same privacy decision: `quarantined`
 /// when it waits for a human review or its Admission quarantined it,
 /// `rejected` when Admission rejected it, and `accepted` otherwise. A run
-/// that failed keeps the value of the state it failed in.
+/// that failed keeps the value of the state it failed in, except one that
+/// failed because its Review-start privacy classification kept failing
+/// (`privacy_classification_failed`, owner decision Q1): its content was
+/// never classified, so it reports `quarantined`, held content, rather
+/// than `accepted`.
 fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
     match status.submission_status.as_str() {
         "accepted" => "accepted",
@@ -17463,6 +17481,12 @@ fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str 
             "quarantined"
         }
         _ if status.admission_decision == "reject" => "rejected",
+        _ if status.processing == PipelineProcessingStatus::Failed
+            && status.reason_label.as_deref()
+                == Some(trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL) =>
+        {
+            "quarantined"
+        }
         _ => "accepted",
     }
 }
@@ -20462,11 +20486,17 @@ use near_provisioning::{
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
+#[cfg(test)]
+use pipeline_runtime::assemble_ingest_pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime_with_components,
     pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
+
+#[path = "trace_commons_ingest_internal/production_assembly.rs"]
+mod production_assembly;
+use production_assembly::PipelineRuntimeSelection;
 
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
@@ -43445,11 +43475,18 @@ struct PipelineReviewQueueItem {
     run_id: Uuid,
     submission_id: Uuid,
     admission_reason: Option<String>,
+    /// What holds the run: `privacy_pass_review_required` when the
+    /// Review-start privacy pass escalated it, else `admission_reason`.
+    hold_reason: Option<String>,
+    /// The run's assessment was recorded before the privacy pass escalated
+    /// it, so Review ignores it; such a run cannot be claimed again.
+    assessment_superseded: bool,
     created_at: DateTime<Utc>,
 }
 
-/// `GET /v1/review/pipeline/quarantine?limit=N`: quarantined pipeline runs
-/// waiting for a human assessment, oldest first. `PgPipelineStore::
+/// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
+/// human assessment (quarantined by Admission or escalated by the privacy
+/// pass), oldest first, each with its hold reason (labels only). `PgPipelineStore::
 /// list_review_queue` already excludes a run whose submission is no longer
 /// operable (Ruling T3-6).
 async fn pipeline_review_quarantine_handler(
@@ -43467,11 +43504,13 @@ async fn pipeline_review_quarantine_handler(
         .await
         .map_err(internal_error)?
         .into_iter()
-        .map(|run| PipelineReviewQueueItem {
-            run_id: run.run_id,
-            submission_id: run.submission_id,
-            admission_reason: run.admission_reason,
-            created_at: run.created_at,
+        .map(|entry| PipelineReviewQueueItem {
+            run_id: entry.run.run_id,
+            submission_id: entry.run.submission_id,
+            admission_reason: entry.run.admission_reason,
+            hold_reason: entry.hold_reason,
+            assessment_superseded: entry.assessment_superseded,
+            created_at: entry.run.created_at,
         })
         .collect();
     Ok(Json(queue))
@@ -60200,29 +60239,19 @@ async fn tenant_submission_policy_for_request(
     Ok(state.tenant_policies.get(&tenant.tenant_id).cloned())
 }
 
+/// A `trace_tenant_policies` row as `main`'s policy, through the decoding
+/// the pipeline's authority also uses
+/// (`trace_authority::submission_allowlists_from_storage`), so the two can
+/// never read one row differently.
 fn tenant_submission_policy_from_storage(
     policy: StorageTraceTenantPolicyRecord,
 ) -> anyhow::Result<TenantSubmissionPolicy> {
+    let allowlists =
+        trace_commons_server::trace_authority::submission_allowlists_from_storage(&policy)?;
     Ok(TenantSubmissionPolicy {
-        allowed_consent_scopes: parse_storage_policy_values(
-            &policy.allowed_consent_scopes,
-            "allowed_consent_scopes",
-        )?,
-        allowed_uses: parse_storage_policy_values(&policy.allowed_uses, "allowed_uses")?,
+        allowed_consent_scopes: allowlists.allowed_consent_scopes,
+        allowed_uses: allowlists.allowed_uses,
     })
-}
-
-fn parse_storage_policy_values<T>(values: &[String], label: &str) -> anyhow::Result<BTreeSet<T>>
-where
-    T: for<'de> Deserialize<'de> + Ord,
-{
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<T>(serde_json::Value::String(value.clone()))
-                .with_context(|| format!("failed to parse trace tenant policy {label} value"))
-        })
-        .collect()
 }
 
 fn enforce_signed_claim_submission_restrictions(
@@ -63941,7 +63970,6 @@ const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM: &str =
     "signed_hashing_vector_l2_normalized";
 const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION: &str =
     "trace_commons_vector_payload_embedding_v1";
-const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceVectorPayloadArtifact {
@@ -68508,7 +68536,6 @@ fn trace_backfill_file_item_ref(path: &Path) -> String {
     }
 }
 
-const TRACE_SIMILARITY_NEIGHBOR_THRESHOLD: f32 = 0.25;
 const TRACE_SIMILARITY_MAX_NEIGHBORS: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -68560,40 +68587,6 @@ fn nearest_trace_neighbors<'a>(
     neighbors
 }
 
-fn trace_summary_similarity_score(
-    target_summary: &str,
-    target_hash: &str,
-    candidate_summary: Option<&str>,
-    candidate_hash: Option<&str>,
-) -> f32 {
-    if candidate_hash.is_some_and(|hash| hash == target_hash) {
-        return 1.0;
-    }
-    let Some(candidate_summary) = candidate_summary else {
-        return 0.0;
-    };
-    let target_embedding = trace_redacted_summary_embedding(target_summary);
-    let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
-    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding).max(
-        trace_summary_token_similarity(target_summary, candidate_summary),
-    )
-}
-
-fn trace_summary_token_similarity(left: &str, right: &str) -> f32 {
-    let left_tokens = trace_similarity_tokens(left);
-    let right_tokens = trace_similarity_tokens(right);
-    if left_tokens.is_empty() || right_tokens.is_empty() {
-        return 0.0;
-    }
-    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
-    let union = left_tokens.union(&right_tokens).count() as f32;
-    if union == 0.0 {
-        0.0
-    } else {
-        (intersection / union).clamp(0.0, 1.0)
-    }
-}
-
 fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
     let mut input = String::new();
     input.push_str("canonical_summary:\n");
@@ -68611,37 +68604,6 @@ fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
     input.push_str("\ncoverage_tags:\n");
     input.push_str(&record.coverage_tags.join(" "));
     input
-}
-
-fn trace_redacted_summary_embedding(input: &str) -> Vec<f32> {
-    let mut values = vec![0.0f32; TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION];
-    for token in trace_similarity_tokens(input) {
-        let digest = Sha256::digest(token.as_bytes());
-        let mut index_bytes = [0u8; 8];
-        index_bytes.copy_from_slice(&digest[..8]);
-        let index = (u64::from_le_bytes(index_bytes) as usize)
-            % TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION;
-        let sign = if digest[8] & 1 == 0 { 1.0 } else { -1.0 };
-        values[index] += sign;
-    }
-    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in &mut values {
-            *value /= norm;
-        }
-    }
-    values
-}
-
-fn trace_summary_embedding_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.is_empty() || right.is_empty() || left.len() != right.len() {
-        return 0.0;
-    }
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| left * right)
-        .sum::<f32>()
-        .clamp(0.0, 1.0)
 }
 
 fn trace_redacted_summary_embedding_sha256(values: &[f32]) -> String {
@@ -68927,36 +68889,6 @@ fn trace_vector_payload_candidate_is_compatible(
             .embedding_values
             .iter()
             .all(|value| value.is_finite())
-}
-
-fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
-    const STOP_WORDS: &[&str] = &[
-        "and", "are", "for", "from", "that", "the", "this", "trace", "with",
-    ];
-
-    let mut tokens = BTreeSet::new();
-    let mut current = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch.to_ascii_lowercase());
-        } else {
-            push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
-        }
-    }
-    push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
-    tokens
-}
-
-fn push_trace_similarity_token(
-    tokens: &mut BTreeSet<String>,
-    current: &mut String,
-    stop_words: &[&str],
-) {
-    if current.len() > 1 && !stop_words.contains(&current.as_str()) {
-        tokens.insert(std::mem::take(current));
-    } else {
-        current.clear();
-    }
 }
 
 fn build_derived_precheck(

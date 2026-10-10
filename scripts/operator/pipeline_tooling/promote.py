@@ -12,13 +12,20 @@ Subcommands, each re-runnable alone into the run `init` created:
 
 - `init`: records the run id, start time, code revision and the package's
   three digests (`promote-run.json`), and keeps a copy of the package.
-- `package-checks`: refuses (`harness_production_assembly_unavailable`) until
-  the qualification harness can run on the production assembly (B-2).
+- `package-checks`: the four package checks re-run with the harness switched
+  to the production assembly (`TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY=
+  production`, B-2), over the run's package and the components
+  `PipelineGateComponents::from_env` builds from the deployment's env file
+  (`--env-file`; only `envfile.PACKAGE_CHECK_VARIABLES` is read), with a
+  fresh usearch index per check inside the run, and the committed HF network
+  pin. Each result must name the run's
+  package and its evidence must say `harness_assembly: production`.
 - `hf-canary`: `pipeline_hf_network_canary`, a fresh download of the network
   pin, every digest compared.
-- `remote-restore`: `pipeline_remote_restore`, from a measurement the remote
-  restore harness writes. The harness is not built yet: the default refuses
-  with `remote_restore_harness_unavailable`.
+- `remote-restore`: `pipeline_remote_restore`, from the measurement the
+  remote restore harness (`run_remote_restore_harness`) writes: a seed into
+  the live store, the database dump and restore, the ciphertext copy into the
+  scratch store, and the resume against it.
 - `adapters`: collects `pipeline_production_adapters`, which only the deployed
   ingest's boot writes; it never starts ingest.
 - `sign`: signs the production run's results with the operator's check key.
@@ -35,6 +42,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import shutil
 import struct
 import tempfile
@@ -42,9 +50,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
 
-from . import checks, environment
+from . import cargo, checks, envfile, environment
 from .corpus import PIN_SCHEMA, export_command, validate_hf_manifest
-from .environment import Run, child_environment, run_child
+from .environment import Environment, Run, child_environment, run_child
 from .errors import ToolingError, require
 from .files import atomic_write, sha256_digest
 from .results import SCHEMA as RESULT_SCHEMA
@@ -78,7 +86,7 @@ PROMOTION_ONLY_CHECK_IDS = (ADAPTERS_CHECK_ID, REMOTE_RESTORE_CHECK_ID, HF_CANAR
 _PIN_DIR = environment.ROOT / "crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl"
 HF_LOCAL_PIN = _PIN_DIR / "pin-local.json"
 # The committed network pin, relative to the repository root: the only pin
-# `hf-canary` accepts.
+# `hf-canary` and `package-checks` accept.
 HF_NETWORK_PIN_PATH = Path("crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json")
 # Every digest a network pin carries, each compared by the canary.
 HF_PIN_DIGEST_FIELDS = (
@@ -96,6 +104,38 @@ REMOTE_RESTORE_REPORT_SCHEMA = "trace_commons.pipeline_remote_restore_report.v1"
 # (`gcs-client`); a file-system store is a local copy, which is what the
 # local restore drill already proves.
 REMOTE_STORE_KINDS = frozenset({"gcs"})
+# The harness's three ignored ingest tests: the local restore drill's seed
+# and resume, run with a remote store in place of the artifact root, and the
+# copy between them.
+RESTORE_SEED = "tests::pipeline_restore_pg_tests::pipeline_restore_seed"
+RESTORE_RESUME = "tests::pipeline_restore_pg_tests::pipeline_restore_resume"
+REMOTE_RESTORE_RUN = "tests::pipeline_restore_pg_tests::pipeline_remote_restore_run"
+RESTORE_FINGERPRINT_SCHEMA = "trace_commons.pipeline_restore_fingerprint.v1"
+REMOTE_RESTORE_COPY_SCHEMA = "trace_commons.pipeline_remote_restore_copy.v1"
+REMOTE_RESTORE_RESUME_SCHEMA = "trace_commons.pipeline_remote_restore_resume.v1"
+# The only ambient variables the harness passes on: which key wrapper the
+# deployment uses, and the KMS key it names (a resource name, never key
+# material). Credentials stay out (`child_environment`); on the operator
+# host they come from Application Default Credentials.
+KEK_SELECTION_VARIABLES = ("TRACE_COMMONS_KEK_PROVIDER", "TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME")
+
+# The harness variables `package-checks` sets (`versioned_pipeline_harness.rs`).
+HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
+HARNESS_PACKAGE_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_PACKAGE_PATH"
+HARNESS_TRUSTED_KEY_PATH_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_TRUSTED_KEY_PATH"
+# Where `PipelineGateComponents::from_env` opens the pipeline index: always a
+# directory inside the run, never the deployment's.
+PIPELINE_INDEX_ROOT_VAR = "TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT"
+# The env file variables without which the real scorer cannot start
+# (`NearAiGateSharedComponents::from_env`); the rest have defaults there.
+PACKAGE_CHECK_REQUIRED_VARIABLES = (
+    "TRACE_COMMONS_NEAR_AI_BASE_URL",
+    "TRACE_COMMONS_NEAR_AI_API_KEY",
+    "TRACE_COMMONS_NEAR_AI_MODEL",
+)
+# Where the run keeps the production harness's usearch indexes, one
+# directory per check, emptied at the start of every `package-checks`.
+INDEX_DIR = "indexes"
 
 _RUN_ID = re.compile(r"q[0-9a-f]{8}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -110,12 +150,16 @@ _PHASES = ("admission", "review", "score", "settle")
 
 class Hooks(NamedTuple):
     """What `pipeline.py` lends the subcommands: its signing-flag parser
-    (`signing_options`) and its signing step (`sign(run, accepted,
+    (`signing_options`), its signing step (`sign(run, accepted,
     signing, cargo_args)`, which signs, publishes, and removes what it signed
-    on failure; returns the count)."""
+    on failure; returns the count), and the runner of the four package checks
+    (`package_checks(run, *, harness_env, cargo_features, network_pin,
+    postgres_admin_url)`, the runners `qualify` uses with the production
+    harness variables added)."""
 
     signing_options: Callable
     sign: Callable
+    package_checks: Callable
 
 
 # ---------------------------------------------------------------------------
@@ -438,13 +482,93 @@ def init(args, run):
     )
 
 
-def package_checks(args, run):
-    """The four package checks on the production assembly. The harness that
-    can run them there is B-2's (spec B-D1, plan B3): until it lands, a run
-    would quietly test the reference package, so this refuses first."""
-    refuse_in_ci()
-    open_run(args.run_id)
-    raise ToolingError("harness_production_assembly_unavailable")
+def require_production_assembly(production, loaded):
+    """Each package check's result in `loaded` came from the production
+    assembly: its evidence says `harness_assembly: production`
+    (`promote_harness_assembly_not_production:<id>` otherwise). The package
+    triple alone does not show it: a reference-assembly harness given the
+    production package would name the same triple over reference doubles."""
+    for check_id in package_check_ids():
+        require(check_id in loaded, f"check_result_missing:{check_id}")
+        evidence = _read_json_file(
+            production.run.results_dir / f"{check_id}.evidence.json", "check_evidence_malformed"
+        )
+        require(
+            isinstance(evidence, dict) and evidence.get("harness_assembly") == "production",
+            f"promote_harness_assembly_not_production:{check_id}",
+        )
+
+
+def committed_network_pin(given):
+    """The committed `pin-network.json`, which the run's code revision
+    covers, validated. `given` (`--pin`), when set, must hold its exact bytes
+    (`hf_network_pin_not_committed`): a pin `hf-pin record` wrote for another
+    revision is internally consistent, and the HF corpus check would then
+    test a corpus nobody reviewed."""
+    pin_path = environment.ROOT / HF_NETWORK_PIN_PATH
+    _load_network_pin(pin_path)
+    if given is not None:
+        given = Path(given).resolve()
+        require(given.is_file(), "hf_network_pin_not_committed")
+        require(sha256_digest(given.read_bytes()) == sha256_digest(pin_path.read_bytes()), "hf_network_pin_not_committed")
+    return pin_path
+
+
+def make_package_checks(hooks):
+    def package_checks(args, run):
+        """The four package checks on the production assembly (spec B-D1).
+        Refused before anything starts when the network pin is missing or
+        the env file lacks the NEAR AI endpoint or key; the env file's other
+        variables never reach a child. A re-run replaces the four results
+        and removes every attestation of the run."""
+        refuse_in_ci()
+        production = open_run(args.run_id)
+        pin_path = committed_network_pin(args.pin)
+        variables = envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_CHECK_VARIABLES)
+        require(
+            all(variables.get(name, "").strip() for name in PACKAGE_CHECK_REQUIRED_VARIABLES),
+            "promote_env_file_incomplete",
+        )
+        run_dir = production.run.run_dir
+        index_root = run_dir / INDEX_DIR
+        shutil.rmtree(index_root, ignore_errors=True)
+        results_dir = production.run.results_dir
+        results_dir.mkdir(parents=True, exist_ok=True)
+        for path in results_dir.glob("*.attestation.json"):
+            path.unlink()
+        for check_id in package_check_ids():
+            for suffix in ("result", "evidence"):
+                (results_dir / f"{check_id}.{suffix}.json").unlink(missing_ok=True)
+        harness_env = {
+            **variables,
+            HARNESS_ASSEMBLY_VAR: "production",
+            HARNESS_PACKAGE_PATH_VAR: str(run_dir / PACKAGE_FILE),
+            HARNESS_TRUSTED_KEY_PATH_VAR: str(run_dir / TRUSTED_KEY_FILE),
+            PIPELINE_INDEX_ROOT_VAR: str(index_root),
+        }
+        hooks.package_checks(
+            production.run,
+            harness_env=harness_env,
+            cargo_features=PROMOTE_FEATURES,
+            network_pin=pin_path,
+            postgres_admin_url=args.postgres_admin_url,
+        )
+        loaded = load_results(production.run)
+        wanted = package_check_ids()
+        require_current_pass_results(
+            production.run, loaded, {check_id: checks.CheckSpec(check_id, True) for check_id in wanted}
+        )
+        for check_id in wanted:
+            result = loaded[check_id]
+            require(
+                (result.package_hash, result.configuration_digest, result.dependency_digest) == production.package,
+                "promote_package_mismatch",
+            )
+        require_production_assembly(production, loaded)
+        production.run.require_code_revision_unchanged()
+        print(f"PipelinePromotePackageChecksOK: checks={','.join(wanted)} package_hash={production.package[0]}")
+
+    return package_checks
 
 
 def run_hf_export(run, step, fields, output_dir, cache_dir):
@@ -586,13 +710,186 @@ def _overlaps(first, second):
     return a[:shorter] == b[:shorter]
 
 
-def run_remote_restore_harness(run, step, source_store, scratch_store, report_path):
+def _read_seed_fingerprint(path):
+    """The two hashes the remote restore needs from the seed's fingerprint
+    file (the local drill reads the rest)."""
+    value = _read_json_file(path, "restore_fingerprint_invalid")
+    require(
+        isinstance(value, dict)
+        and value.get("schema") == RESTORE_FINGERPRINT_SCHEMA
+        and all(
+            isinstance(value.get(key), str) and _HASH.fullmatch(value[key]) is not None
+            for key in ("database_fingerprint", "artifact_fingerprint")
+        ),
+        "restore_fingerprint_invalid",
+    )
+    return value
+
+
+def _read_copy_report(path):
+    """`pipeline_remote_restore_run`'s measurement, exactly its fields."""
+    value = _read_json_file(path, "remote_restore_copy_report_invalid")
+    hashes = ("artifact_fingerprint", "restored_artifact_fingerprint")
+    counts = ("object_count", "kek_unwrap_verified_count")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", "object_store_kind", "versioning_enabled", *hashes, *counts}
+        and value["schema"] == REMOTE_RESTORE_COPY_SCHEMA
+        and isinstance(value["object_store_kind"], str)
+        and _KIND.fullmatch(value["object_store_kind"]) is not None
+        and type(value["versioning_enabled"]) is bool
+        and all(isinstance(value[key], str) and _HASH.fullmatch(value[key]) for key in hashes)
+        and all(type(value[key]) is int and value[key] >= 0 for key in counts),
+        "remote_restore_copy_report_invalid",
+    )
+    return value
+
+
+def _read_resume_report(path, seed):
+    """The remote resume's measurement, exactly its fields. The resume
+    already refused a restored store whose fingerprint is not the seed's;
+    one that reports another is refused here too."""
+    value = _read_json_file(path, "remote_restore_resume_report_invalid")
+    hashes = ("database_fingerprint", "artifact_fingerprint")
+    counts = ("pending_runs_resumed", "duplicate_effects")
+    require(
+        isinstance(value, dict)
+        and set(value) == {"schema", *hashes, *counts}
+        and value["schema"] == REMOTE_RESTORE_RESUME_SCHEMA
+        and all(isinstance(value[key], str) and _HASH.fullmatch(value[key]) for key in hashes)
+        and all(type(value[key]) is int and value[key] >= 0 for key in counts)
+        and value["artifact_fingerprint"] == seed["artifact_fingerprint"],
+        "remote_restore_resume_report_invalid",
+    )
+    return value
+
+
+def run_remote_restore_harness(
+    run, step, source_store, scratch_store, report_path, *, postgres_admin_url=None, double_root=None
+):
     """Restores the live store's objects into the scratch store and writes
     the measurement (`REMOTE_RESTORE_REPORT_SCHEMA`) to `report_path`. The
-    Rust harness this would start (`pipeline_remote_restore_run`, an ignored
-    ingest test built with `PROMOTE_CARGO_ARGS`) does not exist yet, so this
-    refuses. The self-tests replace it."""
-    raise ToolingError("remote_restore_harness_unavailable")
+    local restore drill's order (`pipeline.py`'s `run_restore_drill`), in a
+    PostgreSQL of its own (a container, or the loopback server
+    `postgres_admin_url` names) and with a remote store in place of the
+    artifact root:
+
+    1. the seed, on the drill's `_pilot` database, writing its artifacts
+       through the deployment's store (the GCS client and the selected key
+       wrapper) into the live store, under a namespace fresh for this
+       invocation (`pipeline-remote-restore-<run>-<random>`), never beside
+       the live objects;
+    2. the dump of that database and its restore into `_restored`;
+    3. `pipeline_remote_restore_run`: the namespace's objects copied as
+       ciphertext into the same namespace of the scratch store, with the
+       fingerprint of each side, the unwrap count and both buckets'
+       versioning;
+    4. the resume against the restored database and the scratch store.
+
+    The seed and the resume serve the reference compatibility candidate
+    (no `HARNESS_ASSEMBLY_VAR` reaches them), not the production assembly
+    `package-checks` uses: this check's claim is the remote store and the
+    key wrapper across a restore, and the production assembly's own restore
+    is `package-checks`' `pipeline_restore_drill`. That keeps the NEAR AI
+    credentials and the vector index out of this drill.
+
+    Each child is built with `PROMOTE_CARGO_ARGS`. Only the master key, the
+    store names, the namespace and the key-wrapper selection cross into the
+    children; store names never reach a label or the report. The drill's
+    objects stay in both stores (nothing here deletes from a bucket).
+
+    `double_root` (no command line flag reaches it) runs the same three
+    processes against the test-only directory double instead of GCS, for a
+    local run of the whole harness; its report names the double's kind, which
+    `remote_restore` never passes."""
+    report_path = Path(report_path)
+    work_dir = report_path.parent
+    fingerprint_path = work_dir / "seed-fingerprint.json"
+    copy_path = work_dir / "copy-report.json"
+    resume_path = work_dir / "resume-report.json"
+    dump_path = work_dir / f"{run.run_id}.dump"
+    shared = {
+        # One random key for the three processes: the resume and the copy
+        # unwrap what the seed wrapped. Only the children see it.
+        "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
+        "TRACE_COMMONS_PIPELINE_REMOTE_STORE_KIND": "gcs" if double_root is None else "gcs_directory_double",
+        "TRACE_COMMONS_PIPELINE_REMOTE_NAMESPACE": f"pipeline-remote-restore-{run.run_id}-{secrets.token_hex(4)}",
+        **{key: os.environ[key] for key in KEK_SELECTION_VARIABLES if key in os.environ},
+    }
+    if double_root is not None:
+        shared["TRACE_COMMONS_PIPELINE_REMOTE_DOUBLE_ROOT"] = str(double_root)
+    try:
+        with Environment(run, postgres_admin_url=postgres_admin_url) as environment_:
+            scenario = environment_.scenario(step)
+            seed_env = {
+                **shared,
+                "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
+                "TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE": source_store,
+                "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_seed", PROMOTE_CARGO_ARGS, RESTORE_SEED, child_environment(seed_env),
+                exact=True, ignored=True,
+            )
+            require(
+                scenario.committed_transactions(scenario.pilot_database) >= 5,
+                f"database_check_executed_nothing:{step}_seed",
+            )
+            seed = _read_seed_fingerprint(fingerprint_path)
+            try:
+                environment_.dump(scenario.pilot_database, dump_path)
+                environment_.create_database(scenario.restored_database)
+                environment_.restore(dump_path, scenario.restored_database)
+            finally:
+                dump_path.unlink(missing_ok=True)
+
+            copy_env = {
+                **shared,
+                "TRACE_COMMONS_PIPELINE_REMOTE_SOURCE_STORE": source_store,
+                "TRACE_COMMONS_PIPELINE_REMOTE_SCRATCH_STORE": scratch_store,
+                "TRACE_COMMONS_PIPELINE_REMOTE_COPY_REPORT_PATH": str(copy_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_copy", PROMOTE_CARGO_ARGS, REMOTE_RESTORE_RUN, child_environment(copy_env),
+                exact=True, ignored=True,
+            )
+            copy = _read_copy_report(copy_path)
+            # The source the copy read is the one the seed fingerprinted.
+            require(copy["artifact_fingerprint"] == seed["artifact_fingerprint"], "remote_restore_source_changed")
+
+            resume_env = {
+                **shared,
+                "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.restored_url,
+                "TRACE_COMMONS_PIPELINE_REMOTE_ARTIFACT_STORE": scratch_store,
+                "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+                "TRACE_COMMONS_PIPELINE_REMOTE_RESUME_REPORT_PATH": str(resume_path),
+            }
+            cargo.cargo_test(
+                run, f"{step}_resume", PROMOTE_CARGO_ARGS, RESTORE_RESUME, child_environment(resume_env),
+                exact=True, ignored=True,
+            )
+            require(
+                scenario.committed_transactions(scenario.restored_database) >= 5,
+                f"database_check_executed_nothing:{step}_resume",
+            )
+            resume = _read_resume_report(resume_path, seed)
+    finally:
+        for path in (fingerprint_path, copy_path, resume_path, dump_path):
+            path.unlink(missing_ok=True)
+    report = {
+        "schema": REMOTE_RESTORE_REPORT_SCHEMA,
+        "object_store_kind": copy["object_store_kind"],
+        "object_count": copy["object_count"],
+        "artifact_fingerprint": copy["artifact_fingerprint"],
+        "restored_artifact_fingerprint": copy["restored_artifact_fingerprint"],
+        "versioning_enabled": copy["versioning_enabled"],
+        "kek_unwrap_verified_count": copy["kek_unwrap_verified_count"],
+        "seed_database_fingerprint": seed["database_fingerprint"],
+        "resumed_database_fingerprint": resume["database_fingerprint"],
+        "pending_runs_resumed": resume["pending_runs_resumed"],
+        "duplicate_effects": resume["duplicate_effects"],
+    }
+    atomic_write(report_path, canonical(report) + b"\n")
 
 
 _REPORT_HASHES = (
@@ -639,7 +936,10 @@ def remote_restore(args, run):
     shutil.rmtree(work_dir, ignore_errors=True)
     work_dir.mkdir(parents=True, mode=0o700)
     report_path = work_dir / "remote-restore-report.json"
-    run_remote_restore_harness(production.run, "remote_restore", source, scratch, report_path)
+    run_remote_restore_harness(
+        production.run, "remote_restore", source, scratch, report_path,
+        postgres_admin_url=args.postgres_admin_url,
+    )
     report = _read_remote_report(report_path)
     blockers = []
     if report["object_store_kind"] not in REMOTE_STORE_KINDS:
@@ -715,6 +1015,7 @@ def _accepted_production_results(production):
             (result.package_hash, result.configuration_digest, result.dependency_digest) == production.package,
             "promote_package_mismatch",
         )
+    require_production_assembly(production, loaded)
     return {check_id: loaded[check_id] for check_id in wanted}
 
 
@@ -833,7 +1134,24 @@ def add_parsers(subparsers, hooks):
         parser.set_defaults(handler=handler, run_dir_mode=NEVER_USED)
         return parser
 
-    run_parser("package-checks", package_checks, "The package checks on the production assembly (not yet available)")
+    package = run_parser(
+        "package-checks", make_package_checks(hooks), "The four package checks on the production assembly"
+    )
+    package.add_argument(
+        "--env-file",
+        dest="env_file",
+        required=True,
+        help="The deployment's env file; only the variables PipelineGateComponents::from_env reads are passed on.",
+    )
+    package.add_argument(
+        "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
+    )
+    package.add_argument(
+        "--postgres-admin-url",
+        dest="postgres_admin_url",
+        default=None,
+        help="Use this existing PostgreSQL server instead of starting a container.",
+    )
     canary = run_parser("hf-canary", hf_canary, "pipeline_hf_network_canary: download the network pin and compare it")
     canary.add_argument(
         "--pin", default=None, help="The network pin; refused unless its bytes are the committed pin-network.json's."
@@ -842,6 +1160,10 @@ def add_parsers(subparsers, hooks):
     restore.add_argument("--source-store", dest="source_store", required=True, help="The live bucket[/prefix] name.")
     restore.add_argument(
         "--scratch-store", dest="scratch_store", required=True, help="A scratch bucket[/prefix] name, never the live one."
+    )
+    restore.add_argument(
+        "--postgres-admin-url", dest="postgres_admin_url", default=None,
+        help="A throwaway loopback PostgreSQL for the drill's own databases (default: a container).",
     )
     run_parser("adapters", adapters, "Collect pipeline_production_adapters from the deployed boot")
     sign = run_parser("sign", make_sign(hooks), "Sign the production run's results")

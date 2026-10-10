@@ -30,6 +30,10 @@ enum JoinLookUpOutcome: Equatable {
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinScreenLayout {
+    /// The extra space above the invite card (under the body), on top of the
+    /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
+    static let extraGap = GlassTokens.Space.s4
+
     /// Contributing needs an account; without one, setup is watching only.
     static func hasAccount(_ state: FirstRunState) -> Bool {
         switch state.account {
@@ -54,8 +58,27 @@ enum JoinScreenLayout {
         !state.signedOutOfEnrolment && (state.enrolledInvite != nil || state.nearAIEnrolled)
     }
 
+    /// "Skip" whenever no account was signed into on Join, including when
+    /// the daemon already holds an enrollment from before; "Continue" once
+    /// one was (owner ruling, 2026-10-08). The body tells the person to
+    /// click "Skip", so the button always matches it.
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        hasAccount(state) || !offersWatchOnly(state) ? copy.frame.continueButton : copy.join.skip
+        hasSignedInAccount(state) ? copy.frame.continueButton : copy.join.skip
+    }
+
+    /// Whether Join shows an account as signed into: near.ai or a passkey
+    /// answered on this run, a known invite joined, or a held near.ai
+    /// enrollment, and nothing signed out of. An enrollment the daemon holds
+    /// with no invite or account to show (an earlier run's, a preset
+    /// config's) draws no signed-in card, so the button reads "Skip" there
+    /// too; pressing it still goes on as that enrollment (`forward`).
+    static func hasSignedInAccount(_ state: FirstRunState) -> Bool {
+        if state.signedOutOfEnrolment { return false }
+        switch state.account {
+        case .nearAI, .passkeyChosen, .passkey: return true
+        case .none, .watchOnly, .enrolled:
+            return !(state.enrolledInvite ?? "").isEmpty || state.nearAIEnrolled
+        }
     }
 
     static func footerNote(_ state: FirstRunState, copy: FirstRunCopy) -> String? {
@@ -204,6 +227,24 @@ enum JoinScreenLayout {
         state.enrolledInvite == nil && !passkeyDone(state)
     }
 
+    /// The card shows its invite field unless an invite was joined or a
+    /// passkey holds the account: an enrollment recorded with no invite
+    /// shows the field, closed (`inviteIsEditable`), rather than a joined
+    /// line naming an invite nobody entered.
+    static func showsInviteField(_ state: FirstRunState) -> Bool {
+        inviteIsEditable(state) || (!joinedInvite(state) && !passkeyDone(state))
+    }
+
+    /// An invite this first run (or an earlier one) is known to have joined.
+    /// An enrollment recorded without one (`OnboardingNavigation.recordEnrolment`
+    /// writes an empty `enrolledInvite`: an earlier run joined through
+    /// near.ai or a passkey, or the daemon was already enrolled) joined no
+    /// invite the shell knows of, so the card never says "Joined" for it.
+    static func joinedInvite(_ state: FirstRunState) -> Bool {
+        guard let enrolled = state.enrolledInvite else { return false }
+        return !enrolled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     static func inviteLine(
         _ state: FirstRunState,
         lookup: DaemonData.InviteLookup?,
@@ -211,7 +252,7 @@ enum JoinScreenLayout {
         copy: FirstRunCopy.Join,
         refused: Bool = false
     ) -> JoinInviteLine {
-        if state.enrolledInvite != nil {
+        if joinedInvite(state) {
             return .joined(
                 FirstRunCopy.fill(
                     copy.inviteJoined,
@@ -386,7 +427,7 @@ enum JoinScreenLayout {
 }
 
 /// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,
-/// the passkey and near.ai cards, the quiet no-sharing card, and "Skip:
+/// the passkey and near.ai cards, the no-sharing card, and "Skip:
 /// watch only" until an account exists.
 ///
 /// Join holds no daemon client: on a first pass the daemon is not running.
@@ -415,6 +456,9 @@ struct JoinScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
+            // About taking the action, so directly above the action bar, not
+            // in the cards (owner ruling, 2026-10-08).
+            actionNote: copy.join.noSharing,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
                 isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state),
@@ -424,42 +468,44 @@ struct JoinScreen: View {
             title
         } content: {
             inviteCard
+                .padding(.top, JoinScreenLayout.extraGap)
             passkeyCard
             nearAICard
             if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
-                GlassNotice(tone: .outside) { Text(notice) }
+                GlassAlert(notice)
             }
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
             }
-            GlassCard(quiet: true) {
-                Text(copy.join.noSharing)
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
-            }
         }
     }
 
+    /// The title, then the body as one paragraph (owner, 2026-10-08).
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            (Text(copy.join.body) + Text(" ")
-                + Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary))
+            Text(copy.join.body)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var inviteCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if JoinScreenLayout.inviteIsEditable(runner.state) {
+                if JoinScreenLayout.showsInviteField(runner.state) {
+                    // The field as it always reads; closed while an
+                    // enrollment the daemon holds came with no invite, since
+                    // no second invite is joined over it.
+                    let editable = JoinScreenLayout.inviteIsEditable(runner.state)
                     HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
                         GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
                             .onSubmit(lookUp)
+                            .disabled(!editable)
                         Button(copy.join.lookUp, action: lookUp)
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(!JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
+                            .disabled(!editable || !JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
                     }
                 } else {
                     Text(copy.join.inviteEyebrow)
@@ -483,7 +529,7 @@ struct JoinScreen: View {
         case .joined(let line):
             GlassStatusLabel(line, status: .on)
         case .error(let line):
-            GlassNotice(tone: .outside) { Text(line) }
+            GlassAlert(line)
         case .note(let line):
             Text(line)
                 .glassType(GlassTokens.TypeScale.label)
@@ -516,7 +562,7 @@ struct JoinScreen: View {
             .disabled(runner.isCommitting)
         }
         if let line = JoinScreenLayout.passkeyFailureLine(runner.failure, copy: copy.join) {
-            GlassNotice(tone: .outside) { Text(line) }
+            GlassAlert(line)
         }
     }
 
@@ -593,6 +639,7 @@ struct JoinScreen: View {
     }
 
     private func lookUp() {
+        guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }
         let looked = JoinScreenLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
         runner.failure = looked.failure

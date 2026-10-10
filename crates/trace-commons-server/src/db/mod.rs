@@ -1936,6 +1936,21 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Enumerate decision identifiers and times, cross-tenant, NEWEST first
+    /// (`decided_at DESC, decision_id DESC`), capped at `limit`: the credit
+    /// estimate eval's enumeration. Newest first so a capped run reads the
+    /// most recent decisions, and so every submission it reaches has its
+    /// latest decision among the rows -- the decision its label comes from.
+    /// Reads through the gate-driver reader pool with NO tenant GUC; every
+    /// column is granted to `trace_gate_driver` by V45. Default: empty (test
+    /// doubles / backends without a gate-driver pool).
+    async fn list_recent_gate_decision_keys(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
     /// Enumerate correction-value signal rows (migration V48), cross-tenant,
     /// oldest-decided first, capped at `limit`. Reads through the gate-driver
     /// reader pool with NO tenant GUC (the trace_gate_driver role's permissive

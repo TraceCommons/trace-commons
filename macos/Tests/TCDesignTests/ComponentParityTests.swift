@@ -55,12 +55,13 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(EnvironmentValues().glassFolderMark, "")
     }
 
-    /// A row reserves the watch switch's column when it has no switch, so a
-    /// session's pill lines up with its folder's (#1146's row grid).
-    func test_aRowReservesTheWatchColumn() throws {
+    /// A switch takes #1146's 38pt column, and a row without one reserves
+    /// none, so the Traces tree's pills sit beside the row menu (owner,
+    /// 2026-10-08: no switches on the tree).
+    func test_onlyARowWithASwitchTakesTheWatchColumn() throws {
         XCTAssertEqual(GlassListRow.watchColumn, 38)
         let rows = try XCTUnwrap(Dictionary(uniqueKeysWithValues: try DesignSources.components())["ListRow.swift"])
-        XCTAssertTrue(rows.contains("Color.clear.accessibilityHidden(true)"))
+        XCTAssertFalse(rows.contains("Color.clear.accessibilityHidden(true)"))
         XCTAssertTrue(rows.contains(".frame(width: Self.watchColumn)"))
     }
 

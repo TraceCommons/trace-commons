@@ -12,6 +12,8 @@ import TCShellCore
 /// The main window since R15. Every label here is a single word or comes
 /// from the Rust core (`ShellWordingTests`).
 struct MonitorWindowView: View {
+    /// Opens the Settings window from the gear.
+    @Environment(\.openWindow) private var openWindow
     /// The gate's button, which opens first run: the core's first-run
     /// Continue. With no table the word is empty, never a Swift fallback.
     static let openFirstRun = TCCoreCopy.firstRunCopyJSON().flatMap(FirstRunCopy.decode)?.frame.continueButton ?? ""
@@ -54,9 +56,9 @@ struct MonitorWindowView: View {
     /// The Traces tree's inset from the pane's edge (#1146 `px-2`).
     static let treeInset: CGFloat = 8
 
-    /// Settings is drawn over the panes while `navigation.settingsRequest`
-    /// is set (Ron's #1146 modal; #1241 Task 10), and an outside opener's
-    /// destination waits there (`OpenMonitor`).
+    /// Where the gear asks for Settings, which opens in its own window
+    /// (owner, 2026-10-08), and where an outside opener's destination waits
+    /// (`OpenMonitor`).
     let navigation: MainWindowNavigation
     /// The hosted Insights and Mission drafts screens' inputs (Home pages).
     let insightsStoreSelection: InsightsStoreSelection
@@ -163,7 +165,9 @@ struct MonitorWindowView: View {
     @SceneStorage("monitor.panesSeeded") private var panesSeeded = false
 
     var body: some View {
-        GlassThreePane(showsMap: showsMap, showsInspector: showsInspector, onFirstLayout: seedPanes) {
+        GlassThreePane(
+            showsMap: showsMap, showsInspector: showsInspector && inspectorAvailable, onFirstLayout: seedPanes
+        ) {
             MonitorMainPane(
                 tab: $tab,
                 inferenceDot: Self.inferenceDot(model.daemonSettings?.privateInferenceState?.surfaceState,
@@ -175,13 +179,17 @@ struct MonitorWindowView: View {
                 tracesDot: traces.shield == .attention ? .ask : nil,
                 tracesDescription: Self.tracesDescription(
                     traces.decisionsOwed, shield: traces.shield, secondLook: traces.words?.secondLookWaiting),
-                showsMap: $showsMap, showsInspector: $showsInspector, showsGraph: $showsGraph,
+                showsMap: $showsMap, showsInspector: $showsInspector, inspectorAvailable: inspectorAvailable,
+                showsGraph: $showsGraph,
                 showsIgnored: $showsIgnored,
                 breadcrumb: Self.breadcrumb(
                     tab: Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding), homePage: homePage,
                     hosted: { HomeTabView.hostedHeading($0, missionDrafts: missionDrafts) },
                     back: { homePage = .overview }),
-                onSettings: { navigation.requestSettings() }
+                onSettings: {
+                    navigation.requestSettings()
+                    openWindow(id: WindowID.settings)
+                }
             ) {
                 switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
                 case .traces:
@@ -196,7 +204,7 @@ struct MonitorWindowView: View {
                     // #1146 insets the tree 8 from the pane's edge (`px-2`),
                     // closer than the other tabs' 12.
                     .padding(.horizontal, Self.treeInset - GlassTokens.Space.panePadding)
-                case .inference: InferenceTabView(store: inference)
+                case .inference: InferenceTabView(store: inference, traces: traces)
                 case .home:
                     HomeTabView(
                         store: home, traces: traces,
@@ -243,67 +251,32 @@ struct MonitorWindowView: View {
                 traces: traces, history: home.history, historyFailure: home.failures["list_history"], inference: inference,
                 focusTool: mapFocus ? selectedTool?.rawValue : nil,
                 selectedTool: selectedTool?.rawValue,
-                sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) })
+                sentence: { Self.rowSentence($0, copy: model.privateInferenceCopy, calls: model.harnessCalls) },
+                // A folder clicked on the map is the tree's selection and the
+                // inspector's subject, on Traces (owner, 2026-10-09).
+                onSelectFolder: { projectID in
+                    tab = .traces
+                    selection = .folder(projectID: projectID)
+                    showsInspector = true
+                })
         } inspector: {
-            // Ron's inspector pane insets its content 16 across and 18 down
-            // (`monitor-shell.tsx:166`, `px-4 py-4.5`), wider than the
-            // other panes' 12.
-            GlassPane(insets: GlassPaneInsets.inspector) {
-                // An empty branch would leave the pane nothing to draw, and
-                // it would vanish while the layout still reserved its width.
-                // While onboarding is required only Inference is shown, so
-                // the Private AI inspector is the only one admitted (R-38).
-                if !model.onboardingKnown {
-                    Color.clear
-                } else {
-                    switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {
-                    // On Traces the prompts and the health banners are drawn
-                    // above the tree, not here (owner, 2026-10-07: offers,
-                    // undo and health above the tree). Every other tab draws
-                    // them at the top of the inspector, as Ron's shell
-                    // mounts `WaitingPrompts`: Home and History still offer
-                    // the Traces selection's Contribute. Inference keeps its
-                    // own inspector under them; Home, Traces and History
-                    // host the selection's inspector.
-                    case .inference:
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                            InspectorPrompts(store: traces)
-                            PrivateAIInspectorView(store: inference, destinationLabel: model.privateInferenceCopy?.destination)
-                        }
-                    case .home, .traces:
-                        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                            if Self.promptsInInspector(tab) {
-                                InspectorPromptsHeader(traces: traces)
-                            }
-                            // An opened History row is the inspector's
-                            // selection while History is shown; otherwise the
-                            // Traces selection's card, as Ron mounts
-                            // `WaitingPage`.
-                            if tab == .home,
-                               let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
-                                HistoryInspectorPane(row: row)
-                            } else {
-                                TracesInspectorHost(traces: traces, home: home, selection: selection)
-                            }
-                        }
-                    }
+            // The whole column scrolls as one, prompts and selection together:
+            // unscrolled, a column taller than the window grew the inspector
+            // past it and pushed the other panes down.
+            GlassPane(padding: 0) {
+                ScrollView {
+                    inspectorContent
+                        // Ron's inspector pane insets its content 16 across and 18
+                        // down (`monitor-shell.tsx:166`, `px-4 py-4.5`), wider than
+                        // the other panes' 12.
+                        .padding(GlassPaneInsets.inspector)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollIndicators(.never)
             }
         }
-        // Settings is a modal over all three panes (Ron's #1146): while it is
-        // open the panes take no focus and no clicks, are hidden from
-        // VoiceOver, and are blurred under its scrim.
-        .disabled(navigation.settingsRequest != nil)
-        .accessibilityHidden(navigation.settingsRequest != nil)
-        .blur(radius: navigation.settingsRequest == nil ? 0 : GlassTokens.Size.modalScrimBlur)
-        .overlay {
-            if let request = navigation.settingsRequest {
-                SettingsModal(
-                    request: request, navigation: navigation, paused: traces.status?.paused,
-                    onClose: { navigation.settingsRequest = nil },
-                    onPrivateAI: { Self.openPrivateAI(tab: &tab, navigation: navigation) })
-            }
-        }
+        // Settings is its own window (owner, 2026-10-08,
+        // `SettingsWindowView`), no longer a modal over these panes.
         .glassWindow()
         .onAppear { model.refreshAll() }
         // The app's own reads (settings, the tools, the credential, the
@@ -380,6 +353,11 @@ struct MonitorWindowView: View {
         Self.land(destination, tab: &tab, homePage: &homePage,
                   selection: &selection, showsInspector: &showsInspector)
         navigation.pending = nil
+        if destination == .idleSessions {
+            // Held by the store until the window's first attach when the
+            // window has only just opened.
+            Task { await traces.requestIdleOnly() }
+        }
     }
 
     /// The sentence one tool's row shows (`HarnessSurface.rowSentence`): a
@@ -410,17 +388,72 @@ struct MonitorWindowView: View {
         return parts.isEmpty ? nil : parts.joined(separator: ", ")
     }
 
+    /// The inspector column for the shown tab, unpadded and unscrolled.
+    @ViewBuilder
+    private var inspectorContent: some View {
+        // An empty branch would leave the pane nothing to draw, and
+        // it would vanish while the layout still reserved its width.
+        // The inspector opens only on Traces and on Home's History
+        // (`inspectorAvailable`); on Inference and Home's other pages it
+        // stays closed and draws nothing (owner, 2026-10-08 and 10-09).
+        // While onboarding is required only Inference is shown (R-38), so
+        // nothing is drawn then either.
+        if !model.onboardingKnown || !inspectorAvailable {
+            Color.clear
+        } else {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                // On Traces the prompts and the health banners are drawn
+                // above the tree, not here (owner, 2026-10-07: offers,
+                // undo and health above the tree). History draws them at
+                // the top of the inspector, as Ron's shell mounts
+                // `WaitingPrompts`: it still offers the Traces selection's
+                // Contribute.
+                if Self.promptsInInspector(shownTab) {
+                    InspectorPromptsHeader(traces: traces)
+                }
+                // An opened History row is the inspector's selection while
+                // History is shown; otherwise the Traces selection's card,
+                // as Ron mounts `WaitingPage`.
+                if shownTab == .home,
+                   let row = HistorySelection.opened(selectedHistory, onHistory: homePage == .history, in: home.history) {
+                    HistoryInspectorPane(row: row)
+                } else {
+                    TracesInspectorHost(traces: traces, home: home, selection: selection)
+                }
+            }
+        }
+    }
+
     /// Whether the inspector draws the prompts (and, beside the host, the
-    /// health banners): on every tab but Traces, which draws them above its
-    /// tree. Home and History still offer the Traces selection's
-    /// Contribute, so its Undo and the core's health must be there too.
-    static func promptsInInspector(_ tab: Tab) -> Bool { tab != .traces }
+    /// health banners): on Home, where only History opens it and still
+    /// offers the Traces selection's Contribute, so its Undo and the core's
+    /// health must be there too. Traces draws them above its tree, and
+    /// Inference, whose inspector stays closed, at the top of its page.
+    static func promptsInInspector(_ tab: Tab) -> Bool { tab == .home }
+
+    /// Whether the inspector may open on what is shown: on Traces, and on
+    /// Home's History, whose opened row is the inspector's. Never on Home's
+    /// other pages (owner, 2026-10-08) or on Inference (2026-10-09): they
+    /// have nothing for it to show, and their prompts head their page.
+    static func inspectorAvailable(_ shown: Tab, homePage: HomeTabView.Page) -> Bool {
+        switch shown {
+        case .traces: true
+        case .home: homePage == .history
+        case .inference: false
+        }
+    }
+
+    private var inspectorAvailable: Bool {
+        Self.inspectorAvailable(shownTab, homePage: homePage)
+    }
 
     /// What the inspector must show right now (`InspectorDemand`); the
     /// offers only where the inspector draws them.
     private var demandKeys: Set<String> {
         InspectorDemand.keys(model: model, traces: traces, selection: selection)
-            .union(Self.promptsInInspector(shownTab) ? InspectorDemand.offerKeys(model: model) : [])
+            // Offers ask for the inspector only where it draws them and
+            // may open: on Home's page they head the main pane.
+            .union(Self.promptsInInspector(shownTab) && inspectorAvailable ? InspectorDemand.offerKeys(model: model) : [])
     }
 
     /// The tab on screen (`shownTab(_:requiresOnboarding:)`).
@@ -496,12 +529,15 @@ struct MonitorWindowView: View {
             tab = .home
             homePage = page
         case .inference:
-            // The account is on the main pane (Ron's #1146).
+            // The account is on the main pane (Ron's #1146), and the
+            // inspector stays closed on Inference (owner, 2026-10-09).
             tab = .inference
-            showsInspector = true
         case .traces(let entryId):
             tab = .traces
             if let entryId { select(.session(entryID: entryId), selection: &selection, showsInspector: &showsInspector) }
+        case .idleSessions:
+            // The store narrows the list (`consumePending`).
+            tab = .traces
         case .settings:
             break
         }
@@ -522,13 +558,6 @@ struct MonitorWindowView: View {
     static func select(_ wanted: MonitorSelection?, selection: inout MonitorSelection?, showsInspector: inout Bool) {
         selection = wanted
         if case .session = wanted { showsInspector = true }
-    }
-
-    /// The Settings modal's Private AI pointer: close the modal and open the
-    /// Inference tab, as Ron's `navigate(routePaths["private-ai"])` does.
-    static func openPrivateAI(tab: inout Tab, navigation: MainWindowNavigation) {
-        navigation.settingsRequest = nil
-        tab = .inference
     }
 
     /// The first time this window is shown, open the panes its screen has
@@ -576,6 +605,9 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
     let tracesDescription: String?
     @Binding var showsMap: Bool
     @Binding var showsInspector: Bool
+    /// False where the inspector cannot open (Home but for History): its
+    /// toggle is then disabled and reads as hidden.
+    let inspectorAvailable: Bool
     @Binding var showsGraph: Bool
     @Binding var showsIgnored: Bool
     /// Home's History or Missions trail; nil for no breadcrumb.
@@ -626,9 +658,13 @@ private struct MonitorMainPane<Content: View, Footer: View>: View {
                             GlassToolbarButton(MonitorShellWords.mapToggle(shown: showsMap), icon: .glyph(.map), pressed: showsMap) {
                                 showsMap.toggle()
                             }
-                            GlassToolbarButton(MonitorShellWords.inspectorToggle(shown: showsInspector), icon: .glyph(.inspector), pressed: showsInspector) {
+                            GlassToolbarButton(
+                                MonitorShellWords.inspectorToggle(shown: showsInspector && inspectorAvailable),
+                                icon: .glyph(.inspector), pressed: showsInspector && inspectorAvailable
+                            ) {
                                 showsInspector.toggle()
                             }
+                            .disabled(!inspectorAvailable)
                         }
                         // Open before onboarding too: Settings gates each section
                         // itself (R-43), so Connection, Startup, Notifications,
@@ -760,6 +796,8 @@ private struct MonitorMapPane: View {
     let selectedTool: String?
     /// The core's sentence for a tool's Private AI state.
     let sentence: (HarnessRow) -> String?
+    /// A folder node clicked on the Traces map, by project id.
+    let onSelectFolder: (String) -> Void
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
@@ -793,7 +831,7 @@ private struct MonitorMapPane: View {
                 scene: scene,
                 legend: [.autoUpload, .ask, .ignore], zoomable: true,
                 accessibilityName: FlowMapScene.words?.mapLabel ?? MonitorWindowView.Tab.traces.title, state: tracesState,
-                focus: scene.focusPoint(tool: focusTool))
+                focus: scene.focusPoint(tool: focusTool), onSelectFolder: onSelectFolder)
         case .privateAI:
             // The one tool list, while this window's client has read it and
             // the core still answers; otherwise nothing is drawn as current.
@@ -859,10 +897,9 @@ private struct MonitorMapPane: View {
 }
 
 /// The name the Settings scene mounted (D8; R11 of #1173). No scene mounts
-/// it since the R15 cutover took Ron's modal; it is kept so anything that
-/// still names it routes to the modal. Settings is now Ron's modal over the Monitor
-/// (#1241 Task 10, `SettingsModal`), so this draws nothing of its own: it
-/// opens the Monitor, asks it for the modal, and closes itself.
+/// it; it is kept so anything that still names it routes to Settings,
+/// which is its own window again (owner, 2026-10-08, `SettingsWindowView`).
+/// It draws nothing of its own: it opens that window and closes itself.
 struct MonitorSettingsWindow: View {
     let navigation: MainWindowNavigation
 
@@ -873,8 +910,8 @@ struct MonitorSettingsWindow: View {
         Color.clear
             .frame(width: 1, height: 1)
             .onAppear {
-                openWindow(id: WindowID.monitor)
                 navigation.requestSettings()
+                openWindow(id: WindowID.settings)
                 dismiss()
             }
     }

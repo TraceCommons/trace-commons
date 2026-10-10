@@ -118,20 +118,6 @@ private struct NoticeHeading: View {
     }
 }
 
-/// A refusal's words, in the primary colour behind a status label so the
-/// failure is never colour alone.
-private struct NoticeRefusal: View {
-    private let words: String
-
-    init(_ words: String) { self.words = words }
-
-    var body: some View {
-        GlassStatusLabel(words, status: .ask)
-            .foregroundStyle(GlassColor.textPrimary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
 /// Every grant the daemon voided that no shell has shown yet (R6 of the
 /// connect-and-forget design). The words come from `consent_copy` across the
 /// ABI; this view only lays them out.
@@ -212,10 +198,9 @@ struct GrantVoidNoticeCard: View {
                     NoticeBullet { Text(reason) }
                 }
                 Text(notice.rearm).fixedSize(horizontal: false, vertical: true)
-                if refused, let failed = notice.rearmFailed {
-                    NoticeRefusal(failed)
-                }
-                HStack(spacing: GlassTokens.Space.s2) {
+                // The action first, the acknowledgement after it as a link
+                // (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
                     // "Turn back on" sits beside the sentence saying that
                     // doing so agrees to the new settings. It is Settings'
                     // arming call.
@@ -227,8 +212,12 @@ struct GrantVoidNoticeCard: View {
                     // Acknowledging records that the notice was shown, and
                     // re-arms nothing.
                     Button(notice.acknowledge, action: onAcknowledge)
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
                         .lineLimit(1)
+                }
+                // A refused re-arm, under the buttons it is about.
+                if refused, let failed = notice.rearmFailed {
+                    GlassAlert(failed)
                 }
             }
         }
@@ -284,10 +273,9 @@ struct ArmingRewordedNoticeCard: View {
                 ForEach([notice.scope, notice.limit, notice.noReview], id: \.self) { line in
                     Text(line).fixedSize(horizontal: false, vertical: true)
                 }
-                if refused, let failed = notice.askFirstFailed {
-                    NoticeRefusal(failed)
-                }
-                HStack(spacing: GlassTokens.Space.s2) {
+                // The action first, the acknowledgement after it as a link
+                // (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
                     if let onAskFirst, let action = notice.askFirstAction {
                         Button(action, action: onAskFirst)
                             .buttonStyle(GlassButtonStyle(.primary))
@@ -296,8 +284,12 @@ struct ArmingRewordedNoticeCard: View {
                     // Acknowledging records that the notice was shown, and
                     // changes nothing about the folder.
                     Button(notice.acknowledge, action: onAcknowledge)
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
                         .lineLimit(1)
+                }
+                // A refused Ask first, under the buttons it is about.
+                if refused, let failed = notice.askFirstFailed {
+                    GlassAlert(failed)
                 }
             }
         }
@@ -336,7 +328,7 @@ struct GateHeldNoticeCard: View {
                             if let projectID = project.projectId, refused.contains(projectID),
                                 let failed = project.askFirstFailed
                             {
-                                NoticeRefusal(failed)
+                                GlassAlert(failed)
                             }
                         }
                     }

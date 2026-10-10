@@ -388,6 +388,10 @@ fn pinned_sentences() -> Vec<(&'static str, String)> {
             consent::AUTO_SCOPE_REQUIRED,
             consent::AUTO_PATH_AUTOMATIC,
             consent::AUTO_PATH_ASK_FIRST,
+            consent::AUTO_PATH_AUTOMATIC_TITLE,
+            consent::AUTO_PATH_AUTOMATIC_DETAIL,
+            consent::AUTO_PATH_ASK_FIRST_TITLE,
+            consent::AUTO_PATH_ASK_FIRST_DETAIL,
         ]
         .map(str::to_owned)
         .to_vec(),
@@ -780,7 +784,7 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 
 /// A core sentence that carries a `{name}` placeholder is pinned with a
 /// [`HOLE`] in its place, the way the scanner reads a Swift interpolation.
-/// Pinned with the braces, `"Include every past session in \(folder)"`
+/// Pinned with the braces, `"Include every past trace in \(folder)"`
 /// would never match it.
 #[test]
 fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
@@ -794,7 +798,7 @@ fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
         braced.is_empty(),
         "pinned sentences still carry a brace placeholder: {braced:?}"
     );
-    let probe = swift_literals(r#"let t = "Include every past session in \(folder)""#);
+    let probe = swift_literals(r#"let t = "Include every past trace in \(folder)""#);
     assert!(
         pinned.iter().any(|(_, sentence)| fragments(sentence)
             .iter()

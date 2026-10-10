@@ -88,6 +88,21 @@ pub trait PerplexityScorer: Send + Sync {
     }
 }
 
+/// Shares one scorer between holders (the legacy gate and the versioned
+/// pipeline hold the same NEAR AI scorer). Forwards every method, the
+/// defaulted `score_chunk` included: without the override an `Arc` would
+/// fall back to the trait default and silently drop a scorer's lossless
+/// per-token logprobs.
+impl<T: PerplexityScorer + ?Sized> PerplexityScorer for std::sync::Arc<T> {
+    fn score(&self, plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+        (**self).score(plaintext)
+    }
+
+    fn score_chunk(&self, chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+        (**self).score_chunk(chunk)
+    }
+}
+
 /// Output of scoring a plaintext for per-token rarity (Phase A.5 candidate
 /// replacement metric for aggregate perplexity).
 ///
@@ -368,5 +383,54 @@ mod tests {
         assert_eq!(c.tokens, 0);
         assert_eq!(c.sum_nll, 0.0);
         assert_eq!(c.tail_tokens, 0);
+    }
+
+    /// A scorer whose `score_chunk` returns raw logprobs the default could
+    /// not derive from `score`.
+    struct LosslessChunkScorer;
+
+    impl PerplexityScorer for LosslessChunkScorer {
+        fn score(&self, _plaintext: &[u8]) -> anyhow::Result<PerplexityResult> {
+            Ok(PerplexityResult {
+                aggregate_perplexity_micros: 2_000_000,
+                tail_fraction_micros: 0,
+                tokens_scored: 3,
+            })
+        }
+
+        fn score_chunk(&self, _chunk: &[u8]) -> anyhow::Result<ChunkPerplexity> {
+            Ok(ChunkPerplexity {
+                sum_nll: 1.5,
+                tokens: 3,
+                tail_tokens: 1,
+                logprobs: vec![-0.25, -0.5, -0.75],
+                token_char_lens: vec![1, 2, 3, 4],
+            })
+        }
+    }
+
+    /// An `Arc` (sized or `dyn`) forwards `score_chunk` to the scorer it
+    /// holds, so sharing a scorer never drops a lossless override back to
+    /// the trait default.
+    #[test]
+    fn arc_forwarding_keeps_score_chunk_logprobs() {
+        fn chunk_of<S: PerplexityScorer + ?Sized>(scorer: &S) -> ChunkPerplexity {
+            scorer.score_chunk(b"chunk").unwrap()
+        }
+        let expected = LosslessChunkScorer.score_chunk(b"chunk").unwrap();
+        let sized = std::sync::Arc::new(LosslessChunkScorer);
+        let shared: std::sync::Arc<dyn PerplexityScorer> = sized.clone();
+        assert_eq!(chunk_of(&sized), expected);
+        assert_eq!(chunk_of(&shared), expected);
+        assert_eq!(
+            chunk_of(&shared).logprobs,
+            vec![-0.25, -0.5, -0.75],
+            "the logprobs survive the Arc"
+        );
+        assert_eq!(chunk_of(&shared).logprobs.len(), 3);
+        assert_eq!(
+            shared.score(b"x").unwrap(),
+            LosslessChunkScorer.score(b"x").unwrap()
+        );
     }
 }

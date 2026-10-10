@@ -58,6 +58,10 @@ use trace_commons_server::versioned_pipeline_compat::{
 use trace_commons_server::versioned_pipeline_credit::{
     RecordingSettlementAdapter, SettlementAdapterRegistry,
 };
+use trace_commons_server::versioned_pipeline_harness::{
+    HarnessAssembly, HarnessDependencies, assemble_harness_production_crashing_at,
+    harness_production_components, production_package_pins,
+};
 use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
 use trace_commons_server::versioned_pipeline_product::{
     PipelineForensicTrace, PipelineProductStore,
@@ -96,6 +100,18 @@ const LOCAL_BLOCKERS: [&str; 6] = [
     "synthetic_index",
     "synthetic_settlement",
     "static_bearer_authentication",
+];
+
+/// A production-mode report's blockers (spec B-D1): the scorer, embedder,
+/// index and settlement adapter are the production assembly's, but the run
+/// is still a harness run, with static bearer tokens, the allow-all test
+/// authority and the pass-through privacy boundary, so it is never a
+/// production report.
+const PRODUCTION_HARNESS_BLOCKERS: [&str; 4] = [
+    "local_test_only",
+    "static_bearer_authentication",
+    "harness_test_authority",
+    "harness_pass_through_privacy",
 ];
 
 const CORPUS_PATH_VAR: &str = "TRACE_COMMONS_PIPELINE_CORPUS_PATH";
@@ -500,6 +516,33 @@ impl CorpusRunConfig {
     }
 }
 
+/// The production package (spec B-D5): the scorer and embedder descriptors
+/// `lookup` names, through the parsers the deployed binary uses, under
+/// `main_gate`. Loads no model and calls no network
+/// (`production_compatibility_package` reads descriptors only).
+fn production_bundle_package(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    main_gate: &trace_commons_server::versioned_pipeline_compat::MainGateConfig,
+) -> anyhow::Result<BundlePackage> {
+    let scorer = production_assembly::near_ai_scorer_descriptor_from_lookup(lookup)?;
+    let embedder = production_assembly::fastembed_descriptor_from_lookup(lookup)?;
+    trace_commons_server::versioned_pipeline_production::production_compatibility_package(
+        &scorer, &embedder, main_gate,
+    )
+}
+
+/// [`production_bundle_package`] from the process environment, with
+/// `main`'s gate configuration parsed exactly as ingest parses it under a
+/// pipeline runtime. `pipeline.py package --bundle production` passes the
+/// env file's descriptor and gate variables, and nothing else.
+fn production_bundle_package_from_env() -> anyhow::Result<BundlePackage> {
+    let main_gate = pipeline_main_gate_config_from_env(
+        true,
+        parse_novelty_utility_credit_points_delta_from_env()?,
+    )?;
+    production_bundle_package(&|var: &str| std::env::var(var).ok(), &main_gate)
+}
+
 /// The built-in bundles, by name: PR 2's minimal package with the
 /// `storage_rebate` award, and the qualification candidate, the
 /// compatibility package over `local_reference()` with a 2_500_000
@@ -528,7 +571,24 @@ fn corpus_bundle_package(bundle: &str) -> anyhow::Result<BundlePackage> {
 /// disabled (the default), as in `CompatibilityTestAssembler`.
 struct CorpusAssembler {
     package: BundlePackage,
-    index: Arc<IsolatedPipelineIndex>,
+    dependencies: CorpusDependencies,
+}
+
+/// What the corpus service runs on: the reference assembly over an
+/// isolated index, or the production assembly (spec B-D1) over the
+/// dependencies the signed production package names.
+enum CorpusDependencies {
+    Reference(Arc<IsolatedPipelineIndex>),
+    Production(HarnessDependencies),
+}
+
+impl CorpusDependencies {
+    fn assembly(&self) -> HarnessAssembly {
+        match self {
+            Self::Reference(_) => HarnessAssembly::Reference,
+            Self::Production(_) => HarnessAssembly::Production,
+        }
+    }
 }
 
 impl IngestPipelineRuntimeAssembler for CorpusAssembler {
@@ -536,6 +596,17 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
         &self,
         context: pipeline_runtime::IngestPipelineRuntimeContext,
     ) -> anyhow::Result<Arc<PipelineService>> {
+        let index = match &self.dependencies {
+            CorpusDependencies::Reference(index) => index.clone(),
+            CorpusDependencies::Production(dependencies) => {
+                return production_harness_runtime(
+                    &self.package,
+                    dependencies.clone(),
+                    None,
+                    context,
+                );
+            }
+        };
         let adapters = self
             .package
             .manifest
@@ -567,8 +638,8 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
             context.backend,
             context.artifact_store,
             self.package.clone(),
-            self.index.clone(),
-            self.index.clone(),
+            index.clone(),
+            index,
             SettlementAdapterRegistry::new(adapters)?,
             caps,
         )
@@ -584,6 +655,108 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
     }
 }
 
+/// A production harness's service (spec B-D1): the production assembler,
+/// through the ingest seam's context, over `dependencies` under `package`'s
+/// own pins, with the harness's allow-all authority and pass-through
+/// privacy boundary (the corpus and restore tenants are the harness's, not
+/// the deployment's), and `crash_point` when the restore seed needs one.
+/// Refused unless it serves exactly `package`.
+pub(super) fn production_harness_runtime(
+    package: &BundlePackage,
+    dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
+    context: pipeline_runtime::IngestPipelineRuntimeContext,
+) -> anyhow::Result<Arc<PipelineService>> {
+    let pins = production_package_pins(package)?;
+    let components = harness_production_components(
+        &pins,
+        dependencies,
+        allow_all_test_authority(),
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    Ok(Arc::new(assemble_harness_production_crashing_at(
+        package,
+        trace_commons_server::versioned_pipeline_production::ProductionPipelineInputs {
+            backend: context.backend,
+            artifact_store: context.artifact_store,
+            object_store_name: context.object_store_name,
+            lease_config: context.lease_config,
+            novelty_utility_checks: context.novelty_utility_checks,
+            unqualified_routing_allowed: context.unqualified_routing_allowed,
+            main_gate: context.main_gate,
+            components,
+        },
+        crash_point,
+    )?))
+}
+
+/// [`production_harness_runtime`] behind ingest's assembler seam.
+struct ProductionHarnessAssembler {
+    package: BundlePackage,
+    dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
+}
+
+impl IngestPipelineRuntimeAssembler for ProductionHarnessAssembler {
+    fn assemble(
+        &self,
+        context: pipeline_runtime::IngestPipelineRuntimeContext,
+    ) -> anyhow::Result<Arc<PipelineService>> {
+        production_harness_runtime(
+            &self.package,
+            self.dependencies.clone(),
+            self.crash_point,
+            context,
+        )
+    }
+}
+
+/// The production harness's service for the restore drill, through
+/// `assemble_ingest_pipeline_runtime` with the arguments the compatibility
+/// drill passes (`assemble_compatibility_pipeline_service_with`): the
+/// pipeline's credit issuer configured, and `main`'s gate configuration the
+/// one `package` holds. Panics with the refusal's label.
+pub(super) fn assemble_production_harness_service(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    package: &BundlePackage,
+    dependencies: HarnessDependencies,
+    crash_point: Option<trace_commons_server::versioned_pipeline::PipelineCrashPoint>,
+) -> Arc<PipelineService> {
+    let main_gate = package_compatibility_config(package)
+        .map(|config| config.main_gate())
+        .unwrap_or_else(|| panic!("harness_production_package_invalid"));
+    let assembler = ProductionHarnessAssembler {
+        package: package.clone(),
+        dependencies,
+        crash_point,
+    };
+    let connections = TraceCorpusDbConnections {
+        database: backend.clone() as Arc<dyn Database>,
+        postgres: backend,
+    };
+    assemble_ingest_pipeline_runtime(
+        Some(&assembler),
+        Some(&connections),
+        Some(configured_store),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        true,
+        true,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+        main_gate,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+    .expect("an assembler was given, so a service is returned")
+}
+
 /// The service comes out of `assemble_ingest_pipeline_runtime`, the seam
 /// ingest's real boot uses, exactly as the other HTTP tests' services do,
 /// with the pipeline's credit issuer configured, which a runtime that
@@ -595,13 +768,16 @@ impl IngestPipelineRuntimeAssembler for CorpusAssembler {
 fn assemble_corpus_service(
     backend: Arc<PgBackend>,
     artifacts: Arc<LocalEncryptedTraceArtifactStore>,
-    index: Arc<IsolatedPipelineIndex>,
+    dependencies: CorpusDependencies,
     package: BundlePackage,
 ) -> Arc<PipelineService> {
     let main_gate = package_compatibility_config(&package)
         .map(|config| main_gate_of(&config))
         .unwrap_or(TEST_MAIN_GATE);
-    let assembler = CorpusAssembler { package, index };
+    let assembler = CorpusAssembler {
+        package,
+        dependencies,
+    };
     let connections = TraceCorpusDbConnections {
         database: backend.clone() as Arc<dyn Database>,
         postgres: backend,
@@ -1039,7 +1215,13 @@ fn observed_privacy_state(decision: &str, admission_reason: Option<&str>) -> &'s
 
 /// The labels of every expectation a fixture missed, in the order
 /// `pipeline_tooling.corpus.fixture_mismatches` recomputes them.
-fn fixture_mismatches(item: &serde_json::Value) -> Vec<&'static str> {
+/// The expectations `item` misses, in a fixed order. In production mode
+/// (spec section 2, O-B3) the outcome count, the scoring and settlement
+/// states and the instrument legs are not compared: real NEAR AI scores
+/// against the deployment's floors can legitimately move them, so they stay
+/// in the report as evidence only.
+fn fixture_mismatches(item: &serde_json::Value, assembly: HarnessAssembly) -> Vec<&'static str> {
+    let compare_scoring = assembly == HarnessAssembly::Reference;
     let mut found = Vec::new();
     if !TERMINAL_STATES.contains(&item["state"].as_str().unwrap_or_default()) {
         found.push("run_not_terminal");
@@ -1047,23 +1229,25 @@ fn fixture_mismatches(item: &serde_json::Value) -> Vec<&'static str> {
     if item["admission_decision"] != item["expected_admission_decision"] {
         found.push("admission_decision");
     }
-    if item["phase_count"] != item["expected_outcome_count"] {
+    if compare_scoring && item["phase_count"] != item["expected_outcome_count"] {
         found.push("outcome_count");
     }
-    for field in [
-        "consent_state",
-        "privacy_state",
-        "scoring_state",
-        "settlement_state",
+    for (field, scoring) in [
+        ("consent_state", false),
+        ("privacy_state", false),
+        ("scoring_state", true),
+        ("settlement_state", true),
     ] {
-        if item[field] != item[format!("expected_{field}").as_str()] {
+        if (compare_scoring || !scoring)
+            && item[field] != item[format!("expected_{field}").as_str()]
+        {
             found.push(field);
         }
     }
-    if item["instrument_count"] != item["expected_instrument_count"] {
+    if compare_scoring && item["instrument_count"] != item["expected_instrument_count"] {
         found.push("instrument_count");
     }
-    if item["instrument_states"] != item["expected_instrument_states"] {
+    if compare_scoring && item["instrument_states"] != item["expected_instrument_states"] {
         found.push("instrument_states");
     }
     for flag in [
@@ -1084,6 +1268,7 @@ fn fixture_report(
     fixture: &CorpusFixture,
     expected: &FixtureExpectations,
     observed: &FixtureObservation,
+    assembly: HarnessAssembly,
 ) -> serde_json::Value {
     let phases = observed
         .forensic
@@ -1185,7 +1370,7 @@ fn fixture_report(
             .collect::<BTreeMap<_, _>>(),
         "expected_instrument_states": expected.instrument_states,
     });
-    let mismatches = fixture_mismatches(&item);
+    let mismatches = fixture_mismatches(&item, assembly);
     item["mismatches"] = serde_json::json!(mismatches);
     item
 }
@@ -1233,6 +1418,7 @@ fn corpus_report(
     check_id: &str,
     package: &BundlePackage,
     sections: Vec<serde_json::Value>,
+    assembly: HarnessAssembly,
 ) -> Result<serde_json::Value, String> {
     let digests = package_digests(package)?;
     let every: Vec<serde_json::Value> = sections
@@ -1261,6 +1447,12 @@ fn corpus_report(
         "tenant_isolation": every.iter().all(|item| item["tenant_isolation"] == true),
         "partitions": sections,
     });
+    // A reference report is exactly what it always was; a production one
+    // says so, with its own blockers.
+    if assembly == HarnessAssembly::Production {
+        report["harness_assembly"] = serde_json::json!(assembly.label());
+        report["safe_blockers"] = serde_json::json!(PRODUCTION_HARNESS_BLOCKERS);
+    }
     let digest = sha256_bytes(
         &trace_commons_protocol::canonical_json::to_canonical_vec(&report)
             .map_err(|_| "corpus_report_invalid".to_string())?,
@@ -1634,7 +1826,76 @@ async fn pipeline_corpus_run() {
         Ok(None) => return,
         Err(label) => panic!("{label}"),
     };
+    let assembly = HarnessAssembly::from_env().unwrap_or_else(|error| panic!("{error}"));
     let package = config.package().unwrap_or_else(|label| panic!("{label}"));
+    let dependencies = match assembly {
+        HarnessAssembly::Reference => CorpusDependencies::Reference(IsolatedPipelineIndex::new()),
+        HarnessAssembly::Production => CorpusDependencies::Production(
+            production_corpus_dependencies_from_env(&config, &package).await,
+        ),
+    };
+    run_corpus(&config, package, dependencies).await;
+}
+
+/// Spec B-D1: production mode serves a signed production package, never a
+/// built-in bundle, and never as the minimal corpus check (which names no
+/// package). Refused before any database or model is touched.
+fn require_production_corpus_config(
+    config: &CorpusRunConfig,
+    package: &BundlePackage,
+) -> Result<(), String> {
+    if !matches!(config.source, CorpusPackageSource::Signed { .. }) {
+        return Err("corpus_production_requires_signed_package".to_string());
+    }
+    if config.check_id == MINIMAL_CORPUS_CHECK_ID {
+        return Err("corpus_production_check_id_invalid".to_string());
+    }
+    production_package_pins(package)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The real production components for a corpus run on the operator host:
+/// `PipelineGateComponents::from_env` (NEAR AI, fastembed, and a usearch
+/// index at `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run).
+#[cfg(feature = "near-ai-scorer")]
+async fn production_corpus_dependencies_from_env(
+    config: &CorpusRunConfig,
+    package: &BundlePackage,
+) -> HarnessDependencies {
+    use trace_commons_server::versioned_pipeline_harness::harness_dependencies_from_env;
+    require_production_corpus_config(config, package).unwrap_or_else(|label| panic!("{label}"));
+    harness_dependencies_from_env()
+        .await
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Never reached: `HarnessAssembly::from_env` refuses production mode
+/// without `near-ai-scorer`.
+#[cfg(not(feature = "near-ai-scorer"))]
+async fn production_corpus_dependencies_from_env(
+    _config: &CorpusRunConfig,
+    _package: &BundlePackage,
+) -> HarnessDependencies {
+    panic!(
+        "{}",
+        trace_commons_server::versioned_pipeline_harness::HARNESS_PRODUCTION_ASSEMBLY_UNAVAILABLE_LABEL
+    )
+}
+
+/// One corpus run over `package` on `dependencies`: the body of
+/// `pipeline_corpus_run`, which a production-mode test also drives with
+/// qualified doubles.
+async fn run_corpus(
+    config: &CorpusRunConfig,
+    package: BundlePackage,
+    dependencies: CorpusDependencies,
+) {
+    let assembly = dependencies.assembly();
+    if assembly == HarnessAssembly::Production {
+        require_production_corpus_config(config, &package)
+            .unwrap_or_else(|label| panic!("{label}"));
+    }
     let award_states = bundle_award_states(&package).unwrap_or_else(|label| panic!("{label}"));
     let corpora: Vec<(&str, CorpusFile, String)> = config
         .partitions
@@ -1682,7 +1943,7 @@ async fn pipeline_corpus_run() {
     let service = assemble_corpus_service(
         runtime.clone(),
         artifacts.clone(),
-        IsolatedPipelineIndex::new(),
+        dependencies,
         package.clone(),
     );
 
@@ -1750,7 +2011,7 @@ async fn pipeline_corpus_run() {
         for fixture in &corpus.fixtures {
             let expected = fixture.expectations(&award_states);
             let observed = drive_fixture(&mut http, fixture).await;
-            fixtures.push(fixture_report(fixture, &expected, &observed));
+            fixtures.push(fixture_report(fixture, &expected, &observed, assembly));
         }
         sections.push(partition_report(
             partition,
@@ -1762,7 +2023,7 @@ async fn pipeline_corpus_run() {
     stop.send(()).expect("send shutdown to the corpus app");
     join_within(server, 20, "corpus app").await;
 
-    let report = corpus_report(&config.check_id, &package, sections)
+    let report = corpus_report(&config.check_id, &package, sections, assembly)
         .unwrap_or_else(|label| panic!("{label}"));
     let mut report_bytes = trace_commons_protocol::canonical_json::to_canonical_vec(&report)
         .expect("the report serialises");
@@ -1793,7 +2054,7 @@ async fn pipeline_corpus_run() {
     // for this check beside its result (P5-D14).
     let (corpus_digest, input_digest) =
         corpus_evidence_digests(&report).unwrap_or_else(|label| panic!("{label}"));
-    let evidence = serde_json::json!({
+    let mut evidence = serde_json::json!({
         "fixtures": report["fixture_count"],
         "completed": report["completed_fixture_count"],
         "replay_same_run": report["replay_same_run_count"],
@@ -1803,6 +2064,9 @@ async fn pipeline_corpus_run() {
         "corpus_digest": corpus_digest,
         "input_digest": input_digest,
     });
+    if assembly == HarnessAssembly::Production {
+        evidence["harness_assembly"] = serde_json::json!(assembly.label());
+    }
     assert!(
         !contains_probe(
             &trace_commons_protocol::canonical_json::to_canonical_vec(&evidence)
@@ -1841,8 +2105,18 @@ async fn pipeline_package_write() {
         _ => panic!("package_environment_incomplete"),
     };
     assert_ne!(output, key_output, "package_outputs_must_differ");
-    let package =
-        corpus_bundle_package(&bundle).unwrap_or_else(|_| panic!("package_bundle_invalid"));
+    let package = if bundle == "production" {
+        let package =
+            production_bundle_package_from_env().unwrap_or_else(|error| panic!("{error}"));
+        trace_commons_server::versioned_pipeline_qualification::validate_production_package(
+            &package,
+        )
+        .unwrap_or_else(|_| panic!("package_production_invalid"));
+        production_package_pins(&package).unwrap_or_else(|error| panic!("{error}"));
+        package
+    } else {
+        corpus_bundle_package(&bundle).unwrap_or_else(|_| panic!("package_bundle_invalid"))
+    };
     let (pkcs8, key_id) = match (var(PACKAGE_SIGNING_KEY_PATH_VAR), var(PACKAGE_KEY_ID_VAR)) {
         (Some(path), Some(key_id)) => (
             zeroize::Zeroizing::new(
@@ -2891,7 +3165,7 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
         tenant_isolation: true,
     };
 
-    let report = fixture_report(&fixture, &expected, &observed);
+    let report = fixture_report(&fixture, &expected, &observed, HarnessAssembly::Reference);
     assert_eq!(report["mismatches"], serde_json::json!([]), "{report}");
     assert_eq!(
         report["instrument_states"],
@@ -2912,7 +3186,12 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
 
     let mut expects_reject = expected.clone();
     expects_reject.admission_decision = "reject".into();
-    let report = fixture_report(&fixture, &expects_reject, &observed);
+    let report = fixture_report(
+        &fixture,
+        &expects_reject,
+        &observed,
+        HarnessAssembly::Reference,
+    );
     assert_eq!(
         report["mismatches"],
         serde_json::json!(["admission_decision"])
@@ -2922,7 +3201,7 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     // though the leg completed and the count is met (ruling T9-6).
     let mut withheld = observed.clone();
     withheld.status.as_mut().unwrap().instruments[0].internal_settlement_state = "withheld".into();
-    let report = fixture_report(&fixture, &expected, &withheld);
+    let report = fixture_report(&fixture, &expected, &withheld, HarnessAssembly::Reference);
     assert_eq!(report["settlement_state"], "complete");
     assert_eq!(report["instrument_count"], 1);
     assert_eq!(
@@ -2936,7 +3215,7 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
     parked.admission_reason = Some("privacy_review_required".into());
     parked.forensic.as_mut().unwrap().phases.truncate(1);
     parked.replay_same_run = false;
-    let report = fixture_report(&fixture, &expected, &parked);
+    let report = fixture_report(&fixture, &expected, &parked, HarnessAssembly::Reference);
     assert_eq!(
         report["mismatches"],
         serde_json::json!([
@@ -2956,7 +3235,7 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
         state: "receipt_refused".into(),
         ..FixtureObservation::default()
     };
-    let report = fixture_report(&fixture, &expected, &refused);
+    let report = fixture_report(&fixture, &expected, &refused, HarnessAssembly::Reference);
     assert_eq!(report["consent_state"], "refused");
     assert_eq!(report["run_id_hash"], serde_json::Value::Null);
     assert!(
@@ -2965,4 +3244,296 @@ fn fixture_report_hashes_run_ids_and_names_each_mismatch() {
             .unwrap()
             .contains(&serde_json::json!("consent_state"))
     );
+}
+
+/// Spec section 2, O-B3 (plan B3): in production mode the corpus check
+/// compares only what the scorer and the deployment's floors cannot move --
+/// whether the run finished, the admission decision, consent, privacy,
+/// replay, changed-content refusal and tenant isolation. The outcome count,
+/// scoring and settlement states and the instrument legs stay in the report
+/// as evidence and are not compared. Reference mode compares every field.
+#[test]
+fn production_corpus_mode_compares_only_deterministic_fields() {
+    use trace_commons_server::versioned_pipeline_harness::HarnessAssembly;
+
+    let item = serde_json::json!({
+        "state": "complete",
+        "admission_decision": "admit",
+        "expected_admission_decision": "admit",
+        "phase_count": 3,
+        "expected_outcome_count": 4,
+        "consent_state": "allowed",
+        "expected_consent_state": "allowed",
+        "privacy_state": "low",
+        "expected_privacy_state": "low",
+        "scoring_state": "complete",
+        "expected_scoring_state": "complete",
+        "settlement_state": "incomplete",
+        "expected_settlement_state": "complete",
+        "instrument_count": 0,
+        "expected_instrument_count": 1,
+        "instrument_states": {},
+        "expected_instrument_states": {"trace_credit": "not_settlement_eligible"},
+        "replay_same_run": true,
+        "changed_content_refused": true,
+        "tenant_isolation": true,
+    });
+    assert_eq!(
+        fixture_mismatches(&item, HarnessAssembly::Reference),
+        [
+            "outcome_count",
+            "settlement_state",
+            "instrument_count",
+            "instrument_states"
+        ]
+    );
+    assert!(fixture_mismatches(&item, HarnessAssembly::Production).is_empty());
+    let mut unscored = item.clone();
+    unscored["scoring_state"] = serde_json::json!("missing");
+    assert!(fixture_mismatches(&unscored, HarnessAssembly::Production).is_empty());
+
+    for (field, value, label) in [
+        (
+            "state",
+            serde_json::json!("awaiting_review"),
+            "run_not_terminal",
+        ),
+        (
+            "admission_decision",
+            serde_json::json!("quarantine"),
+            "admission_decision",
+        ),
+        (
+            "consent_state",
+            serde_json::json!("refused"),
+            "consent_state",
+        ),
+        (
+            "privacy_state",
+            serde_json::json!("medium"),
+            "privacy_state",
+        ),
+        (
+            "replay_same_run",
+            serde_json::json!(false),
+            "replay_same_run",
+        ),
+        (
+            "changed_content_refused",
+            serde_json::json!(false),
+            "changed_content_refused",
+        ),
+        (
+            "tenant_isolation",
+            serde_json::json!(false),
+            "tenant_isolation",
+        ),
+    ] {
+        let mut changed = item.clone();
+        changed[field] = value;
+        assert_eq!(
+            fixture_mismatches(&changed, HarnessAssembly::Production),
+            [label],
+            "{field}"
+        );
+    }
+}
+
+/// A production package for the harness tests: the pilot's descriptors and
+/// gate settings (`deploy/pilot-gcp/ingest.env.template`'s floors), built
+/// the way `pipeline.py package --bundle production` builds one.
+pub(super) fn production_test_package() -> BundlePackage {
+    production_test_package_awarding(COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS)
+}
+
+/// [`production_test_package`] with `main`'s `NoveltyUtility` delta set to
+/// `microcredits`: `0` is the pilot's, under which Score awards nothing.
+pub(super) fn production_test_package_awarding(microcredits: u64) -> BundlePackage {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+    use trace_commons_server::versioned_pipeline_production::{
+        FastEmbedDescriptor, NearAiScorerDescriptor, production_compatibility_package,
+    };
+    production_compatibility_package(
+        &NearAiScorerDescriptor {
+            model: "Qwen/Qwen3.6-35B-A3B-FP8".to_string(),
+            tail_logprob_cutoff: -8.0,
+            logprobs_top_k: 1,
+        },
+        &FastEmbedDescriptor {
+            model_id: "BAAI/bge-large-en-v1.5".to_string(),
+            output_dim: 1024,
+            max_tokens: 512,
+            matryoshka_dim: None,
+        },
+        &MainGateConfig {
+            perplexity_floor_micros: Some(0),
+            tail_fraction_floor_micros: Some(0),
+            novelty_floor_micros: Some(500_000),
+            embed_insert_novelty_micros: 50_000,
+            top_k: 5,
+            chunk_target_tokens: 2048,
+            chunk_max_tokens: 3072,
+            chunk_cap: 16,
+            chunk_min_tokens: 64,
+            novelty_utility_microcredits: microcredits,
+        },
+    )
+    .expect("the production test package builds")
+}
+
+/// `package` signed with a generated key, written with its trusted key
+/// into `dir`: the two files `promote init` keeps for a run.
+pub(super) fn write_signed_test_package(dir: &Path, package: &BundlePackage) -> (PathBuf, PathBuf) {
+    let pkcs8 = generated_signing_key();
+    let signed = sign_bundle_package(package.clone(), "production_test_key", &pkcs8)
+        .expect("sign the production test package");
+    let trusted = trusted_key_for_pkcs8("production_test_key", &pkcs8).expect("trusted key");
+    let package_path = dir.join("signed-package.json");
+    let key_path = dir.join("trusted-package-key.json");
+    write_atomically(&package_path, &serde_json::to_vec(&signed).unwrap());
+    write_atomically(&key_path, &serde_json::to_vec(&trusted).unwrap());
+    (package_path, key_path)
+}
+
+/// Production mode end to end (spec B-D1, plan B3) through `run_corpus`, the
+/// body the operator's `promote package-checks` runs, over doubles (never
+/// production-qualified) instead of `from_env`'s NEAR AI, fastembed and
+/// usearch: the production
+/// assembler serves the signed production package over real HTTP, every
+/// deterministic field matches the corpus's expectations, and the report
+/// says it is a production-mode harness report. Production mode refuses a
+/// built-in bundle and a reference package before any database is touched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_corpus_run_serves_the_signed_package_over_doubles() {
+    let dir = tempfile::tempdir().unwrap();
+    let package = production_test_package();
+    let (package_path, key_path) = write_signed_test_package(dir.path(), &package);
+    let config = |source: CorpusPackageSource, check_id: &str| CorpusRunConfig {
+        partitions: vec![("corpus", main_corpus_path())],
+        check_id: check_id.to_string(),
+        source,
+        report_path: dir.path().join("report.json"),
+        artifact_root: None,
+        master_key_hex: None,
+    };
+    let signed = CorpusPackageSource::Signed {
+        package: package_path,
+        trusted_key: key_path,
+    };
+    let production = config(signed.clone(), "pipeline_http_corpus_compatibility");
+    assert_eq!(production.package().unwrap(), package);
+    let bundle = config(
+        CorpusPackageSource::Bundle("compatibility".to_string()),
+        "pipeline_http_corpus_compatibility",
+    );
+    assert_eq!(
+        require_production_corpus_config(&bundle, &bundle.package().unwrap()),
+        Err("corpus_production_requires_signed_package".to_string())
+    );
+    assert_eq!(
+        require_production_corpus_config(
+            &config(signed.clone(), MINIMAL_CORPUS_CHECK_ID),
+            &package
+        ),
+        Err("corpus_production_check_id_invalid".to_string())
+    );
+    assert_eq!(
+        require_production_corpus_config(&production, &qualification_candidate_package().unwrap()),
+        Err("harness_production_package_invalid".to_string())
+    );
+
+    if runtime_backend(1).await.is_none() {
+        return;
+    }
+    let index = IsolatedPipelineIndex::new();
+    run_corpus(
+        &production,
+        package.clone(),
+        CorpusDependencies::Production(HarnessDependencies::Doubles(
+            trace_commons_server::versioned_pipeline_harness::HarnessDoubles {
+                scorer: Arc::new(ReferencePerplexityScorer::new()),
+                embedder: Arc::new(ReferenceEmbedder::new()),
+                index_reader: index.clone(),
+                index_writer: index,
+            },
+        )),
+    )
+    .await;
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("report.json")).unwrap()).unwrap();
+    assert_eq!(report["harness_assembly"], "production");
+    assert!(report["fixture_count"].as_u64().unwrap() > 0);
+    assert_eq!(report["completed_fixture_count"], report["fixture_count"]);
+    assert_eq!(report["failure_count"], 0);
+    assert_eq!(
+        report["safe_blockers"],
+        serde_json::json!(PRODUCTION_HARNESS_BLOCKERS)
+    );
+    assert_eq!(report["bundle_id"], package.bundle_id);
+    assert_eq!(
+        report["package_hash"],
+        package_digests(&package).unwrap().package_hash
+    );
+}
+
+/// Spec B-D5, plan B6: `pipeline.py package --bundle production` builds the
+/// production package from the deployment's env file alone. The
+/// descriptors come from the variables the deployed binary parses, the
+/// scorer and embedder are never loaded, and no network is reachable: the
+/// package validates as a production package and is the one the production
+/// assembler serves for the same configuration.
+#[test]
+fn production_package_build_needs_no_network() {
+    use trace_commons_server::versioned_pipeline_compat::MainGateConfig;
+
+    let env = BTreeMap::from([
+        ("TRACE_COMMONS_NEAR_AI_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8"),
+        ("TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF", "-8.0"),
+        ("TRACE_COMMONS_EMBEDDER_MODEL_ID", "BAAI/bge-large-en-v1.5"),
+        ("TRACE_COMMONS_VECTOR_INDEX_DIM", "1024"),
+        // Never read: the build has no endpoint and no key.
+        (
+            "TRACE_COMMONS_NEAR_AI_BASE_URL",
+            "https://unreachable.invalid/v1",
+        ),
+    ]);
+    let lookup = |var: &str| env.get(var).map(|value| value.to_string());
+    let gate = MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        embed_insert_novelty_micros: 50_000,
+        top_k: 5,
+        chunk_target_tokens: 2048,
+        chunk_max_tokens: 3072,
+        chunk_cap: 16,
+        chunk_min_tokens: 64,
+        novelty_utility_microcredits: COMPATIBILITY_NOVELTY_UTILITY_MICROCREDITS,
+    };
+    let package = production_bundle_package(&lookup, &gate).expect("builds offline");
+    trace_commons_server::versioned_pipeline_qualification::validate_production_package(&package)
+        .expect("a production package");
+    assert_eq!(package, production_test_package());
+    let pins = production_package_pins(&package).unwrap();
+    assert_eq!(pins.main_gate, gate);
+    assert_eq!(pins.scorer_descriptor.model, "Qwen/Qwen3.6-35B-A3B-FP8");
+
+    // No model pin, no package; an all-zero floor configuration is refused
+    // as `main` refuses it.
+    let no_model = |var: &str| {
+        (var != "TRACE_COMMONS_NEAR_AI_MODEL")
+            .then(|| lookup(var))
+            .flatten()
+    };
+    assert_eq!(
+        production_bundle_package(&no_model, &gate)
+            .unwrap_err()
+            .to_string(),
+        "pipeline_scorer_model_missing"
+    );
+    let zero = MainGateConfig {
+        novelty_floor_micros: Some(0),
+        ..gate
+    };
+    assert!(production_bundle_package(&lookup, &zero).is_err());
 }

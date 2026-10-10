@@ -19,7 +19,7 @@ public enum GlassMaterial: Sendable, Equatable {
     /// takes a contrasting border under Increase Contrast), and Apple's
     /// guidance is to let them rather than swap in a fill of our own (R14).
     public static func current(content: Bool = false) -> GlassMaterial {
-        if content { return .opaque }
+        if content && !GlassTheme.contentIsGlass { return .opaque }
         if #available(macOS 26.0, *) { return .liquidGlass }
         return .vibrancy
     }
@@ -51,9 +51,16 @@ struct GlassBackdrop: NSViewRepresentable {
     static func makeView(_ material: GlassMaterial, cornerRadius: CGFloat) -> NSView {
         switch material {
         case .liquidGlass:
+            if GlassTheme.current == .flat {
+                if let view = flatView(cornerRadius) { return view }
+            }
             if #available(macOS 26.0, *) {
                 let glass = NSGlassEffectView()
+                // The regular, frosted style in every theme: the clear
+                // style showed the desktop unblurred behind a focused window
+                // (owner feedback, 2026-10-09).
                 glass.style = .regular
+                glass.appearance = GlassTheme.materialAppearance
                 glass.cornerRadius = cornerRadius
                 return glass
             }
@@ -73,6 +80,35 @@ struct GlassBackdrop: NSViewRepresentable {
         }
     }
 
+    /// The flat theme's material, where it is not the default frosted glass.
+    private static func flatView(_ cornerRadius: CGFloat) -> NSView? {
+        switch GlassTheme.flatMaterial {
+        case .regular:
+            return nil
+        case .regularTint, .clearTint:
+            guard #available(macOS 26.0, *) else { return nil }
+            let glass = NSGlassEffectView()
+            glass.style = GlassTheme.flatMaterial == .clearTint ? .clear : .regular
+            // A faint share of the veil, for the glass's own colour; the
+            // veil itself is painted over it (`GlassPaneFill`).
+            glass.tintColor = GlassTheme.glassTint.dynamicNSColor
+            glass.appearance = GlassTheme.materialAppearance
+            glass.cornerRadius = cornerRadius
+            return glass
+        case .sidebar, .hud:
+            let effect = NSVisualEffectView()
+            effect.material = GlassTheme.flatMaterial == .sidebar ? .sidebar : .hudWindow
+            effect.blendingMode = .behindWindow
+            effect.state = .active
+            effect.appearance = GlassTheme.materialAppearance
+            effect.wantsLayer = true
+            effect.layer?.cornerRadius = cornerRadius
+            effect.layer?.cornerCurve = .continuous
+            effect.layer?.masksToBounds = true
+            return effect
+        }
+    }
+
     private static func opaque(_ cornerRadius: CGFloat) -> NSView {
         let view = OpaquePaneView()
         view.layer?.cornerRadius = cornerRadius
@@ -86,6 +122,7 @@ struct GlassBackdrop: NSViewRepresentable {
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
+        effect.appearance = GlassTheme.materialAppearance
         effect.wantsLayer = true
         effect.layer?.cornerRadius = cornerRadius
         effect.layer?.cornerCurve = .continuous
@@ -105,15 +142,28 @@ struct GlassBackdrop: NSViewRepresentable {
 struct GlassPaneFill: View {
     let radius: CGFloat
     @Environment(\.glassPaneIsContent) private var content
+    @Environment(\.controlActiveState) private var activeState
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
-        switch GlassMaterial.current(content: content) {
+        // Reduce Transparency is the system's to apply: it frosts Liquid
+        // Glass and turns the materials opaque (R14).
+        let material = GlassMaterial.current(content: content)
+        switch material {
         case .liquidGlass, .vibrancy:
             ZStack {
-                GlassBackdrop(material: GlassMaterial.current(content: content), cornerRadius: radius)
+                GlassBackdrop(material: material, cornerRadius: radius)
                 shape.fill(GlassTokens.Color.glassVeil.color)
                 shape.fill(GlassTokens.Gradient.paneFill.linear)
+                // Out of focus a window reads darker (inactiveDim, nothing in
+                // classic); under Increase Contrast the flat veil is deepened.
+                if activeState != .key {
+                    shape.fill(GlassTokens.Color.inactiveDim.color)
+                }
+                if GlassTheme.current == .flat && contrast == .increased {
+                    shape.fill(GlassTokens.Color.glassVeil.color.opacity(0.5))
+                }
             }
         case .opaque:
             ZStack {
@@ -137,6 +187,7 @@ struct GlassFloatingBlur: NSViewRepresentable {
         effect.material = .hudWindow
         effect.blendingMode = .withinWindow
         effect.state = .active
+        effect.appearance = GlassTheme.materialAppearance
         effect.wantsLayer = true
         effect.layer?.cornerRadius = cornerRadius
         effect.layer?.cornerCurve = .continuous
@@ -166,7 +217,13 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
     @MainActor
     static func configure(_ window: NSWindow) {
         window.isOpaque = false
-        window.backgroundColor = .clear
+        // Not quite clear: the window server passes a click on a fully
+        // transparent pixel to the window below, so the pane gaps and the
+        // panes' rounded corners took no clicks, and the edges and corners
+        // there would not start a resize. At this alpha nothing shows, and
+        // the whole frame catches the resize cursor (and, with
+        // `isMovableByWindowBackground`, a drag in a gap moves the window).
+        window.backgroundColor = NSColor(white: 0, alpha: 0.004)
         window.hasShadow = false
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
@@ -175,12 +232,17 @@ private struct GlassWindowConfigurator: NSViewRepresentable {
         // No appearance of our own: the window follows the person's system
         // appearance, light or dark, and every token resolves for it.
         // An empty unified toolbar makes the title bar taller and brings the
-        // real traffic lights in from the window's corner, so with the 10pt
-        // window padding they sit inside the main pane, not on its rim.
+        // real traffic lights in from the window's corner, so they sit
+        // inside the main pane (which runs to the window's edge), not on
+        // its rim.
         if window.toolbar == nil {
             window.toolbar = NSToolbar(identifier: "glass-window")
         }
         window.toolbarStyle = .unified
+        // No title-bar separator: the panes run under the title bar, so its
+        // hairline was drawn across the window's top and showed as a line in
+        // each gap between the panes (owner, 2026-10-08).
+        window.titlebarSeparatorStyle = .none
     }
 
     private final class WindowProbe: NSView {

@@ -119,6 +119,42 @@ struct TraceCommonsShell<MonitorLaunch: MonitorLaunchPolicy>: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 860, height: 760)
 
+        // Settings, in a window of its own beside the Monitor (owner,
+        // 2026-10-08), no longer a modal over it. Cmd-comma, the Monitor's
+        // gear, the menu-bar panel and a Settings destination open it.
+        Window(MonitorWords.table?.settingsTitle ?? "", id: WindowID.settings) {
+            SettingsWindowView(navigation: navigation)
+                .environmentObject(model)
+                .environment(compute)
+                .tint(GlassTokens.Color.purpleSoft.color)
+        }
+        .defaultSize(width: GlassTokens.Size.modalWidth, height: 640)
+        .windowResizability(.contentMinSize)
+    }
+}
+
+/// The Settings window: the Settings body (`SettingsModal` drawn in a
+/// window), at the section last asked for.
+struct SettingsWindowView: View {
+    let navigation: MainWindowNavigation
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        SettingsModal(
+            request: navigation.settingsRequest ?? SettingsRequest(section: nil),
+            navigation: navigation, paused: model.status.paused,
+            onClose: { dismiss() },
+            onPrivateAI: {
+                // The Private AI pointer opens Inference in the Monitor.
+                OpenMonitor.request(.inference)
+            })
+            .frame(minWidth: GlassTokens.Size.modalNavWidth * 3, minHeight: 420)
+            // Confirmations raised by a section cover this window, with
+            // #1146's close button in the core's words.
+            .glassModalHost()
+            .environment(\.glassModalCloseLabel, MonitorWords.table?.close ?? "")
+            .onAppear { navigation.activateServicesForWindow() }
     }
 }
 
@@ -216,10 +252,9 @@ struct MonitorCommands: Commands {
             Divider()
             toggle
         }
-        // Cmd-comma: Settings is Ron's modal over the Monitor (#1146; #1241
-        // Task 10), not a window of its own.
+        // Cmd-comma: the Settings window (owner, 2026-10-08).
         CommandGroup(replacing: .appSettings) {
-            OpenSettingsModalButton(navigation: navigation)
+            OpenSettingsButton(navigation: navigation)
         }
     }
 
@@ -253,14 +288,14 @@ struct MonitorCommands: Commands {
     }
 }
 
-private struct OpenSettingsModalButton: View {
+private struct OpenSettingsButton: View {
     let navigation: MainWindowNavigation
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Button(MonitorWords.table?.settings ?? "") {
-            openWindow(id: WindowID.monitor)
             navigation.requestSettings()
+            openWindow(id: WindowID.settings)
         }
         .keyboardShortcut(",", modifiers: .command)
     }
@@ -321,11 +356,39 @@ private struct Launcher: View {
         }
         appDelegate.compute = compute
         appDelegate.model = model
+        // The edge rail, if the contributor turned it on in Settings.
+        EdgeRailController.shared.attach(model: model, compute: compute)
         navigation.registerServiceStart { startServices() }
         activateServices()
-        // The only thing a notification action may do is open the Monitor
-        // at Traces.
+        // The only thing a digest action may do is open the Monitor at
+        // Traces.
         Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }
+        // A re-engagement button sends its one request (best effort: the
+        // place opens either way, and a "Not now" the core did not take
+        // leaves the suggestion as it was) and opens its place, if any.
+        Notifier.shared.onNudge = { intent in
+            let effect = NudgeSurface.effect(intent)
+            if let client = model.daemonData {
+                Task { try? await NudgeSurface.send(effect, through: client) }
+            }
+            if let destination = effect.destination {
+                OpenMonitor.request(MonitorDestination(nudge: destination))
+            }
+        }
+
+        // The re-engagement declaration follows whether a notification can
+        // be posted: re-read once the prompt is answered, and whenever the
+        // app comes forward, since System Settings may have changed it.
+        Notifier.shared.onAuthorizationAnswered = {
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -407,12 +470,11 @@ private struct Launcher: View {
         case .monitor: openWindow(id: WindowID.monitor)
         case nil: break
         }
-        // Settings is the Monitor's modal (#1241 Task 10): a Settings
-        // destination raises the Monitor and asks it for Settings at the
-        // section.
+        // A Settings destination opens the Settings window at the section
+        // (owner, 2026-10-08: Settings is its own window).
         if let section = opening.settings {
-            openWindow(id: WindowID.monitor)
             navigation.requestSettings(at: section)
+            openWindow(id: WindowID.settings)
         }
     }
 }
@@ -422,6 +484,8 @@ enum WindowID {
     static let monitor = "trace-commons-monitor"
     /// The glass first-run pane (R12), the onboarding gate.
     static let firstRun = "trace-commons-first-run"
+    /// Settings, its own window since 2026-10-08.
+    static let settings = "trace-commons-settings"
     /// The menu-bar item and popover in a window (R13), for review where
     /// the menu bar has no room for the item. Debug builds only.
     static let menuPreview = "trace-commons-menu-preview"

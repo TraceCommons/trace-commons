@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple, Optional
 
-from pipeline_tooling import promote
+from pipeline_tooling import envfile, promote
 from pipeline_tooling.cargo import cargo_test
 from pipeline_tooling.catalog import CATALOG_NAME, update_catalog
 from pipeline_tooling.checks import (
@@ -59,6 +59,7 @@ from pipeline_tooling.corpus import (
     DEFAULT_CORPUS,
     PIN_SCHEMA,
     evidence_digests,
+    report_harness_assembly,
     export_hf_corpus,
     load_direct_corpus,
     load_pin,
@@ -80,6 +81,25 @@ from pipeline_tooling.results import (
 # catalog `--archive` writes (P4-D19). One name so the self-tests can move it.
 LOCAL_DIR = ROOT / ".local"
 
+# The harness assembly switch (`versioned_pipeline_harness.rs`, spec B-D1).
+# Only `promote package-checks` sets it, always to `production`; every other
+# command leaves it unset, so its children run the reference assembly.
+HARNESS_ASSEMBLY_VAR = "TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY"
+
+
+def _harness_assembly(extra_env):
+    """`production` when `extra_env` switches the harness to the production
+    assembly, `reference` otherwise."""
+    return "production" if (extra_env or {}).get(HARNESS_ASSEMBLY_VAR) == "production" else "reference"
+
+
+def _with_harness_assembly(evidence, assembly):
+    """The evidence a harness of `assembly` emits: `evidence` as is for the
+    reference assembly, which adds nothing, and with `harness_assembly` for
+    the production one, so a reference result never reads as production."""
+    return evidence if assembly == "reference" else {**evidence, "harness_assembly": assembly}
+
+
 # The ingest test binary hosts the shared app in-process (P4-D3): `run` and
 # `package` start one exact ignored test in it.
 INGEST_TEST_ARGS = ("-p", "trace-commons-server", "--bin", "trace-commons-ingest")
@@ -90,6 +110,9 @@ PACKAGE_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_package_write"
 ATTESTATION_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_check_attestations_write"
 KEY_WRITER = "tests::pipeline_corpus_pg_tests::pipeline_signing_key_write"
 BUNDLES = ("minimal", "compatibility")
+# `package` also builds the production package (spec B-D5), from the
+# deployment's env file; `run` never serves it as a built-in bundle.
+PACKAGE_BUNDLES = (*BUNDLES, "production")
 
 # The maximum age a signed result carries when `--evidence-max-age-seconds` is
 # not given, and the longest the server accepts
@@ -142,6 +165,11 @@ _RESTORE_FINGERPRINT_COUNTS = (
     "runtime_privilege_count",
     "tenant_count",
     "audit_event_count",
+)
+# The counts a seed under a zero `NoveltyUtility` delta has as zero: Score
+# awards nothing, so no run settles a leg or writes a ledger event.
+_RESTORE_CREDIT_COUNTS = frozenset(
+    {"adapter_request_count", "completed_settlement_count", "completed_credit_event_count"}
 )
 
 # `qualify`: the contract test manifest whose bytes it hashes (ruling T11-2),
@@ -232,7 +260,13 @@ def build_parser():
     run_parser.set_defaults(handler=run_corpus)
 
     package_parser = subparsers.add_parser("package", help="Build and sign a bundle package (this does not qualify it)")
-    package_parser.add_argument("--bundle", choices=BUNDLES, required=True)
+    package_parser.add_argument("--bundle", choices=PACKAGE_BUNDLES, required=True)
+    package_parser.add_argument(
+        "--env-file",
+        dest="env_file",
+        default=None,
+        help="The deployment's env file (--bundle production only); only its descriptor and gate variables are read.",
+    )
     package_parser.add_argument("--output", required=True, help="Where to write the signed package.")
     package_parser.add_argument(
         "--public-key-output", dest="public_key_output", required=True, help="Where to write the trusted key."
@@ -335,7 +369,10 @@ def build_parser():
     revision_parser.set_defaults(handler=revision)
 
     # Spec 2026-10-08 Slice B: the operator-run production checks.
-    promote.add_parsers(subparsers, promote.Hooks(signing_options=signing_options, sign=sign_promoted_results))
+    promote.add_parsers(
+        subparsers,
+        promote.Hooks(signing_options=signing_options, sign=sign_promoted_results, package_checks=run_package_checks),
+    )
 
     return parser
 
@@ -494,13 +531,16 @@ def prepare_corpus_run(run, bundle, package_path, key_path, corpus_path, expecte
     return CorpusRun(label, bundle, package_path, key_path, partitions, digests)
 
 
-def run_corpus_check(run, environment, corpus_run, *, step=None):
+def run_corpus_check(run, environment, corpus_run, *, step=None, extra_env=None, cargo_args=INGEST_TEST_ARGS):
     """One corpus run in its own scenario of `environment`: the harness, the
     transaction guard, and every check of its report, result, and evidence.
     Writes the latest report of its kind under `.local/` and returns
     `(local report path, report)`. `step` labels the harness step and the
     scenario (default: the check id). `run` and `qualify` both call this
-    (ruling T11-4)."""
+    (ruling T11-4); `promote package-checks` passes the production harness
+    variables in `extra_env` and its feature set in `cargo_args`, and the
+    report and evidence must then say the production assembly made them."""
+    assembly = _harness_assembly(extra_env)
     check_id = corpus_run.check_id
     step = step or check_id
     report_path = _corpus_report_path(run, corpus_run.label)
@@ -517,6 +557,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
     }
+    extra.update(extra_env or {})
     if len(corpus_run.partitions) == 2:
         extra["TRACE_COMMONS_PIPELINE_CORPUS_HOLDOUT_PATH"] = str(corpus_run.partitions[1])
     if corpus_run.package_path is not None:
@@ -525,7 +566,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     else:
         extra["TRACE_COMMONS_PIPELINE_CORPUS_BUNDLE"] = corpus_run.bundle
     try:
-        cargo_test(run, step, INGEST_TEST_ARGS, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True)
+        cargo_test(run, step, cargo_args, CORPUS_HARNESS, child_environment(extra), exact=True, ignored=True)
     except StepFailed:
         _keep_failed_report(report_path, corpus_run.label)
         raise
@@ -540,6 +581,7 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
         raise ToolingError("corpus_report_malformed") from error
     validate_report(report)
     require(report["check_id"] == check_id, "corpus_report_check_mismatch")
+    require(report_harness_assembly(report) == assembly, "corpus_report_harness_assembly_mismatch")
     require(
         [section["corpus_digest"] for section in report["partitions"]] == corpus_run.digests,
         "corpus_digest_mismatch",
@@ -565,16 +607,19 @@ def run_corpus_check(run, environment, corpus_run, *, step=None):
     corpus_digest, input_digest = evidence_digests(report)
     require(
         evidence
-        == {
-            "fixtures": report["fixture_count"],
-            "completed": report["completed_fixture_count"],
-            "replay_same_run": report["replay_same_run_count"],
-            "changed_content_refused": report["changed_content_refused_count"],
-            "tenant_isolation": True,
-            "report_hash": sha256_digest(report_bytes),
-            "corpus_digest": corpus_digest,
-            "input_digest": input_digest,
-        },
+        == _with_harness_assembly(
+            {
+                "fixtures": report["fixture_count"],
+                "completed": report["completed_fixture_count"],
+                "replay_same_run": report["replay_same_run_count"],
+                "changed_content_refused": report["changed_content_refused_count"],
+                "tenant_isolation": True,
+                "report_hash": sha256_digest(report_bytes),
+                "corpus_digest": corpus_digest,
+                "input_digest": input_digest,
+            },
+            assembly,
+        ),
         "corpus_evidence_mismatch",
     )
     return _write_local_report(corpus_run.label, report_bytes, report), report
@@ -1002,11 +1047,18 @@ def run_package(args, run):
     output = Path(args.output).resolve()
     key_output = Path(args.public_key_output).resolve()
     require(output != key_output, "package_outputs_must_differ")
+    production = args.bundle == "production"
+    require(not production or args.env_file is not None, "package_env_file_required")
+    require(production or args.env_file is None, "package_env_file_unexpected")
     extra = {
         "TRACE_COMMONS_PIPELINE_PACKAGE_BUNDLE": args.bundle,
         "TRACE_COMMONS_PIPELINE_PACKAGE_OUTPUT": str(output),
         "TRACE_COMMONS_PIPELINE_TRUSTED_KEY_OUTPUT": str(key_output),
     }
+    if production:
+        # Spec B-D5: the production package from the deployment's own
+        # descriptor and gate variables, offline; nothing else of the file.
+        extra.update(envfile.allowlisted(envfile.read_env_file(args.env_file), envfile.PACKAGE_VARIABLES))
     if args.signing_key is not None:
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_SIGNING_KEY_PATH"] = str(Path(args.signing_key).resolve())
         extra["TRACE_COMMONS_PIPELINE_PACKAGE_KEY_ID"] = args.key_id
@@ -1103,32 +1155,53 @@ def require_same_artifact_bytes(source, destination):
 
 
 def _read_restore_fingerprint(path):
-    """The seed's fingerprint file: exactly its schema, seven hashes, and
-    eight positive counts, two tenants or more among them."""
+    """The seed's fingerprint file: exactly its schema, its hashes, its
+    counts, and `credit_delta_zero`, two tenants or more among them. Every
+    count is positive, except that a seed under a zero `NoveltyUtility`
+    delta (the pilot's) has exactly zero of the three credit counts."""
     value = _read_json(path, "restore_fingerprint_invalid")
     require(
         isinstance(value, dict)
-        and set(value) == {"schema", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
+        and set(value)
+        == {"schema", "credit_delta_zero", *_RESTORE_FINGERPRINT_HASHES, *_RESTORE_FINGERPRINT_COUNTS}
         and value["schema"] == RESTORE_FINGERPRINT_SCHEMA
+        and type(value["credit_delta_zero"]) is bool
         and all(
             isinstance(value[key], str) and _HASH.fullmatch(value[key]) is not None
             for key in _RESTORE_FINGERPRINT_HASHES
         )
-        and all(type(value[key]) is int and value[key] > 0 for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(type(value[key]) is int for key in _RESTORE_FINGERPRINT_COUNTS)
+        and all(
+            value[key] == 0 if value["credit_delta_zero"] and key in _RESTORE_CREDIT_COUNTS else value[key] > 0
+            for key in _RESTORE_FINGERPRINT_COUNTS
+        )
         and value["tenant_count"] >= 2,
         "restore_fingerprint_invalid",
     )
     return value
 
 
-def run_restore_drill(run, environment):
+def _step_index_root(extra_env, step):
+    """The restore drill's seed and resume each open their own production
+    pipeline index, `<root>/<step>`, so the resume starts from an empty one
+    and rebuilds it (its rebuild target is `<root>/<step>-rebuilt`). Nothing
+    without a production index root."""
+    root = (extra_env or {}).get(promote.PIPELINE_INDEX_ROOT_VAR)
+    return {} if root is None else {promote.PIPELINE_INDEX_ROOT_VAR: str(Path(root) / step)}
+
+
+def run_restore_drill(run, environment, *, extra_env=None, cargo_args=INGEST_TEST_ARGS):
     """One restore drill in its own scenario of `environment`, in this order:
     the seed (on `<db>_pilot`), the dump of `<db>_pilot`, `<db>_restored`
     created in the same cluster, the restore, the artifact copy and its
     byte comparison, then the resume against `<db>_restored`. Checks the
     resume's `pipeline_restore_drill` result against the seed and returns
     the seed's fingerprint. Takes the environment as an argument so that
-    `qualify` can run it beside its other checks."""
+    `qualify` can run it beside its other checks. `promote package-checks`
+    passes the production harness variables in `extra_env` (both processes
+    get them) and its feature set in `cargo_args`; the evidence must then say
+    the production assembly made it."""
+    assembly = _harness_assembly(extra_env)
     scenario = environment.scenario("restore_drill")
     source_root = scenario.artifact_root
     restored_root = source_root.with_name(f"{source_root.name}_restored")
@@ -1139,15 +1212,17 @@ def run_restore_drill(run, environment):
         # the objects the seed wrote. Only the children see it.
         "TRACE_COMMONS_PIPELINE_TEST_MASTER_KEY_HEX": secrets.token_hex(32),
         "TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH": str(fingerprint_path),
+        **(extra_env or {}),
     }
 
     seed_env = {
         **shared,
         "TRACE_COMMONS_PG_TEST_DATABASE_URL": scenario.runtime_url,
         "TRACE_COMMONS_PIPELINE_ARTIFACT_ROOT": str(source_root),
+        **_step_index_root(extra_env, "seed"),
     }
     cargo_test(
-        run, "restore_seed", INGEST_TEST_ARGS, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
+        run, "restore_seed", cargo_args, RESTORE_SEED, child_environment(seed_env), exact=True, ignored=True
     )
     require(
         scenario.committed_transactions(scenario.pilot_database) >= 5,
@@ -1175,9 +1250,10 @@ def run_restore_drill(run, environment):
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+        **_step_index_root(extra_env, "resume"),
     }
     cargo_test(
-        run, "restore_resume", INGEST_TEST_ARGS, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
+        run, "restore_resume", cargo_args, RESTORE_RESUME, child_environment(resume_env), exact=True, ignored=True
     )
     require(
         scenario.committed_transactions(scenario.restored_database) >= 5,
@@ -1194,22 +1270,26 @@ def run_restore_drill(run, environment):
     validate_evidence(evidence)
     require(
         evidence
-        == {
-            "database_fingerprint": seed["database_fingerprint"],
-            "artifact_fingerprint": seed["artifact_fingerprint"],
-            "index_entry_set_hash": seed["index_entry_set_hash"],
-            "pending_runs_resumed": 1,
-            "duplicate_effects": 0,
-            "rls_tables_checked": seed["rls_table_count"],
-            "rls_policy_set_hash": seed["rls_policy_set_hash"],
-            "rls_policy_count": seed["rls_policy_count"],
-            "rls_flag_set_hash": seed["rls_flag_set_hash"],
-            "rls_flag_table_count": seed["rls_flag_table_count"],
-            "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
-            "tenant_fingerprint": seed["tenant_fingerprint"],
-            "tenant_count": seed["tenant_count"],
-            "audit_events_verified": seed["audit_event_count"],
-        },
+        == _with_harness_assembly(
+            {
+                "database_fingerprint": seed["database_fingerprint"],
+                "artifact_fingerprint": seed["artifact_fingerprint"],
+                "index_entry_set_hash": seed["index_entry_set_hash"],
+                "pending_runs_resumed": 1,
+                "duplicate_effects": 0,
+                "rls_tables_checked": seed["rls_table_count"],
+                "rls_policy_set_hash": seed["rls_policy_set_hash"],
+                "rls_policy_count": seed["rls_policy_count"],
+                "rls_flag_set_hash": seed["rls_flag_set_hash"],
+                "rls_flag_table_count": seed["rls_flag_table_count"],
+                "runtime_privilege_set_hash": seed["runtime_privilege_set_hash"],
+                "tenant_fingerprint": seed["tenant_fingerprint"],
+                "tenant_count": seed["tenant_count"],
+                "audit_events_verified": seed["audit_event_count"],
+                **({"credit_delta_zero": True} if seed["credit_delta_zero"] else {}),
+            },
+            assembly,
+        ),
         "restore_evidence_mismatch",
     )
     return seed
@@ -1259,15 +1339,17 @@ def run_binding_checks(run):
     return digest
 
 
-def run_database_check(run, scenario, check):
+def run_database_check(run, scenario, check, *, extra_env=None):
     """One required database check in its own scenario: its exact test,
     pointed at the scenario's database and the run's result directory, then
     the transaction guard on the database the test ran in, then a current
-    pass result for its check id."""
+    pass result for its check id. `extra_env` is `promote package-checks`'
+    production harness variables."""
     extra = {
         "TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR": str(run.results_dir),
         "TRACE_COMMONS_PIPELINE_CHECK_RUN_ID": run.run_id,
         "TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH": run.code_revision_hash,
+        **(extra_env or {}),
     }
     if check.database == "upgrade":
         extra["TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"] = scenario.upgrade_url
@@ -1279,6 +1361,49 @@ def run_database_check(run, scenario, check):
     cargo_test(run, check.check_id, check.cargo_args, check.test_name, env, exact=True, ignored=check.ignored)
     require(scenario.committed_transactions(database) >= 5, f"database_check_executed_nothing:{check.check_id}")
     require_current_pass_results(run, load_results(run), {check.check_id: CheckSpec(check.check_id, check.digests)})
+
+
+def run_package_checks(run, *, harness_env, cargo_features, network_pin, postgres_admin_url):
+    """`promote package-checks` (spec B-D1): the four checks that test the
+    package, each in its own scenario with `harness_env` (the production
+    harness variables) and `cargo_features` added, so each runs on the
+    production assembly. Each check gets its own index directory under the
+    harness index root. The compatibility corpus serves the run's package as
+    `pipeline_http_corpus_compatibility`; the HF corpus is exported from the
+    network pin first, so a refused download starts no database."""
+    package_path = Path(harness_env[promote.HARNESS_PACKAGE_PATH_VAR])
+    key_path = Path(harness_env[promote.HARNESS_TRUSTED_KEY_PATH_VAR])
+    index_root = Path(harness_env[promote.PIPELINE_INDEX_ROOT_VAR])
+
+    def env_for(check_id):
+        return {**harness_env, promote.PIPELINE_INDEX_ROOT_VAR: str(index_root / check_id)}
+
+    [bundle_check] = [check for check in REQUIRED_DATABASE_CHECKS if check.digests]
+    bundle_check = dataclasses.replace(bundle_check, cargo_args=(*bundle_check.cargo_args, *cargo_features))
+    cargo_args = (*INGEST_TEST_ARGS, *cargo_features)
+    compatibility = CorpusRun(
+        "compatibility", None, package_path, key_path, [DEFAULT_CORPUS], [load_direct_corpus(DEFAULT_CORPUS)[1]]
+    )
+    is_pin, partitions = _corpus_partitions(run, Path(network_pin), None)
+    require(is_pin, "hf_network_pin_invalid")
+    hf = CorpusRun(
+        "hf_local", None, package_path, key_path, partitions, [load_direct_corpus(path)[1] for path in partitions]
+    )
+    require(
+        sorted([bundle_check.check_id, compatibility.check_id, hf.check_id, RESTORE_CHECK_ID])
+        == list(promote.package_check_ids()),
+        "promote_package_checks_invalid",
+    )
+    with Environment(run, postgres_admin_url=postgres_admin_url) as environment:
+        run_database_check(
+            run, environment.scenario(bundle_check.check_id), bundle_check, extra_env=env_for(bundle_check.check_id)
+        )
+        for corpus_run in (compatibility, hf):
+            run_corpus_check(
+                run, environment, corpus_run, extra_env=env_for(corpus_run.check_id), cargo_args=cargo_args
+            )
+        run_restore_drill(run, environment, extra_env=env_for(RESTORE_CHECK_ID), cargo_args=cargo_args)
+    require(not run.cleanup_failed, "cleanup_failed")
 
 
 def corpus_records(run):

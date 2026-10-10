@@ -35,7 +35,7 @@ namespace TraceCommons.Interop;
 public static class SubagentCopy
 {
     private const string Trimmed =
-        "left out to keep this session within its size limit; the conversation itself is complete.";
+        "left out to keep this trace within its size limit; the conversation itself is complete.";
 
     /// <summary>
     /// The card's extent line, or an empty string when there is nothing to

@@ -22,6 +22,9 @@ struct FlowMapView: View {
     /// The binoculars' point in the design space (#1146 `cameraFor`): the
     /// map is scaled up about it, and every node stays drawn.
     var focus: CGPoint? = nil
+    /// A folder node was clicked: its project id, so the window selects the
+    /// folder in the tree and shows it in the inspector (owner, 2026-10-09).
+    var onSelectFolder: ((String) -> Void)? = nil
 
     @State private var zoom: CGFloat = 1
     @State private var hovered: String?
@@ -300,10 +303,16 @@ struct FlowMapView: View {
 
     // MARK: Nodes as controls
 
+    /// A folder node's project id (`FlowMapScene` names them `folder:<id>`).
+    static func folderID(_ nodeID: String) -> String? {
+        nodeID.hasPrefix("folder:") ? String(nodeID.dropFirst("folder:".count)) : nil
+    }
+
     private func target(_ node: FlowMapScene.Node, fit: FlowMapGeometry) -> some View {
         let side = max(24, (node.radius * 2 + 8) * fit.scale)
         return Button {
             pinned = pinned == node.id ? nil : node.id
+            if let onSelectFolder, let projectID = Self.folderID(node.id) { onSelectFolder(projectID) }
         } label: {
             Circle().fill(Color.clear).frame(width: side, height: side).contentShape(Circle())
         }

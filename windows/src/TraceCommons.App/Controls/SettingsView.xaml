@@ -142,7 +142,7 @@
                         Padding="14,12">
                     <StackPanel Spacing="10">
                         <NumberBox x:Name="QuiescenceMinutes"
-                                   Header="Quiet time before a session counts as finished (minutes)"
+                                   Header="Quiet time before a trace counts as finished (minutes)"
                                    Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
                                    Minimum="1"
                                    Maximum="240"

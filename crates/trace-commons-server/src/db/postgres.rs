@@ -1764,6 +1764,16 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_gate_decision_rows",
         include_str!("../../../../migrations/V116__pipeline_gate_decision_rows.sql"),
     ),
+    // V117 (spec 2026-10-09, async privacy rescrub) records the Review-start
+    // privacy pass on pipeline_runs: the pass object, the hashes of its input
+    // and output, its residual-risk labels and outcome, and the link from a
+    // human approval of an escalated run; and admits the `privacy-pass`
+    // attempt artifact.
+    (
+        117,
+        "pipeline_privacy_pass",
+        include_str!("../../../../migrations/V117__pipeline_privacy_pass.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus
@@ -5629,6 +5639,39 @@ impl Database for PgBackend {
                 dedup_cluster_id: row.get("dedup_cluster_id"),
                 dedup_simhash: row.get("dedup_simhash"),
                 dedup_signal_version: row.get("dedup_signal_version"),
+            })
+            .collect())
+    }
+
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
+        let pool = self
+            .gate_driver_pool
+            .as_ref()
+            .ok_or_else(|| DatabaseError::Pool("gate-driver pool not configured".to_string()))?;
+        let client = pool.get().await.map_err(DatabaseError::from)?;
+        // No tenant GUC: the trace_gate_driver role's permissive cross-tenant
+        // SELECT policies authorize this read. The four columns are in the
+        // role's V45 column grants, so the query needs no migration.
+        let rows = client
+            .query(
+                "SELECT tenant_id, submission_id, decision_id, decided_at
+                 FROM trace_gate_decisions
+                 ORDER BY decided_at DESC, decision_id DESC
+                 LIMIT $1",
+                &[&limit],
+            )
+            .await
+            .map_err(DatabaseError::Postgres)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::trace_corpus_storage::GateDecisionKeyRow {
+                tenant_id: row.get("tenant_id"),
+                submission_id: row.get("submission_id"),
+                decision_id: row.get("decision_id"),
+                decided_at: row.get("decided_at"),
             })
             .collect())
     }

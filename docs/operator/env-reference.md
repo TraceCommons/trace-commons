@@ -347,8 +347,8 @@ runbook, including why the floor stays 0.
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_INTERVAL_SECONDS` | optional | `45` | Cadence between enumeration batches. Clamped to `[5, 86400]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | optional | `5` | Submissions enumerated per tick. Clamped to `[1, 1000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | optional | `5` | Bounded attempt counter per submission before the driver stops retrying it. Clamped to `[1, 1000]`. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Novelty-score threshold (micros) above which a submission is treated as a cache-cost duplicate and skipped. Clamped to `[0, 1000000]`. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | optional | `true` | Skip-duplicate cache cost control. Falsy values (`0`, `false`, `no`, `off`) disable it. An assembled pipeline runtime reads this and the threshold below even with the driver off, and applies both to compatibility runs' gate decision rows (`docs/operator/pipeline-activation.md`). |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | optional | `900000` | Duplicate-score threshold (micros): a submission whose precheck duplicate score, in micros, is at or above it is recorded as `skipped_duplicate` without scoring. Clamped to `[0, 1000000]`. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | optional | `30` | Base backoff (seconds) applied after a scoring failure, before the bounded attempt counter allows a retry. Clamped to `[0, 86400]`. |
 
 ### 12b. Server-side NEAR AI PII backstop driver

@@ -128,7 +128,8 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     /// (#1146 `.tc-segmented__item:hover`), otherwise secondary on the
     /// floating variant and tertiary in the well.
     static func ink(selected: Bool, hovering: Bool, floating: Bool) -> Color {
-        if selected || hovering { return GlassColor.textPrimary }
+        if selected { return GlassTokens.Color.textOnSelected.color }
+        if hovering { return GlassColor.textPrimary }
         return floating ? GlassColor.textSecondary : GlassColor.textTertiary
     }
 }
@@ -145,12 +146,14 @@ public struct GlassCrumb: Identifiable {
     }
 }
 
-/// A round back button, then crumbs: secondary › tertiary › current.
+/// A back chevron, then crumbs: secondary › tertiary › current.
 public struct GlassBreadcrumb: View {
     private let trail: [GlassCrumb]
     private let backLabel: String
     private let onBack: (() -> Void)?
     @State private var hovered: Int?
+    /// `hovered` for the back chevron, which is not a crumb.
+    private static var backIndex: Int { -1 }
 
     /// `backLabel` names the back button (it is icon-only), from the core's
     /// copy.
@@ -163,7 +166,30 @@ public struct GlassBreadcrumb: View {
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             if let onBack {
-                GlassRoundButton(backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel, systemImage: "chevron.left", small: true, action: onBack)
+                // The chevron alone, no round container (owner,
+                // 2026-10-08); it reads primary under the pointer, as the
+                // crumbs do, and keeps a control-sized target.
+                let label = backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .glassGlyph(12, weight: .semibold)
+                        .frame(width: GlassTokens.Size.control, height: GlassTokens.Size.control)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(GlassPressStyle())
+                .foregroundStyle(hovered == Self.backIndex ? GlassColor.textPrimary : GlassColor.textSecondary)
+                .onHover { inside in
+                    if inside {
+                        hovered = Self.backIndex
+                    } else if hovered == Self.backIndex {
+                        hovered = nil
+                    }
+                }
+                .accessibilityLabel(label)
+                .help(label)
+                // The chevron's own inset stands in for the container's
+                // edge, so the first crumb keeps its place.
+                .padding(.trailing, -GlassTokens.Space.s4)
             }
             ForEach(Array(trail.enumerated()), id: \.element.id) { index, crumb in
                 if index > 0 {

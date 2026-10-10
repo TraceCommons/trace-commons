@@ -118,9 +118,9 @@ pub const DAILY_BUDGET_TITLE: &str = "Today's upload limit is used up.";
 /// restarts a stopped service, so this does not clear on its own.
 pub fn core_down_copy() -> HealthLineCopy {
     HealthLineCopy::actionable(
-        "Can't reach Trace Commons' background service.",
-        "Nothing is being watched or sent while it's down. Your queue and the sessions \
-         already sent are safe, and sessions from while it was down will be picked up when \
+        "Can't reach the Trace Commons service.",
+        "Nothing is being watched or sent while it's down. Your queue and the traces \
+         already sent are safe, and traces from while it was down will be picked up when \
          it's running again.",
         None,
     )
@@ -153,7 +153,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
     match label {
         health::LABEL_NOT_LOGGED_IN => HealthLineCopy::actionable(
             "Not connected.",
-            "Sessions are being queued, but nothing can be sent until you reconnect. Nothing \
+            "Traces are being queued, but nothing can be sent until you reconnect. Nothing \
              has been lost.",
             Some(("Reconnect", HealthActionKind::Reconnect)),
         ),
@@ -206,7 +206,7 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
                 None => "-- the queue is full. Review or clear some to start again.".to_string(),
             };
             HealthLineCopy::actionable(
-                "Trace Commons has stopped queuing new sessions",
+                "Trace Commons has stopped queuing new traces",
                 &detail,
                 Some(("Review", HealthActionKind::ReviewQueue)),
             )
@@ -287,7 +287,7 @@ mod tests {
     #[test]
     fn core_down_says_the_queue_is_safe_and_new_sessions_are_picked_up() {
         let copy = core_down_copy();
-        assert_eq!(copy.title, "Can't reach Trace Commons' background service.");
+        assert_eq!(copy.title, "Can't reach the Trace Commons service.");
         assert!(copy.detail.contains("Your queue"), "{}", copy.detail);
         assert!(
             copy.detail.contains("already sent are safe"),

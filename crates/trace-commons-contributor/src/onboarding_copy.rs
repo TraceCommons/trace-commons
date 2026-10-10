@@ -1,8 +1,8 @@
 //! Shared onboarding and digest-permission words for every native shell.
 
-pub const WELCOME_BODY: &str = "This app finds finished coding-agent sessions on this machine according to your source settings. Review those settings to see which folders are read.";
-pub const DONE_BODY: &str = "Review waiting sessions in the queue. Notifications summarize sessions to review and recent contributions.";
-pub const NOTIFICATION_PURPOSE: &str = "Notifications tell you about sessions waiting for review and recent contributions. They never submit a session for you.";
+pub const WELCOME_BODY: &str = "This app finds finished coding-agent traces on this machine according to your source settings. Review those settings to see which folders are read.";
+pub const DONE_BODY: &str = "Review waiting traces in the queue. Notifications summarize traces to review and recent contributions.";
+pub const NOTIFICATION_PURPOSE: &str = "Notifications tell you about traces waiting for review and recent contributions. They never submit a trace for you.";
 pub const NOTIFICATION_HEADING: &str = "Notifications";
 pub const NOTIFICATION_OFFER: &str = "Let Trace Commons notify you?";
 pub const NOTIFICATION_ALLOWED: &str = "Notifications allowed";
@@ -70,7 +70,7 @@ mod tests {
         assert_eq!(value["welcome_body"], WELCOME_BODY);
         assert_eq!(value["done_body"], DONE_BODY);
         assert!(WELCOME_BODY.contains("according to your source settings"));
-        assert!(DONE_BODY.contains("sessions to review"));
+        assert!(DONE_BODY.contains("traces to review"));
         assert!(!DONE_BODY.contains("4 hours"));
         assert!(!DONE_BODY.contains("reminder settings"));
         assert!(NOTIFICATION_PURPOSE.contains("never submit"));

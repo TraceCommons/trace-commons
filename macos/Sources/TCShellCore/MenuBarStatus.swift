@@ -57,7 +57,7 @@ public extension MenuBarStatus {
         }
         let detail: String
         if decisionsOwed > 0 {
-            detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "session" : "sessions") waiting for your decision."
+            detail = "\(decisionsOwed) \(decisionsOwed == 1 ? "trace" : "traces") waiting for your decision."
         } else if unhealthy { detail = "Needs attention." }
         else { detail = "Nothing waiting." }
         return "Trace Commons. " + detail + (paused ? " Paused." : "")

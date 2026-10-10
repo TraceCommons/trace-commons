@@ -988,6 +988,41 @@ impl<P: RemoteTraceArtifactProvider, K: KmsKeyWrapper> ServiceOwnedTraceArtifact
         )
     }
 
+    /// Whether the object at `object_ref` decrypts under this store's key
+    /// wrapper: its record is read and verified as `read_scoped_artifact`
+    /// does, its DEK unwrapped under the wrapper, and its ciphertext
+    /// decrypted. The plaintext is never returned or written, and is
+    /// zeroized when dropped. Only a v2 record (a wrapped DEK) passes: a v1
+    /// record never touched the wrapper.
+    pub fn verify_scoped_artifact_decrypts(
+        &self,
+        expected_scope: &TraceArtifactScope,
+        object_ref: &TraceArtifactObjectRef,
+    ) -> anyhow::Result<()> {
+        let artifact = self.read_scoped_artifact(expected_scope, object_ref)?;
+        anyhow::ensure!(
+            artifact.schema_version == TRACE_ARTIFACT_CIPHERTEXT_SCHEMA_V2,
+            "trace_artifact_not_key_wrapped"
+        );
+        let wrapped = artifact
+            .wrapped_dek
+            .as_ref()
+            .context("trace_artifact_not_key_wrapped")?;
+        let dek = self.kek.unwrap_dek(
+            wrapped,
+            &KekContext {
+                tenant_storage_ref: expected_scope.tenant_storage_ref.clone(),
+                artifact_kind: object_ref.artifact_kind.clone(),
+            },
+        )?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(artifact.ciphertext_base64.as_bytes())
+            .context("trace_artifact_ciphertext_invalid")?;
+        let plaintext = Zeroizing::new(aead_decrypt_with_dek(&dek, &ciphertext)?);
+        drop(plaintext);
+        Ok(())
+    }
+
     pub fn invalidate_scoped_artifact(
         &self,
         expected_scope: &TraceArtifactScope,

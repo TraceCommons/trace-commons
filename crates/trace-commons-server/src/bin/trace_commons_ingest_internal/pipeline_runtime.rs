@@ -69,6 +69,12 @@ pub struct IngestPipelineRuntimeContext {
     /// from it (`CompatibilityBundleConfig::production_compatible`), and
     /// `assemble_ingest_pipeline_runtime` refuses one that does not hold it.
     pub main_gate: MainGateConfig,
+    /// The gate components ingest built once for its legacy `enclave_near_ai`
+    /// gate, shared with the pipeline (spec A-D3): `Some` only when the
+    /// assembler asks for them (`needs_gate_components`) and the production
+    /// runtime is selected. The production assembler refuses `None` with
+    /// `pipeline_production_components_missing`.
+    pub components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
 }
 
 /// Compile-time injection seam for a proprietary production pipeline
@@ -87,6 +93,13 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
         &self,
         context: IngestPipelineRuntimeContext,
     ) -> anyhow::Result<Arc<PipelineService>>;
+
+    /// Whether ingest must build the shared gate components and hand them
+    /// over in [`IngestPipelineRuntimeContext::components`]. Only the
+    /// production assembler does.
+    fn needs_gate_components(&self) -> bool {
+        false
+    }
 }
 
 /// Assembles the optional pipeline runtime.
@@ -129,6 +142,7 @@ pub trait IngestPipelineRuntimeAssembler: Send + Sync {
 /// pipeline, with no qualification and no event. A runtime that starts with
 /// it logs one warning (`pipeline_unqualified_routing_allowed`), and
 /// `GET /v1/admin/config-status` reports it.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn assemble_ingest_pipeline_runtime(
     assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
@@ -144,6 +158,43 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
     near_payout_controls: PipelineNearPayoutControls,
     novelty_utility_checks: &PipelineNoveltyUtilityChecks,
     main_gate: MainGateConfig,
+) -> anyhow::Result<Option<Arc<PipelineService>>> {
+    assemble_ingest_pipeline_runtime_with_components(
+        assembler,
+        db_connections,
+        artifact_store,
+        production_required,
+        lease_config,
+        tenants_processed,
+        allow_test_dependencies,
+        unqualified_routing_allowed,
+        near_contract_id,
+        near_confirmation_interval,
+        near_payout_controls,
+        novelty_utility_checks,
+        main_gate,
+        None,
+    )
+}
+
+/// [`assemble_ingest_pipeline_runtime`], handing the assembly `components`
+/// (the shared gate components a production boot built) in its context.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_ingest_pipeline_runtime_with_components(
+    assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
+    db_connections: Option<&TraceCorpusDbConnections>,
+    artifact_store: Option<&ConfiguredTraceArtifactStore>,
+    production_required: bool,
+    lease_config: PipelineLeaseConfig,
+    tenants_processed: bool,
+    allow_test_dependencies: bool,
+    unqualified_routing_allowed: bool,
+    near_contract_id: Option<&str>,
+    near_confirmation_interval: StdDuration,
+    near_payout_controls: PipelineNearPayoutControls,
+    novelty_utility_checks: &PipelineNoveltyUtilityChecks,
+    main_gate: MainGateConfig,
+    components: Option<Arc<super::production_assembly::PipelineGateComponents>>,
 ) -> anyhow::Result<Option<Arc<PipelineService>>> {
     anyhow::ensure!(
         !(allow_test_dependencies && production_required),
@@ -181,6 +232,7 @@ pub(crate) fn assemble_ingest_pipeline_runtime(
         novelty_utility_checks: novelty_utility_checks.clone(),
         unqualified_routing_allowed,
         main_gate,
+        components,
     })?;
     // M11: every object ref the pipeline commits names the store it was
     // written to, exactly as a legacy receipt's does.

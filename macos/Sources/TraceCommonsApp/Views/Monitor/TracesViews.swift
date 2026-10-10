@@ -103,6 +103,9 @@ struct TracesTreeView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                         prompts
+                        // A narrowed list that came back empty still says
+                        // so, with its way out.
+                        if store.idleOnly { TracesListControls(store: store) }
                         if store.phase == .loaded { emptyTree }
                     }
                 }
@@ -119,6 +122,8 @@ struct TracesTreeView: View {
                         PromptsShelf(cap: Self.promptsCap(paneHeight: pane.size.height)) {
                             prompts
                         }
+                        TracesListControls(store: store)
+                            .padding(.vertical, GlassTokens.Space.s2)
                         tree
                     }
                 }
@@ -130,6 +135,11 @@ struct TracesTreeView: View {
             if let pending = confirming { confirmation(pending) }
         }
         .glassModal(item: $dismissing) { dismissModal($0) }
+    }
+
+    /// The folders the idle filter opens: every folder it lists.
+    static func idleFolders(_ tree: TracesTree) -> Set<String> {
+        Set(tree.folders.filter { !$0.sessions.isEmpty }.map(\.id))
     }
 
     /// The most of the Traces pane the prompts shelf may take; the rest is
@@ -163,12 +173,20 @@ struct TracesTreeView: View {
         .scrollIndicators(.never)
         // A restored selection whose session arrives with a later
         // read is revealed then.
-        .onChange(of: store.tree) { _, _ in reveal(selection) }
+        .onChange(of: store.tree) { _, _ in
+            reveal(selection)
+            // The idle card's Review lists the sessions it named: their
+            // folders open, so the list is the sessions, not closed folders.
+            if store.idleOnly { expanded.formUnion(Self.idleFolders(store.tree)) }
+        }
         // #1146's tree name.
         .accessibilityLabel(store.words?.tree.treeLabel ?? "")
         // Full Keyboard Access: focus the tree, then the arrow keys
         // move the selection through the folders and sessions as drawn.
         .focusable()
+        // No focus ring round the whole tree (owner, 2026-10-09): the
+        // selected row's fill already shows where the arrow keys are.
+        .focusEffectDisabled()
         .onMoveCommand(perform: move)
         // Return opens the selected session's review, so the pill
         // need not be its own tab stop on every row.
@@ -237,13 +255,6 @@ struct TracesTreeView: View {
     private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         confirming = nil
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
-    }
-
-    /// A folder row's switch (Ron's watch switch): on is Ask me, off is
-    /// Never, which asks first when sessions are waiting. An ignored folder
-    /// is turned back on here.
-    static func watchChoice(_ on: Bool) -> ProjectMode {
-        on ? .ask : .ignore
     }
 
     static func status(_ mode: ProjectMode) -> GlassStatus {
@@ -367,6 +378,17 @@ struct TracesTreeView: View {
                 maxQueueEntries: model.daemonSettings?.maxQueueEntries)
             ) { GlassHealthBanner(banner: $0) }
             InspectorPrompts(store: store)
+            // The idle or backlog suggestion, in the daemon's words, after
+            // anything owed: the daemon already holds it back while an
+            // arming offer is up.
+            if let card = store.nudgeCard {
+                NudgeGlassCard(
+                    card: card, busy: store.nudgeBusy,
+                    refusal: store.nudgeError.flatMap { store.words?.line(for: $0) }
+                ) { intent in Task { await store.perform(intent) } }
+            }
+            // The one-time offer to turn idle-session notifications on.
+            NudgeOfferCards(place: .traces)
         }
     }
 
@@ -465,11 +487,8 @@ struct TracesTreeView: View {
             off: folder.mode == .ignore,
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
             submitTitle: submits ? words.map { busy ? $0.tree.submitting : Self.submitTitle(offer.count, words: $0) } : nil,
-            watched: switchable
-                ? Binding(get: { folder.mode != .ignore }, set: { request(folder, Self.watchChoice($0)) })
-                : nil,
-            watchDisabled: store.writing.contains(folder.id),
-            watchLabel: words?.tree.watchFolder ?? "",
+            // No watch switch on the row (owner, 2026-10-08): a folder's
+            // mode is the Folder inspector's picker, and Ignore is the menu.
             expandLabel: folder.label,
             menuLabel: ignorable ? words?.tree.ignoreFolder ?? "" : "",
             menuOpen: folderMenu == folder.id,
@@ -544,6 +563,11 @@ struct TracesTreeView: View {
         .zIndex(sessionMenu == entry.entryId ? 1 : 0)
         .id(Self.rowID(.session(entryID: entry.entryId)))
         .accessibilityFocused($spoken, equals: Self.rowID(.session(entryID: entry.entryId)))
+        // The core's tags for the row: a mission it fits, and its estimate
+        // only while the daemon says to draw it.
+        if let tags = store.rowTags[entry.entryId] {
+            NudgeRowTags(tags: tags)
+        }
     }
 
     /// Ron's Dismiss-session confirmation, raised over the whole window: the
