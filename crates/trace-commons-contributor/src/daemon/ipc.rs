@@ -641,6 +641,14 @@ pub const ERR_SUBSCRIBE_ACCEPTS_INVALID: &str = "subscribe-accepts-invalid";
 /// to an older daemon; ordinary event names are dropped too, since every
 /// subscriber already receives them. Anything other than an array of
 /// strings is refused, fail closed.
+/// Whether `accepts` is a value `subscribe` takes as its `accepts`: an
+/// array of strings (names this build does not know are fine). A host-side
+/// caller (the FFI's `tc_subscribe_with_accepts`) checks with this before it
+/// subscribes, so a refusal is reported the same way on every path.
+pub fn subscribe_accepts_valid(accepts: &serde_json::Value) -> bool {
+    subscribe_accepts(&serde_json::json!({ "accepts": accepts })).is_ok()
+}
+
 fn subscribe_accepts(params: &serde_json::Value) -> Result<Option<Vec<&'static str>>, ()> {
     let raw = match params.get("accepts") {
         None | Some(serde_json::Value::Null) => return Ok(None),

@@ -1468,8 +1468,13 @@ pub unsafe extern "C" fn tc_subscribe_with_accepts(
             .to_str()
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok());
+        // Every element is checked here, before either path: over the
+        // socket the daemon's refusal arrives as a response, not an error,
+        // and would otherwise leave the caller a live token with no events.
         match parsed {
-            Some(value @ serde_json::Value::Array(_)) => Some(value),
+            Some(value @ serde_json::Value::Array(_)) if ipc::subscribe_accepts_valid(&value) => {
+                Some(value)
+            }
             _ => {
                 set_last_error(ipc::ERR_SUBSCRIBE_ACCEPTS_INVALID);
                 return 0;
