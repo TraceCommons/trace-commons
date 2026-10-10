@@ -4065,6 +4065,12 @@ sessions on disk. Otherwise:
   carries one or the file was not read (owner question Q1, default taken:
   a row may carry it, though it can be matched to a queue entry's
   `started_at`). A shell must still not join Insights rows to queue entries.
+  The rows come in the order the counter pass made them (within one pass,
+  the most recently written file first; a re-read row moves to the end),
+  never the store's own order, which follows a keyed digest of each path
+  and so means nothing. A row carries no reference, so a shell that draws
+  them knows each by its place, and the order is stable from one answer to
+  the next while no row is re-read.
 - `routing` is where the session's proxy calls went, from its route tally
   (above), or `null` on every row while `routing_available` is false.
   `category` is one of, first match wins, every label from the proxy's

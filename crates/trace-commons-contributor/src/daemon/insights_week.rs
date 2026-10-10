@@ -583,10 +583,17 @@ impl CounterPass {
         let inputs: Vec<SessionInput> = match (&key, &store) {
             (Some(key), Some(store)) if store.key_fingerprint == key_fingerprint(key) => {
                 let never = never_digests(key, never_project_keys);
-                store
+                // In the order the pass made the rows. The store is keyed by
+                // a digest of each file's path, so its own order is
+                // arbitrary, and the engine emits `sessions[]` in input
+                // order: a shell drawing the rows would show them shuffled.
+                let mut rows: Vec<&CounterRow> = store
                     .rows
                     .values()
                     .filter(|row| !never.contains(&row.project))
+                    .collect();
+                rows.sort_by_key(|row| row.seq);
+                rows.into_iter()
                     .map(|row| {
                         let input = row.session_input();
                         let tally = row
@@ -2212,6 +2219,43 @@ mod tests {
         assert!(rows[0].get("session_ref").is_none());
     }
 
+    /// The shells' Sessions drill draws `rollup.sessions[]` in wire order and
+    /// knows a row by its place, so the order is the order the counter pass
+    /// made the rows in: never the store's, which is keyed by a digest of
+    /// each file's path under the counter key and so arbitrary.
+    #[test]
+    fn session_rows_cross_in_the_order_the_pass_made_them() {
+        let f = Fixture::new();
+        // Eight Codex sessions, each 110 + i transcript tokens; the pass
+        // reads the newest first, so session i is row i.
+        let candidates: Vec<CounterCandidate> = (0..8u64)
+            .map(|i| {
+                let text = String::from_utf8(codex_bytes_for(&format!("ORDER-{i}"))).unwrap();
+                let bytes = text
+                    .replace(
+                        "\"output_tokens\":50",
+                        &format!("\"output_tokens\":{}", 50 + i),
+                    )
+                    .replace(
+                        "\"total_tokens\":230",
+                        &format!("\"total_tokens\":{}", 230 + i),
+                    )
+                    .into_bytes();
+                let path = f.write(&format!("o{i}.jsonl"), &bytes);
+                CounterCandidate {
+                    modified_at: written() - Duration::minutes(i64::try_from(i).unwrap()),
+                    ..candidate(SOURCE_CODEX, &path)
+                }
+            })
+            .collect();
+        f.run(&candidates);
+        let tokens: Vec<u64> = sessions_of(&f.week_routed())
+            .iter()
+            .map(|row| row["tokens"].as_u64().unwrap_or_else(|| panic!("{row}")))
+            .collect();
+        assert_eq!(tokens, (110..118).collect::<Vec<u64>>());
+    }
+
     /// A whole routed answer, printed between markers for shells' decode
     /// fixtures (`cargo test ... -- --nocapture`): one session with a mixed
     /// route and an uncounted call, one with no tally.
@@ -2241,23 +2285,14 @@ mod tests {
         categories.sort();
         assert_eq!(categories, ["mixed", "unobserved"]);
         // The shells decode this answer from the committed fixture, so the
-        // fixture is this answer: a change to the wire fails here first. The
-        // rows' order varies from run to run (seen in a full-suite run), so
-        // both sides are compared with the rows sorted by source.
-        let by_source = |answer: &serde_json::Value| {
-            let mut answer = answer.clone();
-            if let Some(rows) = answer["rollup"]["sessions"].as_array_mut() {
-                rows.sort_by_key(|row| row["source"].to_string());
-            }
-            answer
-        };
+        // fixture is this answer, rows in order: a change to the wire fails
+        // here first.
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../../tests/fixtures/insights-analytics/insights_week_routed.json"
         ))
         .unwrap();
         assert_eq!(
-            by_source(&value),
-            by_source(&fixture),
+            value, fixture,
             "re-record tests/fixtures/insights-analytics/insights_week_routed.json \
              from this test's --nocapture output"
         );
