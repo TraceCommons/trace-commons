@@ -151,7 +151,7 @@ Low, and only the pass's classifier finds it.
 
 **Decision 2026-10-10: PII found and removed is accepted.** Owner decision
 (Zaki): "Once PII removed we should go to accepted", for the pipeline as
-for legacy. The rule as first written (below, struck) escalated any pass
+for legacy. The rule as first written (quoted below where it is amended) escalated any pass
 risk above Admission's, so a post-pass Medium -- the classifier found prose
 PII and removed it -- held the run for a human. On the pilot, stage 3's
 `pii-residual` probe (names, a date of birth, an address) was held on the
