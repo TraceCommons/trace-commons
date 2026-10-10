@@ -893,3 +893,53 @@ async fn the_mission_slot_publishes_when_it_ages_out() {
     assert!(published().is_empty(), "published once, not on every tick");
     server.abort();
 }
+
+/// A fetch that passed its enrollment re-check just before `unenroll` can
+/// still write the slot just after `unenroll` emptied it. The next tick,
+/// which finds no config, empties it again and tells shells, so the old
+/// enrollment's missions do not stay live under no enrollment, or under the
+/// next one if its first fetch fails.
+#[tokio::test]
+async fn the_mission_slot_is_emptied_on_a_tick_without_a_config() {
+    use crate::daemon::activity_missions::{
+        MissionSlotSchedule, contribution_catalogue, refresh_mission_slot,
+    };
+    use crate::daemon::ipc::{EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED};
+    use crate::daemon::mission_matching::receive_catalogue;
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust()]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer, calls.clone()).await;
+    let s = shared();
+    configure_catalogue(&s, &base);
+    let mut schedule = MissionSlotSchedule::default();
+    let now = Utc::now();
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert!(slot_missions(&s).is_some());
+
+    // Unenroll, then the racing write lands.
+    crate::daemon::unenroll::unenroll(&s).unwrap();
+    let raw = contribution_catalogue(
+        &parsed(predicate_catalogue(&[claude_rust()])),
+        now.date_naive(),
+    )
+    .unwrap();
+    receive_catalogue(&s.mission_catalogue, &raw, now).unwrap();
+    assert!(slot_missions(&s).is_some());
+
+    let mut events = s.events.subscribe();
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(5), &mut schedule).await;
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut names = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        names.push(event.event);
+    }
+    assert_eq!(
+        names,
+        vec![EVENT_QUEUE_CHANGED.to_string(), EVENT_STATUS_CHANGED.to_string()]
+    );
+    server.abort();
+}

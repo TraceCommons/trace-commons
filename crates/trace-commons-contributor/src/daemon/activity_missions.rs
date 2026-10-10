@@ -454,8 +454,14 @@ async fn fetch_into_mission_slot(
     // The config is read before the schedule is consulted: an unenroll
     // between two due attempts must still reset it, or enrolling again
     // inside the interval would wait out the old enrollment's schedule.
+    //
+    // With no config the slot is emptied too. `unenroll` empties it as
+    // well, but a fetch that passed its enrollment re-check below just
+    // before `unenroll` ran can write it just after; this undoes that on
+    // the next tick, and the caller publishes the change.
     let Ok(Some(config)) = shared.store.load_config() else {
         schedule.unconfigured();
+        clear_catalogue(&shared.mission_catalogue);
         return;
     };
     schedule.enrolled(&config);

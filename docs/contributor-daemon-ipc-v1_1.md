@@ -2921,7 +2921,9 @@ never means fitting everything. The outcomes:
 When the slot's live catalogue changes, the daemon publishes `queue_changed`
 and `status_changed`: on the fetch that changes it, and on the first daemon tick
 after it ages out or its policy ends, which no fetch does. `unenroll` empties the slot, and with no config left the
-fetch sends nothing until the next enrollment. The 6-hour schedule belongs to
+fetch sends nothing until the next enrollment; every tick without a config
+empties the slot again, so a fetch already in flight when `unenroll` ran cannot
+leave the old enrollment's missions in it. The 6-hour schedule belongs to
 one enrollment: the first tick under a new one (a new ingest URL or device
 key) fetches, even inside the previous enrollment's interval.
 
