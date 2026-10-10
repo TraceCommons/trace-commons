@@ -14836,6 +14836,79 @@ async fn reconciliation_accepts_a_submitted_row_whose_risk_the_privacy_pass_chan
     );
 }
 
+/// Only a run whose Review-start privacy pass is recorded has its stored
+/// risk rewritten (V117), so only such a run's `submitted` row is left out
+/// of the risk comparison. A run with no recorded pass (here a pending one)
+/// whose stored risk differs from its `submitted` row is still reported as
+/// `db_audit_submission_metadata_mismatches`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_reports_a_risk_mismatch_of_a_run_with_no_recorded_privacy_pass() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    assert!(created.privacy_pass_recorded_at.is_none(), "{created:?}");
+
+    // Drift that no privacy pass made: the stored risk of a run with no
+    // recorded pass changes behind the audit log.
+    let url = pipeline_http_database_url().await.unwrap();
+    let (owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let updated = owner
+        .execute(
+            "UPDATE trace_submissions SET privacy_risk = 'medium'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("change the stored risk");
+    assert_eq!(updated, 1);
+
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    let mismatches = report
+        .db_audit_submission_metadata_mismatches
+        .iter()
+        .filter(|mismatch| mismatch.submission_id == envelope.submission_id)
+        .collect::<Vec<_>>();
+    assert_eq!(mismatches.len(), 1, "{mismatches:?}");
+    assert_eq!(mismatches[0].audit_event_id, events[0].event_id);
+    assert_eq!(mismatches[0].metadata_privacy_risk, "low");
+    assert_eq!(mismatches[0].db_privacy_risk, "medium");
+}
+
 /// Task 6: the review queue route lists a run the privacy pass escalated,
 /// with `hold_reason = privacy_pass_review_required` (not Admission's
 /// reason, which an admitted run does not have) and

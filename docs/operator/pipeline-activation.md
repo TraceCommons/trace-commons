@@ -1675,7 +1675,7 @@ status. The audit row holds the privacy risk that the receipt stored. The
 privacy pass at Review can change the stored risk later. The row usually
 keeps the receipt's risk (a pass that ends before the route reads the risk
 back gives the row the later risk), and `main`'s reconciliation does not compare the two for a
-pipeline submission. When the append fails, the upload answers `500`, and the run exists
+pipeline submission whose privacy pass is recorded. When the append fails, the upload answers `500`, and the run exists
 and is processed. Such a failure usually leaves the tenant's audit chain one
 event ahead in the database. Until the audit-chain repair, each new upload of
 the tenant answers `500` with its run created. Each such upload logs
@@ -2986,8 +2986,9 @@ each comparison they would fail:
   pipeline submission's objects are the pipeline's own source and approved
   revision, which the pipeline reads and checks itself;
 - the privacy risk in a Submit audit row against the stored risk
-  (`db_audit_submission_metadata_mismatches`): the privacy pass rewrites the
-  stored risk, and the row keeps the receipt's.
+  (`db_audit_submission_metadata_mismatches`), for a run whose privacy pass
+  is recorded: the privacy pass rewrites the stored risk, and the row keeps
+  the receipt's. A run with no recorded pass keeps the comparison.
 
 Each row is found through its pipeline run, not by its shape. `main`'s own
 rows keep every check: a legacy row with no file record is still a blocking

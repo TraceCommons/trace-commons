@@ -76320,13 +76320,15 @@ async fn reconcile_db_mirror(
         .collect::<BTreeMap<_, _>>();
     // A pipeline submission's `submitted` row keeps the risk the receipt
     // stored, and the Review-start privacy pass rewrites the stored risk
-    // (V117), so the two can differ by design: left out, as the other
-    // comparisons of ruling F-M10 are.
+    // (V117), so the two can differ by design once the pass is recorded:
+    // left out, as the other comparisons of ruling F-M10 are. A run with no
+    // recorded pass had its risk rewritten by nothing, so it keeps the
+    // comparison.
     let mut db_audit_submission_metadata_mismatches =
         collect_db_audit_submission_metadata_mismatches(&db_audit_events, &db_by_submission);
     db_audit_submission_metadata_mismatches.retain(|mismatch| {
         !pipeline_rows
-            .submission_ids
+            .privacy_pass_submission_ids
             .contains(&mismatch.submission_id)
     });
     let file_derived_by_submission = file_derived
