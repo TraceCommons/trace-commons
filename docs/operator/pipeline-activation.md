@@ -1671,7 +1671,10 @@ A new pipeline receipt appends `main`'s `submitted` audit event after the
 receipt commits. The event holds the uploader's principal reference, as
 `main`'s event does. An admitted receipt's event has no status, and its audit
 row says `received`. A quarantined or rejected receipt's event has that
-status. When the append fails, the upload answers `500`, and the run exists
+status. The audit row holds the privacy risk that the receipt stored. The
+privacy pass at Review can change the stored risk later. The row keeps the
+receipt's risk, and `main`'s reconciliation does not compare the two for a
+pipeline submission. When the append fails, the upload answers `500`, and the run exists
 and is processed. Such a failure usually leaves the tenant's audit chain one
 event ahead in the database. Until the audit-chain repair, each new upload of
 the tenant answers `500` with its run created. Each such upload logs

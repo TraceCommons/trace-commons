@@ -15070,7 +15070,10 @@ async fn route_pipeline_receipt(
 /// event has none and its row says `received`. The row carries the privacy
 /// risk the receipt stored in `trace_submissions`, read back after the
 /// commit: the receipt re-scrubs its own copy of the envelope, which can
-/// raise the risk, so the handler's envelope is not the source.
+/// raise the risk, so the handler's envelope is not the source. The
+/// Review-start privacy pass can change the stored risk later; the row
+/// keeps the receipt's, and `reconcile_db_mirror` does not compare the two
+/// for a pipeline submission.
 async fn append_pipeline_receipt_submitted_event(
     state: &AppState,
     tenant: &TenantCtx,
@@ -76315,8 +76318,17 @@ async fn reconcile_db_mirror(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let db_audit_submission_metadata_mismatches =
+    // A pipeline submission's `submitted` row keeps the risk the receipt
+    // stored, and the Review-start privacy pass rewrites the stored risk
+    // (V117), so the two can differ by design: left out, as the other
+    // comparisons of ruling F-M10 are.
+    let mut db_audit_submission_metadata_mismatches =
         collect_db_audit_submission_metadata_mismatches(&db_audit_events, &db_by_submission);
+    db_audit_submission_metadata_mismatches.retain(|mismatch| {
+        !pipeline_rows
+            .submission_ids
+            .contains(&mismatch.submission_id)
+    });
     let file_derived_by_submission = file_derived
         .iter()
         .map(|record| (record.submission_id, record))

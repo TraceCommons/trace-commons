@@ -14511,6 +14511,94 @@ impl PipelinePrivacyBoundary for EscalatingClassifierBoundary {
     }
 }
 
+/// The Review-start privacy pass rewrites a pipeline submission's stored
+/// risk (V117), and its `submitted` audit row keeps the risk the receipt
+/// stored: `main`'s reconciliation does not report that difference as
+/// `db_audit_submission_metadata_mismatches`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_accepts_a_submitted_row_whose_risk_the_privacy_pass_changed() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.privacy_risk, "medium");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    let StorageTraceAuditSafeMetadata::Submission { privacy_risk, .. } = &row.metadata else {
+        panic!("a submission row: {:?}", row.metadata);
+    };
+    assert_eq!(privacy_risk, "low", "the row keeps the receipt's risk");
+
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_submission_metadata_mismatches.is_empty(),
+        "{:?}",
+        report.db_audit_submission_metadata_mismatches
+    );
+}
+
 /// Task 6: the review queue route lists a run the privacy pass escalated,
 /// with `hold_reason = privacy_pass_review_required` (not Admission's
 /// reason, which an admitted run does not have) and
