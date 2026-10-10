@@ -72,7 +72,10 @@ pub struct EstimateSum {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
     pub count: u64,
-    /// Tool display names, deduplicated, in a stable order.
+    /// Tool display names, deduplicated, in a stable order. Empty when the
+    /// words should name no tool: some source in the batch has no display
+    /// name, and naming only the others would credit them with its
+    /// sessions.
     pub tools: Vec<String>,
     /// The idle threshold in days. Unused by the backlog.
     pub idle_days: u32,
@@ -119,11 +122,13 @@ fn cap_tool(name: &str) -> String {
     name.chars().take(TOOL_NAME_MAX_CHARS).collect()
 }
 
-/// `{tool}`: one name, two joined, or "{k} tools".
+/// `{tool}`: one name, two joined, or "{k} tools". Empty for no tools,
+/// which no renderer places: a batch with no tool to name takes the
+/// `_NO_TOOL` templates instead (see [`names_tools`]).
 #[must_use]
 pub fn tool_phrase(tools: &[String]) -> String {
     match tools {
-        [] => fill(copy::TOOL_LIST_MANY, &[("k", "0")]),
+        [] => String::new(),
         [one] => cap_tool(one),
         [a, b] => fill(
             copy::TOOL_LIST_TWO,
@@ -209,6 +214,22 @@ fn action(id: &'static str, label: &str) -> Action {
     }
 }
 
+/// Whether a batch's words name its tools. A batch with none to name
+/// (`tools` empty: some source in it has no display name) reads without
+/// one, never "from 0 tools".
+fn names_tools(batch: &Batch) -> bool {
+    !batch.tools.is_empty()
+}
+
+/// `with_tool` when the batch names its tools, else `without`.
+fn by_tool(batch: &Batch, with_tool: &'static str, without: &'static str) -> &'static str {
+    if names_tools(batch) {
+        with_tool
+    } else {
+        without
+    }
+}
+
 /// The idle-sessions card (U4) and its panel row.
 #[must_use]
 pub fn idle_card(batch: &Batch) -> CardText {
@@ -221,7 +242,18 @@ pub fn idle_card(batch: &Batch) -> CardText {
     let one = |many, single| copy::pick(batch.count, many, single);
     CardText {
         title: fill(
-            one(copy::NUDGE_IDLE_TITLE, copy::NUDGE_IDLE_TITLE_ONE),
+            one(
+                by_tool(
+                    batch,
+                    copy::NUDGE_IDLE_TITLE,
+                    copy::NUDGE_IDLE_TITLE_NO_TOOL,
+                ),
+                by_tool(
+                    batch,
+                    copy::NUDGE_IDLE_TITLE_ONE,
+                    copy::NUDGE_IDLE_TITLE_NO_TOOL_ONE,
+                ),
+            ),
             &values,
         ),
         body: join(
@@ -321,7 +353,15 @@ pub fn verdicts_card(v: &Verdicts) -> CardText {
         (
             fill_owned(&template, &values),
             final_clause(v),
-            fill_owned(copy::NUDGE_PANEL_VERDICTS, &values),
+            fill_owned(
+                by_zero_clause(
+                    v,
+                    copy::NUDGE_PANEL_VERDICTS,
+                    copy::NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY,
+                    copy::NUDGE_PANEL_VERDICTS_HELD_ONLY,
+                ),
+                &values,
+            ),
         )
     };
     CardText {
@@ -332,20 +372,51 @@ pub fn verdicts_card(v: &Verdicts) -> CardText {
     }
 }
 
+/// `both` when some were accepted and some held, else the template that
+/// leaves out the zero count ("A zero clause is dropped"). Not for
+/// finals-only news, which has templates of its own.
+fn by_zero_clause(
+    v: &Verdicts,
+    both: &'static str,
+    accepted_only: &'static str,
+    held_only: &'static str,
+) -> &'static str {
+    if v.held == 0 {
+        accepted_only
+    } else if v.accepted == 0 {
+        held_only
+    } else {
+        both
+    }
+}
+
 /// The verdict sentence shared by the N2 notification and the digest fold:
-/// the counts, then the final clause; or the final clause alone.
+/// the counts, then the final clause; or the final clause alone. A zero
+/// count is left out, never said.
 fn verdict_sentence(v: &Verdicts) -> String {
     if v.finals_only() {
         return final_clause(v);
     }
-    let body = fill_owned(
+    let template = if v.held == 0 {
+        copy::pick(
+            u64::from(v.accepted),
+            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY,
+            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE,
+        )
+    } else if v.accepted == 0 {
+        copy::pick(
+            u64::from(v.held),
+            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY,
+            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE,
+        )
+    } else {
         copy::pick(
             u64::from(v.accepted),
             copy::NOTIFY_VERDICTS_BODY,
             copy::NOTIFY_VERDICTS_BODY_ONE,
-        ),
-        &verdict_values(v),
-    );
+        )
+    };
+    let body = fill_owned(template, &verdict_values(v));
     join(body, vec![final_clause(v)])
 }
 
@@ -362,8 +433,16 @@ pub fn idle_notification(batch: &Batch) -> NotificationText {
         body: fill(
             copy::pick(
                 batch.count,
-                copy::NOTIFY_IDLE_BODY,
-                copy::NOTIFY_IDLE_BODY_ONE,
+                by_tool(
+                    batch,
+                    copy::NOTIFY_IDLE_BODY,
+                    copy::NOTIFY_IDLE_BODY_NO_TOOL,
+                ),
+                by_tool(
+                    batch,
+                    copy::NOTIFY_IDLE_BODY_ONE,
+                    copy::NOTIFY_IDLE_BODY_NO_TOOL_ONE,
+                ),
             ),
             &[("n", &n), ("days", &days), ("tool", &tool)],
         ),
@@ -396,8 +475,16 @@ pub fn digest_idle_sentence(batch: &Batch) -> String {
     let sentence = fill(
         copy::pick(
             batch.count,
-            copy::DIGEST_IDLE_SENTENCE,
-            copy::DIGEST_IDLE_SENTENCE_ONE,
+            by_tool(
+                batch,
+                copy::DIGEST_IDLE_SENTENCE,
+                copy::DIGEST_IDLE_SENTENCE_NO_TOOL,
+            ),
+            by_tool(
+                batch,
+                copy::DIGEST_IDLE_SENTENCE_ONE,
+                copy::DIGEST_IDLE_SENTENCE_NO_TOOL_ONE,
+            ),
         ),
         &[("n", &n), ("days", &days), ("tool", &tool)],
     );
@@ -420,7 +507,15 @@ pub fn mark_news_text(v: &Verdicts) -> MarkText {
     let accessibility = if v.finals_only() {
         fill_owned(copy::MARK_A11Y_VERDICTS_FINAL_ONLY, &verdict_values(v))
     } else {
-        fill_owned(copy::MARK_A11Y_VERDICTS, &verdict_values(v))
+        fill_owned(
+            by_zero_clause(
+                v,
+                copy::MARK_A11Y_VERDICTS,
+                copy::MARK_A11Y_VERDICTS_ACCEPTED_ONLY,
+                copy::MARK_A11Y_VERDICTS_HELD_ONLY,
+            ),
+            &verdict_values(v),
+        )
     };
     MarkText {
         accessibility,
@@ -601,11 +696,11 @@ mod tests {
         let many = idle_card(&batch(3, &["Claude Code"], 3));
         assert_eq!(
             many.title,
-            "3 sessions from Claude Code have been idle for 3 days or more"
+            "3 traces from Claude Code have been idle for 3 days or more"
         );
         assert_eq!(
             many.panel_row,
-            "Some sessions have been idle for 3 days or more"
+            "Some traces have been idle for 3 days or more"
         );
         assert_eq!(
             many.actions,
@@ -617,12 +712,56 @@ mod tests {
         let one = idle_card(&batch(1, &["Codex"], 1));
         assert_eq!(
             one.title,
-            "1 session from Codex has been idle for 1 day or more"
+            "1 trace from Codex has been idle for 1 day or more"
         );
-        assert_eq!(one.panel_row, "A session has been idle for 1 day or more");
+        assert_eq!(one.panel_row, "A trace has been idle for 1 day or more");
         assert!(one.body.starts_with("It looks finished."), "{}", one.body);
         card_filled(&many);
         card_filled(&one);
+    }
+
+    /// A batch whose words can name no tool (every source unnamed, or some
+    /// of them) takes the tool-free templates: never "from 0 tools", and
+    /// never one named tool credited with the others' sessions.
+    #[test]
+    fn a_batch_with_no_named_tool_reads_without_one() {
+        let many = batch(2, &[], 3);
+        let one = batch(1, &[], 1);
+        assert_eq!(
+            idle_card(&many).title,
+            "2 traces have been idle for 3 days or more"
+        );
+        assert_eq!(
+            idle_card(&one).title,
+            "1 trace has been idle for 1 day or more"
+        );
+        assert_eq!(
+            idle_notification(&many).body,
+            "2 traces have been idle for 3 days or more. Review them to send or keep."
+        );
+        assert_eq!(
+            idle_notification(&one).body,
+            "1 trace has been idle for 1 day or more. Review it to send or keep."
+        );
+        assert_eq!(
+            digest_idle_sentence(&many),
+            "2 of them have been idle for 3 days or more."
+        );
+        assert_eq!(
+            digest_idle_sentence(&one),
+            "1 of them has been idle for 1 day or more."
+        );
+        for b in [many, one] {
+            for text in [
+                idle_card(&b).title,
+                idle_card(&b).panel_row,
+                idle_notification(&b).body,
+                digest_idle_sentence(&b),
+            ] {
+                assert!(!text.contains("tools") && !text.contains("from"), "{text}");
+                assert_filled(&text);
+            }
+        }
     }
 
     #[test]
@@ -636,6 +775,7 @@ mod tests {
             tool_phrase(&["a".into(), "b".into(), "c".into()]),
             "3 tools"
         );
+        assert_eq!(tool_phrase(&[]), "", "never \"0 tools\"");
         let long = "x".repeat(200);
         assert_eq!(tool_phrase(&[long]).chars().count(), TOOL_NAME_MAX_CHARS);
     }
@@ -689,10 +829,10 @@ mod tests {
     #[test]
     fn backlog_card_uses_the_plain_title_and_reads_singular() {
         let many = backlog_card(&batch(6, &[], 0));
-        assert_eq!(many.title, "6 unpurposed traces are waiting");
+        assert_eq!(many.title, "6 traces to review");
         assert_eq!(many.actions[0].label, "Review the 6 in Traces");
         let one = backlog_card(&batch(1, &[], 0));
-        assert_eq!(one.title, "1 unpurposed trace is waiting");
+        assert_eq!(one.title, "1 trace to review");
         assert_eq!(one.actions[0].label, "Review it in Traces");
         assert_eq!(one.panel_row, copy::NUDGE_PANEL_BACKLOG_ONE);
         card_filled(&many);
@@ -740,13 +880,13 @@ mod tests {
         let n1 = idle_notification(&batch(1, &["Codex"], 3));
         assert_eq!(
             n1.body,
-            "1 session from Codex has been idle for 3 days. Contribute it?"
+            "1 trace from Codex has been idle for 3 days or more. Review it to send or keep."
         );
         assert_eq!(n1.title, copy::NOTIFY_TITLE);
         let n2 = verdicts_notification(&verdicts(1, 2, Some(15)));
         assert_eq!(
             n2.body,
-            "1 session accepted and 2 held for privacy review. 1.5 credit is now final."
+            "1 trace accepted and 2 held for privacy review. 1.5 credit is now final."
         );
         assert_eq!(
             verdicts_notification(&verdicts(0, 0, Some(15))).body,
@@ -754,7 +894,7 @@ mod tests {
         );
         assert_eq!(
             digest_verdict_sentence(&verdicts(3, 0, None)),
-            "3 sessions accepted and 0 held for privacy review."
+            "3 traces accepted."
         );
         let mut b = batch(2, &["Codex", "Claude Code"], 2);
         b.mission_fit = Some(1);
@@ -774,6 +914,74 @@ mod tests {
         }
     }
 
+    /// A zero count is never said: accepted-only news names no held, and
+    /// held-only news names no accepted, in every renderer that reports
+    /// verdicts (the notification, the digest fold, the mark and the panel
+    /// row), each reading singular at one.
+    #[test]
+    fn verdict_renderers_drop_zero_clauses() {
+        let cases = [
+            ((3, 0, None), "3 traces accepted."),
+            ((1, 0, None), "1 trace accepted."),
+            ((0, 2, None), "2 traces held for privacy review."),
+            ((0, 1, None), "1 trace held for privacy review."),
+            (
+                (1, 0, Some(15)),
+                "1 trace accepted. 1.5 credit is now final.",
+            ),
+            (
+                (0, 2, Some(15)),
+                "2 traces held for privacy review. 1.5 credit is now final.",
+            ),
+            (
+                (2, 1, None),
+                "2 traces accepted and 1 held for privacy review.",
+            ),
+        ];
+        for ((a, h, x), want) in cases {
+            let v = verdicts(a, h, x);
+            assert_eq!(verdicts_notification(&v).body, want, "N2 {a}/{h}");
+            assert_eq!(digest_verdict_sentence(&v), want, "fold {a}/{h}");
+        }
+        assert_eq!(
+            mark_news_text(&verdicts(2, 0, None)).accessibility,
+            "New: 2 accepted."
+        );
+        assert_eq!(
+            mark_news_text(&verdicts(0, 3, None)).accessibility,
+            "New: 3 held for privacy review."
+        );
+        assert_eq!(
+            mark_news_text(&verdicts(2, 1, None)).accessibility,
+            "New: 2 accepted and 1 held for privacy review."
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(2, 0, None)).panel_row,
+            "2 accepted since 8 October"
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(0, 3, None)).panel_row,
+            "3 held since 8 October"
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(2, 1, None)).panel_row,
+            "2 accepted, 1 held since 8 October"
+        );
+        for (a, h) in [(4, 0), (0, 4), (1, 0), (0, 1)] {
+            let v = verdicts(a, h, Some(5));
+            for text in [
+                verdicts_notification(&v).body,
+                digest_verdict_sentence(&v),
+                mark_news_text(&v).accessibility,
+                verdicts_card(&v).panel_row,
+                verdicts_card(&v).title,
+            ] {
+                assert!(!text.contains(" 0 ") && !text.starts_with("0 "), "{text}");
+                assert_filled(&text);
+            }
+        }
+    }
+
     #[test]
     fn mark_text_fills_every_placeholder() {
         let ready = mark_ready_text(&batch(1, &[], 1));
@@ -783,10 +991,7 @@ mod tests {
         );
         assert_eq!(ready.tooltip, "1 idle for 1 day or more.");
         let news = mark_news_text(&verdicts(2, 0, None));
-        assert_eq!(
-            news.accessibility,
-            "New: 2 accepted and 0 held for privacy review."
-        );
+        assert_eq!(news.accessibility, "New: 2 accepted.");
         let finals = mark_news_text(&verdicts(0, 0, Some(40)));
         assert_eq!(finals.accessibility, "New: 4.0 credit is now final.");
     }

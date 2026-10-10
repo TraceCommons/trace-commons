@@ -707,6 +707,100 @@ jobs:
           exit $fail
       - uses: ./.github/actions/trim-cargo-cache
 
+  ingest-bin-postgres-near-ai-scorer:
+    name: trace-commons-ingest tests, whole bin, near-ai-scorer, against PostgreSQL
+    # Not a required status check. The production pipeline assembly's
+    # usearch index, and the near-ai-scorer arm of its end-to-end test
+    # (`production_assembly_serves_a_routed_tenant_end_to_end`), compile only
+    # under `near-ai-scorer`, and that test needs PostgreSQL: without it the
+    # test returns early and is reported as passed. `ingest-bin-postgres`
+    # builds default features only, and `cargo check (near-ai-scorer)` has no
+    # database, so before this job the usearch-backed path ran nowhere in CI
+    # (PR #1295 review, Minor 4). Everything else is `ingest-bin-postgres`:
+    # the same service, roles, single thread and xact_commit floors, on its
+    # own database and cache. No network: the tests build no NEAR AI scorer
+    # and load no fastembed model.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: trace
+          POSTGRES_PASSWORD: trace
+          POSTGRES_DB: postgres
+          # Same reason as `ingest-bin-postgres`.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-ingest-bin-near-ai-scorer-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+      # The same database name rule and login-resolver roles as
+      # `ingest-bin-postgres`.
+      - name: Create the database and the login-resolver roles
+        run: |
+          set -euo pipefail
+          PGPASSWORD=trace createdb -h 127.0.0.1 -U trace admission_test_ingest_bin_near_ai
+          PGPASSWORD=trace psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U trace postgres <<'SQL'
+          CREATE ROLE trace_login_resolver NOLOGIN NOBYPASSRLS;
+          CREATE ROLE tc_login_resolver_login LOGIN NOBYPASSRLS;
+          GRANT trace_login_resolver TO tc_login_resolver_login;
+          SQL
+      - uses: ./.github/actions/apt-update-ubuntu-only
+      - name: Install a Secret Service provider for credential tests
+        run: sudo apt-get install -y --no-install-recommends gnome-keyring dbus-x11
+      # The usearch pipeline index's own tests are in the library since the
+      # assembly moved there. A filter that matches nothing passes with
+      # "0 passed", so the step requires at least one.
+      - name: production assembly lib tests (near-ai-scorer)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cargo test --locked -p trace-commons-server --features near-ai-scorer --lib versioned_pipeline_production 2>&1 | tee production-assembly-lib-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' production-assembly-lib-tests.log
+      - name: trace-commons-ingest, every test, one thread (near-ai-scorer)
+        run: |
+          dbus-run-session -- sh -eu -c '
+            printf "\n" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked -p trace-commons-server --features near-ai-scorer --bin trace-commons-ingest -- --test-threads=1
+          '
+        env:
+          TRACE_COMMONS_PG_TEST_DATABASE_URL: postgres://trace@127.0.0.1:5432/admission_test_ingest_bin_near_ai
+          TRACE_COMMONS_LOGIN_RESOLVER_DATABASE_URL: postgres://tc_login_resolver_login@127.0.0.1:5432/admission_test_ingest_bin_near_ai
+      # The guard of `ingest-bin-postgres`, with the same floors: the
+      # pipeline HTTP tests, the production assembly's end-to-end test among
+      # them, commit to the `_pilot` database their harness creates.
+      - name: Refuse a run that executed nothing
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          fail=0
+          for pair in admission_test_ingest_bin_near_ai:1000 admission_test_ingest_bin_near_ai_pilot:2000; do
+            db=${pair%%:*}
+            floor=${pair##*:}
+            n=$(PGPASSWORD=trace psql -qtA -h 127.0.0.1 -U trace postgres \
+                  -c "SELECT xact_commit FROM pg_stat_database WHERE datname='$db';")
+            echo "$db committed ${n:-0} transactions (floor $floor)"
+            if [ "${n:-0}" -lt "$floor" ]; then
+              echo "::error::$db shows no real activity; the PostgreSQL tests skipped instead of running"
+              fail=1
+            fi
+          done
+          exit $fail
+      - uses: ./.github/actions/trim-cargo-cache
+
   pipeline-qualification:
     # Not a required status check (owner decision P4-D17): it runs on every
     # pull request and in the merge queue, and it blocks nothing until the
@@ -982,6 +1076,19 @@ jobs:
       # client, which is the exact call that panicked.
       - run: cargo build -p trace-commons-server --bin trace-commons-ingest --features near-ai-scorer
       - run: ./target/debug/trace-commons-ingest --tls-selfcheck
+      # The production Google Cloud Storage client (`ProdGcsObjectClient`) is
+      # behind `gcs-client`, which the pilot builds and no other job compiles.
+      # Its unit tests pin how a fetch failure is classified: a 404 (with or
+      # without a JSON error body) is an integrity failure the pipeline
+      # charges, every other failure is transport (PR #1283 review, finding
+      # 2). A filter that matches nothing passes with "0 passed", so the step
+      # requires at least one.
+      - name: gcs-client lib tests
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo test -p trace-commons-server --features gcs-client --lib trace_artifact_gcs 2>&1 | tee gcs-client-tests.log
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' gcs-client-tests.log
       # Last, so every step above still has its binaries; see the action for
       # what is removed and why. Only a finished job saves its cache, so this
       # runs exactly when a save is about to happen.

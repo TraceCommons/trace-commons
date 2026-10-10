@@ -416,8 +416,8 @@ struct MenuBarGlassPanel: View {
             Button(MenuWords.manageRules) { open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding)) }
             Button(MenuWords.settings) {
                 NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: WindowID.monitor)
                 navigation.requestSettings()
+                openWindow(id: WindowID.settings)
             }
             Button(MenuWords.quit) { NSApp.terminate(nil) }
         }
@@ -496,6 +496,7 @@ private struct PanelSurface: ViewModifier {
 struct MenuBarStripLabel: View {
     @ObservedObject var model: AppModel
     let store: MenuPanelStore
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         let available = model.startup == .running && !store.stale
@@ -508,11 +509,9 @@ struct MenuBarStripLabel: View {
         // ring or halo the strip hid is never spoken or shown as a tooltip.
         let words = MenuPanelStatus.markWords(
             store.status?.nudge, available: available, badge: badge, condition: condition)
-        GlassMenuBarStrip(
-            columns: store.columns,
-            condition: condition,
-            badge: badge,
-            mark: MenuPanelStatus.mark(store.status?.nudge, available: available))
+        Image(nsImage: rendered(
+            condition: condition, badge: badge,
+            mark: MenuPanelStatus.mark(store.status?.nudge, available: available)))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(MenuPanelStatus.markAccessibility(
                 base: MenuBarStatus.accessibilityLabel(
@@ -527,6 +526,30 @@ struct MenuBarStripLabel: View {
                 store.attach(model.daemonData, configDirectory: model.configDirectory)
                 await store.run()
             }
+    }
+
+    /// The strip as a bitmap. A `MenuBarExtra` label keeps only an `Image`
+    /// and a `Text` out of whatever view it is given, so the strip drawn as
+    /// a view lost its bars and kept the badge as a bare number. Drawn as a
+    /// non-template image it reaches the menu bar in its own colours.
+    /// Padded past the badge's offset so the badge is not clipped.
+    /// The condition, badge and nudge mark are the ones `body` speaks, so
+    /// the drawn mark and its words never disagree.
+    @MainActor
+    private func rendered(
+        condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark
+    ) -> NSImage {
+        let renderer = ImageRenderer(content: GlassMenuBarStrip(
+            columns: store.columns,
+            condition: condition,
+            badge: badge,
+            mark: mark)
+            .padding(.trailing, 6)
+            .padding(.bottom, 2))
+        renderer.scale = displayScale
+        let image = renderer.nsImage ?? NSImage()
+        image.isTemplate = false
+        return image
     }
 }
 

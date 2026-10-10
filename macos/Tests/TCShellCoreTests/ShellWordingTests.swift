@@ -97,11 +97,10 @@ final class ShellWordingTests: XCTestCase {
         // QueueView.swift and ScrubbingCaveat.swift: deleted at zero,
         // 2026-10-07 -- `QueueLegacyWords` and `ScrubbingCaveat` read the
         // core's `shell_words_copy` (#1146 parity).
-        // Lowered from 37 at #1146 parity (2026-10-07): the Settings sections'
-        // sentences are the core's (`shell_words_copy`). What is left is
-        // `ActionNoticeWords.dismissWord`, the fallback for a notice whose
-        // core word did not decode.
-        "TraceCommonsApp/Views/SettingsView.swift": 1,
+        // SettingsView.swift: deleted at zero, 2026-10-08 -- the Settings
+        // sections' sentences are the core's (`shell_words_copy`, #1146
+        // parity), and `ActionNoticeWords.dismissWord` reads the core's
+        // `dismiss_action` rather than its own "Dismiss this message".
         // Lowered from 48 at #1146 parity (2026-10-07): the withdrawal words
         // are the core's (`shell_words_copy`). What is left is
         // `WithdrawalCopyCheck`'s defect lines.

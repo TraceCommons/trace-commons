@@ -242,8 +242,8 @@ final class ComputeSkillsParityTests: XCTestCase {
         // record, and the inspector pane outlives a change of selection.
         XCTAssertTrue(inspector.contains(".id(record.submissionID)"))
         // The opened row's details are the inspector's (Ron's inspector
-        // auto-open), in a scroll of its own.
-        XCTAssertTrue(inspector.contains("ScrollView {\n            HistoryDetailInspector(row: row)\n"))
+        // auto-open); the window scrolls the inspector column.
+        XCTAssertTrue(inspector.contains("var body: some View {\n        HistoryDetailInspector(row: row)\n"))
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains("HistoryInspectorPane(row: row)"))
         XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selectedHistory\") private var selectedHistory = \"\""))
@@ -273,7 +273,7 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(
             "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }"))
         XCTAssertTrue(try Self.text("Views/SettingsView.swift").contains(
-            "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
+            "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction"))
     }
 
     /// A rollback asks first, in the core's words (owner ruling,

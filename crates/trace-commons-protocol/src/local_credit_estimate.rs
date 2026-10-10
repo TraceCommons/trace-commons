@@ -217,8 +217,9 @@ pub struct LocalEstimateFeatures {
     ///
     /// The windows are compressed as one stream, and deflate looks back at
     /// most 32 KiB, so this sees repetition within a window and its
-    /// neighbour, not across the whole session. On very short content
-    /// deflate's framing outweighs the content and this exceeds 1000.
+    /// neighbour, not across the whole session. At most 1000: on very short
+    /// content deflate's framing outweighs the content, and the ratio is
+    /// capped rather than reading as less repetitive than any real text.
     /// `None` when there is no content to measure, never 0 for that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deflate_ratio_milli: Option<u32>,
@@ -458,11 +459,15 @@ impl Write for ByteCounter {
     }
 }
 
-/// Deflated size over sample size, times 1000. `None` with nothing read.
+/// Deflated size over sample size, times 1000, at most 1000. `None` with
+/// nothing read. Deflate's framing makes a tiny sample's raw ratio exceed
+/// 1000 (about 3000 for one byte); that says nothing about repetition, so
+/// it is capped at 1000, "no repetition found".
 fn deflate_ratio_milli(deflated: u64, read: usize) -> Option<u32> {
     if read == 0 {
         return None;
     }
+    let deflated = deflated.min(read as u64);
     let milli = (deflated as f64 * 1000.0 / read as f64).round();
     Some(u32::try_from(milli as u64).unwrap_or(u32::MAX))
 }
@@ -1160,6 +1165,20 @@ mod tests {
     fn empty_content_has_unknown_deflate_ratio() {
         let f = features_of(&[(EstimateRole::User, None, None)]);
         assert_eq!(f.deflate_ratio_milli, None);
+    }
+
+    /// Kristi's #1285 re-review, item 2: on a tiny sample deflate's
+    /// framing outweighs the content, so the raw ratio of a 1-byte sample
+    /// is about 3000. The ratio is capped at 1000, "no repetition at all",
+    /// so the smallest sessions do not read as the least repetitive.
+    #[test]
+    fn deflate_ratio_is_capped_at_1000_on_a_tiny_sample() {
+        for text in ["x", "ab", "hello"] {
+            let f = features_of(&[(EstimateRole::User, Some(text), None)]);
+            assert_eq!(f.deflate_ratio_milli, Some(1000), "{text:?}");
+        }
+        assert_eq!(deflate_ratio_milli(3, 1), Some(1000));
+        assert_eq!(deflate_ratio_milli(420, 1000), Some(420));
     }
 
     #[test]

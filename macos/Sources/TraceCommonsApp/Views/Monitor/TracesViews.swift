@@ -184,6 +184,9 @@ struct TracesTreeView: View {
         // Full Keyboard Access: focus the tree, then the arrow keys
         // move the selection through the folders and sessions as drawn.
         .focusable()
+        // No focus ring round the whole tree (owner, 2026-10-09): the
+        // selected row's fill already shows where the arrow keys are.
+        .focusEffectDisabled()
         .onMoveCommand(perform: move)
         // Return opens the selected session's review, so the pill
         // need not be its own tab stop on every row.
@@ -252,13 +255,6 @@ struct TracesTreeView: View {
     private func apply(_ folder: TracesTree.FolderNode, _ mode: ProjectMode) {
         confirming = nil
         Task { await store.setFolderMode(folder, mode, promised: folder.sessions.count) }
-    }
-
-    /// A folder row's switch (Ron's watch switch): on is Ask me, off is
-    /// Never, which asks first when sessions are waiting. An ignored folder
-    /// is turned back on here.
-    static func watchChoice(_ on: Bool) -> ProjectMode {
-        on ? .ask : .ignore
     }
 
     static func status(_ mode: ProjectMode) -> GlassStatus {
@@ -491,11 +487,8 @@ struct TracesTreeView: View {
             off: folder.mode == .ignore,
             expanded: folder.sessions.isEmpty ? nil : isOpen(folder.id),
             submitTitle: submits ? words.map { busy ? $0.tree.submitting : Self.submitTitle(offer.count, words: $0) } : nil,
-            watched: switchable
-                ? Binding(get: { folder.mode != .ignore }, set: { request(folder, Self.watchChoice($0)) })
-                : nil,
-            watchDisabled: store.writing.contains(folder.id),
-            watchLabel: words?.tree.watchFolder ?? "",
+            // No watch switch on the row (owner, 2026-10-08): a folder's
+            // mode is the Folder inspector's picker, and Ignore is the menu.
             expandLabel: folder.label,
             menuLabel: ignorable ? words?.tree.ignoreFolder ?? "" : "",
             menuOpen: folderMenu == folder.id,

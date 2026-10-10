@@ -659,6 +659,14 @@ fn subscribe_accepts(params: &serde_json::Value) -> Result<Option<Vec<&'static s
     Ok(Some(accepted))
 }
 
+/// Whether `accepts` is a value `subscribe` takes as its `accepts`: an
+/// array of strings (names this build does not know are fine). A host-side
+/// caller (the FFI's `tc_subscribe_with_accepts`) checks with this before it
+/// subscribes, so a refusal is reported the same way on every path.
+pub fn subscribe_accepts_valid(accepts: &serde_json::Value) -> bool {
+    subscribe_accepts(&serde_json::json!({ "accepts": accepts })).is_ok()
+}
+
 /// Live socket subscribers per opt-in event they accepted. Shared between
 /// [`DaemonShared`] and every [`RendererDeclaration`], which is what lets a
 /// declaration retract itself when its connection ends.
@@ -868,6 +876,11 @@ pub struct DaemonShared {
     /// tick read them; `None` until the first tick. See
     /// [`Self::publish_time_driven_status`].
     time_driven_status: Mutex<Option<serde_json::Value>>,
+    /// The estimate table readers were last told is in force: the table and
+    /// its basis as [`EstimateTableSlot::in_force`] gave them. Starts as the
+    /// built-in table, which the slot starts as. A leaf lock. See
+    /// [`Self::publish_estimate_in_force_change`].
+    estimate_in_force: Mutex<EstimateInForce>,
     /// The daemon-wide bound on concurrent preview work.
     ///
     /// `Arc` rather than a plain field because the worker pool outlives any
@@ -1027,6 +1040,23 @@ impl Drop for PreviewBuildGuard<'_> {
 pub const ESTIMATE_BASIS_BUILT_IN: &str = "built_in";
 /// `credit_estimate.basis` while a fetched, accepted table is in force.
 pub const ESTIMATE_BASIS_PUBLISHED: &str = "published";
+
+/// What readers render with: the table in force and its basis, without the
+/// receipt time a re-fetch renews.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EstimateInForce {
+    table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+    basis: &'static str,
+}
+
+impl EstimateInForce {
+    pub(crate) fn of(slot: EstimateTableSlot) -> Self {
+        Self {
+            table: slot.table,
+            basis: slot.basis,
+        }
+    }
+}
 
 /// The calibration table in force and where it came from.
 #[derive(Debug, Clone, PartialEq)]
@@ -1288,8 +1318,9 @@ impl DaemonShared {
         {
             // Save provenance before marking the policy migration done; a
             // restart must not mistake a legacy settings-less install for fresh.
-            // The notification offers rest on the same policy evidence, and a
-            // new install has neither, so it still writes nothing here.
+            // The notification offers rest on the same kind of evidence (a
+            // policy or state file an older build wrote), and a new install
+            // has neither, so it still writes nothing here.
             settings.save(&store)?;
         }
         if policy.record_scrub_check_upgrade(
@@ -1332,6 +1363,7 @@ impl DaemonShared {
             events,
             renderers,
             time_driven_status: Mutex::new(None),
+            estimate_in_force: Mutex::new(EstimateInForce::of(EstimateTableSlot::built_in())),
             previews: Arc::new(PreviewScheduler::default()),
             routing,
             private_inference_endpoint: Mutex::new(None),
@@ -2254,6 +2286,39 @@ impl DaemonShared {
         }
     }
 
+    /// Publish `queue_changed` and `status_changed` when the estimate table
+    /// in force at `now` is not the one readers were last told about, or
+    /// not `before` (what was in force just ahead of a fetch). Every
+    /// `credit_estimate` on `list_pending` and on `status` renders under the
+    /// table in force, so its change is a change to both.
+    ///
+    /// Called on every daemon tick with no `before`, which is what announces
+    /// a fetched table ageing past `ESTIMATE_TABLE_MAX_AGE`: nothing fetched,
+    /// the clock alone moved readers to the built-in table. Called after a
+    /// fetch with `before`, which announces a table re-fetched after it
+    /// expired, though the slot itself holds the same table as before.
+    pub(crate) fn publish_estimate_in_force_change(
+        &self,
+        now: chrono::DateTime<Utc>,
+        before: Option<EstimateInForce>,
+    ) {
+        let slot = self.estimate_table.lock().expect("estimate lock").clone();
+        let view = EstimateInForce::of(slot.in_force(now));
+        let changed = {
+            let mut last = self
+                .estimate_in_force
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = *last != view || before.is_some_and(|before| before != view);
+            *last = view;
+            changed
+        };
+        if changed {
+            self.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
         self.status_value_at(Utc::now())
@@ -2356,7 +2421,7 @@ impl DaemonShared {
                     candidates.len(),
                     mission_fit,
                     credit_estimate,
-                    batch_tools(&candidates),
+                    batch_text_tools(&candidates),
                 )
             }
             None => (None, 0, None, None, Vec::new()),
@@ -3826,10 +3891,11 @@ fn decorate_token_storage(value: &mut serde_json::Value, enabled: Option<bool>) 
         return;
     }
     value["capture_enabled"] = serde_json::json!(enabled == Some(true));
+    // The capture switch's button. Approved 2026-10-08 (button rule).
     value["capture_label"] = serde_json::json!(if enabled == Some(true) {
-        "Disable local token capture"
+        "Disable capture"
     } else {
-        "Enable local token capture"
+        "Enable capture"
     });
     value["capture_confirmation"] = serde_json::json!(
         "Token capture stores raw request and response data on this device. It requires configured, supported model targets and restarts the hosted proxy. Contribution and witness sharing remain separate choices."
@@ -5467,19 +5533,31 @@ pub(crate) struct NudgeSnapshot {
     pub notify_idle_sessions: bool,
 }
 
-/// `status.idle_sessions` on the wire: how many candidates, the display
-/// names of the tools they came from (distinct, in alphabetical order; a
-/// source the tool table has no name for is left out, never shown as its
-/// raw id), and the threshold in days. Never an id, a path, a folder label
-/// or a session's own age.
 /// The display names of the tools a batch came from, deduplicated and
-/// sorted. A source with no display name is left unnamed.
+/// sorted. A source with no display name is left unnamed. This is the
+/// wire's `status.idle_sessions.tools`; the words take
+/// [`batch_text_tools`].
 pub(crate) fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
     let tools: std::collections::BTreeSet<&'static str> = candidates
         .iter()
         .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
         .collect();
     tools.into_iter().map(str::to_string).collect()
+}
+
+/// The tools a batch's words name ([`crate::nudge_render::Batch::tools`]):
+/// [`batch_tools`] when every source in the batch has a display name, and
+/// none otherwise, so the words read without a tool rather than credit
+/// the named ones with an unnamed source's sessions.
+pub(crate) fn batch_text_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+    let all_named = candidates
+        .iter()
+        .all(|e| super::inference_map::tool_display_name(e.displayed_source()).is_some());
+    if all_named {
+        batch_tools(candidates)
+    } else {
+        Vec::new()
+    }
 }
 
 /// A `credit_estimate` sum as the renderer reads it.
@@ -5508,6 +5586,11 @@ pub(crate) fn render_verdicts(
     }
 }
 
+/// `status.idle_sessions` on the wire: how many candidates, the display
+/// names of the tools they came from (distinct, in alphabetical order; a
+/// source the tool table has no name for is left out, never shown as its
+/// raw id), and the threshold in days. Never an id, a path, a folder label
+/// or a session's own age.
 fn idle_sessions_value(
     candidates: &[&super::queue::QueueEntry],
     window: super::nudge::IdleWindow,
@@ -11123,6 +11206,74 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    /// Kristi's #1300 review, finding 2: an Ask me install that ran a build
+    /// after #1162 has its policy marked migrated and no settings file.
+    /// Startup still treats it as existing and saves the offers, so the new
+    /// kinds never come on for it unasked.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_migrated_install_without_a_settings_file() {
+        let s = shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+            assert!(policy.scrub_check_upgrade_recorded);
+            let mut value = serde_json::to_value(&*policy).unwrap();
+            value.as_object_mut().unwrap().remove("notify_kinds_known");
+            s.store
+                .write_daemon_file(
+                    crate::config::DAEMON_PROJECTS_FILE,
+                    value.to_string().as_bytes(),
+                )
+                .unwrap();
+        }
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
+    }
+
+    /// Kristi's #1300 review, finding 2: an older install that only ever
+    /// watched has no policy file, only the state file its daemon wrote.
+    /// Startup saves its offers, and the next start still reads them.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_watch_only_install_without_a_settings_file() {
+        let s = shared();
+        let mut value = serde_json::to_value(super::super::state::DaemonState::new()).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_STATE_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
     }
 
     /// A new install's startup writes no settings file on its own account.
@@ -18758,6 +18909,32 @@ mod tests {
             assert!(!text.contains(ASK), "{text}");
             assert!(!text.contains(&a.to_string()), "{text}");
             assert!(!text.contains("nudge-ask"), "{text}");
+        }
+
+        /// A batch holding a source the tool table cannot name names no
+        /// tool in its words, even beside named ones: "3 traces from Claude
+        /// Code and Codex" would credit two tools with a third's session.
+        /// The wire's `tools` still lists the names it has.
+        #[test]
+        fn a_batch_with_an_unnamed_source_names_no_tool_in_its_words() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_TRAJECTORY, 6);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert_eq!(
+                status["idle_sessions"]["tools"],
+                serde_json::json!(["Claude Code", "Codex"])
+            );
+            let title = status["nudge"]["text"]["title"].as_str().unwrap();
+            assert_eq!(
+                title,
+                format!(
+                    "3 traces have been idle for {} or more",
+                    crate::nudge_copy::days_phrase(crate::daemon::nudge::IDLE_DAYS as u32)
+                )
+            );
         }
 
         /// Core composes the leading card's words (`status.nudge.text`)

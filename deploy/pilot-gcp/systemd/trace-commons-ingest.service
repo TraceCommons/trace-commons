@@ -26,7 +26,12 @@ PrivateDevices=true
 # usearch instance under a separate root (sharing one would cross the two
 # indexes' neighbours), so admitting the novelty root does not admit it. Logs are appended to /var/log/tracecommons. ProtectHome
 # blocks the binary's default ~/.ironclaw fallback, which is intentional.
-ReadWritePaths=/var/cache/trace-commons-embedder /var/lib/trace-commons-vector-index /var/lib/trace-commons-dedup-index /var/log/tracecommons /var/lib/trace-commons-data
+# The versioned pipeline's own index (TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT)
+# and the one-boot pipeline_production_adapters result directory
+# (TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR) need entries too: without them a
+# production-runtime boot cannot write either. The leading `-` lets a host
+# that has never run the pipeline start without creating them.
+ReadWritePaths=/var/cache/trace-commons-embedder /var/lib/trace-commons-vector-index /var/lib/trace-commons-dedup-index /var/log/tracecommons /var/lib/trace-commons-data -/var/lib/trace-commons-pipeline-index -/var/lib/trace-commons-pipeline-checks
 
 [Install]
 WantedBy=multi-user.target

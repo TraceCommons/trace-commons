@@ -190,21 +190,18 @@ public struct GlassListRow: View {
                 accessory
             }
 
-            // The switch's column is always kept (#1146 `.tc-list-row`'s
-            // `38px` track, a placeholder where a row has no switch), so a
-            // session's Review lines up with its folder's Submit.
-            Group {
-                if let watched {
-                    Toggle(watchLabel, isOn: watched)
-                        .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
-                        // A switch the person cannot change here is disabled, so
-                        // assistive tech does not offer a control that does nothing.
-                        .disabled(watchDisabled)
-                } else {
-                    Color.clear.accessibilityHidden(true)
-                }
+            // A row's switch, when it has one, in #1146's `38px` column. No
+            // placeholder for a row without one: the Traces tree has no
+            // switches (owner, 2026-10-08), so its rows' Review and Submit
+            // sit right beside the row menu, lined up with each other.
+            if let watched {
+                Toggle(watchLabel, isOn: watched)
+                    .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
+                    // A switch the person cannot change here is disabled, so
+                    // assistive tech does not offer a control that does nothing.
+                    .disabled(watchDisabled)
+                    .frame(width: Self.watchColumn)
             }
-            .frame(width: Self.watchColumn)
 
             Group {
                 // The kebab needs its own name: falling back to the row title

@@ -34,7 +34,7 @@ final class GrantVoidNoticeTests: XCTestCase {
     {"title":"Automatic contributing stopped for api","body":"b",
      "reasons_heading":"What changed","reasons":["r1","r2"],
      "rearm":"re","acknowledge":"Got it",
-     "rearm_action":"Turn back on","rearm_failed":"f"}
+     "rearm_action":"Turn on","rearm_failed":"f"}
     """
 
     private let noButton = """
@@ -44,14 +44,14 @@ final class GrantVoidNoticeTests: XCTestCase {
      "rearm_action":null,"rearm_failed":null}
     """
 
-    /// "Turn back on" acts on the element's `project_id`, and only when the
+    /// "Turn on" acts on the element's `project_id`, and only when the
     /// Rust offered the button: never on the grant's notice or an unplaced
     /// one, which have no project to arm.
     func testTheRearmTargetIsTheElementsProjectOnlyWhenOffered() throws {
         let void = try JSONDecoder().decode(GrantVoidWire.self, from: Data(projectElement.utf8))
         XCTAssertEqual(void.projectId, "3f1c")
         let offered = try XCTUnwrap(GrantVoidNotice.decode(fromJSON: notice))
-        XCTAssertEqual(offered.rearmAction, "Turn back on")
+        XCTAssertEqual(offered.rearmAction, "Turn on")
         XCTAssertEqual(offered.rearmTarget(for: void), "3f1c")
         let withheld = try XCTUnwrap(GrantVoidNotice.decode(fromJSON: noButton))
         XCTAssertNil(withheld.rearmAction)
@@ -67,7 +67,7 @@ final class GrantVoidNoticeTests: XCTestCase {
     func testTheRearmButtonAndItsRefusalLineComeAsAPair() throws {
         for (action, failed) in [("\"a\"", "null"), ("null", "\"f\""), ("\"\"", "\"f\"")] {
             let json = notice
-                .replacingOccurrences(of: #""rearm_action":"Turn back on""#, with: "\"rearm_action\":\(action)")
+                .replacingOccurrences(of: #""rearm_action":"Turn on""#, with: "\"rearm_action\":\(action)")
                 .replacingOccurrences(of: #""rearm_failed":"f""#, with: "\"rearm_failed\":\(failed)")
             XCTAssertNil(GrantVoidNotice.decode(fromJSON: json), json)
         }

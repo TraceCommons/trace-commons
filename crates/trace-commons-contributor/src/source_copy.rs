@@ -195,6 +195,7 @@ pub struct SourceSettingsCopy {
     pub unavailable: &'static str,
     pub selected_folder: &'static str,
     pub no_candidate: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub watch_candidate: &'static str,
     pub choose_folder: &'static str,
     pub retry: &'static str,
@@ -277,7 +278,7 @@ pub fn source_settings_copy() -> SourceSettingsCopy {
         unavailable: "Current folder settings aren't available.",
         selected_folder: "Selected folder",
         no_candidate: "No standard location found — choose a folder, or decline",
-        watch_candidate: "Watch this folder",
+        watch_candidate: "Watch",
         choose_folder: "Choose a different folder…",
         retry: "Retry",
         tools,

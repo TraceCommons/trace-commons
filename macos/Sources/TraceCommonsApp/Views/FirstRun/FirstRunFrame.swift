@@ -7,7 +7,9 @@ import TCShellCore
 struct FirstRunFooter {
     let title: String
     let isEnabled: Bool
-    /// The caption on the footer's leading side, when the screen has one.
+    /// A note about the action in its current state (Join's "what Skip
+    /// means"), when the screen has one. It sits above the action bar, after
+    /// the frame's `actionNote` (owner ruling, 2026-10-08).
     let note: String?
     /// The action is running: the button carries a spinner (Ron's Start
     /// sharing).
@@ -78,21 +80,47 @@ struct FirstRunTitle: View {
 /// The frame's decisions, apart from the view so they can be tested.
 enum FirstRunFrameLayout {
     /// The current step's index within its tier's steps.
+    /// The page content's extra side margin, inside the pane: the header,
+    /// the cards, the pinned row and the action notes, but not the step
+    /// progress above or the button row below (owner ruling, 2026-10-08).
+    static let contentInset: CGFloat = GlassTokens.Space.s9
+
     static func current(_ state: FirstRunState) -> Int {
         FirstRunNavigation.steps(for: state.tier).firstIndex(of: state.step) ?? 0
     }
 
-    /// "Custom setup instead" sits on Quick's Folders only (#1030
-    /// `tool-screens.tsx`): it is the one place Quick asks something Custom
-    /// asks differently. It is withdrawn while a commit runs: the runner
-    /// moves the step on from wherever the state is when its calls finish,
-    /// so a switch mid-commit would skip Custom's Tools.
+    /// "Customize" (switch to Custom setup) sits on Quick's Folders only
+    /// (#1030 `tool-screens.tsx`): it is the one place Quick asks something
+    /// Custom asks differently. It is a secondary button in the footer, just
+    /// left of Continue (owner, 2026-10-08). It is withdrawn while a commit
+    /// runs: the runner moves the step on from wherever the state is when
+    /// its calls finish, so a switch mid-commit would skip Custom's Tools.
     static func offersCustomSetupInstead(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
         !isCommitting && state.tier == .quick && state.step == .folders
     }
 
+    /// Back, at the footer's left, on every step after Join in either tier
+    /// (owner, 2026-10-08, reversing Ron's review of #1235, item 9): the
+    /// frame draws it, so every step that is not the first has it, and Join
+    /// never does. It goes to the previous step with every answer kept
+    /// (`FirstRunNavigation.back`). Like the tier switch it is withdrawn
+    /// while a commit runs, so the runner never moves the step on from a
+    /// step the person has already left.
+    static func offersBack(_ state: FirstRunState, isCommitting: Bool = false) -> Bool {
+        !isCommitting && current(state) > 0
+    }
+
     /// The disabled Continue explains itself only on the tool screens, where
     /// the reason is an unanswered tool; elsewhere the reason differs.
+    /// The notes above the action bar, top to bottom: the screen's standing
+    /// note about its action, then the footer's note for the action's
+    /// current state (owner ruling, 2026-10-08: text about taking the
+    /// primary action sits directly above the action bar, not in the
+    /// scrolling content).
+    static func actionNotes(actionNote: String?, footer: FirstRunFooter) -> [String] {
+        [actionNote, footer.note].compactMap { $0 }.filter { !$0.isEmpty }
+    }
+
     static func showsAnswerEveryTool(_ state: FirstRunState, footer: FirstRunFooter) -> Bool {
         guard !footer.isEnabled else { return false }
         return state.step == .folders || state.step == .tools
@@ -102,46 +130,56 @@ enum FirstRunFrameLayout {
 /// Ron's first-run frame (#1030 `ftux-frame.tsx`) in glass: one pane with
 /// the tier on the right of its bar, the step progress, the screen's fixed
 /// header (its title), the cards scrolling beneath it with the runner's
-/// failure after them as a notice, and the footer. No screen has a Back
-/// (Ron's review of #1235, item 9).
+/// failure after them as a notice, and the footer: Back on its left after
+/// Join, the step's action on its right (owner, 2026-10-08).
 ///
 /// `notice` is the sentence a screen maps the runner's failure to; the
 /// frame shows it and decides nothing about it. `isCommitting` withdraws
-/// the tier switch while the runner's calls are in flight.
-struct FirstRunFrame<Header: View, Content: View>: View {
+/// Back and the tier switch while the runner's calls are in flight.
+struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
     private let copy: FirstRunCopy
     @Binding private var state: FirstRunState
     private let isCommitting: Bool
     private let notice: String?
+    private let actionNote: String?
     private let footer: FirstRunFooter
     private let header: Header
     private let content: Content
+    private let pinned: Pinned
 
+    /// `pinned` sits under the scrolling cards and above the footer, always
+    /// in view (the tool screens' add tile, owner 2026-10-08). `actionNote`
+    /// is the screen's text about taking its primary action, drawn directly
+    /// above the action bar (owner ruling, 2026-10-08).
     init(
         copy: FirstRunCopy,
         state: Binding<FirstRunState>,
         isCommitting: Bool = false,
         notice: String? = nil,
+        actionNote: String? = nil,
         footer: FirstRunFooter,
         @ViewBuilder header: () -> Header,
-        @ViewBuilder content: () -> Content
+        @ViewBuilder content: () -> Content,
+        @ViewBuilder pinned: () -> Pinned
     ) {
         self.copy = copy
         self._state = state
         self.isCommitting = isCommitting
         self.notice = notice
+        self.actionNote = actionNote
         self.footer = footer
         self.header = header()
         self.content = content()
+        self.pinned = pinned()
     }
 
     var body: some View {
         GlassPane {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s8) {
-                bar
                 GlassStepProgress(labels: copy.frame.steps(for: state.tier), current: FirstRunFrameLayout.current(state))
                     .frame(maxWidth: .infinity)
                 header
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         content
@@ -154,41 +192,47 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                footerRow
+                pinned
+                    .padding(.horizontal, FirstRunFrameLayout.contentInset)
+                GlassActionBar(
+                    notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer),
+                    noteInset: FirstRunFrameLayout.contentInset
+                ) {
+                    footerRow
+                }
             }
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(copy.frame.eyebrow(for: state.tier))
     }
 
-    /// Ron's `ftux-pane__bar`: the tier's name on the right.
-    private var bar: some View {
-        HStack(spacing: GlassTokens.Space.s6) {
-            Spacer(minLength: 0)
-            Text(copy.frame.eyebrow(for: state.tier))
-                .glassType(GlassTokens.TypeScale.eyebrow)
-                .foregroundStyle(GlassColor.textTertiary)
-        }
-    }
+    // No tier tag on either setup (owner, 2026-10-08): the pane's
+    // accessible name still names the tier.
 
     private var footerRow: some View {
         HStack(spacing: GlassTokens.Space.s6) {
+            // The secondary buttons are TCDesign's neutral glass pill at the
+            // action bar's size: every button in the bar is Continue's size
+            // (owner ruling, 2026-10-08).
+            if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {
+                Button(copy.frame.back) {
+                    state = FirstRunNavigation.back(state)
+                }
+                .buttonStyle(GlassButtonStyle(.glass, size: .bar))
+            }
+            Spacer(minLength: 0)
             if FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting) {
                 Button(copy.frame.customSetupInstead) {
                     state = FirstRunNavigation.switchTier(state, to: .custom)
                 }
-                .buttonStyle(GlassButtonStyle(.link))
-            } else if let note = footer.note {
-                Text(note)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
+                .buttonStyle(GlassButtonStyle(.glass, size: .bar))
             }
-            Spacer(minLength: 0)
             if let cancel = footer.cancel {
                 Button(cancel.title, action: cancel.action)
-                    .buttonStyle(GlassButtonStyle(.secondary))
+                    .buttonStyle(GlassButtonStyle(.secondary, size: .bar))
             }
             Button(action: footer.action) {
                 HStack(spacing: GlassTokens.Space.s3) {
@@ -200,5 +244,23 @@ struct FirstRunFrame<Header: View, Content: View>: View {
                 .disabled(!footer.isEnabled)
                 .help(FirstRunFrameLayout.showsAnswerEveryTool(state, footer: footer) ? copy.frame.answerEveryTool : "")
         }
+    }
+}
+
+extension FirstRunFrame where Pinned == EmptyView {
+    /// A step with nothing pinned under its cards.
+    init(
+        copy: FirstRunCopy,
+        state: Binding<FirstRunState>,
+        isCommitting: Bool = false,
+        notice: String? = nil,
+        actionNote: String? = nil,
+        footer: FirstRunFooter,
+        @ViewBuilder header: () -> Header,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.init(
+            copy: copy, state: state, isCommitting: isCommitting, notice: notice, actionNote: actionNote,
+            footer: footer, header: header, content: content, pinned: { EmptyView() })
     }
 }
