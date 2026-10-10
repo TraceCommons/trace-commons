@@ -37,10 +37,19 @@ REPORT_SCHEMA = "trace_commons.pipeline_comparison_report.v1"
 # The check ids the harness may emit (`pipeline_compare_pg_tests`'s
 # `COMPARE_CHECK_IDS`): a pin with a local directory, and a network pin.
 CHECK_IDS = frozenset({"pipeline_comparison_local", "pipeline_comparison_hf"})
-# `COMPARISON_BLOCKERS` in `versioned_pipeline_comparison.rs`. The last one
-# is PC-D18: the harness removes the baseline tenant's derived files after
-# each trace.
-BLOCKERS = (*LOCAL_BLOCKERS, "deterministic_privacy_only", "baseline_derived_scan_removed")
+# `COMPARISON_BLOCKERS` in `versioned_pipeline_comparison.rs`.
+# `baseline_derived_scan_removed` is PC-D18: the harness removes the
+# baseline tenant's derived files after each trace. The last two name the
+# paths of `main` that the run does not compare: the duplicate
+# short-circuits of #1325 (PC-D24) and the Review-start privacy pass of
+# #1324 (PC-D25).
+BLOCKERS = (
+    *LOCAL_BLOCKERS,
+    "deterministic_privacy_only",
+    "baseline_derived_scan_removed",
+    "duplicate_short_circuits_not_compared",
+    "review_start_privacy_pass_not_compared",
+)
 # The report lists at most this many unexplained traces; `unexplained_total`
 # counts each one.
 UNEXPLAINED_LIST_LIMIT = 1000
@@ -125,6 +134,21 @@ _BRANCH_GAPS = frozenset(
 # does not write is not evidence.
 PERMITTED_RULES = (
     {"rule": "medium_risk_privacy_review", "source": "ruling.PC-D22", "fields": ["admission"]},
+)
+# The exclusions of spec section 10.2 (`ComparisonRule::ALL`, in order). A
+# report holds exactly this list.
+EXCLUDED_RULES = (
+    {
+        "rule": "deterministic_index_keys",
+        "source": "compatibility_mapping.required_behavior_change_2",
+        "fields": ["index_entry_id", "nearest_neighbor_hash"],
+    },
+    {"rule": "ledger_reason_text", "source": "ruling.T15-2", "fields": ["ledger_reason"]},
+    {
+        "rule": "shadow_values_not_in_contract",
+        "source": "compatibility_mapping.membership_and_credit_rules",
+        "fields": ["dedup_penalty", "contributor_cap", "anomaly_withheld"],
+    },
 )
 _REPORT_HASHES = ("bundle_id", "package_hash", "configuration_digest", "dependency_digest", "records_digest")
 _REPORT_COUNTS = ("trace_count", "compared_count", "equal_count", "permitted_total", "unexplained_total")
@@ -355,16 +379,7 @@ def _validate_comparison_report(report):
             and all(_is_count(counts[key]) for key in _SIDE_COUNTS),
             malformed,
         )
-    require(isinstance(report["excluded_rules"], list), malformed)
-    for rule in report["excluded_rules"]:
-        require(
-            isinstance(rule, dict)
-            and set(rule) == {"rule", "source", "fields"}
-            and isinstance(rule["rule"], str)
-            and isinstance(rule["source"], str)
-            and _is_text_list(rule["fields"]),
-            malformed,
-        )
+    require(report["excluded_rules"] == list(EXCLUDED_RULES), malformed)
     unexplained = report["unexplained"]
     require(isinstance(unexplained, list), malformed)
     for entry in unexplained:
@@ -387,6 +402,22 @@ def _validate_comparison_report(report):
         len(unexplained) == min(report["unexplained_total"], UNEXPLAINED_LIST_LIMIT), "comparison_count_mismatch"
     )
     require(compared <= report["trace_count"], "comparison_count_mismatch")
+    # Each side observed each compared pair once (`SideDistribution::observe`):
+    # its admission counts add up to `compared_count`, each gate branch pair
+    # adds up to `scored`, and a capped trace is a scored trace. `scored` is
+    # not bounded by `admit`: a quarantined trace that the review approved is
+    # scored.
+    for side in SIDES:
+        counts = distribution[side]
+        scored = counts["scored"]
+        require(
+            sum(counts[key] for key in ("admit", "quarantine", "reject", "refused", "other")) == compared
+            and counts["quality_passed"] + counts["quality_failed"] == scored
+            and counts["novelty_passed"] + counts["novelty_failed"] == scored
+            and counts["member"] + counts["not_member"] == scored
+            and counts["chunks_capped"] <= scored,
+            "comparison_count_mismatch",
+        )
     require(report["partial"] is (compared < report["trace_count"]), "comparison_partial_mismatch")
 
 

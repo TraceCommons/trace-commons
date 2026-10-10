@@ -24,7 +24,7 @@ use crate::versioned_pipeline_qualification::package_digests;
 pub const COMPARISON_REPORT_SCHEMA: &str = "trace_commons.pipeline_comparison_report.v1";
 pub const COMPARE_CORPUS_SCHEMA: &str = "trace_commons.pipeline_compare_corpus.v1";
 pub const UNEXPLAINED_LIST_LIMIT: usize = 1_000;
-pub const COMPARISON_BLOCKERS: [&str; 8] = [
+pub const COMPARISON_BLOCKERS: [&str; 10] = [
     "local_test_only",
     "local_reference_scorer",
     "local_reference_embedder",
@@ -34,6 +34,13 @@ pub const COMPARISON_BLOCKERS: [&str; 8] = [
     "deterministic_privacy_only",
     // baseline-old-path:
     "baseline_derived_scan_removed",
+    // PC-D24: `main`'s duplicate short-circuits (`skipped_duplicate`,
+    // `cached`) run on the two production paths since #1325, and on neither
+    // side of the run.
+    "duplicate_short_circuits_not_compared",
+    // PC-D25: the harness reads the candidate's privacy fields at the
+    // receipt, before the Review-start privacy pass of #1324.
+    "review_start_privacy_pass_not_compared",
 ];
 pub const COMPARISON_UNEXPLAINED_LABEL: &str = "comparison_has_unexplained_differences";
 pub const COMPARISON_BRANCH_LABEL: &str = "comparison_gate_branch_not_exercised";
@@ -184,7 +191,9 @@ impl ComparisonRule {
 pub enum PermittedDifference {
     /// PC-D22. The server-side risk is `medium` for a cause other than the
     /// consent flag alone. The old path admits the trace and the pipeline
-    /// quarantines it for review.
+    /// quarantines it for review. The basis clause is "not exactly
+    /// `["consent_content_flag"]`", so an empty basis also meets it: a
+    /// declared risk has no basis label (the self-test's permitted pair).
     MediumRiskPrivacyReview,
 }
 
@@ -1414,6 +1423,21 @@ mod tests {
             report["safe_blockers"],
             serde_json::json!(COMPARISON_BLOCKERS)
         );
+        // PC-D24 and PC-D25: two paths of `main` that the run does not
+        // compare. Each report names them.
+        for blocker in [
+            "duplicate_short_circuits_not_compared",
+            "review_start_privacy_pass_not_compared",
+        ] {
+            assert!(
+                report["safe_blockers"]
+                    .as_array()
+                    .expect("a list")
+                    .contains(&serde_json::json!(blocker)),
+                "{blocker}"
+            );
+            assert!(is_safe_label(blocker), "{blocker}");
+        }
         assert_eq!(
             report["excluded_rules"].as_array().expect("a list").len(),
             3

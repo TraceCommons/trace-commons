@@ -217,7 +217,9 @@ The rule permits a pair only when all of these are true:
 - The field is `admission`.
 - `privacy_risk` is `medium` on the two records.
 - `privacy_basis` is equal on the two records, and it is not exactly
-  `["consent_content_flag"]`.
+  `["consent_content_flag"]`. An empty basis meets this too: a declared
+  risk has no basis label, and the permitted pair of `--self-test` (the
+  declared medium trace) is such a pair.
 - The baseline admission is `admit` and the candidate admission is
   `quarantine`.
 
@@ -323,7 +325,7 @@ name, no secret-shaped value. The report has no time field.
 | `scope`, `production_ready`, `external_payout_enabled` | always `local_test`, `false`, `false` |
 | `partial` | `true` when the run compared fewer traces than the pin has |
 | `skew` | `null`, or `baseline_quality_floor` in scenario 3 of `--self-test` |
-| `safe_blockers` | always `local_test_only`, `local_reference_scorer`, `local_reference_embedder`, `synthetic_index`, `synthetic_settlement`, `static_bearer_authentication`, `deterministic_privacy_only`, `baseline_derived_scan_removed` |
+| `safe_blockers` | always `local_test_only`, `local_reference_scorer`, `local_reference_embedder`, `synthetic_index`, `synthetic_settlement`, `static_bearer_authentication`, `deterministic_privacy_only`, `baseline_derived_scan_removed`, `duplicate_short_circuits_not_compared`, `review_start_privacy_pass_not_compared` (see [Limits](#limits)). A report without one of them is refused (`missing_local_blockers`). |
 | `pin` | the five digests of the export manifest: `source_digest`, `order_digest`, `configuration_digest`, `bootstrap_corpus_digest`, `holdout_corpus_digest` |
 | `bundle_id`, `package_hash`, `configuration_digest`, `dependency_digest` | the candidate's compatibility package. The bundle holds the floors, so the bundle id changes with the floors. |
 | `floors` | the three derived floors, in micros |
@@ -337,9 +339,9 @@ name, no secret-shaped value. The report has no time field.
 | `unexplained` | the first 1,000 unexplained traces in sample order, each with `position`, `trace_hash`, and `fields` |
 | `first_unexplained_position` | the position of the first unexplained trace, or `null` |
 | `alignment_lost_position` | the position of the pair at which the run stopped, or `null` |
-| `excluded_rules` | the three rules of [What is compared](#what-is-compared), each with `rule`, `source`, and `fields` |
+| `excluded_rules` | the three rules of [What is compared](#what-is-compared), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
 | `permitted_rules` | the closed list of the rules that permit a difference (see [The permitted difference](#the-permitted-difference)), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
-| `distribution` | for `baseline` and for `candidate`: the counts `admit`, `quarantine`, `reject`, `refused`, `other`, `scored`, `quality_passed`, `quality_failed`, `novelty_passed`, `novelty_failed`, `member`, `not_member`, `chunks_capped`. `member` and `not_member` count scored traces only. |
+| `distribution` | for `baseline` and for `candidate`: the counts `admit`, `quarantine`, `reject`, `refused`, `other`, `scored`, `quality_passed`, `quality_failed`, `novelty_passed`, `novelty_failed`, `member`, `not_member`, `chunks_capped`. `member` and `not_member` count scored traces only. On each side the five admission counts add up to `compared_count`, each pass and fail pair and `member` with `not_member` add up to `scored`, and `chunks_capped` is at most `scored`; a report in which they do not is refused (`comparison_count_mismatch`). |
 | `branch_gaps` | the gate branches with no evidence on the baseline side: any of `quality_passed_true`, `quality_passed_false`, `novelty_passed_true`, `novelty_passed_false`, `member_true`, `member_false`. Always empty for a partial run. |
 | `records_digest` | the SHA-256 of the records file |
 | `report_digest` | the SHA-256 of the canonical report without this field |
@@ -493,10 +495,26 @@ What a passing report does not show:
 - **No classifier and no backstop.** The two sides use the deterministic
   rescrub only. The prose classifier and the PII backstop are off (blocker
   `deterministic_privacy_only`).
-- **The gate route, not the score driver.** The harness calls the old gate
-  through `POST /v1/workers/gate/evaluate`. The in-process perplexity score
-  driver of `main` does not run, so its duplicate skip and its cache are
-  not compared.
+- **No Review-start privacy pass.** The pipeline runs the prose classifier
+  again in a privacy pass at the start of Review (#1324). The harness reads
+  the candidate's `privacy_risk`, `privacy_basis`, and `admission` at the
+  receipt, before the pass, so the pass is not compared (blocker
+  `review_start_privacy_pass_not_compared`, PC-D25). With the deterministic
+  boundary of this tool the pass changes nothing. With a real classifier, a
+  pass that escalates parks the candidate run for a human, and the run
+  stops with `comparison_alignment_lost`: it fails, but the label names
+  the alignment and not the privacy pass.
+- **No duplicate short-circuits.** `main` records a duplicate as
+  `skipped_duplicate` or `cached`, with no credit quality: the old path in
+  its in-process perplexity score driver, and the pipeline at Settle since
+  #1325. The run applies them on neither side (blocker
+  `duplicate_short_circuits_not_compared`, PC-D24). The harness calls the
+  old gate through `POST /v1/workers/gate/evaluate`, so the score driver
+  does not run, and it assembles the candidate runtime with no
+  `duplicate_controls`. The two sides also read `credit_quality_micros`
+  from different places: the candidate from its Score evidence, the
+  baseline from its gate decision row. For a duplicate these differ since
+  #1325, so a passing report says nothing about duplicates.
 - **Serial order.** One trace reaches its end on the two sides before the
   next trace starts. The run shows nothing about concurrent submission,
   load, or throughput.

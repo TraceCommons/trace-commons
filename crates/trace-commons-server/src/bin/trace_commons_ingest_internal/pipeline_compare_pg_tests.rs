@@ -2857,6 +2857,12 @@ async fn a_declared_medium_trace_is_aligned() {
         return;
     };
     let pair = drive_pair(&app, &risk_fixture("declared_medium", "medium"), 0).await;
+    // The declared risk has no basis label, so the pair meets PC-D22 through
+    // its empty basis: `[]` is not exactly `["consent_content_flag"]`.
+    for record in [&pair.baseline, &pair.candidate] {
+        assert_eq!(record.privacy_risk.as_deref(), Some("medium"));
+        assert!(record.privacy_basis.is_empty());
+    }
     assert_eq!(pair.action, AlignmentAction::ApproveCandidate);
     assert_eq!(pair.baseline.admission, AdmissionLabel::Admit);
     assert_eq!(pair.baseline.review, ReviewLabel::None);

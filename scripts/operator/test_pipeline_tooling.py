@@ -6260,22 +6260,24 @@ _COMPARE_VARIABLES = frozenset(
 _COMPARE_CHECK_VARIABLES = frozenset(name for name in _COMPARE_VARIABLES if "_PIPELINE_CHECK_" in name)
 
 
-def _comparison_side(**overrides):
-    """The distribution of one side for 10 traces with evidence of each gate
-    branch."""
+def _comparison_side(compared=10, **overrides):
+    """The distribution of one side for `compared` traces, each admitted and
+    scored, with evidence of each gate branch when `compared` is 2 or more.
+    The admission counts add up to `compared`, and each gate branch pair to
+    `scored`, as `SideDistribution::observe` counts them."""
     side = {
-        "admit": 10,
+        "admit": compared,
         "quarantine": 0,
         "reject": 0,
         "refused": 0,
         "other": 0,
-        "scored": 10,
-        "quality_passed": 6,
-        "quality_failed": 4,
-        "novelty_passed": 5,
-        "novelty_failed": 5,
-        "member": 5,
-        "not_member": 5,
+        "scored": compared,
+        "quality_passed": compared - compared * 4 // 10,
+        "quality_failed": compared * 4 // 10,
+        "novelty_passed": compared - compared // 2,
+        "novelty_failed": compared // 2,
+        "member": compared - compared // 2,
+        "not_member": compared // 2,
         "chunks_capped": 0,
     }
     side.update(overrides)
@@ -6284,6 +6286,20 @@ def _comparison_side(**overrides):
 
 _PERMITTED_RULE = "medium_risk_privacy_review"
 _PERMITTED_RULES = [{"rule": _PERMITTED_RULE, "source": "ruling.PC-D22", "fields": ["admission"]}]
+# `ComparisonRule::ALL` of `versioned_pipeline_comparison.rs`, in order.
+_EXCLUDED_RULES = [
+    {
+        "rule": "deterministic_index_keys",
+        "source": "compatibility_mapping.required_behavior_change_2",
+        "fields": ["index_entry_id", "nearest_neighbor_hash"],
+    },
+    {"rule": "ledger_reason_text", "source": "ruling.T15-2", "fields": ["ledger_reason"]},
+    {
+        "rule": "shadow_values_not_in_contract",
+        "source": "compatibility_mapping.membership_and_credit_rules",
+        "fields": ["dedup_penalty", "contributor_cap", "anomaly_withheld"],
+    },
+]
 
 
 def _compared_fields(compared=10, unexplained=None, trace_count=10, permitted=None, permitted_total=None):
@@ -6338,19 +6354,17 @@ def _comparison_report(check_id, **overrides):
         "trace_count": 10,
         **_compared_fields(),
         "alignment_lost_position": None,
-        "excluded_rules": [
-            {
-                "rule": "deterministic_index_keys",
-                "source": "compatibility_mapping.required_behavior_change_2",
-                "fields": ["index_entry_id", "nearest_neighbor_hash"],
-            }
-        ],
+        "excluded_rules": json.loads(json.dumps(_EXCLUDED_RULES)),
         "permitted_rules": json.loads(json.dumps(_PERMITTED_RULES)),
-        "distribution": {"baseline": _comparison_side(), "candidate": _comparison_side()},
         "branch_gaps": [],
         "records_digest": _fake_hash("records"),
     }
     report.update(overrides)
+    # Each side observed each compared pair.
+    compared = report.get("compared_count")
+    report.setdefault(
+        "distribution", {"baseline": _comparison_side(compared), "candidate": _comparison_side(compared)}
+    )
     return _resigned(report)
 
 
@@ -6445,7 +6459,7 @@ class ComparisonReportValidationTests(unittest.TestCase):
             alignment_lost_position=4,
             skew="baseline_quality_floor",
             branch_gaps=[],
-            distribution={"baseline": _comparison_side(), "candidate": _comparison_side(admit=9, refused=1)},
+            distribution={"baseline": _comparison_side(5), "candidate": _comparison_side(5, admit=4, refused=1)},
         )
         comparison.validate_comparison_report(failed)
         # A report with permitted pairs is valid, and its Markdown view names
@@ -6592,11 +6606,22 @@ class ComparisonReportValidationTests(unittest.TestCase):
             return [blocker for blocker in comparison.BLOCKERS if blocker != name]
 
         self.assertEqual(
-            comparison.BLOCKERS, (*corpus.LOCAL_BLOCKERS, "deterministic_privacy_only", "baseline_derived_scan_removed")
+            comparison.BLOCKERS,
+            (
+                *corpus.LOCAL_BLOCKERS,
+                "deterministic_privacy_only",
+                "baseline_derived_scan_removed",
+                "duplicate_short_circuits_not_compared",
+                "review_start_privacy_pass_not_compared",
+            ),
         )
         cases = (
             ("missing_local_blockers", {"safe_blockers": without_blocker("deterministic_privacy_only")}),
             ("missing_local_blockers", {"safe_blockers": without_blocker("baseline_derived_scan_removed")}),
+            # PC-D24 and PC-D25: a report that does not name the two paths
+            # of `main` that the run does not compare is not valid.
+            ("missing_local_blockers", {"safe_blockers": without_blocker("duplicate_short_circuits_not_compared")}),
+            ("missing_local_blockers", {"safe_blockers": without_blocker("review_start_privacy_pass_not_compared")}),
             ("missing_local_blockers", {"safe_blockers": without_blocker("local_test_only")}),
             ("invalid_report_scope", {"production_ready": True}),
             ("invalid_report_scope", {"scope": "production"}),
@@ -6608,6 +6633,70 @@ class ComparisonReportValidationTests(unittest.TestCase):
             with self.subTest(label=label, overrides=overrides):
                 check_id = overrides.pop("check_id", _COMPARE_LOCAL)
                 self._refused(_comparison_report(check_id, **overrides), label)
+
+    def test_the_comparison_blockers_agree_with_the_harness(self):
+        source = (environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_comparison.rs").read_text()
+        match = re.search(r"const COMPARISON_BLOCKERS: \[&str; \d+\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        self.assertEqual(tuple(re.findall(r'"([a-z0-9_]+)"', match.group(1))), comparison.BLOCKERS)
+
+    def test_the_excluded_rules_are_the_closed_list(self):
+        self.assertEqual(list(comparison.EXCLUDED_RULES), _EXCLUDED_RULES)
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL))
+        first, second, third = _EXCLUDED_RULES
+        for excluded in (
+            [],
+            [first],
+            [first, second],
+            [second, first, third],
+            [*_EXCLUDED_RULES, {"rule": "another_rule", "source": "ruling.PC-D99", "fields": ["member"]}],
+            [{**first, "fields": ["index_entry_id"]}, second, third],
+            [{**first, "source": "ruling.PC-D99"}, second, third],
+            [first, second, {**third, "fields": [*third["fields"], "admission"]}],
+        ):
+            with self.subTest(excluded=[rule.get("rule") for rule in excluded]):
+                self._refused(_comparison_report(_COMPARE_LOCAL, excluded_rules=excluded), "comparison_report_malformed")
+
+    def test_each_side_counts_each_compared_pair(self):
+        # A partial run and an empty run are valid when the counts agree.
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(3)))
+        comparison.validate_comparison_report(_comparison_report(_COMPARE_LOCAL, **_compared_fields(0)))
+        cases = {
+            # The admission counts of a side add up to `compared_count`.
+            "admission sum low": _comparison_side(admit=9),
+            "admission sum high": _comparison_side(quarantine=1),
+            "refused beside each admit": _comparison_side(refused=1),
+            # `scored` is the sum of each gate branch pair.
+            "scored above quality": _comparison_side(quality_passed=5),
+            "scored below quality": _comparison_side(quality_failed=5),
+            "novelty": _comparison_side(novelty_failed=4),
+            "member": _comparison_side(not_member=6),
+            "scored alone": _comparison_side(scored=9),
+            # A capped trace is a scored trace.
+            "capped": _comparison_side(chunks_capped=11, admit=10),
+        }
+        for case, side in cases.items():
+            for name in ("baseline", "candidate"):
+                with self.subTest(case=case, side=name):
+                    sides = {"baseline": _comparison_side(), "candidate": _comparison_side()}
+                    sides[name] = side
+                    self._refused(_comparison_report(_COMPARE_LOCAL, distribution=sides), "comparison_count_mismatch")
+        # The distribution of a partial run counts its compared pairs, not
+        # each trace of the pin.
+        self._refused(
+            _comparison_report(
+                _COMPARE_LOCAL,
+                **_compared_fields(3),
+                distribution={"baseline": _comparison_side(), "candidate": _comparison_side()},
+            ),
+            "comparison_count_mismatch",
+        )
+        # A quarantined trace that the review approved is scored: `scored`
+        # can exceed `admit`.
+        quarantined = _comparison_side(admit=4, quarantine=6)
+        comparison.validate_comparison_report(
+            _comparison_report(_COMPARE_LOCAL, distribution={"baseline": quarantined, "candidate": quarantined})
+        )
 
     def test_a_malformed_report_gives_a_label(self):
         base = _comparison_report(_COMPARE_LOCAL)
@@ -7557,8 +7646,9 @@ class CompareCommandTests(_CorpusRunCase):
         ]
 
         def refused(side):
-            sides = {"baseline": _comparison_side(), "candidate": _comparison_side()}
-            sides[side] = _comparison_side(admit=9, refused=1)
+            # The risk pin has 8 traces, and the risk scenario compares each.
+            sides = {"baseline": _comparison_side(8), "candidate": _comparison_side(8)}
+            sides[side] = _comparison_side(8, admit=7, refused=1)
             return sides
 
         cases = (
@@ -7686,9 +7776,9 @@ class CompareCommandTests(_CorpusRunCase):
                 self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
 
     def test_a_refused_receipt_fails_with_its_label(self):
-        def distribution(side):
-            sides = {"baseline": _comparison_side(), "candidate": _comparison_side()}
-            sides[side] = _comparison_side(admit=9, refused=1)
+        def distribution(side, compared=10):
+            sides = {"baseline": _comparison_side(compared), "candidate": _comparison_side(compared)}
+            sides[side] = _comparison_side(compared, admit=compared - 1, refused=1)
             return sides
 
         refused = {"unexplained": {"receipt_code": 1}, "distribution": distribution("candidate")}
@@ -7705,7 +7795,13 @@ class CompareCommandTests(_CorpusRunCase):
                 self.assertTrue((self.run.results_dir / f"{_COMPARE_LOCAL}.result.json").is_file())
                 self.assertNotIn("PipelineCompareOK", self.stdout.getvalue())
         # The order is alignment, refusal, unexplained, branch.
-        both = {**refused, "compared": 5, "alignment_lost_position": 4, "branch_gaps": ["member_true"]}
+        both = {
+            **refused,
+            "distribution": distribution("candidate", 5),
+            "compared": 5,
+            "alignment_lost_position": 4,
+            "branch_gaps": ["member_true"],
+        }
         for behavior in ({"fail": True, **both}, both):
             with self.subTest(fail=behavior.get("fail", False)):
                 self._again()

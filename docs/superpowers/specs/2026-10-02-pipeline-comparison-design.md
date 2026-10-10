@@ -67,6 +67,16 @@ Facts at PR 4 head `cbe165ff`:
   driver (`score_one_submission`). The driver adds cost controls (a
   duplicate skip and a cache) and then calls the same function,
   `evaluate_and_record_gate`.
+- Since #1325 (2026-10-09) the pipeline applies the same two
+  short-circuits, in the same order and with the same knobs
+  (`PipelineNoveltyUtilityChecks::duplicate_controls`), when it writes a
+  run's gate decision row at Settle: `skipped_duplicate` or `cached`, with
+  no credit quality, and the NoveltyUtility leg withheld. The Score
+  evidence is unchanged.
+- Since #1324 (2026-10-09) the pipeline runs the prose classifier in a
+  privacy pass at the start of Review, after the receipt. A pass that
+  raises the risk parks the run for a human (`escalated`), and since #1332
+  it also moves an admitted submission to `quarantined`.
 
 ## 4. Scope
 
@@ -82,9 +92,15 @@ Out of scope:
 
 - Real scorers. The result says nothing about gate quality.
 - The prose classifier and the PII backstop. They need a model.
+- The Review-start privacy pass of the pipeline (#1324). The harness reads
+  the privacy fields at the receipt, before the pass (section 8.3, PC-D25).
 - Concurrent submission, load, and throughput.
 - The product surfaces (receipt, status, credit summary, dedup, withdrawal).
-- The score driver's duplicate skip and cache (section 17, point 2).
+- The duplicate short-circuits (`skipped_duplicate`, `cached`). The two
+  production paths apply them, the old path in the score driver and the
+  pipeline at Settle since #1325, and the run applies them on neither side
+  (section 17, point 2, PC-D24). The report has the blocker
+  `duplicate_short_circuits_not_compared`.
 - A promotion requirement in `evaluate_promotion`.
 - A comparison of two bundles (section 18).
 
@@ -251,6 +267,10 @@ Trace `n + 1` starts only after step 7 of trace `n`.
 - The two sides use the deterministic rescrub only. The prose classifier
   and the PII backstop are off. The report has the blocker
   `deterministic_privacy_only`.
+- The candidate's privacy fields are read at the receipt. The
+  Review-start privacy pass (#1324) runs later, and no compared field
+  reads its result (PC-D25). The report has the blocker
+  `review_start_privacy_pass_not_compared`.
 - `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS` is true on the baseline
   side. This is the value of `deploy/pilot-gcp/ingest.env.template`.
 
@@ -298,6 +318,22 @@ tool permits this difference under the rule `medium_risk_privacy_review`
 sample have no trace of row 4. The tool reports row 4 as `unexplained`. Any
 other pair that does not meet the exact condition of the rule stays
 `unexplained`.
+
+The condition on the basis is "not exactly `["consent_content_flag"]`", so
+an empty basis also meets it. A declared risk has no basis label, and the
+permitted pair of `--self-test` (the declared medium trace) meets the rule
+through its empty basis. The rule is not narrowed to a non-empty basis.
+
+The table is the receipt. Since #1324 the pipeline runs the prose
+classifier again in a privacy pass at the start of Review. The harness
+reads `privacy_risk`, `privacy_basis`, and `admission` at the receipt, so
+the pass is not compared (PC-D25, blocker
+`review_start_privacy_pass_not_compared`). With the deterministic boundary
+of this tool the classifier half of the pass changes nothing, and the pass
+is `cleared` for each trace. With a real classifier, a pass that escalates
+parks the candidate run for a human. The candidate side is then not
+terminal, and the run stops with `comparison_alignment_lost` (PC-D20). That
+fails closed, but the label names the alignment and not the privacy pass.
 
 ## 9. Records
 
@@ -376,7 +412,7 @@ Permitted differences:
 
 | Rule | Field | Condition | Source |
 |---|---|---|---|
-| `medium_risk_privacy_review` | `admission` | The privacy risk is `medium` on the two records. The privacy basis is equal on the two records and is not exactly `consent_content_flag`. The baseline admission is `admit` and the candidate admission is `quarantine`. | ruling PC-D22 (2026-10-09) |
+| `medium_risk_privacy_review` | `admission` | The privacy risk is `medium` on the two records. The privacy basis is equal on the two records and is not exactly `consent_content_flag` (an empty basis meets this, section 8.3). The baseline admission is `admit` and the candidate admission is `quarantine`. | ruling PC-D22 (2026-10-09) |
 
 The rule permits no other field. If another compared field also differs,
 the pair is `unexplained` with that field only.
@@ -438,7 +474,9 @@ Fields:
 - `schema`, `check_id`, `scope: "local_test"`, `production_ready: false`,
   `partial`.
 - `safe_blockers`: the blockers of a corpus report, plus
-  `deterministic_privacy_only`.
+  `deterministic_privacy_only`, `baseline_derived_scan_removed` (PC-D18),
+  `duplicate_short_circuits_not_compared` (PC-D24), and
+  `review_start_privacy_pass_not_compared` (PC-D25).
 - Identity: the pin digests, `bundle_id`, `package_hash`,
   `configuration_digest`, `dependency_digest`, and the derived floors.
 - Counts: `trace_count`, `equal_count`, `permitted_counts` for each rule,
@@ -448,9 +486,11 @@ Fields:
   and `unexplained_total` add up to `compared_count`.
 - `excluded_rules` and `permitted_rules`: each rule with its `rule`,
   `source`, and `fields`. A report holds exactly the closed list of
-  permitted rules.
+  excluded rules (PC-D26) and exactly the closed list of permitted rules.
 - `distribution` for each side: admission decisions, gate passes and
-  failures, membership, and capped traces.
+  failures, membership, and capped traces. The admission counts of a side
+  add up to `compared_count`, each pair of gate counts adds up to `scored`,
+  and `chunks_capped` is at most `scored` (PC-D26).
 - `unexplained`: the trace hash and the field names of each unexplained
   trace. The list holds the first 1,000 entries in sample order, and
   `unexplained_total` holds the full count.
@@ -537,11 +577,37 @@ Sequence:
 
 1. **PR 4 is not merged.** A review round on PR 4 can change the harness
    code that this branch uses.
-2. **The score driver is not compared.** The harness calls the gate route,
-   which is `evaluate_and_record_gate`. The pilot's in-process score driver
-   adds a duplicate skip and a cache before that call. The pipeline has no
-   such step. If the owner wants that behavior in the baseline, it is a
-   change to this design.
+2. **The duplicate short-circuits are not compared.** The baseline calls
+   the gate route, which is `evaluate_and_record_gate`. The pilot's
+   in-process score driver adds a duplicate skip and a cache before that
+   call (`skipped_duplicate`, `cached`). Correction of 2026-10-10: the text
+   until then said "The pipeline has no such step". That is false since
+   #1325, which applies the same two short-circuits to the pipeline's gate
+   decision row at Settle. The run applies them on neither side:
+   - The candidate runtime is assembled with
+     `PipelineNoveltyUtilityChecks::default()` apart from the issuer, so
+     `duplicate_controls` is `None`. Ingest always passes `Some` for an
+     assembled runtime.
+   - The baseline goes through `POST /v1/workers/gate/evaluate`, and the
+     short-circuits are only in the score driver. `clear_baseline_derived`
+     (PC-D18) also removes the derived record whose duplicate score the
+     driver reads.
+   - The two sides read `credit_quality_micros` from different places: the
+     candidate from the Score evidence (`candidate_gate_values`), the
+     baseline from its gate decision row (`baseline_finish`). Without the
+     short-circuits the two are equal. Since #1325 they differ for a
+     duplicate: the row has no credit quality, and the Score evidence
+     keeps it.
+
+   With `duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT)` on the candidate and two
+   equal traces, the review of 2026-10-10 found the second pair
+   `unexplained` in `credit_events` only, while `credit_quality_micros`
+   compared equal. The owner chose to name the gap and not to compare the
+   path in this PR: the report has the blocker
+   `duplicate_short_circuits_not_compared` (PC-D24), and a follow-up issue
+   holds the comparison of the path (`MAIN_DEFAULT` on the candidate, the
+   baseline through the score driver, and the candidate's credit quality
+   read from its gate decision row).
 3. **The baseline index.** The in-memory index of the gate-enclave crate is
    `MockVectorIndex`. A `Mock*` type must never gate anything in production.
    The plan must confirm that its use in a test harness is acceptable, or

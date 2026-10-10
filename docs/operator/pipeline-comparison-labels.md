@@ -90,7 +90,7 @@ sides. Keep the run directory.
 
 | Label | Cause |
 |---|---|
-| `comparison_report_missing`, `comparison_report_malformed`, `comparison_count_mismatch`, `comparison_partial_mismatch` | The harness passed, but its report is absent or not valid: it is not JSON, it lacks a field or has a field that the harness does not write, a value has the wrong type, its list `permitted_rules` is not the closed list (rule `medium_risk_privacy_review`, source `ruling.PC-D22`, field `admission`), `permitted_counts` names another rule, or its counts do not agree with each other. |
+| `comparison_report_missing`, `comparison_report_malformed`, `comparison_count_mismatch`, `comparison_partial_mismatch` | The harness passed, but its report is absent or not valid: it is not JSON, it lacks a field or has a field that the harness does not write, a value has the wrong type, its list `permitted_rules` is not the closed list (rule `medium_risk_privacy_review`, source `ruling.PC-D22`, field `admission`), `permitted_counts` names another rule, its list `excluded_rules` is not exactly the three rules of [What is compared](pipeline-comparison.md#what-is-compared), or its counts do not agree with each other, also the `distribution` of a side with `compared_count` and with its `scored` count. |
 | `comparison_report_check_mismatch`, `comparison_report_pin_mismatch`, `comparison_report_trace_count_mismatch`, `comparison_report_skew_mismatch`, `comparison_compared_count_mismatch` | The report is not the report of this run: it names another check id, other pin digests than the export manifest, another trace count, or another skew, or a pass compared a number of traces that is not the limit or the trace count. |
 | `comparison_check_results_unexpected`, `comparison_skew_with_check_result` | A check result exists where none can: for a partial run, for a report with a skew, or a result that is not the result of this check. |
 | `comparison_report_package_mismatch`, `comparison_evidence_malformed`, `comparison_evidence_mismatch`, `comparison_records_missing` | For a full run that passed, the check result does not agree with the report: the package digests differ, the evidence file cannot be read, the evidence does not equal the counts and the two file hashes, or the records file cannot be read. |
@@ -131,9 +131,10 @@ The shared labels, by the part that gives them:
 | The check result of a full run that passed | `check_result_missing:<check id>`, each other `check_result_*` or `check_evidence_*` label, `unsafe_evidence_field`, `unsafe_evidence_value` |
 | The log of the harness step | `pipeline_check_environment_invalid`, `pipeline_check_environment_incomplete`, `pipeline_check_already_emitted`, `pipeline_output_directory_unwritable`, `pipeline_output_unwritable` |
 
-Two shared labels have a cause that is true only for `compare`:
+Three shared labels have a cause that is true only for `compare`:
 
 | Label | Cause |
 |---|---|
 | `hf_<field>_mismatch` | A digest of the export manifest is not the digest of the pin (for example `hf_bootstrap_corpus_digest_mismatch`). `compare` examines all five digests of the pin. A source or an order that changed fails earlier, in the export itself (`step_failed:compare_export_corpus`). |
+| `missing_local_blockers` | The report's `safe_blockers` lacks one of the ten blockers of a comparison report. Two of them name the paths of `main` that the run does not compare: `duplicate_short_circuits_not_compared` (PC-D24) and `review_start_privacy_pass_not_compared` (PC-D25); see [Limits](pipeline-comparison.md#limits). |
 | `code_revision_changed` | At the end of a `compare --corpus` run that passed each other check, the hash of the tree is not the hash at the start of the command: a file changed while the command ran. The report is not written under `.local/`. A run that failed earlier does not make this check. |
