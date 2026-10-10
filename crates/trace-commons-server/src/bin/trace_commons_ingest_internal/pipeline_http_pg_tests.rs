@@ -14948,8 +14948,8 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
     assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
     assert_audit_verification_is_clean(&fixture).await;
 
-    // The hold event says `quarantined` and the stored status stays
-    // `received`: `main`'s reconciliation reports no audit gap for it.
+    // The hold event says `quarantined`, as the stored status does since
+    // #1326: `main`'s reconciliation reports no audit gap for it.
     let caller = fixture
         .state
         .tokens
@@ -14971,6 +14971,135 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
         report.db_audit_canonical_projection_failures
     );
     assert!(report.db_audit_submission_metadata_mismatches.is_empty());
+}
+
+/// The whole sequence of a held run, possible since #1326: the privacy pass
+/// escalates an admitted run, a reviewer rejects it, and the server commits
+/// the rejection. The submission's audit events are, in order, the receipt's
+/// `submitted`, the hold (`quarantined`), the reviewer's `review_decision`
+/// from the assessment route, and the Review commit (`rejected`). The marker
+/// is cleared and `main`'s audit verification is clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_run_that_a_reviewer_rejects_has_its_audit_events_in_order() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let reviewer = format!("token-review-held-audit-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass appends the hold event");
+
+    let run_id = created.run_id;
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    let (status, recorded) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    let ended = fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .expect("the server commits the rejection")
+        .expect("the run was claimed");
+    assert_eq!(ended.state, PipelineRunState::Complete, "{ended:?}");
+    assert!(review_audit_marker_is_set(&fixture, run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass appends the Review commit event");
+    assert!(!review_audit_marker_is_set(&fixture, run_id).await);
+
+    let events = read_all_audit_events(&fixture.state.root, &tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.submission_id == envelope.submission_id)
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "submitted" | "lifecycle_status_change" | "review_decision"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (event.kind.as_str(), event.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("submitted", None),
+            (
+                "lifecycle_status_change",
+                Some(TraceCorpusStatus::Quarantined)
+            ),
+            ("review_decision", Some(TraceCorpusStatus::Rejected)),
+            ("lifecycle_status_change", Some(TraceCorpusStatus::Rejected)),
+        ],
+        "{events:?}"
+    );
+    assert_eq!(
+        events[1].event_id,
+        deterministic_trace_uuid_for("pipeline-privacy-pass-hold-audit", &tenant, run_id)
+    );
+    let review = fixture
+        .service
+        .store()
+        .outcome_for_phase(&tenant, run_id, Phase::Review)
+        .await
+        .unwrap()
+        .expect("the Review outcome");
+    assert_eq!(events[3].event_id, review.outcome_id);
+    assert_audit_verification_is_clean(&fixture).await;
 }
 
 /// A run whose privacy classification fails until its attempts end (state

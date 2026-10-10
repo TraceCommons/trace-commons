@@ -2018,9 +2018,12 @@ Review commit. It appends one more for a run that the privacy pass holds for
 a human (status `quarantined`, reason `privacy_pass_review_required`) and one
 for a run that ends with `privacy_classification_failed` (status
 `quarantined`, that reason). The transaction that records an escalated pass,
-and the one that ends the run, set the marker. The stored status of such a
-run does not change (`received`, or `quarantined` when Admission quarantined
-it). The pass clears the marker once each event of the run exists. The time of an event is the time of the append. A decision from
+and the one that ends the run, set the marker. The transaction that records
+an escalated pass also moves the stored status of an admitted run from
+`received` to `quarantined` (#1326), so the hold event and the stored status
+agree. A run that ends with `privacy_classification_failed` keeps the stored
+status `received`. The pass clears the marker once each event of the run
+exists. The time of an event is the time of the append. A decision from
 before V118 gets no event. A failed event keeps its marker and logs
 `pipeline_worker_review_audit_item_failed` with a hash of the run id. A
 failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit
@@ -2973,10 +2976,10 @@ snapshots.
 submissions out of its vector counts and its `missing_active_vectors` gate.
 Its submission counts and review counts include a pipeline submission only
 when its stored status is one that `main` reads. A run that Admission
-quarantined is counted. A run that the privacy pass holds, and a run that
-failed with `privacy_classification_failed`, keep the stored status
-`received` and are in no count of `main`: read `work` in the pipeline
-operational summary and `GET /v1/review/pipeline/quarantine`.
+quarantined is counted, and so is a run that the privacy pass holds (the
+pass stores `quarantined`, #1326). A run that failed with
+`privacy_classification_failed` keeps the stored status `received` and is
+in no count of `main`: read `work` in the pipeline operational summary.
 `main`'s benchmark export, its two ranker exports, its ranking-feature run
 and its process-evaluation worker leave pipeline submissions out. The
 process-evaluation job route

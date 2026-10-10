@@ -35,6 +35,14 @@ Known limits that this merge adds (they are also in the list "Known limits"):
 
 - A run that the privacy pass holds, or that fails with `privacy_classification_failed`, keeps the stored status `received`, so `main`'s `review_sla` and `urgent_reviews` do not count it. The pipeline review queue lists it.
 
+## Update of 2026-10-10: the review of #1331 and `main` at `4f22b6d8`
+
+The reviewer pushed five commits for his five findings (`8c08b2c8` to `6cf691e6`), and the texts of this plan hold his changes. Three more changes follow them:
+
+- **A backfilled row.** The database backfill writes a pipeline submission's `submitted` row with the risk `unknown` (the pipeline has no file record). With the narrower risk filter of `8c08b2c8`, the reconciliation reported that row for a run with no recorded privacy pass, with no end for a run that Admission rejected (the audit table is insert-only). The reconciliation now leaves that row out for a pipeline submission (`pipeline_risk_differs_by_design`). A row with a real risk keeps the comparison.
+- **`main` at `4f22b6d8` (#1332, #1333), a second merge.** #1332 corrects #1326: the transaction that records an escalated privacy pass moves the stored status of an admitted run from `received` to `quarantined`. A reviewer can now assess such a run, so it gets its assessment event, and `main`'s `review_sla` and `urgent_reviews` count it. The sentences of this plan that say a held run keeps `received` hold only for a run that failed with `privacy_classification_failed`. One new test pins the whole sequence (hold, rejection by a reviewer, Review commit: four audit events in order).
+- **Two open points for the reviewer and the owner.** (1) `562a8f6e` gives an integrity failure of Settle's command read the short backoff again. A root that is not mounted, a wrong key and a wrong bucket read as integrity failures, so each fault that the box "C5 residual" of #1185 names can again fail a run in Settle in about one second and forfeit its legs. Only an outage that is not an integrity failure gets the hourly wait. (2) `bb6fcce9` makes the backfill refuse a `submitted` event with no status when the submission has no pipeline run. A database restore loses each run that was created after the backup, and the file event of such a run then stops the backfill of each later audit event of the tenant (triage G-C of this plan).
+
 ## Questions for the owner (answered on 2026-10-09: each recommendation is accepted)
 
 Each question has a recommendation. The plan is written for the recommended answers.
