@@ -6671,6 +6671,15 @@ class ComparisonReportValidationTests(unittest.TestCase):
         self.assertEqual(rust, list(comparison.PERMITTED_RULES))
         self.assertEqual(rust, _PERMITTED_RULES)
 
+    def test_the_compared_fields_agree_with_the_harness(self):
+        source = (environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_comparison.rs").read_text()
+        match = re.search(r"const COMPARED: \[&str; (\d+)\] = \[(.*?)\];", source, re.S)
+        self.assertIsNotNone(match)
+        names = tuple(re.findall(r'"([a-z0-9_]+)"', match.group(2)))
+        self.assertEqual(len(names), int(match.group(1)))
+        self.assertEqual(names, _COMPARED_FIELD_NAMES)
+        self.assertEqual(comparison._COMPARED_FIELDS, frozenset(names) | {"record_pair"})
+
     def test_each_permitted_rule_is_counted_and_bounded(self):
         medium, high = _PERMITTED_RULE, _PERMITTED_RULE_HIGH
         # The counts name only the two rules, in any combination.
