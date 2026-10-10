@@ -144,7 +144,6 @@ enum PrivateInferenceCopyFixture {
          "panel_connection_eyebrow":"PANEL-CONNECTION-EYEBROW",
          "panel_balance_eyebrow":"PANEL-BALANCE-EYEBROW",
          "panel_balance_refresh":"PANEL-BALANCE-REFRESH",
-         "panel_settings_eyebrow":"PANEL-SETTINGS-EYEBROW",
          "panel_settings_title":"PANEL-SETTINGS-TITLE",
          "panel_settings_body":"PANEL-SETTINGS-BODY",
          "panel_settings_open":"PANEL-SETTINGS-OPEN",

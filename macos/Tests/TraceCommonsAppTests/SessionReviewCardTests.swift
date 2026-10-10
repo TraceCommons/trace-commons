@@ -313,9 +313,11 @@ final class SessionReviewCardTests: XCTestCase {
     /// Not enrolled the muted one.
     func test_theVerdictAndChipAreRons() throws {
         let card = try Self.text(Self.card)
-        XCTAssertTrue(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"))
+        // The answers are radios, one at most (owner, 2026-10-10).
+        XCTAssertTrue(card.contains("GlassRadioRow(\n                outcome.verdictQuestion, selection: draft.verdict,"))
+        XCTAssertFalse(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"), "the pressed-button answers are back")
         XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
-        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is the purple button, not a mark")
+        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is a radio, not a mark")
         XCTAssertTrue(card.contains(".glassType(GlassTokens.TypeScale.label.weight(.semibold))"))
         XCTAssertTrue(card.contains("GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,"))
         XCTAssertTrue(card.contains("muted: summary.enrolled != true)"), "unknown enrolment reads as not enrolled")

@@ -107,17 +107,21 @@ struct ManagedSessionsSection: View {
         }
     }
 
+    /// The re-read icon (owner, 2026-10-10: an icon, not a link), named
+    /// with the card's title for assistive tech.
     private var refreshLink: some View {
-        Button { model.refreshManagedSessions() } label: {
-            Text(model.managedText("refresh")).lineLimit(1)
-        }
-        .buttonStyle(GlassButtonStyle(.link))
-        .fixedSize()
+        GlassRoundButton(
+            PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title")),
+            systemImage: "arrow.clockwise", small: true
+        ) { model.refreshManagedSessions() }
         .disabled(model.managedBusy)
     }
 
     /// Add and Launch, each on one line at its own width: side by side when
-    /// they fit, stacked when the pane is too narrow, never wrapped.
+    /// they fit, stacked when the pane is too narrow, never wrapped. Launch
+    /// is left out while it could not be used -- no saved account, or no
+    /// terminal to launch in (owner, 2026-10-10) -- rather than drawn
+    /// disabled.
     private func accountActions(_ snapshot: ManagedSnapshot) -> some View {
         let add = Button { adding = true } label: {
             Text(model.managedText("add")).lineLimit(1)
@@ -129,10 +133,10 @@ struct ManagedSessionsSection: View {
         }
         .buttonStyle(GlassButtonStyle(.primary, small: true))
         .fixedSize()
-        .disabled(snapshot.accounts.isEmpty || !snapshot.capabilities.terminalLaunch)
+        let launchable = Self.offersLaunch(snapshot)
         return ViewThatFits(in: .horizontal) {
-            HStack(spacing: GlassTokens.Space.s3) { add; launch }
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { add; launch }
+            HStack(spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { add; if launchable { launch } }
         }
         .disabled(model.managedBusy)
     }
@@ -273,6 +277,14 @@ struct ManagedSessionsSection: View {
 }
 
 /// The "Change global settings" heading above the standard tool settings.
+extension ManagedSessionsSection {
+    /// Whether Launch is offered: a saved account to launch with and a
+    /// terminal to launch in.
+    static func offersLaunch(_ snapshot: ManagedSnapshot) -> Bool {
+        !snapshot.accounts.isEmpty && snapshot.capabilities.terminalLaunch
+    }
+}
+
 struct ManagedGlobalSettingsHeader: View {
     @EnvironmentObject private var model: AppModel
 

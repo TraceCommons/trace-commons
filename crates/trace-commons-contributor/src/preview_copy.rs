@@ -373,6 +373,8 @@ pub struct MonitorSessionReviewCopy {
     pub outcome_unavailable: &'static str,
     pub outcome_loading: &'static str,
     pub look_inside: &'static str,
+    /// The collapsed section under the review holding the trace's facts.
+    pub trace_details: &'static str,
     /// Contribute's label when it cannot be pressed. Approved 2026-10-08 (button rule).
     pub enroll_to_approve: &'static str,
     pub not_eligible: &'static str,
@@ -622,6 +624,7 @@ pub fn monitor_traces_copy() -> MonitorTracesCopy {
                 Contribution is disabled.",
             outcome_loading: "Loading outcome and correction disclosure\u{2026}",
             look_inside: "Look inside",
+            trace_details: "Trace details",
             enroll_to_approve: "Enroll",
             not_eligible: "Not eligible",
             checking_eligibility: "Checking eligibility\u{2026}",

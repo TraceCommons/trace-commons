@@ -109,39 +109,50 @@ struct PrivateAISettingsPanels: View {
 
 /// The card at the foot of the Private AI tab that opens the Private AI
 /// section of Settings, where the standard settings, the local tools and
-/// the connection are. Every word is the core's.
+/// the connection are (owner, 2026-10-10): a medium gear on the left, the
+/// title over its sentence, and the button on the right, centred on the
+/// card's height. Every word is the core's.
 struct PrivateAISettingsLinkCard: View {
     let copy: PrivateInferenceCopy
     let onOpen: () -> Void
 
+    /// The gear's size: medium, between a row glyph and a tile.
+    static let iconSize: CGFloat = 22
+
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
-                    Text(copy.panelSettingsEyebrow)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
-                        .foregroundStyle(GlassColor.textTertiary)
+            HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
+                Image(systemName: "gearshape")
+                    .glassGlyph(Self.iconSize, weight: .regular)
+                    .foregroundStyle(GlassColor.textSecondary)
+                    .frame(width: Self.iconSize + 4)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Text(copy.panelSettingsTitle)
-                        .glassType(GlassTokens.TypeScale.title)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
                         .foregroundStyle(GlassColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
+                    Text(copy.panelSettingsBody)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Text(copy.panelSettingsBody)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: GlassTokens.Space.s4)
                 Button(copy.panelSettingsOpen, action: onOpen)
-                .buttonStyle(GlassButtonStyle(.glass, small: true))
-                .accessibilityLabel(copy.panelSettingsOpenAccessibility)
+                    .buttonStyle(GlassButtonStyle(.glass, small: true))
+                    .lineLimit(1)
+                    .fixedSize()
+                    .accessibilityLabel(copy.panelSettingsOpenAccessibility)
             }
         }
     }
 }
 
 /// A Private AI panel's header, as #1146's panels draw it: an eyebrow over
-/// the panel's heading, and a re-read link on the right that keeps to one
-/// line at its own width.
+/// the panel's heading, and a re-read icon on the right (owner,
+/// 2026-10-10: an icon, not a link), named "Refresh <heading>" for
+/// assistive tech so the panels' icons are told apart.
 struct PrivateAIPanelHeader: View {
     let eyebrow: String
     var title: String?
@@ -164,11 +175,18 @@ struct PrivateAIPanelHeader: View {
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            Button(action: onRefresh) { Text(refresh).lineLimit(1) }
-                .buttonStyle(GlassButtonStyle(.link))
-                .fixedSize()
+            GlassRoundButton(Self.refreshName(refresh, title: title ?? eyebrow), systemImage: "arrow.clockwise",
+                             small: true, action: onRefresh)
                 .disabled(disabled)
         }
+    }
+}
+
+extension PrivateAIPanelHeader {
+    /// The refresh icon's name: the core's "Refresh" and the panel it
+    /// re-reads.
+    static func refreshName(_ refresh: String, title: String) -> String {
+        title.isEmpty ? refresh : refresh + " " + title
     }
 }
 

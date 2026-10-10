@@ -170,6 +170,73 @@ public struct GlassRadioGroup<Value: Hashable>: View {
     }
 }
 
+// MARK: - Radio row
+
+/// One choice of a few short ones, as radios in a row (owner, 2026-10-10):
+/// an optional answer, so nothing is chosen until the person picks one,
+/// and picking the chosen one again clears it. One keyboard stop; the
+/// arrow keys move the choice. To assistive tech it is a native
+/// radio-group picker with a "none" choice, so the system says the choice.
+public struct GlassRadioRow<Value: Hashable>: View {
+    private let label: String
+    private let selection: Value?
+    private let options: [GlassRadioOption<Value>]
+    private let choose: (Value) -> Void
+
+    /// `choose` receives the option pressed; the caller decides what a
+    /// press on the chosen one does.
+    public init(_ label: String, selection: Value?, options: [GlassRadioOption<Value>], choose: @escaping (Value) -> Void) {
+        self.label = label
+        self.selection = selection
+        self.options = options
+        self.choose = choose
+    }
+
+    public var body: some View {
+        HStack(spacing: GlassTokens.Space.s6) {
+            ForEach(options) { option in
+                Button {
+                    choose(option.value)
+                } label: {
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        GlassRadio(checked: option.value == selection)
+                            .glassPressedFill()
+                        Text(option.title)
+                            .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                            .foregroundStyle(GlassColor.textPrimary)
+                            .lineLimit(1)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(GlassPressStyle(disabledOpacity: GlassTokens.Opacity.disabledCheck))
+                .focusable(false)
+                .disabled(!option.isEnabled)
+            }
+            Spacer(minLength: 0)
+        }
+        .focusable()
+        .onMoveCommand { direction in
+            let current = selection ?? options.first(where: \.isEnabled)?.value
+            guard let current else { return }
+            switch direction {
+            case .down, .right: choose(GlassRadioGroup.moved(current, by: selection == nil ? 0 : 1, in: options))
+            case .up, .left: choose(GlassRadioGroup.moved(current, by: selection == nil ? 0 : -1, in: options))
+            @unknown default: break
+            }
+        }
+        .accessibilityRepresentation {
+            Picker(label, selection: Binding<Value?>(
+                get: { selection },
+                set: { if let value = $0, value != selection { choose(value) } })) {
+                ForEach(options) { option in
+                    Text(option.title).tag(Optional(option.value))
+                }
+            }
+            .pickerStyle(.radioGroup)
+        }
+    }
+}
+
 // MARK: - Check row
 
 /// A checkbox with its sentence beside it, wrapping under its own width

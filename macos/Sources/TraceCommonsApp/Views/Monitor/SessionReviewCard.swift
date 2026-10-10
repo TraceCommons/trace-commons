@@ -70,6 +70,8 @@ struct SessionReviewCard: View {
     @State private var previewing: QueueEntry?
     /// The verdict and correction, for the session they were written for.
     @State private var draft = SessionReviewDraft(entryId: "")
+    /// Whether the trace's facts are shown; collapsed by default.
+    @State private var detailsOpen = false
 
     /// The preview, keyed by the session it was asked for. Only the
     /// selected session's answer is ever read out of it.
@@ -141,20 +143,25 @@ struct SessionReviewCard: View {
                 Text(words?.line(for: failure) ?? review.cannotShowBody)
             }
         } else if let summary {
-            HStack(alignment: .top, spacing: GlassTokens.Space.s4) {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+            // The eyebrow and the enrolment chip share a line, so the
+            // heading runs the card's width rather than wrapping beside the
+            // chip (owner, 2026-10-10: a less crowded card).
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                HStack(alignment: .center, spacing: GlassTokens.Space.s4) {
                     Text(review.eyebrow)
                         .glassType(GlassTokens.TypeScale.eyebrow)
                         .foregroundStyle(GlassColor.textTertiary)
-                    Text(review.heading)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
+                    Spacer(minLength: 0)
+                    // Unknown is not enrolled: Contribute stays disarmed.
+                    // #1146's glass chip, no dot; Not enrolled is tinted and
+                    // secondary.
+                    GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,
+                              muted: summary.enrolled != true)
                 }
-                Spacer(minLength: 0)
-                // Unknown is not enrolled: Contribute stays disarmed. #1146's
-                // glass chip, no dot; Not enrolled is tinted and secondary.
-                GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,
-                          muted: summary.enrolled != true)
+                Text(review.heading)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             GlassCard(quiet: true) {
                 Text(summary.openingPrompt.flatMap { $0.isEmpty ? nil : $0 } ?? review.noOpeningPrompt)
@@ -236,12 +243,18 @@ struct SessionReviewCard: View {
                 if rows.removed.isEmpty {
                     caption(review.nothingRemoved)
                 } else {
+                    // The count and what it covered; what the category is
+                    // goes behind the line's tooltip and accessibility hint
+                    // (owner, 2026-10-10: a less verbose card). What was
+                    // left in keeps its full line below.
                     ForEach(rows.removed, id: \.family) { row in
-                        Self.redactionLine(row)
+                        Self.redactionLine(row, describe: false)
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
+                            .help(row.description)
+                            .accessibilityHint(row.description)
                     }
                 }
             }
@@ -290,14 +303,20 @@ struct SessionReviewCard: View {
             Text(outcome.verdictQuestion)
                 .glassType(GlassTokens.TypeScale.label.weight(.semibold))
                 .foregroundStyle(GlassColor.textPrimary)
-            HStack(spacing: GlassTokens.Space.s2) {
-                verdictOption(.worked, outcome.worked, draft)
-                verdictOption(.partly, outcome.partly, draft)
-                verdictOption(.failed, outcome.failed, draft)
-                Spacer(minLength: 0)
+            // Radios, one answer at most (owner, 2026-10-10); pressing the
+            // chosen one again clears it, as the answer is optional.
+            GlassRadioRow(
+                outcome.verdictQuestion, selection: draft.verdict,
+                options: [
+                    GlassRadioOption(outcome.worked, value: ContributorVerdict.worked),
+                    GlassRadioOption(outcome.partly, value: ContributorVerdict.partly),
+                    GlassRadioOption(outcome.failed, value: ContributorVerdict.failed),
+                ]
+            ) { option in
+                var next = draft
+                next.choose(option)
+                self.draft = next
             }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(outcome.verdictQuestion)
             caption(outcome.verdictCaption)
             if draft.correctionOffered {
                 Text(outcome.correctionQuestion)
@@ -323,22 +342,6 @@ struct SessionReviewCard: View {
             }
         }
         .disabled(busy)
-    }
-
-    /// One answer, #1146's `GlassButton` with `aria-pressed`: the standard
-    /// glass button, and the chosen one purple (the CTA fill, on-accent
-    /// ink) with the selected trait, so which is chosen is never the
-    /// colour alone to assistive tech.
-    private func verdictOption(
-        _ option: ContributorVerdict, _ label: String, _ draft: SessionReviewDraft
-    ) -> some View {
-        let selected = draft.verdict == option
-        return Button(label) {
-            var next = draft
-            next.choose(option)
-            self.draft = next
-        }
-        .buttonStyle(GlassButtonStyle(.glass, selected: selected))
     }
 
     // MARK: Native's kept lines
@@ -375,14 +378,22 @@ struct SessionReviewCard: View {
                 ForEach(reasons, id: \.self) { GlassChip($0, status: .ask) }
             }
         }
-        if let words {
-            GlassKeyValueList(Self.rows(
-                entry, summary, words: words, attestation: store.attestationValue(entry)))
-        }
-        // The token distribution, the daemon's own line, which the deleted
-        // What's-in-it tab drew. Absent draws nothing: no fact is invented.
-        if let line = summary?.tokenDistributionSummary, !line.isEmpty {
-            caption(line)
+        // The session's facts and the token distribution, collapsed under
+        // one heading (owner, 2026-10-10: a less crowded inspector). They
+        // describe the trace; nothing in them is needed before deciding.
+        if let words, let review {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                GlassExpander(review.traceDetails, isOpen: $detailsOpen)
+                if detailsOpen {
+                    GlassKeyValueList(Self.rows(
+                        entry, summary, words: words, attestation: store.attestationValue(entry)))
+                    // The daemon's own line, which the deleted What's-in-it
+                    // tab drew. Absent draws nothing: no fact is invented.
+                    if let line = summary?.tokenDistributionSummary, !line.isEmpty {
+                        caption(line)
+                    }
+                }
+            }
         }
     }
 
@@ -569,9 +580,10 @@ struct SessionReviewCard: View {
     }
 
     /// #1146's redaction line: the count in bold, then what the category
-    /// is and the sub-labels it covered, all the core's words.
-    static func redactionLine(_ row: RedactionSummaryRow) -> Text {
-        var tail = row.description.isEmpty ? "" : ": " + row.description
+    /// is (unless `describe` is false) and the sub-labels it covered, all
+    /// the core's words.
+    static func redactionLine(_ row: RedactionSummaryRow, describe: Bool = true) -> Text {
+        var tail = !describe || row.description.isEmpty ? "" : ": " + row.description
         if !row.detail.isEmpty { tail += " (" + row.detail.joined(separator: ", ") + ")" }
         return Text(row.countLine).bold().foregroundColor(GlassColor.textPrimary) + Text(tail)
     }

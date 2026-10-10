@@ -82,7 +82,10 @@ struct InferenceTabView: View {
                         if let summary = store.summary, summary.readable, !summary.models.isEmpty {
                             models(summary)
                         }
-                        calls(page)
+                        // An empty ledger is said by the totals' zero; the
+                        // card is drawn only for calls to list (owner,
+                        // 2026-10-10: no card for one figure).
+                        if !page.calls.isEmpty { calls(page) }
                     } else {
                         unreadable
                     }
@@ -203,17 +206,9 @@ struct InferenceTabView: View {
 
     private func calls(_ page: DaemonData.InferenceCallPage) -> some View {
         GlassEyebrowCard(MonitorWords.calls) {
-            if page.calls.isEmpty {
-                // Readable and empty: the ledger answered, with nothing in
-                // its window. A zero, which is not the same as unknown.
-                Text("0")
-                    .glassType(GlassTokens.TypeScale.number)
-                    .foregroundStyle(GlassColor.textTertiary)
-            } else {
-                VStack(spacing: 0) {
-                    ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
-                        GlassTableRow(first: index == 0) { callRow(call) }
-                    }
+            VStack(spacing: 0) {
+                ForEach(Array(page.calls.enumerated()), id: \.element.id) { index, call in
+                    GlassTableRow(first: index == 0) { callRow(call) }
                 }
             }
         }
@@ -246,13 +241,12 @@ struct InferenceTabView: View {
         .accessibilityElement(children: .combine)
     }
 
+    /// An unreadable ledger: the calls legend cell with a dash, one line
+    /// rather than a card around one figure (owner, 2026-10-10). Unknown,
+    /// never zero.
     private var unreadable: some View {
-        GlassEyebrowCard(MonitorWords.calls) {
-            Text("—")
-                .glassType(GlassTokens.TypeScale.number)
-                .foregroundStyle(GlassColor.textTertiary)
-                .accessibilityLabel(MonitorWords.unknown)
-        }
+        GlassLegendCell(MonitorWords.calls, value: "—", status: .shared)
+            .accessibilityValue(MonitorWords.unknown)
     }
 
     // MARK: Formatting
