@@ -10,6 +10,13 @@
   "paused": false,
   "queue_depth": 3,
   "decisions_owed": 1,
+  "unpurposed_traces": 0,
+  "nudge": {
+    "state": "none",
+    "lead": null,
+    "mark": "none",
+    "mark_kinds": []
+  },
   "next_digest_at": null,
   "health": {
     "last_error_label": null,
@@ -55,5 +62,10 @@
   "contribution_override": null,
   "contribution_mode": "auto_upload",
   "contribution_mode_partial": false,
+  "idle_sessions": {
+    "count": 0,
+    "tools": [],
+    "threshold_days": 3
+  },
   "dev_dry_run": false
 }

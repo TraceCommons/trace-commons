@@ -3150,7 +3150,7 @@ fn the_witness_copy_call_carries_the_whole_card() {
         object["certificate_means"]
             .as_str()
             .unwrap()
-            .contains("not a statement that a session is clean")
+            .contains("not a statement that a trace is clean")
     );
 }
 
@@ -3719,7 +3719,7 @@ fn the_private_inference_branch_tables_cross_the_abi() {
             TC_PRIVATE_INFERENCE_TONE_REFUSED,
             "{failure}"
         );
-        assert!(line(failure).contains("off and on again"), "{failure}");
+        assert!(line(failure).contains("off and on"), "{failure}");
     }
 
     // A state this build has never heard of, and no pointer at all, claim
@@ -4478,9 +4478,9 @@ fn the_harness_last_call_sentence_crosses_the_abi() {
 fn the_harness_spend_sentence_crosses_the_abi() {
     assert!(take_owned(tc_harness_spend_line(1_230_000)).contains("$1.23"));
     assert!(take_owned(tc_harness_spend_line(0)).contains("$0.00"));
-    assert!(take_owned(tc_harness_spend_line(1)).contains("less than $0.01"));
+    assert!(take_owned(tc_harness_spend_line(1)).contains("under $0.01"));
     // The window is in the sentence, not left to a shell to add.
-    assert!(take_owned(tc_harness_spend_line(0)).contains("since midnight"));
+    assert!(take_owned(tc_harness_spend_line(0)).contains("Today"));
 
     // Not known is out of range, and draws no line. Never a zero.
     for absent in [-1, -2, i64::MIN] {
@@ -4774,11 +4774,11 @@ fn an_unrecognised_balance_state_borrows_nothing_across_the_abi() {
 fn the_balance_age_crosses_the_abi() {
     assert_eq!(
         take_owned(tc_near_ai_balance_observed_line(0)),
-        "Asked for just now."
+        "Checked just now"
     );
     assert_eq!(
         take_owned(tc_near_ai_balance_observed_line(120)),
-        "Asked for 2 minutes ago."
+        "Checked 2 minutes ago"
     );
     for absent in [-1, i64::MIN] {
         assert_eq!(take_owned(tc_near_ai_balance_observed_line(absent)), "");
@@ -5502,7 +5502,7 @@ fn the_monitor_traces_copy_crosses_the_abi() {
     // Ron's #1146 inspector words (#1241) cross as nested tables.
     for (pointer, word) in [
         ("/tree/submit_count", "Submit \u{00b7} {count}"),
-        ("/tree/dismiss_session_title", "Dismiss this session?"),
+        ("/tree/dismiss_session_title", "Dismiss this trace?"),
         ("/inspector/contribution_rule", "Contribution rule"),
         ("/summary_panel/statistics", "Statistics"),
         ("/session_review/heading", "What would leave this computer"),
@@ -5917,7 +5917,7 @@ fn the_disclosure_bundle_crosses_the_abi_with_the_state_map() {
     let value = json_owned(tc_contributor_disclosure_copy_json());
     assert_eq!(value, contributor_disclosure_copy());
     // The three tables the macOS bridge decodes (`ContributorDisclosureCopy`).
-    assert_eq!(value["outcome"]["submit_all_as"], "Submit all as...");
+    assert_eq!(value["outcome"]["submit_all_as"], "Submit as...");
     assert!(value["outcome"]["max_correction_chars"].is_u64());
     assert!(value["history_ui"]["status_labels"].is_object());
     assert!(value["folder_mode_labels"].is_object());

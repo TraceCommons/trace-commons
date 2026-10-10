@@ -36,7 +36,7 @@ pub const WITNESS_HEADING: &str = "Redaction witness";
 /// sealed machine that removes private material from a session for you,
 /// instead of this app doing it here. ..."
 pub const WITNESS_INTRO: &str = concat!(
-    "A witness gets your raw sessions only after you agree and its measurement ",
+    "A witness gets your raw traces only after you agree and its measurement ",
     "checks out. If its pin isn't valid, nothing is sent. With no witness, redaction ",
     "happens on this computer."
 );
@@ -45,7 +45,7 @@ pub const WITNESS_INTRO: &str = concat!(
 /// shell has to summarise it and no shell summarises it wrongly.
 pub const WITNESS_CERTIFICATE_MEANS: &str = concat!(
     "A certificate records what the witness removed and the risk it judged was left. ",
-    "It is not a statement that a session is clean."
+    "It is not a statement that a trace is clean."
 );
 
 /// How the pin list is written, in Ron's #1146 words, then why more than
@@ -89,12 +89,12 @@ pub const WITNESS_CLEAR: &str = "Return";
 /// What clearing actually does. Not "off": the redaction still happens, on
 /// this machine, and saying "off" would read as no redaction at all.
 pub const WITNESS_CLEAR_NOTE: &str = concat!(
-    "Sessions go back to being redacted on this machine, and are sent with this app's own ",
+    "Traces go back to being redacted on this machine, and are sent with this app's own ",
     "judgement of what was left rather than a certificate."
 );
 
 /// Changes take effect on the next upload, with no restart.
-pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next session sent.";
+pub const WITNESS_APPLIES_AT_ONCE: &str = "Changes here apply to the next trace sent.";
 
 /// Consent to carry inference content is independent of observing a proxy's
 /// ledger, configuring a witness, and acknowledging the extra privacy scan.
@@ -113,9 +113,9 @@ pub fn token_review_summary(
 /// Approved 2026-10-07: it was "Token
 /// probabilities".
 pub const WITNESS_TOKEN_HEADING: &str = "Token distribution contribution";
-pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in sessions you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
+pub const WITNESS_TOKEN_DISCLOSURE: &str = "Include token probabilities and alternative tokens in traces you review with your witness. Alternatives can contain personal information even when the chosen text does not. The witness filters them before contribution; they remain restricted research data.";
 pub const WITNESS_TOKEN_CAPTURE_NOTE: &str = "Capture is configured separately in Ironwire for supported models. This permission does not turn on capture.";
-pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent session files stay on this device. Withdrawing a contribution is a separate action.";
+pub const WITNESS_TOKEN_SCOPE_NOTE: &str = "After the server confirms durable storage, this app removes its local bundle and releases its capture lease. Your agent trace files stay on this device. Withdrawing a contribution is a separate action.";
 /// Approved 2026-10-07: they were "Include
 /// token probabilities" and "Stop including token probabilities".
 pub const WITNESS_TOKEN_ENABLE: &str = "Enable";
@@ -149,7 +149,7 @@ pub const WITNESS_INFERENCE_CAPTURE_NOTE: &str = concat!(
 pub const WITNESS_INFERENCE_SCOPE_NOTE: &str = concat!(
     "This permission does not connect an agent to NEAR AI, fund inference, or prove a ",
     "receipt was verified. A supported desktop app asks separately before sending a ",
-    "session for witness review. This permission alone does not make it ready to send."
+    "trace for witness review. This permission alone does not make it ready to send."
 );
 /// Approved 2026-10-07: they were "Review
 /// permission" and "Stop including inference bodies".
@@ -248,16 +248,16 @@ impl WitnessTone {
 pub fn witness_state_line(state: WitnessTrustState) -> &'static str {
     match state {
         WitnessTrustState::Absent => concat!(
-            "Not in use. Sessions are redacted on this machine before they are sent, ",
+            "Not in use. Traces are redacted on this machine before they are sent, ",
             "which is the normal arrangement."
         ),
         WitnessTrustState::Pinned => concat!(
-            "In use. Each session is redacted by the pinned witness, which signs a record ",
+            "In use. Each trace is redacted by the pinned witness, which signs a record ",
             "of what it removed and the risk it judged was left."
         ),
         WitnessTrustState::RefusingUnpinned => concat!(
             "Nothing is being sent. A witness is set but no measurement is pinned, and this ",
-            "app will not hand a session to a machine it cannot check. Pin the measurement ",
+            "app will not hand a trace to a machine it cannot check. Pin the measurement ",
             "this witness reports."
         ),
         WitnessTrustState::RefusingPinMalformed => concat!(
@@ -267,14 +267,14 @@ pub fn witness_state_line(state: WitnessTrustState) -> &'static str {
         ),
         WitnessTrustState::RefusingInferenceReceiptsMissing => concat!(
             "Nothing is being sent. The witness requires a receipt for each model call, and ",
-            "these sessions carried none."
+            "these traces carried none."
         ),
         WitnessTrustState::NotEnrolled => {
             "Not set up yet. Join an instance first, and a witness can be chosen after that."
         }
         WitnessTrustState::SettingsUnreadable => concat!(
             "Nothing is being sent. This app could not read its own settings, so it cannot ",
-            "say what would happen to a session."
+            "say what would happen to a trace."
         ),
     }
 }
@@ -399,6 +399,7 @@ pub struct WitnessReviewCopy {
     pub heading: &'static str,
     pub disclosure: &'static str,
     pub action: &'static str,
+    /// The confirm button. Approved 2026-10-08 (button rule).
     pub confirm: &'static str,
     pub cancel: &'static str,
     pub working: &'static str,
@@ -762,21 +763,21 @@ pub fn witness_copy() -> WitnessCopy {
         local_storage: WITNESS_LOCAL_STORAGE,
         review: WitnessReviewCopy {
             heading: "Review with your configured witness",
-            disclosure: "This sends this session, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a session already sent to the witness.",
+            disclosure: "This sends this trace, including its unredacted conversation and any correction you include, to your configured remote witness before you approve a contribution. It may contain prompts, tool results, personal data, or secrets. Captured inference bodies are included only with the separate saved permission. You can inspect the returned redacted contribution before deciding whether to send it. Cancelling afterwards cannot recall a trace already sent to the witness.",
             action: "Prepare witness review",
-            confirm: "Send this session for review",
+            confirm: "Send",
             cancel: "Not now",
-            working: "Preparing your witness review. The session may already have left this device.",
-            failed: "The witness review could not be confirmed. The session may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
+            working: "Preparing your witness review. The trace may already have left this device.",
+            failed: "The witness review could not be confirmed. The trace may already have reached the witness. No contribution has been approved here. Try again only if you want to send another review request.",
             failed_host_not_allowed: "The review could not go ahead, because the reviewer's address is not on the allowed list for this computer. Nothing left the machine. Whoever set this computer up needs to allow it.",
             failed_measurement_unpinned: "The review could not go ahead, because this computer has nothing recorded to check the reviewer against, or what it reported did not match. Nothing was sent. Record the value your commons publishes for its reviewer, then try again.",
             failed_unreachable: "The review could not go ahead, because the reviewer did not answer, or answered something this app could not read. Nothing has been approved and nothing has been lost. Try again in a little while.",
             failed_unproven: "The review was refused, because the reviewer could not show it is the one you recorded. Nothing was sent onward and nothing has been approved. This is deliberate -- a reviewer that cannot prove itself does not get used. Ask whoever runs your commons before trying again.",
-            failed_bodies_returned: "The review was refused, because what came back still held the model text it was given, which a finished review never does. That session has not been approved and will not be sent. Ask whoever runs your commons about it before reviewing anything else.",
-            failed_too_large: "This session is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
-            failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
-            failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this session's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
-            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other sessions. Nothing was sent and nothing has been approved. It will be free again soon.",
+            failed_bodies_returned: "The review was refused, because what came back still held the model text it was given, which a finished review never does. That trace has not been approved and will not be sent. Ask whoever runs your commons about it before reviewing anything else.",
+            failed_too_large: "This trace is larger than the review will carry, so nothing was offered and nothing left the machine. It cannot be contributed this way.",
+            failed_not_connected: "The review could not go ahead, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
+            failed_receipt_declined: "The review was refused, because the reviewer would not accept the signature covering this trace's model call -- which one answered, which model, or how small the request was. Nothing has been approved. This is a setting where your commons runs, not here, so ask its operator. You can still contribute existing history without it.",
+            failed_busy: "The review could not go ahead yet, because the privacy witness is busy checking other traces. Nothing was sent and nothing has been approved. It will be free again soon.",
             busy_retry_at: "Try again after",
             immutable: "Witness review uses fixed contribution content. Outcome and correction edits are unavailable here.",
         },
@@ -801,36 +802,37 @@ pub fn witness_copy() -> WitnessCopy {
         },
         admission: AdmissionCopy {
             heading: "Prepare next NEAR inference",
-            disclosure: "For new inference evidence, this adds an account-bound challenge to the next request in this session. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.",
+            disclosure: "For new inference evidence, this adds an account-bound challenge to the next request in this trace. Use your own funded NEAR AI backend, then continue the agent task and return here to review. You can separately choose witness review of eligible existing history, subject to server limits.",
             prerequisite: "IronWire must already route this agent to that backend and capture request bodies. Inference-body evidence also needs your separate permission in Settings.",
             backend: "NEAR AI backend name",
-            confirm: "Prepare session",
-            confirm_line: "I understand and want to prepare this session.",
+            confirm: "Prepare trace",
+            confirm_line: "I understand and want to prepare this trace.",
             cancel: "Cancel",
             permission: "Review inference-body permission",
-            working: "Preparing this session…",
-            ready: "Ready. Continue this session in your agent, then review the updated session.",
-            failed: "This session could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
-            failed_receipt_endpoint: "This session could not be prepared, and nothing in your settings will fix it. Your commons has not published a receipt service, so there is nowhere to collect the provider's signature for this inference. Ask the operator of your commons to publish one. You can still contribute existing history without it.",
-            failed_receipt_endpoint_invalid: "This session could not be prepared. The receipt service configured for this computer is not an address this app will call, so the provider's signature cannot be collected. Whoever set it up needs to correct it. You can still contribute existing history without it.",
-            failed_permission: "This session could not be prepared, because sending captured inference bodies has not been permitted. Open Settings and give that permission, then confirm this session again. Nothing is sent until you do.",
-            failed_not_enrolled: "This session could not be prepared, because this computer is not connected to a commons yet. Finish joining, then come back to this session.",
-            failed_session_unreadable: "This session could not be prepared, because its file could not be read back. It may have been moved, deleted, or still be in use by the agent. Pick another session, or close the agent and try again.",
-            failed_source_unsupported: "This session could not be prepared, because it was produced by an agent this app cannot read yet. Use a supported agent for the task you want to contribute. Sessions from other agents are left alone.",
-            failed_proxy_missing: "This session could not be prepared, because the local proxy that records model calls is not running or is not capturing them. Start it and turn on body capture, then confirm this session again.",
-            failed_proxy_untrusted: "This session could not be prepared, because the local proxy's control file did not pass its safety check. Nothing was sent. Restart the proxy so it writes a fresh one, and if it keeps happening, ask for help before retrying.",
-            failed_hosts_untrusted: "This session could not be prepared, because one of the addresses it must call is not on the allowed-hosts list for this computer. Whoever set this computer up needs to allow it. Nothing left the machine.",
-            failed_backend: "This session could not be prepared, because the backend name given for it cannot be used. Choose a backend from the list and confirm again.",
-            failed_try_again: "This session could not be prepared this time. Your commons or the local proxy declined the attempt, which is usually temporary. Confirm the session again in a moment.",
+            working: "Preparing this trace…",
+            ready: "Ready. Continue this trace in your agent, then review the updated trace.",
+            failed: "This trace could not be prepared. Check your supported agent, backend, and capture settings, then try again.",
+            failed_receipt_endpoint: "This trace could not be prepared, and nothing in your settings will fix it. Your commons has not published a receipt service, so there is nowhere to collect the provider's signature for this inference. Ask the operator of your commons to publish one. You can still contribute existing history without it.",
+            failed_receipt_endpoint_invalid: "This trace could not be prepared. The receipt service configured for this computer is not an address this app will call, so the provider's signature cannot be collected. Whoever set it up needs to correct it. You can still contribute existing history without it.",
+            failed_permission: "This trace could not be prepared, because sending captured inference bodies has not been permitted. Open Settings and give that permission, then confirm this trace again. Nothing is sent until you do.",
+            failed_not_enrolled: "This trace could not be prepared, because this computer is not connected to a commons yet. Finish joining, then come back to this trace.",
+            failed_session_unreadable: "This trace could not be prepared, because its file could not be read back. It may have been moved, deleted, or still be in use by the agent. Pick another trace, or close the agent and try again.",
+            failed_source_unsupported: "This trace could not be prepared, because it was produced by an agent this app cannot read yet. Use a supported agent for the task you want to contribute. Traces from other agents are left alone.",
+            failed_proxy_missing: "This trace could not be prepared, because the local proxy that records model calls is not running or is not capturing them. Start it and turn on body capture, then confirm this trace again.",
+            failed_proxy_untrusted: "This trace could not be prepared, because the local proxy's control file did not pass its safety check. Nothing was sent. Restart the proxy so it writes a fresh one, and if it keeps happening, ask for help before retrying.",
+            failed_hosts_untrusted: "This trace could not be prepared, because one of the addresses it must call is not on the allowed-hosts list for this computer. Whoever set this computer up needs to allow it. Nothing left the machine.",
+            failed_backend: "This trace could not be prepared, because the backend name given for it cannot be used. Choose a backend from the list and confirm again.",
+            failed_try_again: "This trace could not be prepared this time. Your commons or the local proxy declined the attempt, which is usually temporary. Confirm the trace again in a moment.",
             refused_glyph: "⊘",
             refused_tone: "refused",
         },
         onboarding: FirstContributionCopy {
             heading: "Your first contribution",
-            start: "Start with an existing session you can share, or complete a new task in a supported agent. Choose its session folder in Settings, then return here to review. Setup alone does not mean a contribution was accepted.",
-            review: "Open a waiting session with Look inside. A configured witness asks separately before the session leaves this device for review. Check the returned contribution before sending it. The server may allow limited initial submissions from eligible existing history; this screen does not show a remaining allowance.",
-            follow_up: "Open History to follow the server's recorded result. Upload, acceptance, and credit are separate steps. Points are not a spendable NEAR AI balance.",
-            agent_setup: "To generate new NEAR AI inference evidence, configure your selected agent using your own funded provider account and model settings. IronWire capture and sending captured bodies each require separate setup. Existing-history review is a separate choice; this app does not create a funded provider account.",
+            // Plain-language rewrite (owner, 2026-10-08).
+            start: "Share a trace you already have, or finish a new task in a supported agent. Choose its folder in Settings, then come back here to review it.",
+            review: "Open a waiting trace and choose Look inside. If you've set up a witness, you're asked before the trace is sent to it for review. Check what comes back before you send it.",
+            follow_up: "Follow it in History. Sending, acceptance and credit happen separately. Points are not a spendable NEAR AI balance.",
+            agent_setup: "To make new NEAR AI usage to contribute, set up your agent with your own paid provider account and model. Capturing requests with IronWire, and sending what it captures, each need their own setup. This app doesn't create a provider account for you.",
         },
     }
 }
@@ -971,8 +973,8 @@ pub(crate) mod tests {
             // word may appear, and only in that denial.
             if lowered.contains("clean") {
                 assert!(
-                    lowered.contains("not a statement that a session is clean"),
-                    "a certificate never says a session is clean: {line}"
+                    lowered.contains("not a statement that a trace is clean"),
+                    "a certificate never says a trace is clean: {line}"
                 );
             }
         }

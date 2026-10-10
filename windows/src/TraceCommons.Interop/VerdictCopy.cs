@@ -12,7 +12,7 @@ public static class VerdictCopy
     /// <summary>
     /// The question. Answering it is optional and never gates Contribute.
     /// </summary>
-    public const string Question = "Did this session do what you asked?";
+    public const string Question = "Did this trace do what you asked?";
 
     public const string Worked = "Worked";
     public const string Partly = "Partly";
@@ -32,8 +32,8 @@ public static class VerdictCopy
     /// one-click unanswered submit; this is the opt-in path for answering
     /// once for the whole group, never a step in front of it.
     /// </summary>
-    public const string SubmitAllAs = "Submit all as...";
+    public const string SubmitAllAs = "Submit as...";
 
     public const string SubmitAllAsTooltip =
-        "Record the same outcome for every session in this group.";
+        "Record the same outcome for every trace in this group.";
 }

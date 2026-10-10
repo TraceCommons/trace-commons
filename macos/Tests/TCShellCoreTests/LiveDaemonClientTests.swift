@@ -57,6 +57,65 @@ final class LiveDaemonClientTests: XCTestCase {
         }
     }
 
+    /// The nudge requests: the Traces filter and order, the card actions,
+    /// and the Settings switches and offer markers. Queue order sends no
+    /// `order` at all, so the request is byte for byte the one before it.
+    func testNudgeRequestsSendTheirIPCNameAndParams() async throws {
+        let transport = ScriptedTransport { method, _ in
+            switch method {
+            case "list_pending": return #"{"id":0,"result":{"pending":[]}}"#
+            case "nudge_opened": return #"{"id":0,"result":{"opened":true}}"#
+            case "nudge_decline": return #"{"id":0,"result":{"declined":true}}"#
+            case "set_suggestions_enabled": return #"{"id":0,"result":{"suggestions_enabled":false}}"#
+            case "set_menu_bar_mark_enabled": return #"{"id":0,"result":{"menu_bar_mark_enabled":true}}"#
+            case "set_notifications_enabled": return #"{"id":0,"result":{"notifications_enabled":true}}"#
+            case "set_notify_kind": return #"{"id":0,"result":{"kind":"verdicts_landed","on":true}}"#
+            case "set_settings": return #"{"id":0,"result":{"idle_offer_pending":false}}"#
+            default: return nil
+            }
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.listPending(projectId: nil, filter: .idleSessions, order: .suggested)
+        _ = try await client.listPending(projectId: nil, filter: nil, order: .queue)
+        _ = try await client.listPending(projectId: nil, filter: nil, order: .suggested)
+        try await client.nudgeOpened(.idleSessions)
+        try await client.nudgeDecline(.reviewBacklog)
+        try await client.setSuggestionsEnabled(false)
+        try await client.setMenuBarMarkEnabled(true)
+        try await client.setNotificationsEnabled(true)
+        try await client.setNotifyKind("verdicts_landed", on: true)
+        try await client.dismissNotifyOffer(kind: "idle_sessions")
+        XCTAssertEqual(transport.calls.map(\.method), [
+            "list_pending", "list_pending", "list_pending", "nudge_opened", "nudge_decline",
+            "set_suggestions_enabled", "set_menu_bar_mark_enabled", "set_notifications_enabled",
+            "set_notify_kind", "set_settings",
+        ])
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"filter":"idle_sessions","order":"suggested"}"#,
+            "{}",
+            #"{"order":"suggested"}"#,
+            #"{"kind":"idle_sessions"}"#,
+            #"{"kind":"review_backlog"}"#,
+            #"{"on":false}"#,
+            #"{"on":true}"#,
+            #"{"on":true}"#,
+            #"{"kind":"verdicts_landed","on":true}"#,
+            #"{"idle_offer_pending":false}"#,
+        ])
+    }
+
+    /// Only the two kinds with a one-time offer have a marker to clear; any
+    /// other kind sends nothing.
+    func testOnlyAnOfferedKindsMarkerCanBeCleared() async {
+        let transport = ScriptedTransport { _, _ in #"{"id":0,"result":{}}"# }
+        let client = LiveDaemonClient(transport: transport)
+        do {
+            try await client.dismissNotifyOffer(kind: "weekly_recap")
+            XCTFail("cleared a marker that does not exist")
+        } catch {}
+        XCTAssertTrue(transport.calls.isEmpty)
+    }
+
     /// The pill's override writes (#1208): `confirm` goes only with Auto
     /// contribute, only as `true`; Ask me and Never carry the mode alone;
     /// clear carries nothing. Each reply decodes as the daemon sends it.

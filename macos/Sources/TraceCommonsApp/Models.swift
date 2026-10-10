@@ -846,6 +846,9 @@ enum DaemonEvent: Equatable {
         creditPending: Double,
         text: String
     )
+    /// One standalone re-engagement notification, in the daemon's words.
+    /// Delivered only because this app subscribes declaring it accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.
@@ -1023,6 +1026,8 @@ struct TokenStorageView: Decodable, Equatable {
     let scopeNote: String
     let cleanupLabel: String
     let discardLabel: String
+    /// The discard confirmation's title: the full name the short button drops.
+    let discardTitle: String?
     let discardConfirmation: String
     let cancelLabel: String
     let confirmLabel: String
@@ -1030,7 +1035,7 @@ struct TokenStorageView: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
-        case discardLabel = "discard_label", discardConfirmation = "discard_confirmation"
+        case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }
 }

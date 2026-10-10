@@ -496,6 +496,14 @@ impl PreviewScheduler {
         self.stopping.load(Ordering::SeqCst)
     }
 
+    /// Whether a preview is building or waiting to: any job running or
+    /// queued. Other work that wants to stay out of a preview's way (the
+    /// local-estimate backfill, OWNER DECISION E13) checks this.
+    pub fn is_building(&self) -> bool {
+        let inner = self.lock();
+        !inner.running.is_empty() || !inner.pending.is_empty()
+    }
+
     /// How many jobs are queued. Test and diagnostic use.
     pub fn queued_len(&self) -> usize {
         self.lock().pending.len()

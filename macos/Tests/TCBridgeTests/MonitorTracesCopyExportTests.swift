@@ -21,7 +21,7 @@ final class MonitorTracesCopyExportTests: XCTestCase {
     /// Keep and its undo are Customize's words, so the two surfaces agree.
     func testKeepIsTheCustomizeLabel() throws {
         let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
-        XCTAssertEqual(copy.keep, "Keep on this Mac")
+        XCTAssertEqual(copy.keep, "Keep")
     }
 
     /// A core that does not answer, and a request that failed, each get the
@@ -48,18 +48,18 @@ final class MonitorTracesCopyExportTests: XCTestCase {
     func testRonsInspectorWordsDecode() throws {
         let copy = try XCTUnwrap(MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON()))
         XCTAssertEqual(copy.tree.submitCount, "Submit \u{00B7} {count}")
-        XCTAssertEqual(copy.tree.dismissSessionTitle, "Dismiss this session?")
+        XCTAssertEqual(copy.tree.dismissSessionTitle, "Dismiss this trace?")
         // #1273 review: the folder tile's mark and the bucket's note are the
         // core's, the note keeping "You'll always be asked".
         XCTAssertEqual(copy.tree.folderMark, "dir")
         XCTAssertEqual(copy.tree.unresolvedBucketNote,
-                       "These sessions cannot be contributed automatically. You'll always be asked.")
-        XCTAssertEqual(copy.counts.sessionsWaiting, "{count} sessions waiting")
+                       "These traces cannot be contributed automatically. You'll always be asked.")
+        XCTAssertEqual(copy.counts.sessionsWaiting, "{count} traces waiting")
         XCTAssertEqual(copy.inspector.noRule, "This folder has no rule of its own yet.")
-        XCTAssertEqual(copy.inspector.applyOutcome, "Apply one outcome to {count} eligible sessions.")
+        XCTAssertEqual(copy.inspector.applyOutcome, "Apply one outcome to {count} eligible traces.")
         XCTAssertEqual(copy.summaryPanel.statistics, "Statistics")
         XCTAssertEqual(copy.sessionReview.heading, "What would leave this computer")
-        XCTAssertEqual(copy.lookInside.witnessConfirmLine, "I understand and want to send this session for review.")
+        XCTAssertEqual(copy.lookInside.witnessConfirmLine, "I understand and want to send this trace for review.")
         XCTAssertEqual(copy.undo.within, "Undo within {seconds}s before upload starts.")
         XCTAssertEqual(copy.optionalAutomation, "OPTIONAL AUTOMATION")
         XCTAssertEqual(copy.dismissAction, "Dismiss")

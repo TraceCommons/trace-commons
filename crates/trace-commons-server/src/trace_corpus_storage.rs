@@ -2243,6 +2243,17 @@ impl DedupSignalRow {
     }
 }
 
+/// One decision row's identifiers and time, newest first, as the credit
+/// estimate eval enumerates them (through the narrow `trace_gate_driver`
+/// pool, no tenant GUC, every column granted by V45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDecisionKeyRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
+}
+
 /// One decision row as the dedup re-derivation pass enumerates it (through
 /// the narrow `trace_gate_driver` pool, no tenant GUC, every column granted
 /// by V45 and V57). Carries what the pass needs to decide whether to reuse
@@ -3586,7 +3597,12 @@ pub trait TraceCorpusStore: Send + Sync {
     /// are left untouched. Implementations MUST scope the update by `tenant_id`
     /// (the V23 table has forced RLS bound to `trace_current_tenant_id()`).
     ///
-    /// Defaults to a log-once warning + no-op; only the production Postgres
+    /// Returns the number of rows updated: 0 when there is nothing to update,
+    /// or when the submission has a pipeline row, which a re-score never
+    /// rewrites (spec 2026-10-08, Slice C, O-C3). The caller counts a 0 as a
+    /// skip, never as a re-score.
+    ///
+    /// Defaults to a log-once warning + no-op (0 rows); only the production Postgres
     /// backend has a real implementation. The default deliberately does not
     /// panic but does warn (label-only, no tenant/submission identifiers) so a
     /// future non-Postgres backend that exercises the re-score path cannot
@@ -3598,14 +3614,14 @@ pub trait TraceCorpusStore: Send + Sync {
         _perplexity_micros: i64,
         _peak_perplexity_micros: Option<i64>,
         _perplexity_passed: bool,
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Write ONLY the five per-author perplexity columns (migration V73) on
@@ -3617,21 +3633,23 @@ pub trait TraceCorpusStore: Send + Sync {
     /// different model than the row was gated under cannot rewrite gating
     /// history. Implementations MUST scope the update by `tenant_id`.
     ///
-    /// Defaults to a log-once warning + no-op, as
-    /// `update_trace_gate_decision_perplexity` does and for the same reason.
+    /// Returns the number of rows updated, as
+    /// `update_trace_gate_decision_perplexity` does: 0 for a pipeline
+    /// submission. Defaults to a log-once warning + no-op (0 rows), as that
+    /// method does and for the same reason.
     async fn update_trace_gate_decision_author_perplexity(
         &self,
         _tenant_id: &str,
         _submission_id: Uuid,
         _columns: [Option<i64>; 5],
-    ) -> Result<(), DatabaseError> {
+    ) -> Result<u64, DatabaseError> {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| {
             tracing::warn!(
                 "update_trace_gate_decision_author_perplexity called on a backend without a real impl"
             );
         });
-        Ok(())
+        Ok(0)
     }
 
     /// Update ONLY the credit-quality columns for the decision row identified by

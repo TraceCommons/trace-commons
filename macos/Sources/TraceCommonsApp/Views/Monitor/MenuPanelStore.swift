@@ -50,6 +50,25 @@ final class MenuPanelStore {
         self.client = client
     }
 
+    // MARK: The nudge row
+
+    /// The lead suggestion's row, in the daemon's words; nil while the
+    /// panel is stale or there is none.
+    var nudgeRow: NudgeSurface.PanelRow? {
+        stale ? nil : NudgeSurface.panelRow(status?.nudge)
+    }
+
+    /// The row was tapped: records that the suggestion was opened, then
+    /// answers where to open the Monitor. The stamp is best effort here;
+    /// a refused one still opens the place, since looking changes nothing.
+    func open(_ row: NudgeSurface.PanelRow) async -> MonitorDestination? {
+        let effect = NudgeSurface.effect(row.intent)
+        if let client {
+            try? await NudgeSurface.send(effect, through: client)
+        }
+        return effect.destination.map(MonitorDestination.init(nudge:))
+    }
+
     /// Follows a new client (or none): the old data is stale until the
     /// new one has been read.
     func attach(_ client: (any DaemonDataClient)?, configDirectory: String? = nil) {
@@ -163,7 +182,7 @@ final class MenuPanelStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired, .inferenceCallAdded:
                 await load()
-            case .digestDue, .previewReady, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .unknown:
                 break
             }
         }

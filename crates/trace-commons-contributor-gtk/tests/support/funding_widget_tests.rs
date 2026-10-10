@@ -229,7 +229,7 @@ impl Fixture {
     fn assert_ready(&self, organization: &str) {
         assert_eq!(
             self.view().message.text(),
-            format!("Cloud organization: Synthetic {organization}")
+            format!("Organization: Synthetic {organization}")
         );
         assert_eq!(
             self.view().action.label().as_deref(),

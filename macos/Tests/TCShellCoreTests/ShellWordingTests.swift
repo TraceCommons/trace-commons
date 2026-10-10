@@ -58,7 +58,10 @@ final class ShellWordingTests: XCTestCase {
         // Lowered from 10 at R15: `QueueStateCopy` (8 sentences, no caller) was
         // deleted; the 2 left are the on-hold fallback's.
         "TraceCommonsApp/HealthCopy.swift": 2,
-        "TraceCommonsApp/Notifier.swift": 2,
+        // Lowered from 2: the digest posts the core's `digest_due.text`
+        // unchanged, and its buttons are the core's; the counts' fallback
+        // for a daemon that sends no text is what is left.
+        "TraceCommonsApp/Notifier.swift": 1,
         "TraceCommonsApp/SelfTest.swift": 14,
 
         // The SwiftUI views, which carry their own labels and help text.
@@ -94,11 +97,10 @@ final class ShellWordingTests: XCTestCase {
         // QueueView.swift and ScrubbingCaveat.swift: deleted at zero,
         // 2026-10-07 -- `QueueLegacyWords` and `ScrubbingCaveat` read the
         // core's `shell_words_copy` (#1146 parity).
-        // Lowered from 37 at #1146 parity (2026-10-07): the Settings sections'
-        // sentences are the core's (`shell_words_copy`). What is left is
-        // `ActionNoticeWords.dismissWord`, the fallback for a notice whose
-        // core word did not decode.
-        "TraceCommonsApp/Views/SettingsView.swift": 1,
+        // SettingsView.swift: deleted at zero, 2026-10-08 -- the Settings
+        // sections' sentences are the core's (`shell_words_copy`, #1146
+        // parity), and `ActionNoticeWords.dismissWord` reads the core's
+        // `dismiss_action` rather than its own "Dismiss this message".
         // Lowered from 48 at #1146 parity (2026-10-07): the withdrawal words
         // are the core's (`shell_words_copy`). What is left is
         // `WithdrawalCopyCheck`'s defect lines.

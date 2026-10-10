@@ -8,6 +8,7 @@ pub struct SkillLearningCopy {
     pub heading: &'static str,
     pub promise: &'static str,
     pub supported_family: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub learn_action: &'static str,
     pub learning: &'static str,
     pub candidate_heading: &'static str,
@@ -25,6 +26,7 @@ pub struct SkillLearningCopy {
     pub digest: &'static str,
     pub evaluation_disclosure: &'static str,
     pub review_budget_format: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub approve_and_test: &'static str,
     pub edit_skill: &'static str,
     pub testing: &'static str,
@@ -38,6 +40,7 @@ pub struct SkillLearningCopy {
     pub inspect_runs: &'static str,
     pub model_and_budget: &'static str,
     pub model_budget_format: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub open_fixture_source: &'static str,
     pub model_output: &'static str,
     pub edits: &'static str,
@@ -79,10 +82,10 @@ pub struct SkillLearningCopy {
 #[must_use]
 pub fn skill_learning_copy() -> SkillLearningCopy {
     SkillLearningCopy {
-        heading: "Learn from session",
+        heading: "Learn from trace",
         promise: "Turn this correction into an Agent Skill, score its plans and applicability on held-out repository scenarios, then install only a version that improves on both controls.",
         supported_family: "The first supported family repairs generated files through their authoritative source.",
-        learn_action: "Learn from session",
+        learn_action: "Learn",
         learning: "Learning…",
         candidate_heading: "Candidate skill",
         generated_source: "Generated source",
@@ -99,7 +102,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         digest: "SHA-256",
         evaluation_disclosure: "Approving starts the disclosed NEAR AI Cloud requests. Every arm uses the same private model and output limit. Requests contain public repository fixtures and the exact skill package shown above. Source correction and evidence fields stay on this device; remove anything private you copied into the package before approving.",
         review_budget_format: "%1$d model requests; %2$d output tokens per request; model owner must be %3$@.",
-        approve_and_test: "Approve and test",
+        approve_and_test: "Approve & test",
         edit_skill: "Edit skill",
         testing: "Scoring held-out plans…",
         results: "Held-out plan results",
@@ -112,7 +115,7 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         inspect_runs: "Inspect all runs",
         model_and_budget: "Model and budget",
         model_budget_format: "Owner %1$@ · %2$d tasks · %3$d output tokens per run",
-        open_fixture_source: "Open fixture source",
+        open_fixture_source: "View source",
         model_output: "Full model output",
         edits: "Direct source edits",
         commands: "Commands",
@@ -154,19 +157,19 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
         "account-session-required" => "Sign in to your Trace Commons account, then retry.",
         "session-detail-not-found" => "This contribution is no longer available to this account.",
         "skill-correction-required" => {
-            "This session has no contributed human correction to learn from."
+            "This trace has no contributed human correction to learn from."
         }
         "skill-session-not-accepted" => {
-            "This session must be accepted before its correction can become a skill."
+            "This trace must be accepted before its correction can become a skill."
         }
         "skill-source-lineage-invalid" => {
-            "Trace Commons could not verify this skill against the selected session."
+            "Trace Commons could not verify this skill against the selected trace."
         }
         "skill-workflow-capacity" => {
             "Too many reviewed skill workflows are open. Finish or retry an existing workflow."
         }
         "skill-candidate-unknown" | "skill-review-unknown" | "skill-evaluation-unknown" => {
-            "The local skill workflow expired. Start again from this session."
+            "The local skill workflow expired. Start again from this trace."
         }
         "skill-family-not-supported" => {
             "This correction does not match the first supported generated-file debugging family."
@@ -220,7 +223,7 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
             "The installed directory changed. Trace Commons refused rollback to protect those changes."
         }
         "skill-install-multiple-matches" => {
-            "More than one installed skill claims this session. Inspect the Codex skills directory."
+            "More than one installed skill claims this trace. Inspect the Codex skills directory."
         }
         "skill-install-scan-limit" => {
             "The Codex skills directory is too large to verify safely. Inspect it before retrying."

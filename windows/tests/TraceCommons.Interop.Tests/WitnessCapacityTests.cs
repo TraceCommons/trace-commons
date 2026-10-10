@@ -54,7 +54,7 @@ public class WitnessCapacityTests
     }
 
     private const string NoticeJson = """
-        {"title":"Waiting for the privacy witness","body":"2 approved sessions are waiting.","next_check":"Next try"}
+        {"title":"Waiting for the privacy witness","body":"2 approved traces are waiting.","next_check":"Next try"}
         """;
 
     [Fact]

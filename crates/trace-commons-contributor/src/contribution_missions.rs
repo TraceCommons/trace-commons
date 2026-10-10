@@ -14,10 +14,15 @@
 //!
 //! # PROVISIONAL: shape owned by Z7/Z8
 //!
-//! The server catalogue does not exist yet. Until Z7/Z8 publish one, the
-//! catalogue arrives as a parameter of the `mission_matches` IPC call, and
-//! this type is the minimum matching needs. Z7/Z8 own the shape; expect it to
-//! change, under a new `schema_version`. It is read leniently -- unknown
+//! The server publishes what to match on as an optional, versioned predicate
+//! on each activity mission
+//! (`trace_commons_protocol::activity_missions::MissionPredicateV1`). The
+//! daemon's scheduled refresh turns the missions carrying a version-1
+//! predicate into this catalogue for its mission slot
+//! (`daemon::activity_missions::contribution_catalogue`); the
+//! `mission_matches` IPC call still takes one as a parameter. This type is
+//! the minimum matching needs; expect it to change, under a new
+//! `schema_version`. It is read leniently -- unknown
 //! fields are ignored and every field but `schema_version` and `mission_id`
 //! has a default -- so a catalogue written for a later minor addition still
 //! loads. A catalogue whose `schema_version` is newer than this build knows
@@ -265,7 +270,35 @@ pub fn match_missions(catalogue: &ContributionMissionCatalogue, facts: &LocalFac
         .collect()
 }
 
-fn session_fits(criteria: &MissionCriteria, session: &SessionFact, facts: &LocalFacts) -> bool {
+/// How many of `matched_ids`' missions `session` fits: the per-session
+/// half of [`match_missions`], for counting what one waiting session would
+/// count toward.
+///
+/// A mission counts only when it is in `matched_ids` -- what
+/// [`match_missions`] returned over the same `facts` -- as well as fitting
+/// the session's criteria. So a session never fits a mission whose
+/// `min_sessions` the readable sessions have not reached, and the count
+/// agrees with what a Missions screen would show (OWNER DECISION V3).
+pub fn missions_fitting(
+    catalogue: &ContributionMissionCatalogue,
+    matched_ids: &[String],
+    session: &SessionFact,
+    facts: &LocalFacts,
+) -> usize {
+    catalogue
+        .missions
+        .iter()
+        .filter(|m| {
+            matched_ids.contains(&m.mission_id) && session_fits(&m.criteria, session, facts)
+        })
+        .count()
+}
+
+pub(crate) fn session_fits(
+    criteria: &MissionCriteria,
+    session: &SessionFact,
+    facts: &LocalFacts,
+) -> bool {
     let any = |wanted: &[String], have: &str| wanted.iter().any(|w| w == have);
     (criteria.tools.is_empty() || any(&criteria.tools, &session.tool))
         && (criteria.tool_families.is_empty()
@@ -419,5 +452,39 @@ mod tests {
             {"mission_id": "zero", "criteria": {"min_sessions": 0}},
         ]));
         assert!(match_missions(&cat, &LocalFacts::default()).is_empty());
+    }
+
+    /// `missions_fitting` counts a mission only when it was matched and the
+    /// session meets its criteria; one it meets but that was not matched
+    /// (its `min_sessions` unreached), or one matched that it does not
+    /// meet, is not counted (OWNER DECISION V3).
+    #[test]
+    fn missions_fitting_counts_matched_missions_the_session_meets() {
+        let cat = ContributionMissionCatalogue::from_value(&json!({
+            "schema_version": 1,
+            "missions": [
+                {"mission_id": "claude", "criteria": {"tools": ["claude-code"]}},
+                {"mission_id": "anthropic", "criteria": {"tool_families": ["anthropic"]}},
+                {"mission_id": "claude-5", "criteria": {"tools": ["claude-code"], "min_sessions": 5}},
+                {"mission_id": "codex", "criteria": {"tools": ["codex"]}},
+            ],
+        }))
+        .unwrap();
+        let fact = |tool: &str| SessionFact {
+            tool: tool.to_string(),
+            folder: "/work/a".to_string(),
+        };
+        let facts = LocalFacts {
+            sessions: vec![fact("claude-code"), fact("codex")],
+            folder_languages: BTreeMap::new(),
+        };
+        let matched = match_missions(&cat, &facts);
+        assert_eq!(matched, vec!["claude", "anthropic", "codex"]);
+        assert_eq!(
+            missions_fitting(&cat, &matched, &fact("claude-code"), &facts),
+            2
+        );
+        assert_eq!(missions_fitting(&cat, &matched, &fact("codex"), &facts), 1);
+        assert_eq!(missions_fitting(&cat, &[], &fact("claude-code"), &facts), 0);
     }
 }

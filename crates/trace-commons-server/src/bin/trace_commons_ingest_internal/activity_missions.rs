@@ -7,7 +7,17 @@ use axum::extract::RawQuery;
 use trace_commons_protocol::activity_missions::{ActivityCatalogue, ActivityPolicy};
 
 pub(super) fn policy_from_env() -> anyhow::Result<Option<Arc<ActivityPolicy>>> {
-    match std::env::var("TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON") {
+    policy_from_raw(std::env::var("TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON"))
+}
+
+/// Absent is unconfigured; anything malformed fails startup. That includes a
+/// mission predicate of a version this server cannot validate: the server
+/// publishes predicates for clients to match locally, and never evaluates
+/// one or accepts a matching result.
+pub(super) fn policy_from_raw(
+    raw: Result<String, std::env::VarError>,
+) -> anyhow::Result<Option<Arc<ActivityPolicy>>> {
+    match raw {
         Ok(raw) => ActivityPolicy::parse(raw.as_bytes())
             .map(|p| Some(Arc::new(p)))
             .map_err(|_| anyhow::anyhow!("activity_missions_policy_invalid")),

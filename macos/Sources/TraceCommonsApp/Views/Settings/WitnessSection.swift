@@ -175,14 +175,17 @@ struct WitnessSection: View {
                     Button(copy.inferenceEnable) { showingInferenceDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
+                    // Disable, the decline, is a link after Enable (Ron,
+                    // 2026-10-09).
                     Button(copy.inferenceDisable) {
                         Task { await model.setInferenceEvidence(false) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
+                // A failed save, directly under the buttons it is about.
                 if model.inferenceEvidenceSaveFailed {
-                    GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
+                    GlassAlert(copy.inferenceSaveFailed)
                 }
             }
         }
@@ -221,17 +224,20 @@ struct WitnessSection: View {
                     Button(copy.tokenEnable ?? "") { showingTokenDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
+                    // Disable, the decline, is a link after Enable (Ron,
+                    // 2026-10-09).
                     Button(copy.tokenDisable ?? "") {
                         Task { await model.setTokenContribution(false) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
+                }
+                // A failed save, directly under the buttons it is about.
+                if model.tokenContributionSaveFailed {
+                    GlassAlert(copy.tokenSaveFailed ?? "")
                 }
                 if let storage = model.daemonSettings?.tokenStorage {
                     storageBlock(storage)
-                }
-                if model.tokenContributionSaveFailed {
-                    GlassFlowNotice(message: copy.tokenSaveFailed ?? "", glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
                 }
             }
         }
@@ -298,7 +304,7 @@ struct WitnessSection: View {
         // Discard is destructive: right-most, never on Return.
         .glassModal(isPresented: $showingTokenDiscard) {
             GlassConfirmation(
-                title: storage.discardLabel, message: storage.discardConfirmation,
+                title: storage.discardTitle ?? storage.discardLabel, message: storage.discardConfirmation,
                 actions: [
                     .cancel(storage.cancelLabel) { showingTokenDiscard = false },
                     .destructive(storage.confirmLabel) {
@@ -308,7 +314,8 @@ struct WitnessSection: View {
                 ],
                 onCancel: { showingTokenDiscard = false })
         }
-        if !model.tokenStorageNotice.isEmpty { note(model.tokenStorageNotice) }
+        // Set only by a failed capture or storage action: a failure line.
+        if !model.tokenStorageNotice.isEmpty { GlassAlert(model.tokenStorageNotice) }
     }
 
     private func prose(_ text: String) -> some View {

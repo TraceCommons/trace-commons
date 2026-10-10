@@ -55,12 +55,12 @@ final class SubagentCopyTests: XCTestCase {
         XCTAssertEqual(
             SubagentCopy.line(count: 42, dropped: 1),
             "Includes 42 delegated subagent transcripts. The largest was left out to keep this "
-                + "session within its size limit; the conversation itself is complete."
+                + "trace within its size limit; the conversation itself is complete."
         )
         XCTAssertEqual(
             SubagentCopy.line(count: 42, dropped: 3),
             "Includes 42 delegated subagent transcripts. The 3 largest were left out to keep "
-                + "this session within its size limit; the conversation itself is complete."
+                + "this trace within its size limit; the conversation itself is complete."
         )
     }
 
@@ -70,12 +70,12 @@ final class SubagentCopyTests: XCTestCase {
     func testEverythingDroppedStartsFromWhatWasLeftOut() {
         XCTAssertEqual(
             SubagentCopy.line(count: 0, dropped: 1),
-            "1 delegated subagent transcript was left out to keep this session within its size "
+            "1 delegated subagent transcript was left out to keep this trace within its size "
                 + "limit; the conversation itself is complete."
         )
         XCTAssertEqual(
             SubagentCopy.line(count: 0, dropped: 2),
-            "2 delegated subagent transcripts were left out to keep this session within its "
+            "2 delegated subagent transcripts were left out to keep this trace within its "
                 + "size limit; the conversation itself is complete."
         )
     }

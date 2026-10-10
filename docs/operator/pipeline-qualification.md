@@ -149,7 +149,23 @@ directory and compare every file byte for byte; check the restored
 database before anything resumes; resume the pending run against the
 restored database and artifacts, and require it to reach the same
 settlement legs and Trace Credit ledger event the seed produced, with no
-duplicate effect.
+duplicate effect. The database fingerprint covers each run's privacy pass
+record (its object ref, content hash, outcome and `privacy_pass_required`),
+so a restore that dropped the pass record fails
+`restore_database_fingerprint_mismatch`.
+
+A production package whose `NoveltyUtility` delta is `0` (the pilot's
+`TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0`) awards nothing, so no
+run settles a leg or writes a ledger event. The drill then requires exactly
+that, zero legs and zero events for every run, the resume included, and its
+evidence carries `credit_delta_zero: true`. Everything else is checked as
+before, and the seed still requires the pending run's Settle selection to
+include it in the index (`restore_seed_pending_selection_excludes` when a
+fixture misses its floors). With no `CreditMutate` event to keep, the seed
+appends one hash-only read event per tenant through `main`'s mirrored audit
+log, so the audit chain checks still have a chain to compare. The credit
+and credit-audit path stays covered by the reference candidate's drill,
+which awards 2.5 points.
 
 The checks before the resume, each with its own failure label in the
 resume's protected log:
@@ -250,31 +266,35 @@ qualification and activation routes call it over signed results (see
 passing result for each of the 22 checks in `PROMOTION_REQUIRED_CHECKS`: the 19
 that `qualify` produces, and three promotion-only checks
 (`pipeline_production_adapters`, `pipeline_remote_restore`,
-`pipeline_hf_network_canary`) that need the production assembly. No code in
-this repository emits those three (see "What local evidence is not"). It
-also requires:
+`pipeline_hf_network_canary`) that need the production assembly. The deployed
+production assembly emits `pipeline_production_adapters` at startup (see
+[pipeline-activation.md](pipeline-activation.md), "The production assembly");
+no code in this repository emits the other two yet (see "What local evidence
+is not"). It also requires:
 
 - every result to carry the same `code_revision_hash`
   (`qualification_evidence_mixed_revision` otherwise);
-- the 19 results that `qualify` produces to carry the same `run_id`
-  (`qualification_evidence_mixed_run` otherwise). The evidence of a bundle is
-  the output of one `qualify` run plus the three promotion-only results. A set
-  cannot take one result from one `qualify` run and the rest from another run,
-  on the same revision or not. The three promotion-only results can come from
-  other runs: their run ids are not compared. `PROMOTION_ONLY_CHECKS` holds
-  the three ids. The rule applies at the qualification, at the activation, and
-  at the rollback;
+- the 15 mechanics results to carry one `run_id` and the seven
+  package-bearing results (`PROMOTION_PACKAGE_CHECKS`) to carry one `run_id`
+  (`qualification_evidence_mixed_run` otherwise; spec A-D12). The evidence of
+  a bundle is two runs of one revision: the mechanics run (`qualify`,
+  reference dependencies, no network) and the production run (against the
+  production assembly), which also carries the three promotion-only results
+  (`PROMOTION_ONLY_CHECKS`). A set cannot take one mechanics result from one
+  run and the rest from another, nor split the package-bearing results across
+  runs. The rule applies at the qualification, at the activation, and at the
+  rollback;
 - no result to carry a safe blocker, a passing one included. Each blocker is
   listed as `<label>:<check_id>`. A local restore drill passes with the blocker
   `filesystem_restore_local_only`, so a local result set is never ready;
-- each of the four checks that test the candidate package to name it, with all
-  three digests. `PROMOTION_PACKAGE_CHECKS` holds them:
+- each of the seven checks that test the candidate package to name it, with
+  all three digests. `PROMOTION_PACKAGE_CHECKS` holds them:
   `pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`,
-  `pipeline_http_corpus_hf_local`, and `pipeline_restore_drill`. A candidate
-  check that names fewer digests adds
+  `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`, and the three
+  promotion-only checks. A candidate check that names fewer digests adds
   `qualification_evidence_package_missing:<check_id>`;
-- every other check, a mechanics check or a promotion-only check, to name no
-  package. A result that carries any digest adds
+- every other check, a mechanics check, to name no package. A result that
+  carries any digest adds
   `qualification_evidence_package_unexpected:<check_id>`;
 - the packages that the results name to be one
   (`qualification_evidence_mixed_package` otherwise).
@@ -284,9 +304,9 @@ Its decision names the one revision and the one package, and its
 evidence hash (not the evaluation time, so the same evidence gives the same
 hash). Three consequences:
 
-- A decision is ready only when the four candidate checks name one package and
+- A decision is ready only when the seven candidate checks name one package and
   no other result names any. A decision in which no check names a package is
-  not ready: it carries four `qualification_evidence_package_missing`
+  not ready: it carries seven `qualification_evidence_package_missing`
   blockers.
 - A `qualify` run names exactly one package. The corpus runs for the
   compatibility and HF-local checks and the restore drill serve it, and so does
@@ -304,8 +324,8 @@ hash). Three consequences:
   the whole set (`qualification_evidence_mixed_revision`,
   `qualification_evidence_mixed_run`). A ready decision needs each of the 22
   ids once, each `pass`, each inside its maximum age, one revision, one run
-  for the 19 results of `qualify`, the package named by the four candidate
-  checks only, and no safe blocker.
+  for the mechanics results and one for the package-bearing results, the
+  package named by the seven candidate checks only, and no safe blocker.
 
 ## Signed check results
 
@@ -477,10 +497,184 @@ Closing these is promotion work, not part of `qualify`:
 `evaluate_promotion` also requires three promotion-only checks:
 `pipeline_production_adapters`, `pipeline_remote_restore`, and
 `pipeline_hf_network_canary`. Their results come from a production run, not a
-local one. No code in this repository emits them, and no local or CI run passes
-them. So a decision over the results of a local `qualify` run is never ready: it
-lacks these three results, and its restore drill carries the blocker
+local one. The deployed production assembly emits the first at startup,
+`pipeline.py promote` (below) writes the last two on the operator host, and no
+local or CI run passes any of them. A local `qualify` run's package is the
+reference one, which no production assembly holds, so its four package-bearing
+results can never be the evidence of a production package. A decision over the
+results of a local `qualify` run is therefore never ready: it lacks these three
+results, and its restore drill carries the blocker
 `filesystem_restore_local_only`.
+
+The production run's four package-bearing results must come from the
+production assembly. `assemble_production_pipeline`
+(`trace_commons_server::versioned_pipeline_production`) is library code, and
+so is its one components constructor,
+`PipelineGateComponents::from_env(PipelineComponentInputs)` (`near-ai-scorer`),
+which builds the NEAR AI scorer, the fastembed embedder and the usearch
+pipeline index from the environment and refuses a start whose descriptors
+disagree with them. The ingest binary and the integration targets that emit
+these results call that same constructor. Its scorer and embedder adapters
+are the only ones that report themselves production-qualified: components
+built any other way (`PipelineGateComponents::with_unqualified_adapters`,
+which is how a test fills them with doubles) are never production-qualified,
+whatever the doubles report, so a double wrapped under the production
+descriptors cannot qualify
+(`production_assembly_is_constructible_from_the_library` pins that).
+
+The four harnesses that emit the package-bearing results (the bundle
+qualification test, the corpus harness, and the restore seed and resume)
+read `TRACE_COMMONS_PIPELINE_HARNESS_ASSEMBLY`: unset or `reference`, they
+build the reference assembly exactly as `qualify` always has; `production`,
+they build their components through `from_env` and the service through the
+production builder over the signed production package, and refuse unless the
+service serves exactly that package. Production mode exists only in a
+`near-ai-scorer` build; any other build refuses it with
+`harness_production_assembly_unavailable`, and a missing NEAR AI or embedder
+setting refuses with `from_env`'s own label, never falling back to reference
+components. In production mode `pipeline_bundle_qualification`'s five
+reference assertions flip (scorer and embedder identities are
+`near_ai_perplexity_scorer` and `fastembed_text_embedder`, both
+production-qualified, configuration qualifiable), the corpus check compares
+only the fields real scoring cannot move, and every one of the four results'
+evidence says `"harness_assembly": "production"`. A reference result never
+carries that field. `promote package-checks` (below) runs the four in this
+mode.
+
+## The production run: `pipeline.py promote`
+
+Spec: `docs/superpowers/specs/2026-10-08-pipeline-production-assembly-design.md`
+(Slice B). Qualification is two runs of one code revision: the mechanics run
+(`qualify`, above) and a production run on the operator host, against the
+production package, with network. Every `promote` subcommand and `hf-pin
+record` refuses to start when `CI` is set (`promote_refused_in_ci`).
+
+| Command | What it does |
+|---|---|
+| `promote init --package P --trusted-key K` | Starts the production run: prints its `run_id` and code revision, records the package's three digests. Every later subcommand takes `--run-id` and refuses a changed tree (`promote_code_revision_changed`). |
+| `promote package-checks --run-id R --env-file ENV [--pin PATH]` | The four package checks (`pipeline_bundle_qualification`, `pipeline_http_corpus_compatibility`, `pipeline_http_corpus_hf_local`, `pipeline_restore_drill`) on the production assembly, on the pilot's feature set, over the run's package. Its components come from `PipelineGateComponents::from_env`. From `ENV` (the deployment's env file) it passes on only what that reads: the scorer and embedder descriptors, the NEAR AI endpoint, key and timeout, the embedder cache, and the usearch settings. It never passes the live index roots, and points `TRACE_COMMONS_PIPELINE_VECTOR_INDEX_ROOT` inside the run. It refuses (`promote_env_file_incomplete`) without the NEAR AI endpoint, key and model. The HF corpus comes from the committed `pin-network.json` (`hf_network_pin_missing` until it is committed); a `--pin` whose bytes differ from it is refused (`hf_network_pin_not_committed`). Each check gets a fresh usearch index under the run's `indexes/`. Refuses any result that does not name the run's package or whose evidence does not say `harness_assembly: production` (`promote_harness_assembly_not_production:<id>`); `sign` refuses the same. |
+| `promote hf-canary --run-id R [--pin PATH]` | `pipeline_hf_network_canary`: downloads the network pin's revision into a fresh cache inside the run and compares all five digests (`hf_pin_digest_mismatch_<field>` on a moved one). The pin is the committed `crates/trace-commons-server/tests/fixtures/pipeline-hf-jsonl/pin-network.json`, which the run's code revision covers; `hf_network_pin_missing` when it is absent. A `--pin` whose bytes differ from it is refused with `hf_network_pin_not_committed` before anything is downloaded, so an uncommitted pin (one `hf-pin record` just wrote, for example) is never certified. |
+| `promote remote-restore --run-id R --source-store B[/prefix] --scratch-store B[/prefix] [--postgres-admin-url URL]` | `pipeline_remote_restore`: runs the remote restore drill (below). Refuses a scratch store that is, contains, or sits inside the live one. Store names appear only as hashes. |
+| `promote adapters --run-id R` | Checks the `pipeline_production_adapters` result the deployed ingest wrote at boot (copied into the run's `results/`): this run, this revision, this package, a pass with no blocker. |
+| `promote sign --run-id R --signing-key KEY --signing-key-id ID` | Signs exactly the production run's seven results (the four package checks and the three promotion-only checks), on the pilot's feature set. |
+| `promote assemble --run-id R --mechanics-run-id M --output DIR` | Writes the 22 attestations (15 from the mechanics run, 7 from this one) and the signed package into a new directory. Refuses a missing id, a mechanics id signed in the production run, and two code revisions. `evaluate_promotion` applies the run rule per group; see below. |
+| `hf-pin record --revision COMMIT --output PATH` | Downloads one dataset commit and writes `pin-network.json` (the local pin's fields less `local_jsonl_dir`, with the computed digests). Never overwrites; the owner commits the file in a PR. |
+
+In order, on the operator host, from a checkout of the deployed revision:
+
+```bash
+python3 scripts/operator/pipeline.py package --bundle production \
+  --env-file /etc/tracecommons/ingest.env \
+  --signing-key PACKAGE-KEY.der --key-id PACKAGE_KEY_ID \
+  --output PKG.json --public-key-output PKG-KEY.json
+python3 scripts/operator/pipeline.py promote init --package PKG.json --trusted-key PKG-KEY.json
+python3 scripts/operator/pipeline.py promote package-checks --run-id R --env-file /etc/tracecommons/ingest.env
+python3 scripts/operator/pipeline.py promote hf-canary --run-id R
+python3 scripts/operator/pipeline.py promote remote-restore --run-id R --source-store B --scratch-store S
+python3 scripts/operator/pipeline.py promote adapters --run-id R
+python3 scripts/operator/pipeline.py promote sign --run-id R --signing-key KEY --signing-key-id ID
+python3 scripts/operator/pipeline.py promote assemble --run-id R --mechanics-run-id M --output DIR
+```
+
+`evaluate_promotion` discharges exactly one blocker on a production run's
+evidence: `filesystem_restore_local_only` on `pipeline_restore_drill` is not a
+blocker when the set holds a passing `pipeline_remote_restore` with no blocker of
+its own, from the same code revision, naming the same package. Every other
+blocker still blocks.
+
+An assembled set is two runs by design: the 15 mechanics results carry run M,
+and the seven production results carry run R. `evaluate_promotion`
+(`versioned_pipeline_qualification.rs`) applies the run rule per group (spec
+A-D12): one run id for the mechanics results, one for the package-bearing
+results (`PROMOTION_PACKAGE_CHECKS`, which holds the three promotion-only ids
+too, so they name the production package like the other four). A set with
+more than one run within a group is refused with
+`qualification_evidence_mixed_run`.
+
+The child processes `promote` starts see only the allowlisted environment
+(`child_environment`): no cloud credential variable reaches them. On the pilot
+host, Application Default Credentials come from the metadata server.
+
+### The remote restore drill (`promote remote-restore`)
+
+`promote remote-restore` runs the local restore drill's order with a remote
+store in place of the artifact root, in a PostgreSQL of its own (a container,
+or the loopback server `--postgres-admin-url` names; never the production
+database):
+
+1. **Seed.** `pipeline_restore_seed` serves the ingest app on the drill's own
+   database with the deployment's artifact store (the GCS client and the key
+   wrapper `TRACE_COMMONS_KEK_PROVIDER` selects) and writes its objects into
+   the **source** store, under a namespace fresh for each invocation:
+   `<source prefix>/pipeline-remote-restore-<run>-<random>/`. The live
+   objects sit under `trace_commons_service_owned_remote/`, so the drill never
+   writes among them, and it lists only its own namespace. Its
+   tenants (`tenant-a`, `tenant-b`, `tenant-c`) exist only in the drill's
+   database. The seed and the resume serve the reference compatibility
+   candidate, not the production assembly: this check is about the remote
+   store and the key wrapper across a restore, and the production assembly's
+   restore is `package-checks`' `pipeline_restore_drill`. The drill needs no
+   NEAR AI credential and no vector index.
+2. **Database restore.** The seed's database is dumped and restored into a
+   second database, as in `restore-drill`.
+3. **Copy** (`pipeline_remote_restore_run`). Every object in the namespace is
+   read from the source and written into the same namespace of the **scratch**
+   store at the provider (`read_encrypted_artifact`, then
+   `put_encrypted_artifact`), as ciphertext with its object ref unchanged. A
+   copy that decrypted and stored again would encrypt under a fresh DEK and
+   never match. It refuses a scratch namespace that already holds objects
+   (`remote_restore_scratch_not_empty`). It measures: the stored-object
+   fingerprint of the source before the copy and of the scratch store after it
+   (SHA-256 over each object's key under the store and the SHA-256 of its
+   stored bytes, in key order); how many restored objects decrypt under the
+   configured key wrapper (the DEK unwrapped, the ciphertext decrypted in
+   memory, the plaintext dropped, nothing written); and whether **both**
+   buckets report object versioning on.
+4. **Resume.** `pipeline_restore_resume` runs against the restored database
+   with the scratch store as its artifact store: it refuses a scratch store
+   whose fingerprint is not the seed's, then resumes the seed's pending run
+   once.
+
+The result passes only on a `gcs` store with at least one object, equal
+fingerprints, every object unwrapped, versioning on in both buckets, and the
+resumed database equal to the seed's with one pending run resumed and no
+duplicate effect. The source fingerprint the copy read must be the one the
+seed took (`remote_restore_source_changed` otherwise).
+
+Only `TRACE_COMMONS_KEK_PROVIDER` and `TRACE_COMMONS_KEK_GCP_KMS_KEY_NAME` are
+passed from the operator's environment to the children; set them as the
+deployment does. On GCS the drill refuses a key wrapper that is not a
+production trust boundary (`remote_restore_kek_not_production`): under the
+local master key every object would unwrap and the count would say nothing
+about KMS. Credentials come from Application Default Credentials. The
+drill's objects stay in both stores: nothing in the drill deletes from a
+bucket. Remove the `pipeline-remote-restore-*` namespaces by hand (or with a
+lifecycle rule on that prefix) when the run is done.
+
+**What the operator creates (O-B1).** A scratch target that is not the live
+store and not inside it: a separate bucket (preferred: its IAM and lifecycle
+stay apart from the live data), or a prefix in the live bucket beside the live
+objects, which requires naming the live store with a prefix too, because a
+bare bucket name overlaps every prefix in it. Object versioning must be on in
+both buckets, or the result fails with `remote_restore_versioning_disabled`.
+The identity the drill runs as needs:
+
+- on the source bucket: `storage.objects.create`, `storage.objects.get`,
+  `storage.objects.list`, and `storage.buckets.get` (for the versioning read);
+- on the scratch bucket: the same four;
+- on the KMS key: encrypt and decrypt (`roles/cloudkms.cryptoKeyEncrypterDecrypter`),
+  because the seed wraps DEKs and the copy unwraps them.
+
+No delete permission is needed.
+
+**What only a live run proves.** Every test in the repository runs the drill
+over an in-memory client or a directory double, with the local master key.
+Those show the copy keeps the stored bytes, the unwrap count and the resume.
+They cannot show that the production client lists every page of a real
+bucket, that `get_bucket` reports the bucket's real versioning policy, that
+the operator's identity holds the permissions above, or that GCP KMS unwraps
+what it wrapped. A run against the double reports its kind
+(`gcs_directory_double`) and no versioning, so it can never pass.
 
 ## Package trust and `qualify_bundle`
 

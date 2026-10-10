@@ -673,7 +673,7 @@ impl SettingsView {
         let public = gtk::Box::new(gtk::Orientation::Vertical, space::M);
         content.append(&public);
 
-        // #1146's "Changes on this machine", the core's word for every shell.
+        // The core's "Change log" (owner ruling, 2026-10-08), for every shell.
         content.append(&style::section(
             trace_commons_contributor::preview_copy::monitor_screens_copy()
                 .shell
@@ -946,9 +946,11 @@ fn offer_pause(app: &Rc<App>) {
     );
     dialog.add_responses(&[
         ("cancel", "Cancel"),
-        ("hour", "For 1 hour"),
-        ("tomorrow", "Until tomorrow morning"),
-        ("forever", "Until I turn it back on"),
+        // The core's pause lengths (`pause_hour`, `pause_morning`,
+        // `pause_until_resumed`), button rule 2026-10-08.
+        ("hour", "1 hour"),
+        ("tomorrow", "Until morning"),
+        ("forever", "Until resumed"),
     ]);
     dialog.set_close_response("cancel");
     let app = Rc::clone(app);
@@ -1039,7 +1041,7 @@ pub fn render_status(app: &Rc<App>, status: &Status) {
     let connected = if status.logged_in {
         concat!("Connected to ", copy::app_name!(), ".")
     } else {
-        "Not connected. Sessions are still being queued; nothing can be sent yet, and nothing \
+        "Not connected. Traces are still being queued; nothing can be sent yet, and nothing \
          has been lost."
     };
     app.settings
@@ -1991,7 +1993,7 @@ fn render_projects(app: &Rc<App>, projects: &[Project]) {
     });
     let armed_line = gtk::Label::builder()
         .label(if armed.is_empty() {
-            "Every session is offered to you first.".to_string()
+            "Every trace is offered to you first.".to_string()
         } else {
             armed
                 .iter()
@@ -4250,7 +4252,7 @@ mod tests {
     /// The three modes are three different rows, and the `off` row does not
     /// say what the `unset` row says.
     ///
-    /// `off` and `unset` shared a sentence -- "sessions read from the usual
+    /// `off` and `unset` shared a sentence -- "traces read from the usual
     /// place" -- because the row branched on `*_root_configured`, which is
     /// `mode == "watch"`. Nothing is read from an `off` source, so that was
     /// a false statement on the one screen a contributor checks to confirm
@@ -4262,15 +4264,15 @@ mod tests {
         let unset = source_check_rows(&settings_with_modes("unset", "unset"));
         let off = source_check_rows(&settings_with_modes("off", "off"));
 
-        assert_eq!(watch[0].0, "Claude Code sessions folder set");
-        assert_eq!(unset[0].0, "Claude Code sessions read from the usual place");
+        assert_eq!(watch[0].0, "Claude Code traces folder set");
+        assert_eq!(unset[0].0, "Claude Code traces read from the usual place");
         assert_eq!(
             off[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
         assert_eq!(
             off[1].0,
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
 
         for (a, b) in [(&watch, &unset), (&watch, &off), (&unset, &off)] {
@@ -4298,9 +4300,9 @@ mod tests {
         let rows = source_check_rows(&settings_with_modes("off", "unset"));
         assert_eq!(
             rows[0].0,
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed"
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed"
         );
-        assert_eq!(rows[1].0, "Codex sessions read from the usual place");
+        assert_eq!(rows[1].0, "Codex traces read from the usual place");
         assert_eq!((rows[0].1, rows[1].1), (false, false));
     }
 
@@ -5347,9 +5349,15 @@ fn wire_token_storage(app: &Rc<App>) {
         let Some(storage) = a.settings.token_storage.borrow().clone() else {
             return;
         };
+        // The button is short; the confirmation keeps the full title.
+        let title = if storage.discard_title.is_empty() {
+            &storage.discard_label
+        } else {
+            &storage.discard_title
+        };
         let dialog = adw::MessageDialog::new(
             Some(&a.window),
-            Some(&storage.discard_label),
+            Some(title),
             Some(&storage.discard_confirmation),
         );
         dialog.add_responses(&[

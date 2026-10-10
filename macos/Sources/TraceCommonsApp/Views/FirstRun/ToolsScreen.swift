@@ -175,7 +175,7 @@ enum ToolsScreenLayout {
         URL(fileURLWithPath: path).lastPathComponent
     }
 
-    /// The trajectory row's picker. "I don't use it" withdraws the folder;
+    /// The trajectory row's picker. "Not used" withdraws the folder;
     /// the placeholder and "Watch this folder" leave it as it is.
     static func selectTrajectory(_ answer: ToolAnswer?, in state: inout FirstRunState) {
         if answer == .dontUse { state.withdrawTrajectory() }
@@ -193,9 +193,10 @@ enum ToolsScreenLayout {
 
     /// Whether a described folder may still change the state. A drop and an
     /// off-main describe answer later; by then a commit may hold the start
-    /// snapshot, or the screen may have moved on.
+    /// snapshot, or the screen may have moved on. Both tool screens take
+    /// folders: Quick's Folders and Custom's Tools (owner, 2026-10-08).
     static func acceptsFolder(step: FirstRunStep, isCommitting: Bool) -> Bool {
-        step == .tools && !isCommitting
+        (step == .tools || step == .folders) && !isCommitting
     }
 
     /// Discovery's rows. A kind discovery did not find that the state
@@ -215,20 +216,14 @@ enum ToolsScreenLayout {
         return rows
     }
 
-    /// Ron's compact meta: "Added by you" for a folder the person gave
-    /// through a missing tool's row, the session count alone for a found
-    /// tool, discovery's evidence otherwise.
+    /// A tool card's caption: "Added by you" for a folder the person gave
+    /// through a missing tool's row, nothing otherwise. Tool cards show no
+    /// session count and no "not found" line (owner, 2026-10-08).
     static func meta(
         for candidate: SourceCandidate, in state: FirstRunState, discovered: [SourceCandidate],
-        copy: FirstRunCopy, now: Date
-    ) -> String {
-        if personalPath(for: candidate.source, discovered: discovered, in: state) != nil {
-            return copy.tools.addedByYou
-        }
-        if candidate.exists {
-            return FirstRunCopy.fill(copy.frame.sessionCount, ["count": String(candidate.sessionCount)])
-        }
-        return candidate.evidence(now: now)
+        copy: FirstRunCopy
+    ) -> String? {
+        personalPath(for: candidate.source, discovered: discovered, in: state) != nil ? copy.tools.addedByYou : nil
     }
 
     /// The added trajectory folder, which has no tool row of its own.
@@ -252,10 +247,295 @@ enum ToolsScreenLayout {
     }
 }
 
+/// A folder that matched more than one kind, waiting for the person.
+struct PendingFolder: Equatable {
+    let path: String
+    let kinds: [AddedFolder.Kind]
+}
+
+/// The add-tool flow the two tool screens share (owner, 2026-10-08: Quick's
+/// Folders and Custom's Tools both offer it, with one component and one
+/// behaviour): a picked or dropped folder is described by the core off the
+/// main actor, and its answer lands only while a tool screen is up and
+/// nothing is committing (`ToolsScreenLayout.acceptsFolder`).
+@MainActor
+final class AddToolModel: ObservableObject {
+    @Published var pending: PendingFolder?
+    @Published var refused = false
+
+    /// Describe a picked folder and act on what the core reports.
+    /// `replacing` names an added row whose folder button picked `path`.
+    func describe(_ path: String, replacing: String? = nil, runner: FirstRunRunner) {
+        guard Self.accepting(runner) else { return }
+        Task.detached(priority: .userInitiated) {
+            let json = TCDiscovery.describeFolderJSON(path)
+            await MainActor.run {
+                self.land(ToolsScreenLayout.outcome(path: path, json: json), replacing: replacing, runner: runner)
+            }
+        }
+    }
+
+    func land(_ outcome: AddToolOutcome, replacing: String? = nil, runner: FirstRunRunner) {
+        guard Self.accepting(runner) else { return }
+        if let replacing {
+            refused = !ToolsScreenLayout.replace(path: replacing, with: outcome, in: &runner.state)
+        } else {
+            refused = !ToolsScreenLayout.apply(outcome, to: &runner.state)
+        }
+        if case .ask(let path, let kinds) = outcome {
+            pending = PendingFolder(path: path, kinds: kinds)
+        } else {
+            pending = nil
+        }
+    }
+
+    static func accepting(_ runner: FirstRunRunner) -> Bool {
+        ToolsScreenLayout.acceptsFolder(step: runner.state.step, isCommitting: runner.isCommitting)
+    }
+}
+
+/// The tool cards both tool screens show, in the frame's scrolling body:
+/// discovery's rows, the folders added with the tile, the trajectory folder
+/// and an open question. The add tile is not among them: it is the frame's
+/// pinned area, always in view (`AddToolTile`).
+struct ToolList: View {
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    @ObservedObject var adding: AddToolModel
+    let discovery: DiscoveredRows
+    let installURL: (SourceKind) -> URL?
+    let retry: () -> Void
+
+    var body: some View {
+        Group {
+            switch discovery {
+            case .found(let discovered):
+                VStack(spacing: GlassTokens.Space.s4) {
+                    ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) { candidate in
+                        ToolAnswerRow(
+                            copy: copy.folders,
+                            choose: copy.frame.choose,
+                            candidate: candidate,
+                            meta: ToolsScreenLayout.meta(
+                                for: candidate, in: runner.state, discovered: discovered, copy: copy),
+                            state: $runner.state,
+                            installURL: installURL(candidate.source)
+                        )
+                    }
+                    ForEach(ToolsScreenLayout.addedRows(runner.state), id: \.path) { folder in
+                        addedRow(folder)
+                    }
+                    if let trajectory = ToolsScreenLayout.trajectoryFolder(in: runner.state) {
+                        let name = ToolsScreenLayout.name(.trajectory, copy: copy.tools)
+                        let question = FirstRunCopy.fill(copy.folders.watchQuestion, ["tool": name])
+                        folderCard(name: name, path: trajectory.path, meta: copy.tools.addedByYou) {
+                            GlassPicker(
+                                question,
+                                selection: trajectoryChoice,
+                                options: [
+                                    GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
+                                    GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
+                                ],
+                                placeholder: copy.frame.choose
+                            )
+                            .fixedSize()
+                        }
+                    }
+                    if let pending = adding.pending {
+                        let question = ToolsScreenLayout.question(path: pending.path, copy: copy.tools)
+                        folderCard(name: ToolsScreenLayout.folderName(pending.path), path: pending.path, meta: nil) {
+                            GlassPicker(
+                                question,
+                                selection: pendingChoice,
+                                options: ToolsScreenLayout.pendingOptions(pending.kinds, copy: copy.tools),
+                                placeholder: copy.frame.choose
+                            )
+                            .fixedSize()
+                        }
+                    }
+                }
+                .disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))
+            case .failed:
+                HStack(spacing: GlassTokens.Space.s4) {
+                    Text(discovery.failureLine(copy.folders) ?? "")
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(copy.folders.retry, action: retry)
+                        .buttonStyle(GlassButtonStyle(.secondary))
+                }
+            case .loading:
+                HStack(spacing: GlassTokens.Space.s4) {
+                    GlassSpinner()
+                    Text(copy.folders.loading)
+                        .glassType(GlassTokens.TypeScale.body)
+                        .foregroundStyle(GlassColor.textSecondary)
+                }
+            }
+        }
+    }
+
+    /// A folder added with the tile (Ron's custom tool row): named after
+    /// the folder, a folder tile, "Added by you", and the same picker and
+    /// folder button as every other row, centred beside the name, unanswered
+    /// until the person answers.
+    private func addedRow(_ folder: AddedFolder) -> some View {
+        let name = ToolsScreenLayout.folderName(folder.path)
+        let question = FirstRunCopy.fill(copy.folders.watchQuestion, ["tool": name])
+        return GlassCard {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                folderRow(name: name, path: folder.path, meta: copy.tools.addedByYou) {
+                    GlassPicker(
+                        question,
+                        selection: Binding(
+                            get: { ToolsScreenLayout.addedAnswer(folder) },
+                            set: { ToolsScreenLayout.selectAdded($0, path: folder.path, in: &runner.state) }),
+                        options: [
+                            GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
+                            GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
+                        ],
+                        placeholder: copy.frame.choose
+                    )
+                    .fixedSize()
+                    GlassFolderButton(FirstRunCopy.fill(copy.folders.chooseFolder, ["tool": name])) {
+                        if let path = FolderPanel.choose() { adding.describe(path, replacing: folder.path, runner: runner) }
+                    }
+                    .fixedSize()
+                }
+                if let line = ToolsScreenLayout.conflict(folder, in: runner.state, copy: copy.tools) {
+                    Text(line)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func folderCard<Trailing: View>(
+        name: String, path: String, meta: String?, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        GlassCard {
+            folderRow(name: name, path: path, meta: meta, trailing: trailing)
+        }
+    }
+
+    /// One compact row: the folder tile, its name, path and caption, and
+    /// the answer centred beside them.
+    private func folderRow<Trailing: View>(
+        name: String, path: String, meta: String?, @ViewBuilder trailing: () -> Trailing
+    ) -> some View {
+        HStack(alignment: .center, spacing: GlassTokens.Space.s6) {
+            GlassToolTile(.folder, large: true)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(name)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .lineLimit(1)
+                Text(path)
+                    .glassType(GlassTokens.TypeScale.mono)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(path)
+                if let meta {
+                    Text(meta)
+                        .glassType(GlassTokens.TypeScale.caption)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            trailing()
+        }
+    }
+
+    private var trajectoryChoice: Binding<ToolAnswer?> {
+        Binding(
+            get: { .watch },
+            set: { ToolsScreenLayout.selectTrajectory($0, in: &runner.state) }
+        )
+    }
+
+    private var pendingChoice: Binding<ToolsScreenLayout.PendingAnswer?> {
+        Binding(
+            get: { nil },
+            set: { answer in
+                guard let answer, let pending = adding.pending,
+                    ToolsScreenLayout.answer(answer, path: pending.path, kinds: pending.kinds, in: &runner.state)
+                else { return }
+                adding.pending = nil
+            }
+        )
+    }
+}
+
+/// Ron's add box (`ftux-add-tool`): a dashed border, a "+" tile, and the
+/// purple border over a faint fill while a folder is dragged over it.
+/// Click to pick a folder, or drop one on it. Both tool screens pin it under
+/// their cards, so it stays in view while the cards scroll.
+struct AddToolTile: View {
+    let copy: FirstRunCopy
+    @ObservedObject var runner: FirstRunRunner
+    @ObservedObject var adding: AddToolModel
+    @State private var dragging = false
+
+    var body: some View {
+        Button {
+            if let path = FolderPanel.choose() { adding.describe(path, runner: runner) }
+        } label: {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                HStack(spacing: GlassTokens.Space.s6) {
+                    GlassToolTile(.add, large: true)
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(copy.tools.addTool)
+                            .glassType(GlassTokens.TypeScale.bodyStrong)
+                            .foregroundStyle(GlassColor.textPrimary)
+                        Text(copy.tools.addToolCaption)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                // A refused folder: the failed request's red line.
+                if adding.refused {
+                    GlassAlert(ToolsScreenLayout.refusal(copy.tools))
+                }
+            }
+            .padding(.vertical, GlassTokens.Space.cardPaddingVertical)
+            .padding(.horizontal, GlassTokens.Space.cardPaddingHorizontal)
+            .background(
+                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
+                    .fill(dragging ? GlassTokens.Color.tintNeutral.color : .clear))
+            .overlay(
+                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
+                    .strokeBorder(
+                        dragging ? GlassTokens.Color.purpleText.color : GlassColor.ink(0.28),
+                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))
+        .onDrop(of: [UTType.fileURL], isTargeted: $dragging) { providers in
+            guard let provider = providers.first else { return false }
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+                let path = url.path
+                Task { @MainActor in
+                    guard AddToolModel.accepting(runner) else { return }
+                    if isFolder { adding.describe(path, runner: runner) } else { adding.refused = true }
+                }
+            }
+            return true
+        }
+    }
+}
+
 /// Ron's Tools screen (#1030 `tool-screens.tsx` W-4), Custom setup's tool
-/// list: the Folders rows with compact meta, then the "add your tool" tile.
-/// A click opens a folder panel; a drop takes a folder. Continue commits
-/// `.leaveRoots`, which starts the daemon.
+/// list: the tool cards, scrolling, and the "add your tool" tile pinned
+/// under them. A click opens a folder panel; a drop takes a folder.
+/// Continue commits `.leaveRoots`, which starts the daemon.
 struct ToolsScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -265,10 +545,7 @@ struct ToolsScreen: View {
 
     @State private var discovery: DiscoveredRows = .loading
     @State private var onboarding = TCOnboardingCopy.load()
-    /// A folder that matched more than one kind, waiting for the person.
-    @State private var pending: (path: String, kinds: [AddedFolder.Kind])?
-    @State private var refused = false
-    @State private var dragging = false
+    @StateObject private var adding = AddToolModel()
 
     var body: some View {
         FirstRunFrame(
@@ -288,74 +565,12 @@ struct ToolsScreen: View {
         ) {
             title
         } content: {
-            Group {
-                switch discovery {
-                case .found(let discovered):
-                    Group {
-                        VStack(spacing: GlassTokens.Space.s4) {
-                            ForEach(ToolsScreenLayout.rows(discovered, state: runner.state), id: \.source) {
-                                candidate in
-                                ToolAnswerRow(
-                                    copy: copy.folders,
-                                    choose: copy.frame.choose,
-                                    candidate: candidate,
-                                    meta: ToolsScreenLayout.meta(
-                                        for: candidate, in: runner.state, discovered: discovered,
-                                        copy: copy, now: Date()),
-                                    state: $runner.state,
-                                    installURL: installURL(candidate.source)
-                                )
-                            }
-                            ForEach(ToolsScreenLayout.addedRows(runner.state), id: \.path) { folder in
-                                addedRow(folder)
-                            }
-                            if let trajectory = ToolsScreenLayout.trajectoryFolder(in: runner.state) {
-                                let name = ToolsScreenLayout.name(.trajectory, copy: copy.tools)
-                                let question = FirstRunCopy.fill(copy.folders.watchQuestion, ["tool": name])
-                                folderCard(name: name, path: trajectory.path, meta: copy.tools.addedByYou) {
-                                    GlassPicker(
-                                        question,
-                                        selection: trajectoryChoice,
-                                        options: [
-                                            GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
-                                            GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
-                                        ],
-                                        placeholder: copy.frame.choose
-                                    )
-                                }
-                            }
-                            if let pending {
-                                let question = ToolsScreenLayout.question(path: pending.path, copy: copy.tools)
-                                folderCard(name: ToolsScreenLayout.folderName(pending.path), path: pending.path, meta: nil) {
-                                    GlassPicker(
-                                        question,
-                                        selection: pendingChoice,
-                                        options: ToolsScreenLayout.pendingOptions(pending.kinds, copy: copy.tools),
-                                        placeholder: copy.frame.choose
-                                    )
-                                }
-                            }
-                            addTile
-                        }
-                    }
-                    .disabled(!FoldersScreenLayout.rowsEnabled(isCommitting: runner.isCommitting))
-                case .failed:
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        Text(discovery.failureLine(copy.folders) ?? "")
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        Button(copy.folders.retry) { refreshDiscovery() }
-                            .buttonStyle(GlassButtonStyle(.secondary))
-                    }
-                case .loading:
-                    HStack(spacing: GlassTokens.Space.s4) {
-                        GlassSpinner()
-                        Text(copy.folders.loading)
-                            .glassType(GlassTokens.TypeScale.body)
-                            .foregroundStyle(GlassColor.textSecondary)
-                    }
-                }
+            ToolList(
+                copy: copy, runner: runner, adding: adding, discovery: discovery, installURL: installURL,
+                retry: refreshDiscovery)
+        } pinned: {
+            if discovery.rows != nil {
+                AddToolTile(copy: copy, runner: runner, adding: adding)
             }
         }
         .task {
@@ -364,194 +579,6 @@ struct ToolsScreen: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshDiscovery()
         }
-    }
-
-    /// Ron's add box (`ftux-add-tool`): a dashed border, a "+" tile, and the
-    /// purple border over a faint fill while a folder is dragged over it.
-    /// Click to pick a folder, or drop one on it.
-    private var addTile: some View {
-        Button {
-            if let path = FolderPanel.choose() { describe(path) }
-        } label: {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack(spacing: GlassTokens.Space.s6) {
-                    GlassToolTile(.add, large: true)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(copy.tools.addTool)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        Text(copy.tools.addToolCaption)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if refused {
-                    Text(ToolsScreenLayout.refusal(copy.tools))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                }
-            }
-            .padding(.vertical, GlassTokens.Space.cardPaddingVertical)
-            .padding(.horizontal, GlassTokens.Space.cardPaddingHorizontal)
-            .background(
-                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
-                    .fill(dragging ? GlassTokens.Color.tintNeutral.color : .clear))
-            .overlay(
-                RoundedRectangle(cornerRadius: GlassTokens.Radius.card, style: .continuous)
-                    .strokeBorder(
-                        dragging ? GlassTokens.Color.purpleText.color : GlassColor.ink(0.28),
-                        style: StrokeStyle(lineWidth: 1, dash: [4, 3])))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onDrop(of: [UTType.fileURL], isTargeted: $dragging) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                let isFolder = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
-                let path = url.path
-                Task { @MainActor in
-                    guard accepting else { return }
-                    if isFolder { describe(path) } else { refused = true }
-                }
-            }
-            return true
-        }
-    }
-
-    /// A folder added with the tile (Ron's custom tool row): named after
-    /// the folder, a folder tile, "Added by you", and the same picker and
-    /// folder button as every other row, unanswered until the person
-    /// answers.
-    private func addedRow(_ folder: AddedFolder) -> some View {
-        let name = ToolsScreenLayout.folderName(folder.path)
-        let question = FirstRunCopy.fill(copy.folders.watchQuestion, ["tool": name])
-        return GlassCard {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                HStack(spacing: GlassTokens.Space.s6) {
-                    GlassToolTile(.folder, large: true)
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(name)
-                            .glassType(GlassTokens.TypeScale.bodyStrong)
-                            .foregroundStyle(GlassColor.textPrimary)
-                        Text(folder.path)
-                            .glassType(GlassTokens.TypeScale.mono)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .help(folder.path)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(copy.tools.addedByYou)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .lineLimit(1)
-                }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Spacer(minLength: 0)
-                    GlassPicker(
-                        question,
-                        selection: Binding(
-                            get: { ToolsScreenLayout.addedAnswer(folder) },
-                            set: { ToolsScreenLayout.selectAdded($0, path: folder.path, in: &runner.state) }),
-                        options: [
-                            GlassPickerOption(copy.folders.watch, value: ToolAnswer.watch, dot: .on),
-                            GlassPickerOption(copy.folders.dontUse, value: ToolAnswer.dontUse, dot: .off),
-                        ],
-                        placeholder: copy.frame.choose
-                    )
-                    GlassFolderButton(FirstRunCopy.fill(copy.folders.chooseFolder, ["tool": name])) {
-                        if let path = FolderPanel.choose() { describe(path, replacing: folder.path) }
-                    }
-                }
-                if let line = ToolsScreenLayout.conflict(folder, in: runner.state, copy: copy.tools) {
-                    Text(line)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
-    private func folderCard<Trailing: View>(
-        name: String, path: String, meta: String?, @ViewBuilder trailing: () -> Trailing
-    ) -> some View {
-        GlassCard {
-            HStack(spacing: GlassTokens.Space.s6) {
-                GlassToolTile(.folder, large: true)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(name)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                    Text(path)
-                        .glassType(GlassTokens.TypeScale.mono)
-                        .foregroundStyle(GlassColor.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .help(path)
-                    if let meta {
-                        Text(meta)
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                            .lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                trailing()
-            }
-        }
-    }
-
-    /// Describe a picked folder and act on what the core reports. The core
-    /// walks the folder off the main actor; its answer lands only if the
-    /// screen is still Tools and nothing is committing.
-    /// `replacing` names an added row whose folder button picked `path`.
-    private func describe(_ path: String, replacing: String? = nil) {
-        guard accepting else { return }
-        Task.detached(priority: .userInitiated) {
-            let json = TCDiscovery.describeFolderJSON(path)
-            await MainActor.run { land(ToolsScreenLayout.outcome(path: path, json: json), replacing: replacing) }
-        }
-    }
-
-    @MainActor
-    private func land(_ outcome: AddToolOutcome, replacing: String? = nil) {
-        guard accepting else { return }
-        if let replacing {
-            refused = !ToolsScreenLayout.replace(path: replacing, with: outcome, in: &runner.state)
-        } else {
-            refused = !ToolsScreenLayout.apply(outcome, to: &runner.state)
-        }
-        if case .ask(let path, let kinds) = outcome {
-            pending = (path, kinds)
-        } else {
-            pending = nil
-        }
-    }
-
-    private var accepting: Bool {
-        ToolsScreenLayout.acceptsFolder(step: runner.state.step, isCommitting: runner.isCommitting)
-    }
-
-    private var trajectoryChoice: Binding<ToolAnswer?> {
-        Binding(
-            get: { .watch },
-            set: { ToolsScreenLayout.selectTrajectory($0, in: &runner.state) }
-        )
-    }
-
-    private var pendingChoice: Binding<ToolsScreenLayout.PendingAnswer?> {
-        Binding(
-            get: { nil },
-            set: { answer in
-                guard let answer, let pending,
-                    ToolsScreenLayout.answer(answer, path: pending.path, kinds: pending.kinds, in: &runner.state)
-                else { return }
-                self.pending = nil
-            }
-        )
     }
 
     /// Discovery's rows, and what they say is not on this Mac: such a tool
@@ -564,7 +591,7 @@ struct ToolsScreen: View {
 
     private var canContinue: Bool {
         ToolsScreenLayout.canContinue(
-            discovered: discovery.rows, state: runner.state, pending: pending != nil,
+            discovered: discovery.rows, state: runner.state, pending: adding.pending != nil,
             isCommitting: runner.isCommitting)
     }
 

@@ -1100,6 +1100,11 @@ enum DaemonEventParser {
                 creditPending: payload["credit_pending"] as? Double ?? 0,
                 text: payload["text"] as? String ?? ""
             )
+        case "reengage_due":
+            guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                  let due = try? DaemonDataDecoding.decoder().decode(DaemonData.ReengageDue.self, from: payloadData)
+            else { return .unknown(name) }
+            return .reengageDue(due)
         case "resync_required":
             return .resyncRequired
         case "lagged":

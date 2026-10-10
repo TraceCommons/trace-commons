@@ -111,7 +111,7 @@ canonical table. Summary:
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | `5` | Submissions enumerated per tick. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | `5` | Bounded attempt counter per submission before the driver stops retrying it. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | `true` | Cache-cost control; falsy values (`0`/`false`/`no`/`off`) disable it. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | `900000` | Novelty threshold above which a submission is treated as a duplicate and skipped. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | `900000` | Duplicate-score threshold (micros): a submission whose precheck duplicate score is at or above it is recorded as `skipped_duplicate` without scoring. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | `30` | Base backoff after a scoring failure. |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | (none) | The `trace_gate_driver`-role pool connection string, per above. |
 
@@ -223,10 +223,15 @@ the backlog with repeated limited calls.
 An author-only pass can only add. For a submission where the scorer
 attributes nothing -- it reports no token lengths, or lengths that never
 tile the chunk -- nothing is written and any value an earlier pass computed
-is left alone. The pass logs three counts when it finishes: `rescored`,
-`failed`, and `author_unattributed`. A pass that reports mostly
-`author_unattributed` has a scorer that supplies no usable token lengths;
-fix that before running it again, because rerunning will not help. A full
+is left alone. The pass logs four counts when it finishes: `rescored`,
+`failed`, `author_unattributed`, and `pipeline_row_skipped`. A pass that
+reports mostly `author_unattributed` has a scorer that supplies no usable
+token lengths; fix that before running it again, because rerunning will not
+help. `pipeline_row_skipped` counts submissions the pass enumerated before
+the pipeline's Settle wrote a row for them: the writers leave such a row
+exactly as Settle wrote it, so nothing is written and the submission is not
+counted in `rescored`. It is expected to be 0 or small, and it is not a
+failure. A full
 (non-author-only) re-score is different: it has just rewritten the row's
 perplexity under the current scorer, so it clears per-author values it
 cannot recompute rather than leave them describing an older scoring.

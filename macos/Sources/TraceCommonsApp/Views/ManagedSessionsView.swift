@@ -24,13 +24,6 @@ struct ManagedSessionsSection: View {
             if let snapshot = model.managedSnapshot {
                 sessionsCard(snapshot)
             }
-            if let key = model.managedErrorKey {
-                GlassNotice(tone: .outside, title: model.managedText("action_failed")) {
-                    if key != "action_failed" {
-                        Text(model.managedText(key)).textSelection(.enabled)
-                    }
-                }
-            }
         }
         // Glass modals over the whole window, not stock sheets.
         .glassModal(isPresented: $adding) {
@@ -72,6 +65,7 @@ struct ManagedSessionsSection: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let snapshot = model.managedSnapshot {
                     accountActions(snapshot)
+                    actionFailure
                     terminalLine(snapshot)
                     if !snapshot.accounts.isEmpty {
                         VStack(spacing: 0) {
@@ -92,6 +86,22 @@ struct ManagedSessionsSection: View {
                         .buttonStyle(GlassButtonStyle(.glass, small: true))
                         .fixedSize()
                     }
+                    actionFailure
+                }
+            }
+        }
+    }
+
+    /// A failed request: the failed request's red lines, unboxed, under
+    /// the account actions (Ron, 2026-10-09). The headline, then the
+    /// reason when it is a different word.
+    @ViewBuilder
+    private var actionFailure: some View {
+        if let key = model.managedErrorKey {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                GlassAlert(model.managedText("action_failed"))
+                if key != "action_failed" {
+                    GlassAlert(model.managedText(key)).textSelection(.enabled)
                 }
             }
         }
@@ -400,7 +410,7 @@ struct ManagedLaunchSheet: View {
 
     var body: some View {
         GlassModal(
-            title: model.managedText("launch"), width: .narrow,
+            title: model.managedText("launch_title"), width: .narrow,
             actions: [
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(

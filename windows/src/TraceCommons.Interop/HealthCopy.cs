@@ -89,7 +89,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
         {
             "not-logged-in" => new HealthCopy(
                 "Not connected.",
-                "Sessions are being queued, but nothing can be sent until you reconnect. "
+                "Traces are being queued, but nothing can be sent until you reconnect. "
                 + "Nothing has been lost.",
                 "Reconnect"),
             "near-ai-notice-not-acknowledged" => new HealthCopy(
@@ -108,11 +108,11 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "automatically.",
                 null),
             "claim-mint-failed" or "ingest-unreachable" => new HealthCopy(
-                "Can't reach Trace Commons right now.",
+                "Can't upload right now.",
                 "Your queue is safe; it'll retry on its own.",
                 null),
             "queue-full" => new HealthCopy(
-                "Trace Commons has stopped queuing new sessions",
+                "Trace Commons has stopped queuing new traces",
                 "-- 500 are already waiting. Review or clear some to start again.",
                 "Review"),
             // The fallback for a daemon that reported the label but no

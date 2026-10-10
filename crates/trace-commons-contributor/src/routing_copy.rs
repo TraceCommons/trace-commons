@@ -146,8 +146,8 @@ pub const IRONWIRE_APPLIES_AT_ONCE: &str = "Changes here apply straight away.";
 /// running it there is nothing for a contributor to look up -- the port is
 /// already known. This is the button that turns the switch on and checks,
 /// in one press, so the discovered case costs one action instead of two
-/// fields.
-pub const IRONWIRE_CONNECT: &str = "Connect and check";
+/// fields. Approved 2026-10-08 (button rule).
+pub const IRONWIRE_CONNECT: &str = "Connect";
 
 /// The disclosure the port and folder fields sit behind once discovery has
 /// answered.
@@ -229,7 +229,8 @@ pub fn ironwire_folder_note_here() -> String {
     )
 }
 
-pub const IRONWIRE_APPLY: &str = "Apply and check";
+/// Approved 2026-10-08 (button rule).
+pub const IRONWIRE_APPLY: &str = "Apply";
 pub const IRONWIRE_CHECKING: &str = "Checking\u{2026}";
 
 /// The check itself could not be run -- not a fact about IronWire, so it
@@ -255,7 +256,7 @@ pub const IRONWIRE_PROBE_REACHABLE: &str =
     concat!(crate::app_name!(), " can read the local record.");
 
 /// The reported origin is independent of whether the reader is succeeding.
-pub const IRONWIRE_DERIVED_ORIGIN: &str = "The local record is selected from this app's model-call service. This does not enable reading session bodies.";
+pub const IRONWIRE_DERIVED_ORIGIN: &str = "The local record is selected from this app's model-call service. This does not enable reading trace bodies.";
 /// Unknown internal state is not evidence of an Off declaration or a bad token.
 pub const IRONWIRE_STATE_UNKNOWN: &str =
     "The local-record state is unavailable. Check again before relying on it.";
@@ -883,7 +884,7 @@ mod tests {
 
     /// The discovered path's action is its own word, not the manual path's.
     /// One press instead of two fields is the whole point, and a button
-    /// that reads "Apply and check" beside a port nobody typed describes
+    /// that reads "Apply" beside a port nobody typed describes
     /// the manual flow it replaces.
     #[test]
     fn the_discovered_action_is_not_the_manual_one() {

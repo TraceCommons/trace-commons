@@ -19,25 +19,25 @@
   <id>ai.tracecommons.Contributor</id>
 
   <name>Trace Commons</name>
-  <summary>Review and contribute your coding sessions</summary>
+  <summary>Review and contribute your coding traces</summary>
 
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT OR Apache-2.0</project_license>
 
   <description>
     <p>
-      Trace Commons contributes the sessions you have with coding agents to an
+      Trace Commons contributes the traces you have with coding agents to an
       open corpus, with your explicit consent for each one. Nothing leaves your
       machine until you have seen exactly what it contains.
     </p>
     <p>
-      The application watches the session folders you nominate, and nothing
+      The application watches the trace folders you nominate, and nothing
       else. It will not guess: until you say which folders to watch, it watches
       none of them.
     </p>
     <p>
-      Every session is scanned for secrets and personal information and shown
-      to you in full before anything is sent. You decide per session, or arm a
+      Every trace is scanned for secrets and personal information and shown
+      to you in full before anything is sent. You decide per trace, or arm a
       project you trust to contribute without asking.
     </p>
   </description>
