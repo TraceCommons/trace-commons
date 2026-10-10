@@ -320,7 +320,15 @@ pub fn verdicts_card(v: &Verdicts) -> CardText {
         (
             fill_owned(&template, &values),
             final_clause(v),
-            fill_owned(copy::NUDGE_PANEL_VERDICTS, &values),
+            fill_owned(
+                by_zero_clause(
+                    v,
+                    copy::NUDGE_PANEL_VERDICTS,
+                    copy::NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY,
+                    copy::NUDGE_PANEL_VERDICTS_HELD_ONLY,
+                ),
+                &values,
+            ),
         )
     };
     CardText {
@@ -331,20 +339,51 @@ pub fn verdicts_card(v: &Verdicts) -> CardText {
     }
 }
 
+/// `both` when some were accepted and some held, else the template that
+/// leaves out the zero count ("A zero clause is dropped"). Not for
+/// finals-only news, which has templates of its own.
+fn by_zero_clause(
+    v: &Verdicts,
+    both: &'static str,
+    accepted_only: &'static str,
+    held_only: &'static str,
+) -> &'static str {
+    if v.held == 0 {
+        accepted_only
+    } else if v.accepted == 0 {
+        held_only
+    } else {
+        both
+    }
+}
+
 /// The verdict sentence shared by the N2 notification and the digest fold:
-/// the counts, then the final clause; or the final clause alone.
+/// the counts, then the final clause; or the final clause alone. A zero
+/// count is left out, never said.
 fn verdict_sentence(v: &Verdicts) -> String {
     if v.finals_only() {
         return final_clause(v);
     }
-    let body = fill_owned(
+    let template = if v.held == 0 {
+        copy::pick(
+            u64::from(v.accepted),
+            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY,
+            copy::NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE,
+        )
+    } else if v.accepted == 0 {
+        copy::pick(
+            u64::from(v.held),
+            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY,
+            copy::NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE,
+        )
+    } else {
         copy::pick(
             u64::from(v.accepted),
             copy::NOTIFY_VERDICTS_BODY,
             copy::NOTIFY_VERDICTS_BODY_ONE,
-        ),
-        &verdict_values(v),
-    );
+        )
+    };
+    let body = fill_owned(template, &verdict_values(v));
     join(body, vec![final_clause(v)])
 }
 
@@ -419,7 +458,15 @@ pub fn mark_news_text(v: &Verdicts) -> MarkText {
     let accessibility = if v.finals_only() {
         fill_owned(copy::MARK_A11Y_VERDICTS_FINAL_ONLY, &verdict_values(v))
     } else {
-        fill_owned(copy::MARK_A11Y_VERDICTS, &verdict_values(v))
+        fill_owned(
+            by_zero_clause(
+                v,
+                copy::MARK_A11Y_VERDICTS,
+                copy::MARK_A11Y_VERDICTS_ACCEPTED_ONLY,
+                copy::MARK_A11Y_VERDICTS_HELD_ONLY,
+            ),
+            &verdict_values(v),
+        )
     };
     MarkText {
         accessibility,
@@ -642,7 +689,7 @@ mod tests {
         );
         assert_eq!(
             digest_verdict_sentence(&verdicts(3, 0, None)),
-            "3 traces accepted and 0 held for privacy review."
+            "3 traces accepted."
         );
         let mut b = batch(2, &["Codex", "Claude Code"], 2);
         b.mission_fit = Some(1);
@@ -662,6 +709,74 @@ mod tests {
         }
     }
 
+    /// A zero count is never said: accepted-only news names no held, and
+    /// held-only news names no accepted, in every renderer that reports
+    /// verdicts (the notification, the digest fold, the mark and the panel
+    /// row), each reading singular at one.
+    #[test]
+    fn verdict_renderers_drop_zero_clauses() {
+        let cases = [
+            ((3, 0, None), "3 traces accepted."),
+            ((1, 0, None), "1 trace accepted."),
+            ((0, 2, None), "2 traces held for privacy review."),
+            ((0, 1, None), "1 trace held for privacy review."),
+            (
+                (1, 0, Some(15)),
+                "1 trace accepted. 1.5 credit is now final.",
+            ),
+            (
+                (0, 2, Some(15)),
+                "2 traces held for privacy review. 1.5 credit is now final.",
+            ),
+            (
+                (2, 1, None),
+                "2 traces accepted and 1 held for privacy review.",
+            ),
+        ];
+        for ((a, h, x), want) in cases {
+            let v = verdicts(a, h, x);
+            assert_eq!(verdicts_notification(&v).body, want, "N2 {a}/{h}");
+            assert_eq!(digest_verdict_sentence(&v), want, "fold {a}/{h}");
+        }
+        assert_eq!(
+            mark_news_text(&verdicts(2, 0, None)).accessibility,
+            "New: 2 accepted."
+        );
+        assert_eq!(
+            mark_news_text(&verdicts(0, 3, None)).accessibility,
+            "New: 3 held for privacy review."
+        );
+        assert_eq!(
+            mark_news_text(&verdicts(2, 1, None)).accessibility,
+            "New: 2 accepted and 1 held for privacy review."
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(2, 0, None)).panel_row,
+            "2 accepted since 8 October"
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(0, 3, None)).panel_row,
+            "3 held since 8 October"
+        );
+        assert_eq!(
+            verdicts_card(&verdicts(2, 1, None)).panel_row,
+            "2 accepted, 1 held since 8 October"
+        );
+        for (a, h) in [(4, 0), (0, 4), (1, 0), (0, 1)] {
+            let v = verdicts(a, h, Some(5));
+            for text in [
+                verdicts_notification(&v).body,
+                digest_verdict_sentence(&v),
+                mark_news_text(&v).accessibility,
+                verdicts_card(&v).panel_row,
+                verdicts_card(&v).title,
+            ] {
+                assert!(!text.contains(" 0 ") && !text.starts_with("0 "), "{text}");
+                assert_filled(&text);
+            }
+        }
+    }
+
     #[test]
     fn mark_text_fills_every_placeholder() {
         let ready = mark_ready_text(&batch(1, &[], 1));
@@ -671,10 +786,7 @@ mod tests {
         );
         assert_eq!(ready.tooltip, "1 idle for 1 day or more.");
         let news = mark_news_text(&verdicts(2, 0, None));
-        assert_eq!(
-            news.accessibility,
-            "New: 2 accepted and 0 held for privacy review."
-        );
+        assert_eq!(news.accessibility, "New: 2 accepted.");
         let finals = mark_news_text(&verdicts(0, 0, Some(40)));
         assert_eq!(finals.accessibility, "New: 4.0 credit is now final.");
     }

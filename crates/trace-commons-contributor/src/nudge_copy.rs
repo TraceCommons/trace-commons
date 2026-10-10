@@ -169,17 +169,34 @@ pub const NUDGE_VERDICTS_FINAL_CLAUSE: &str = "{x} credit is now final.";
 pub const NUDGE_VERDICTS_TITLE_FINAL_ONLY: &str = "Since {date}: {x} credit is now final";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_VERDICTS_SEE: &str = "See history";
-/// The panel row for U2. DRAFT, NEEDS APPROVAL.
+/// The panel row for U2, when some were accepted and some held. DRAFT,
+/// NEEDS APPROVAL.
 pub const NUDGE_PANEL_VERDICTS: &str = "{a} accepted, {h} held since {date}";
+/// [`NUDGE_PANEL_VERDICTS`] when none was held: a zero clause is dropped.
+/// DRAFT, NEEDS APPROVAL.
+pub const NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY: &str = "{a} accepted since {date}";
+/// [`NUDGE_PANEL_VERDICTS`] when none was accepted. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_PANEL_VERDICTS_HELD_ONLY: &str = "{h} held since {date}";
 /// The panel row when the only news is credit becoming final. DRAFT, NEEDS
 /// APPROVAL.
 pub const NUDGE_PANEL_VERDICTS_FINAL_ONLY: &str = "{x} credit is now final";
-/// The N2 notification body, followed by [`NUDGE_VERDICTS_FINAL_CLAUSE`]
-/// when the credit is non-zero. Never reports accepted sessions without
-/// the held count. DRAFT, NEEDS APPROVAL.
+/// The N2 notification body and the digest fold's verdict sentence, when
+/// some were accepted and some held, followed by
+/// [`NUDGE_VERDICTS_FINAL_CLAUSE`] when the credit is non-zero. A zero
+/// count is never said: accepted-only news takes
+/// [`NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY`], held-only news
+/// [`NOTIFY_VERDICTS_BODY_HELD_ONLY`]. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_VERDICTS_BODY: &str = "{a} traces accepted and {h} held for privacy review.";
 /// [`NOTIFY_VERDICTS_BODY`] when one was accepted. DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_VERDICTS_BODY_ONE: &str = "1 trace accepted and {h} held for privacy review.";
+/// [`NOTIFY_VERDICTS_BODY`] when none was held. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY: &str = "{a} traces accepted.";
+/// [`NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY`] for one. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE: &str = "1 trace accepted.";
+/// [`NOTIFY_VERDICTS_BODY`] when none was accepted. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_VERDICTS_BODY_HELD_ONLY: &str = "{h} traces held for privacy review.";
+/// [`NOTIFY_VERDICTS_BODY_HELD_ONLY`] for one. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE: &str = "1 trace held for privacy review.";
 /// The verdict sentence folded into a due digest: [`NOTIFY_VERDICTS_BODY`]
 /// and [`NUDGE_VERDICTS_FINAL_CLAUSE`]. Changes approved K9 digest copy
 /// (owner decision 6). DRAFT, NEEDS APPROVAL.
@@ -194,8 +211,12 @@ pub const DIGEST_VERDICT_SENTENCE_ONE: &str =
 // The news mark.
 // ---------------------------------------------------------------------
 
-/// DRAFT, NEEDS APPROVAL.
+/// When some were accepted and some held. DRAFT, NEEDS APPROVAL.
 pub const MARK_A11Y_VERDICTS: &str = "New: {a} accepted and {h} held for privacy review.";
+/// [`MARK_A11Y_VERDICTS`] when none was held. DRAFT, NEEDS APPROVAL.
+pub const MARK_A11Y_VERDICTS_ACCEPTED_ONLY: &str = "New: {a} accepted.";
+/// [`MARK_A11Y_VERDICTS`] when none was accepted. DRAFT, NEEDS APPROVAL.
+pub const MARK_A11Y_VERDICTS_HELD_ONLY: &str = "New: {h} held for privacy review.";
 /// [`MARK_A11Y_VERDICTS`] when the only news is credit becoming final.
 /// DRAFT, NEEDS APPROVAL.
 pub const MARK_A11Y_VERDICTS_FINAL_ONLY: &str = "New: {x} credit is now final.";
@@ -352,8 +373,8 @@ pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the trace's size 
      the commons scores it, and can differ, including 0 when the server reads it as a repeat.";
 
 /// Each counted string's key and its `_ONE` sibling's. The count the pair
-/// turns on is the string's first count placeholder (`{n}`, `{a}`, `{m}`
-/// or `{hours}`), or for a panel row with no number, the count behind the
+/// turns on is the string's first count placeholder (`{n}`, `{a}`, `{m}`,
+/// `{hours}`, or `{h}` in a held-only string), or for a panel row with no number, the count behind the
 /// row.
 pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE", "NUDGE_BACKLOG_TITLE_ONE"),
@@ -378,6 +399,14 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("DIGEST_IDLE_SENTENCE", "DIGEST_IDLE_SENTENCE_ONE"),
     ("MARK_A11Y_IDLE", "MARK_A11Y_IDLE_ONE"),
     ("NOTIFY_VERDICTS_BODY", "NOTIFY_VERDICTS_BODY_ONE"),
+    (
+        "NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY",
+        "NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE",
+    ),
+    (
+        "NOTIFY_VERDICTS_BODY_HELD_ONLY",
+        "NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE",
+    ),
     ("DIGEST_VERDICT_SENTENCE", "DIGEST_VERDICT_SENTENCE_ONE"),
     ("NUDGE_MISSION_FIT_CLAUSE", "NUDGE_MISSION_FIT_CLAUSE_ONE"),
     (
@@ -459,14 +488,43 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_VERDICTS_SEE", NUDGE_VERDICTS_SEE),
     ("NUDGE_PANEL_VERDICTS", NUDGE_PANEL_VERDICTS),
     (
+        "NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY",
+        NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY,
+    ),
+    (
+        "NUDGE_PANEL_VERDICTS_HELD_ONLY",
+        NUDGE_PANEL_VERDICTS_HELD_ONLY,
+    ),
+    (
         "NUDGE_PANEL_VERDICTS_FINAL_ONLY",
         NUDGE_PANEL_VERDICTS_FINAL_ONLY,
     ),
     ("NOTIFY_VERDICTS_BODY", NOTIFY_VERDICTS_BODY),
     ("NOTIFY_VERDICTS_BODY_ONE", NOTIFY_VERDICTS_BODY_ONE),
+    (
+        "NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY",
+        NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY,
+    ),
+    (
+        "NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE",
+        NOTIFY_VERDICTS_BODY_ACCEPTED_ONLY_ONE,
+    ),
+    (
+        "NOTIFY_VERDICTS_BODY_HELD_ONLY",
+        NOTIFY_VERDICTS_BODY_HELD_ONLY,
+    ),
+    (
+        "NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE",
+        NOTIFY_VERDICTS_BODY_HELD_ONLY_ONE,
+    ),
     ("DIGEST_VERDICT_SENTENCE", DIGEST_VERDICT_SENTENCE),
     ("DIGEST_VERDICT_SENTENCE_ONE", DIGEST_VERDICT_SENTENCE_ONE),
     ("MARK_A11Y_VERDICTS", MARK_A11Y_VERDICTS),
+    (
+        "MARK_A11Y_VERDICTS_ACCEPTED_ONLY",
+        MARK_A11Y_VERDICTS_ACCEPTED_ONLY,
+    ),
+    ("MARK_A11Y_VERDICTS_HELD_ONLY", MARK_A11Y_VERDICTS_HELD_ONLY),
     (
         "MARK_A11Y_VERDICTS_FINAL_ONLY",
         MARK_A11Y_VERDICTS_FINAL_ONLY,
@@ -911,6 +969,10 @@ mod tests {
         "NUDGE_VERDICTS_TITLE",
         "NUDGE_PANEL_VERDICTS",
         "MARK_A11Y_VERDICTS",
+        "MARK_A11Y_VERDICTS_ACCEPTED_ONLY",
+        "MARK_A11Y_VERDICTS_HELD_ONLY",
+        "NUDGE_PANEL_VERDICTS_ACCEPTED_ONLY",
+        "NUDGE_PANEL_VERDICTS_HELD_ONLY",
         "NOTIFY_RECAP_BODY",
         "DIGEST_RECAP_SENTENCE",
         "NUDGE_ESTIMATE_CLAUSE_PARTIAL",
@@ -934,9 +996,11 @@ mod tests {
             if ones.contains(key) {
                 continue;
             }
-            let counted = ["{n}", "{a}", "{m}", "{k}", "{c}", "{hours}", "{known}"]
-                .iter()
-                .any(|p| text.contains(p))
+            let counted = [
+                "{n}", "{a}", "{h}", "{m}", "{k}", "{c}", "{hours}", "{known}",
+            ]
+            .iter()
+            .any(|p| text.contains(p))
                 || text.starts_with("Some ")
                 || text.starts_with("Previewed traces");
             if !counted {
@@ -960,7 +1024,18 @@ mod tests {
     fn singular_forms_read_singular() {
         for (many, one) in PLURAL_FORMS {
             let (many_text, one_text) = (text_of(many), text_of(one));
+            // A held-only string turns on `{h}`, so its singular drops it.
+            let held_counted = !["{n}", "{a}", "{m}", "{hours}"]
+                .iter()
+                .any(|p| many_text.contains(p))
+                && many_text.contains("{h}");
+            if held_counted {
+                assert!(!one_text.contains("{h}"), "{one}: {one_text}");
+            }
             for placeholder in ["{tool}", "{days}", "{h}", "{x}"] {
+                if held_counted && placeholder == "{h}" {
+                    continue;
+                }
                 assert_eq!(
                     many_text.contains(placeholder),
                     one_text.contains(placeholder),
