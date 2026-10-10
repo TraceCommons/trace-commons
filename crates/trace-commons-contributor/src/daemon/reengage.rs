@@ -393,6 +393,10 @@ mod tests {
     }
 
     fn seed_idle(s: &DaemonShared, days: i64) -> uuid::Uuid {
+        seed_idle_from(s, crate::source::SOURCE_CODEX, days)
+    }
+
+    fn seed_idle_from(s: &DaemonShared, source: &str, days: i64) -> uuid::Uuid {
         let entry_id = uuid::Uuid::new_v4();
         let at = noon() - Duration::days(days);
         s.queue
@@ -402,7 +406,7 @@ mod tests {
                 super::super::queue::QueueEntry {
                     entry_id,
                     session_hash: format!("sha256:{entry_id}"),
-                    source: crate::source::SOURCE_CODEX.to_string(),
+                    source: source.to_string(),
                     project_key: ASK.to_string(),
                     project_label: super::super::policy::project_label_for(ASK),
                     path: std::path::PathBuf::from(format!("/tmp/re-{entry_id}.jsonl")),
@@ -537,6 +541,40 @@ mod tests {
         seed_idle(&s, 9);
         let got = tick(&s, later, &Utc, digest(false, 2));
         assert_eq!(got.standalone, Some(Kind::IdleSessions));
+    }
+
+    /// A batch holding a source the tool table cannot name (trajectory)
+    /// names no tool in the N1 notification or the digest fold: never
+    /// "from 0 tools", and never Codex credited with the trajectory
+    /// session (Kristi's #1300 review, finding 5).
+    #[test]
+    fn an_unnamed_source_names_no_tool_in_the_notification_or_the_fold() {
+        let s = live();
+        digest_off(&s);
+        seed_idle_from(&s, crate::source::SOURCE_CODEX, 5);
+        seed_idle_from(&s, crate::source::SOURCE_TRAJECTORY, 6);
+        let _r = renderer(&s);
+        let mut rx = s.events.subscribe();
+        let got = tick(&s, noon(), &Utc, digest(false, 2));
+        assert_eq!(got.standalone, Some(Kind::IdleSessions));
+        let frames = reengage_frames(&mut rx);
+        assert_eq!(
+            frames[0]["body"],
+            "2 traces have been idle for 3 days or more. Review them to send or keep."
+        );
+
+        let s = live();
+        seed_idle_from(&s, crate::source::SOURCE_TRAJECTORY, 5);
+        let _r = renderer(&s);
+        let got = tick(&s, noon(), &Utc, digest(true, 1));
+        assert!(got.digest_posts);
+        assert_eq!(
+            got.fold,
+            Some((
+                Kind::IdleSessions,
+                "1 of them has been idle for 3 days or more.".to_string()
+            ))
+        );
     }
 
     /// With the digest on and sessions pending, idle sessions fold into the
