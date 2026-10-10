@@ -7409,25 +7409,26 @@ async fn score_shadow_credit_decision(
     }
 }
 
-/// Stage 3, 2026-10-09: of two submissions with the same content, `main`
-/// shows the second as a duplicate with 0.0 pending ("This trace duplicates
-/// an earlier submission under your account and earns no separate
-/// credit."), from its driver's `skipped_duplicate` row. A compatibility run
-/// under `main`'s duplicate controls reads the same: its gate decision row
-/// is withheld as `skipped_duplicate` with no credit quality, so the status
-/// shows no pending credit and the duplicate line, and no `NoveltyUtility`
-/// credit. The first submission keeps its gate figure.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compatibility_status_shows_a_duplicate_as_mains_does() {
-    let Some(runtime) = runtime_backend(4).await else {
-        return;
-    };
+/// The submission-status documents, under file or database contributor
+/// reads, of two compatibility runs of the same content by one contributor,
+/// the second after the first, on a runtime paying `delta_microcredits` of
+/// `NoveltyUtility` credit under `controls`: the first run's shadow credit
+/// decision, and the two documents.
+async fn duplicate_pair_status_documents(
+    tenant_label: &str,
+    delta_microcredits: u64,
+    controls: PipelineDuplicateControls,
+) -> Option<(
+    StorageTraceGateCreditDecisionRow,
+    Vec<(bool, serde_json::Value, serde_json::Value)>,
+)> {
+    let runtime = runtime_backend(4).await?;
     account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
-    let tenant = format!("tenant-compat-dup-{suffix}");
-    let token = format!("token-compat-dup-{suffix}");
+    let tenant = format!("tenant-{tenant_label}-{suffix}");
+    let token = format!("token-{tenant_label}-{suffix}");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
     let dir = tempfile::tempdir().expect("temp dir");
@@ -7436,7 +7437,7 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
         runtime.clone(),
         &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
         IsolatedPipelineIndex::new(),
-        2_500_000,
+        delta_microcredits,
         Arc::new(PassThroughPipelinePrivacyBoundary),
         vec![RecordingSettlementAdapter::new(
             InstrumentId::trace_credit(),
@@ -7446,7 +7447,7 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
         None,
         PipelineNoveltyUtilityChecks {
             issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
-            duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT),
+            duplicate_controls: Some(controls),
             ..PipelineNoveltyUtilityChecks::default()
         },
     );
@@ -7457,84 +7458,203 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
     second_envelope.trace_id = Uuid::new_v4();
     let first = completed_run_of(&service, &tenant, &principal, &first_envelope).await;
     let second = completed_run_of(&service, &tenant, &principal, &second_envelope).await;
-    let first_quality = score_shadow_credit_decision(&runtime, &tenant, &first)
-        .await
-        .credit_quality_micros
-        .expect("a compatibility Score records a shadow credit quality");
+    let first_shadow = score_shadow_credit_decision(&runtime, &tenant, &first).await;
 
-    let mut state = test_state_with_options(
-        dir.path().to_path_buf(),
-        Some(mains_database().await),
-        Some(artifacts.clone()),
-        true,
-        true,
-        false,
-        false,
-    );
-    let state_mut = Arc::make_mut(&mut state);
-    state_mut.tokens = Arc::new(tokens.clone());
-    state_mut.pipeline_service = Some(service.clone());
-    state_mut.pipeline_activation = routing_store(&runtime);
-    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
-    state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
-    let (status, documents) = route_request(
-        state,
-        "POST",
-        "/v1/contributors/me/submission-status",
-        auth_headers(&token),
-        Some(serde_json::json!({
-            "submission_ids": [first.submission_id, second.submission_id]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{documents}");
-    let documents = documents.as_array().expect("a document list").clone();
-    let document_of = |submission_id: Uuid| {
-        documents
-            .iter()
-            .find(|document| document["submission_id"] == submission_id.to_string())
-            .unwrap_or_else(|| panic!("a document for {submission_id}: {documents:?}"))
-            .clone()
-    };
-    let first_document = document_of(first.submission_id);
-    let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
-    assert!(
-        (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs() < 1e-4,
-        "{first_document}"
-    );
+    let mut documents = Vec::new();
+    for database_reads in [true, false] {
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(mains_database().await),
+            Some(artifacts.clone()),
+            database_reads,
+            database_reads,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens.clone());
+        state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+        let (status, response) = route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&token),
+            Some(serde_json::json!({
+                "submission_ids": [first.submission_id, second.submission_id]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let response = response.as_array().expect("a document list").clone();
+        let document_of = |submission_id: Uuid| {
+            response
+                .iter()
+                .find(|document| document["submission_id"] == submission_id.to_string())
+                .unwrap_or_else(|| panic!("a document for {submission_id}: {response:?}"))
+                .clone()
+        };
+        documents.push((
+            database_reads,
+            document_of(first.submission_id),
+            document_of(second.submission_id),
+        ));
+    }
+    Some((first_shadow, documents))
+}
 
-    let document = document_of(second.submission_id);
-    assert_eq!(document["status"], "accepted", "{document}");
-    assert_eq!(
-        document["credit_points_pending"].as_f64(),
-        Some(0.0),
-        "{document}"
-    );
-    let explanation = document["explanation"]
+const DUPLICATE_STATUS_LINE: &str = "This trace duplicates an earlier submission under your \
+                                     account and earns no separate credit.";
+
+fn explanation_lines(document: &serde_json::Value) -> Vec<String> {
+    document["explanation"]
         .as_array()
         .expect("explanation lines")
         .iter()
         .map(|line| line.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// The first of the pair keeps its gate figure, round(10 * q, 2), with the
+/// gate's basis line; the second is `accepted` with 0.0 pending and `main`'s
+/// duplicate line, whichever read mode serves the contributor.
+fn assert_duplicate_pair_reads_as_mains(
+    first_shadow: &StorageTraceGateCreditDecisionRow,
+    documents: &[(bool, serde_json::Value, serde_json::Value)],
+) {
+    let first_quality = first_shadow
+        .credit_quality_micros
+        .expect("a compatibility Score records a shadow credit quality");
+    let expected_basis = gate_credit_basis_line(first_shadow);
     assert!(
-        explanation.contains(
-            &"This trace duplicates an earlier submission under your account and earns no \
-              separate credit."
-                .to_string()
-        ),
-        "{explanation:?}"
+        expected_basis.starts_with("Credit reflects the gate's scoring (calibration V"),
+        "{expected_basis}"
     );
-    // No NoveltyUtility credit: the status omits a zero ledger figure, and
-    // the Trace Credit leg is withheld under main's label.
-    assert!(document.get("credit_points_ledger").is_none(), "{document}");
-    assert_eq!(
-        document["pipeline"]["instruments"][0]["internal_settlement_state"], "withheld",
-        "{document}"
-    );
-    assert_eq!(
-        document["pipeline"]["instruments"][0]["reason_label"], "skipped_duplicate",
-        "{document}"
-    );
+    for (database_reads, first_document, second_document) in documents {
+        let mode = if *database_reads { "database" } else { "file" };
+        let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+        assert!(
+            (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs()
+                < 1e-4,
+            "{mode} reads: {first_document}"
+        );
+        let first_explanation = explanation_lines(first_document);
+        assert!(
+            first_explanation.contains(&expected_basis),
+            "{mode} reads: {first_explanation:?}"
+        );
+        assert!(
+            !first_explanation
+                .iter()
+                .any(|line| line == DUPLICATE_STATUS_LINE),
+            "{mode} reads: {first_explanation:?}"
+        );
+
+        assert_eq!(
+            second_document["status"], "accepted",
+            "{mode} reads: {second_document}"
+        );
+        assert_eq!(
+            second_document["credit_points_pending"].as_f64(),
+            Some(0.0),
+            "{mode} reads: {second_document}"
+        );
+        let second_explanation = explanation_lines(second_document);
+        assert!(
+            second_explanation
+                .iter()
+                .any(|line| line == DUPLICATE_STATUS_LINE),
+            "{mode} reads: {second_document}"
+        );
+        assert!(
+            !second_explanation
+                .iter()
+                .any(|line| line.starts_with("Credit reflects the gate's scoring")),
+            "{mode} reads: {second_document}"
+        );
+    }
+}
+
+/// Stage 3, 2026-10-09: of two submissions with the same content, `main`
+/// shows the second as a duplicate with 0.0 pending ("This trace duplicates
+/// an earlier submission under your account and earns no separate
+/// credit."), from its driver's `skipped_duplicate` row. A compatibility run
+/// under `main`'s duplicate controls reads the same: its gate decision row
+/// is withheld as `skipped_duplicate` with no credit quality, so the status
+/// shows no pending credit and the duplicate line, and no `NoveltyUtility`
+/// credit. The first submission keeps its gate figure. Under database and
+/// file contributor reads alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_duplicate_as_mains_does() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-dup",
+        2_500_000,
+        PipelineDuplicateControls::MAIN_DEFAULT,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
+    for (database_reads, _, document) in &documents {
+        let mode = if *database_reads { "database" } else { "file" };
+        // No NoveltyUtility credit: the status omits a zero ledger figure,
+        // and the Trace Credit leg is withheld under main's label.
+        assert!(
+            document.get("credit_points_ledger").is_none(),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["pipeline"]["instruments"][0]["internal_settlement_state"], "withheld",
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["pipeline"]["instruments"][0]["reason_label"], "skipped_duplicate",
+            "{mode} reads: {document}"
+        );
+    }
+}
+
+/// Stage 3, 2026-10-10: the pilot pays no `NoveltyUtility` delta, so a
+/// compatibility run has no Trace Credit leg to carry `main`'s duplicate
+/// label. The status still reads the run's gate decision row, withheld as
+/// `skipped_duplicate` with no credit quality: the duplicate shows 0.0 and
+/// the duplicate line, not the Score's shadow credit quality, and the first
+/// submission keeps its gate figure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_duplicate_as_mains_does_with_no_delta() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-dup-zero",
+        0,
+        PipelineDuplicateControls::MAIN_DEFAULT,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
+}
+
+/// `main`'s canonical-hash cache, with no `NoveltyUtility` delta: with the
+/// skip-duplicate knob off, the second submission's gate decision row is
+/// `cached` with no credit quality, and its status reads as a duplicate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_cached_duplicate_as_mains_does_with_no_delta() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-cached-zero",
+        0,
+        PipelineDuplicateControls {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
 }
 
 /// Ruling T15-7: a compatibility run's contributor status reads as `main`'s
@@ -15120,4 +15240,205 @@ async fn pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason() {
     assert_eq!(queue[0]["admission_reason"], serde_json::Value::Null);
     assert_eq!(queue[0]["hold_reason"], "privacy_pass_review_required");
     assert_eq!(queue[0]["assessment_superseded"], false);
+}
+
+/// #1326: an Admission-admitted run the Review-start privacy pass escalated
+/// is held for a human, and the reviewer who claims it can assess it. The
+/// pass moves the submission row from `received` to `quarantined`, as
+/// `main`'s PII backstop does for the equal state, so the assessment route's
+/// consent check reads the record (it answered `404 trace submission not
+/// found` for the `received` row). An approval releases the run to the
+/// Review policy, which reads the pass output, and links the assessment's
+/// hash on the pass record; a rejection ends the run rejected under the
+/// server's rule id, with no approved content.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reviewer_assesses_an_admitted_run_the_privacy_pass_escalated() {
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_compatibility_pipeline_service(
+                runtime,
+                &ConfiguredTraceArtifactStore::legacy(artifacts),
+                IsolatedPipelineIndex::new(),
+                2_500_000,
+                Arc::new(EscalatingClassifierBoundary),
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-escalated-assess-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+
+    let held_run = || async {
+        let mut envelope = sample_envelope().await;
+        envelope.submission_id = Uuid::new_v4();
+        make_metadata_only_low_risk(&mut envelope);
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+        let raw = serde_json::to_vec(&envelope).unwrap();
+        let key = envelope.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) = fixture
+            .service
+            .submit(PipelineReceiptRequest {
+                source_session: None,
+                tenant_id: &fixture.tenant,
+                actor_principal_ref: "principal_sha256:escalated-assessment",
+                counts_toward_quota: true,
+                request_idempotency_key: &key,
+                request_bytes: &raw,
+                server_envelope: &envelope,
+                residual_risk_basis: &[],
+                limits: PipelineAdmissionLimits {
+                    max_per_tenant_per_hour: 0,
+                    max_per_principal_per_hour: 0,
+                },
+            })
+            .await
+            .expect("the receipt succeeds")
+        else {
+            panic!("the receipt creates a run")
+        };
+        assert_eq!(created.admission_decision, "admit");
+        let held = fixture
+            .service
+            .process_run(&fixture.tenant, created.run_id)
+            .await
+            .expect("Review runs the privacy pass")
+            .expect("the run was claimed");
+        assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+        assert_eq!(
+            held.privacy_pass_outcome,
+            Some(trace_commons_server::versioned_pipeline::PrivacyPassOutcome::Escalated),
+            "{held:?}"
+        );
+        held
+    };
+    let submission_status = |submission_id: Uuid| {
+        let owner = fixture.owner.clone();
+        let tenant = fixture.tenant.clone();
+        async move {
+            owner
+                .get_trace_submission(&tenant, submission_id)
+                .await
+                .unwrap()
+                .expect("the submission row")
+                .status
+        }
+    };
+    let claim_and_assess = |run_id: Uuid, body: serde_json::Value| {
+        let state = fixture.state.clone();
+        let reviewer = reviewer.clone();
+        async move {
+            let (status, claim) = route_request(
+                state.clone(),
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+                auth_headers(&reviewer),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{claim}");
+            let mut body = body;
+            body["lease_token"] = claim["lease_token"].clone();
+            route_request(
+                state,
+                "POST",
+                &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+                auth_headers(&reviewer),
+                Some(body),
+            )
+            .await
+        }
+    };
+
+    // Approve: the run goes on to the Review policy with the pass output.
+    let approved_run = held_run().await;
+    let (status, recorded) = claim_and_assess(
+        approved_run.run_id,
+        serde_json::json!({
+            "recommendation": "approve",
+            "reason": "privacy_review_cleared",
+            "resolved_quarantine_reasons": ["privacy_pass_review_required"],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert_eq!(
+        submission_status(approved_run.submission_id).await,
+        StorageTraceCorpusStatus::Quarantined,
+        "the escalated hold is quarantined, as main's backstop holds it"
+    );
+    let assessment = fixture
+        .service
+        .store()
+        .load_review_assessment(&fixture.tenant, approved_run.run_id)
+        .await
+        .unwrap()
+        .expect("the assessment is recorded");
+    let released = fixture
+        .service
+        .process_run(&fixture.tenant, approved_run.run_id)
+        .await
+        .expect("Review runs on the assessment")
+        .expect("the run was claimed");
+    assert_eq!(released.next_phase, Some(Phase::Score), "{released:?}");
+    assert!(released.approved_revision_id.is_some(), "{released:?}");
+    assert_eq!(
+        released.privacy_pass_approval_assessment_hash.as_deref(),
+        Some(assessment.assessment.evidence_hash.as_str())
+    );
+    assert_eq!(
+        submission_status(approved_run.submission_id).await,
+        StorageTraceCorpusStatus::Accepted
+    );
+
+    // Reject: the server ends the run rejected on the pass output.
+    let rejected_run = held_run().await;
+    let (status, recorded) = claim_and_assess(
+        rejected_run.run_id,
+        serde_json::json!({
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    assert_eq!(
+        submission_status(rejected_run.submission_id).await,
+        StorageTraceCorpusStatus::Quarantined
+    );
+    let ended = fixture
+        .service
+        .process_run(&fixture.tenant, rejected_run.run_id)
+        .await
+        .expect("Review runs on the assessment")
+        .expect("the run was claimed");
+    assert_eq!(ended.state, PipelineRunState::Complete, "{ended:?}");
+    assert_eq!(ended.approved_revision_id, None);
+    assert_eq!(ended.privacy_pass_approval_assessment_hash, None);
+    let review = fixture
+        .service
+        .store()
+        .outcome_for_phase(&fixture.tenant, rejected_run.run_id, Phase::Review)
+        .await
+        .unwrap()
+        .expect("the Review outcome");
+    assert_eq!(
+        review.evaluation["rule_id"],
+        trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID
+    );
+    assert_eq!(
+        submission_status(rejected_run.submission_id).await,
+        StorageTraceCorpusStatus::Rejected
+    );
 }
