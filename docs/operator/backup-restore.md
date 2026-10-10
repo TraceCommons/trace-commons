@@ -357,10 +357,13 @@ answers `404` there. Do these steps in this order:
    fence that cannot be written (a database fault) stops the rebuild before
    that run's first write with `503` `index_rebuild_fence_unavailable`. Rerun
    once the database is healthy. When the store call for a stored command
-   fails for a reason other than integrity, the rebuild stops with `503`
-   `index_command_unreadable`; a second run helps once the store is back. A
-   command the store reports missing or corrupt stops it with `409`
-   `index_command_invalid`, which a second run does not change.
+   fails, the rebuild stops with `503` `index_command_unreadable`: an outage,
+   and also a command the store reports missing, corrupt or bound to another
+   tenant, or one it cannot decrypt under the loaded key. A second run helps
+   once the store is back or the right key is loaded. A command that the
+   store read and that fails its run's checks (hash, revision, index, model)
+   stops it with `409` `index_command_invalid`, which a second run does not
+   change.
 
    A withdrawal during the rebuild is safe because of the rebuild's fence, not
    because no withdrawal happens: withdrawals come from clients, from `main`'s

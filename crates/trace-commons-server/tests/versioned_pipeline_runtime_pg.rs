@@ -8334,14 +8334,18 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 }
 
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
-/// bound to another tenant, or bound to another run of the same tenant
-/// makes Settle fail closed, without completing the run or writing a Settle
-/// outcome. Each is wrong content, which a wait cannot correct (plan RB-D6):
-/// an integrity failure the store reports (cases a to c) and a command that
-/// is read but belongs to another run (case d) are all
-/// `index_command_invalid`, with the short backoff. Only a store failure
-/// that is not an integrity failure is `index_command_unreadable`
-/// (`an_unreadable_settle_command_waits_an_hour_and_ends_the_run`).
+/// bound to another tenant, read under the wrong key, or bound to another
+/// run of the same tenant makes Settle fail closed, without completing the
+/// run or writing a Settle outcome. Plan RB-D6 as the owner decided it on
+/// 2026-10-10 (review of #1331, minor finding 1): each failure the store
+/// reports, an integrity failure included, is `index_command_unreadable`,
+/// with the hourly wait (`mark_retry`, C5), because a store fault (a root
+/// that is not mounted, a wrong key) reads the same. That is cases a, b, c
+/// and e: the store refuses another tenant's command (case c) before any
+/// check of the pipeline, because it looks the key up under the run's own
+/// tenant, where no such object is. Only content that the store read and
+/// decrypted, and that fails a later check (case d: another run's command
+/// fails the hash check), is `index_command_invalid`, with the short backoff.
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8402,7 +8406,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::remove_file(&path).unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id, "index_command_invalid").await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (b) overwrite the file with other bytes.
@@ -8430,7 +8434,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id, "index_command_invalid").await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (c) point index_command_ref at another tenant's stored command.
@@ -8464,7 +8468,13 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant_a, run_a.run_id, "index_command_invalid").await;
+        assert_fails_closed(
+            &service,
+            &tenant_a,
+            run_a.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 
     // (d) point it at another run's command of the same tenant.
@@ -8494,6 +8504,40 @@ async fn stored_command_binding_failures_fail_closed() {
         tx.commit().await.unwrap();
 
         assert_fails_closed(&service, &tenant, run_1.run_id, "index_command_invalid").await;
+    }
+
+    // (e) read the command under another key: the same root, the same
+    // package, a store with another master key.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let wrong_key: Arc<dyn TraceArtifactStore> =
+            Arc::new(LocalEncryptedTraceArtifactStore::new(
+                dir.path(),
+                SecretsCrypto::new(SecretString::from(
+                    "pipeline-runtime-test-other-master-key-32b".to_string(),
+                ))
+                .unwrap(),
+            ));
+        let (wrong_key_service, _, _) =
+            test_service(backend.clone(), wrong_key, minimal_config(true), None).await;
+        assert_eq!(service.bundle_id(), wrong_key_service.bundle_id());
+        let tenant = format!("settle-binding-e-{}", uuid::Uuid::new_v4());
+        let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+        assert_fails_closed(
+            &wrong_key_service,
+            &tenant,
+            run.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 }
 
@@ -30463,12 +30507,14 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
 }
 
 /// Multi-lens review C5, residual: a failed store call of Settle's read of
-/// the stored index command (an outage, not an integrity failure) is charged
-/// as `index_command_unreadable`, one hour between attempts, so a store
-/// fault spans hours in which an operator can correct it. The run fails only
-/// after its last attempt, and its open legs are forfeited. (A command that
-/// is missing, corrupt, or read but wrong keeps `index_command_invalid` and
-/// the short backoff: `stored_command_binding_failures_fail_closed`.)
+/// the stored index command (here an outage) is charged as
+/// `index_command_unreadable`, one hour between attempts, so a store fault
+/// spans hours in which an operator can correct it. The run fails only
+/// after its last attempt, and its open legs are forfeited. (A missing,
+/// corrupt or wrongly keyed command is a failure the store reports, and is
+/// `index_command_unreadable` too; only a command that the store read and
+/// that is wrong keeps `index_command_invalid` and the short backoff:
+/// `stored_command_binding_failures_fail_closed`.)
 #[tokio::test]
 async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
     let Some(backend) = runtime_backend(4).await else {
@@ -32571,13 +32617,15 @@ async fn index_rebuild_fails_closed_on_a_tampered_command() {
     );
 }
 
-/// C5 residual (plan RB-D6): the rebuild reads each stored command through
-/// Settle's read, so it splits the same way. A store outage is
-/// `index_command_unreadable` (the route's `503`: a rerun helps once the
-/// store is back); a missing command object is an integrity failure,
-/// `index_command_invalid` (the route's `409`). Neither writes an entry.
+/// C5 residual (plan RB-D6, as the owner decided it on 2026-10-10): the
+/// rebuild reads each stored command through Settle's read, so it splits the
+/// same way. A store outage and a missing command object are both failures
+/// the store reports, `index_command_unreadable` (the route's `503`: a rerun
+/// helps once the store is back). A command that the store reads and that
+/// fails the run's hash is `index_command_invalid` (the route's `409`). None
+/// writes an entry.
 #[tokio::test]
-async fn index_rebuild_splits_a_store_outage_from_a_missing_command() {
+async fn index_rebuild_splits_a_store_fault_from_bad_content() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -32589,6 +32637,8 @@ async fn index_rebuild_splits_a_store_outage_from_a_missing_command() {
     let tenant_ref = pipeline_tenant_storage_ref(&tenant);
     let (ready, _) = run_to_settle_ready(&service, &tenant).await;
     let settled = settle_included(&service, &tenant, &ready).await;
+    let (ready_2, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled_2 = settle_included(&service, &tenant, &ready_2).await;
     assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
 
     store.set(true, false);
@@ -32616,7 +32666,28 @@ async fn index_rebuild_splits_a_store_outage_from_a_missing_command() {
     let error = service
         .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
         .await
-        .expect_err("a missing command fails the rebuild closed");
+        .expect_err("a missing command fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    // Bad content: the first run's ref names the second run's command,
+    // which the store reads and which fails the first run's hash.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_ref = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id, &settled_2.index_command_ref],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a command that fails its hash fails the rebuild closed");
     assert_eq!(error.to_string(), "index_command_invalid");
     assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }

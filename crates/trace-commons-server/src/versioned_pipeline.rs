@@ -273,9 +273,10 @@ pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
     "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
 /// Settle's read of the stored index command failed in the artifact store
-/// call. The attempt is charged and the next one waits an hour, as for
-/// `artifact_integrity_failed`. A command that is read but wrong stays
-/// `index_command_invalid`.
+/// call, an integrity failure the store reports included (a missing object,
+/// a wrong key). The attempt is charged and the next one waits an hour, as
+/// for `artifact_integrity_failed`. A command that the store read and that
+/// is wrong stays `index_command_invalid`.
 pub const PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL: &str = "index_command_unreadable";
 /// An index rebuild whose committed fence (V113,
 /// `PgPipelineStore::set_index_rebuild_fence`) could not be written before a
@@ -11630,12 +11631,11 @@ impl PipelineService {
     /// outcome stored, per decision P1 (the byte wrapper) and the runtime
     /// plan's ruling A7. `evidence` is the same Score outcome's own
     /// evidence; `None` when Score proposed no command
-    /// (`embedding_artifact_hash` absent). Any failure -- a store read that
-    /// fails for a reason other than integrity (`index_command_unreadable`),
-    /// or a missing or malformed reference, an integrity failure the store
-    /// reports, a decode failure, or a mismatch against the evidence or the
-    /// run's own recorded hash/revision (`index_command_invalid`) -- is a
-    /// safe label.
+    /// (`embedding_artifact_hash` absent). Any failure -- a failure the
+    /// store reports, an integrity failure included
+    /// (`index_command_unreadable`), or a missing or malformed reference, a
+    /// decode failure, or a mismatch against the evidence or the run's own
+    /// recorded hash/revision (`index_command_invalid`) -- is a safe label.
     pub async fn load_index_command(
         &self,
         run: &PipelineRunRecord,
@@ -11665,12 +11665,15 @@ impl PipelineService {
 
     /// Reads the index command a run committed at Score from its stored ref
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
-    /// `command_hash` and names `revision_id`. A failed store call is the safe
-    /// label `index_command_unreadable`, unless the store reports an
-    /// integrity failure (`is_trace_artifact_integrity_error`: the object
-    /// missing, corrupt, or bound to another tenant, kind or hash), which is
-    /// wrong content as each later check's failure is: `index_command_invalid`
-    /// (plan RB-D6: a wait cannot correct it).
+    /// `command_hash` and names `revision_id`. Each failure the store
+    /// reports is the safe label `index_command_unreadable`, an integrity
+    /// failure included (the object missing, corrupt, bound to another
+    /// tenant, kind or hash, or not decrypted under the loaded key): a store
+    /// fault (a root that is not mounted, a wrong key, a wrong bucket) reads
+    /// the same, and gets the hourly wait (plan RB-D6 as the owner decided it
+    /// on 2026-10-10, review of #1331). Content that the store read, and
+    /// that fails a later check (the byte wrapper, the decode, the hash, the
+    /// revision), is `index_command_invalid`.
     async fn read_index_command(
         &self,
         tenant_id: &str,
@@ -11701,13 +11704,7 @@ impl PipelineService {
             )
         })
         .await
-        .map_err(|error| {
-            if crate::trace_artifact_store::is_trace_artifact_integrity_error(&error) {
-                anyhow::anyhow!("index_command_invalid")
-            } else {
-                anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL)
-            }
-        })?;
+        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL))?;
         let bytes = decode_pipeline_artifact_bytes(&wrapper)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
@@ -11761,7 +11758,9 @@ impl PipelineService {
     /// is meant to be re-run after the operator resolves the tampered row,
     /// and every entry write is idempotent (`writer.upsert`'s `Unchanged`
     /// result) so a re-run never double-counts what an earlier attempt
-    /// already applied.
+    /// already applied. A stored command that the store cannot read (an
+    /// outage, a missing object, a wrong key) fails the rebuild the same way
+    /// with `index_command_unreadable` (`read_index_command`).
     pub async fn rebuild_index_from_authoritative_commands(
         &self,
         tenant_id: &str,

@@ -697,13 +697,15 @@ async fn rebuild_index_and_audit(
 }
 
 /// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
-/// HTTP shape. `index_command_invalid` -- a sealed command that failed
-/// validation against its run or its own committed Score evidence -- is
-/// surfaced as 409 Conflict, a state of the store rather than a transient
-/// service fault. `index_unavailable` -- a run's writes that passed their
-/// deadline -- and `index_rebuild_fence_unavailable` -- a fence write that
-/// failed before a run's writes (V113) -- are 503. Everything else falls
-/// back to the generic hash-only internal error.
+/// HTTP shape. `index_command_invalid` -- a sealed command that the store
+/// read and that failed validation against its run or its own committed
+/// Score evidence -- is surfaced as 409 Conflict, a state of the store
+/// rather than a transient service fault. `index_command_unreadable` -- a
+/// failure the artifact store reported, a missing object or a wrong key
+/// included (plan RB-D6) -- `index_unavailable` -- a run's writes that
+/// passed their deadline -- and `index_rebuild_fence_unavailable` -- a fence
+/// write that failed before a run's writes (V113) -- are 503. Everything
+/// else falls back to the generic hash-only internal error.
 pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     use trace_commons_server::versioned_pipeline::{
         PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
