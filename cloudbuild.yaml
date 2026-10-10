@@ -22,10 +22,13 @@
 # _CODE_REVISION_HASH is the versioned pipeline's code revision, which a
 # qualification and an activation compare against the binary's (see
 # docs/operator/pipeline-activation.md). It must be computed on the checkout
-# being uploaded, before the upload: `pipeline.py revision` hashes the git tree,
-# including docs/ and community/, which .gcloudignore leaves out of the upload,
-# so the build cannot compute it. Computing it first, as above, keeps a failed
-# `pipeline.py revision` from reaching the upload.
+# being uploaded, before the upload: `pipeline.py revision` takes its file list
+# from git and its ignore rules from the .gitignore files, and covers a few
+# files under docs/ (an include, the qualification's inputs), all of which
+# .gcloudignore leaves out of the upload, so the build cannot compute it.
+# Computing it first, as above, keeps a failed `pipeline.py revision` from
+# reaching the upload. This file is itself covered by the revision: it names
+# the features the binaries are built with.
 #
 # Empty or left out fails the build, so a command substitution that printed
 # nothing cannot pass for a deliberate choice. To build a binary with no

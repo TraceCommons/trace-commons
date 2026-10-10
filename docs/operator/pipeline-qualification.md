@@ -365,9 +365,51 @@ passed.
 - `pipeline.py revision` prints the code revision hash of the working tree: the
   `code_revision_hash` that every result of a run carries, and the value to give
   the build as `TRACE_COMMONS_BUILD_CODE_REVISION_HASH`. It hashes the path and
-  content of every file that git tracks, and of every untracked file that the
-  repository's own `.gitignore` files do not ignore, except the top-level
-  `.local`, `.vscode`, and `target` directories, so any edit changes it. It
+  content of each file that can change what the server's binaries do or what
+  a qualification run finds (#1249), and of no other file:
+  - each crate that `crates/trace-commons-server` is built from: the server
+    crate itself and every crate that its `[dependencies]` and
+    `[build-dependencies]` tables (for any target, a `workspace = true` entry
+    included) reach by `path`, transitively, plus a crate that the workspace's
+    `[patch]` or `[replace]` tables substitute by `path`. The whole directory
+    of each: sources, `build.rs`, tests, and fixtures. Today these are the
+    server, `-attestation`, `-build-info`, `-gate-api`, `-gate-enclave`,
+    `-operator-client`, and `-protocol` crates. A `[dev-dependencies]` table
+    is not followed: a dev-dependency never links into a binary, so the
+    contributor crate (the server's one path dev-dependency) is outside;
+  - each file that a Rust file of those crates includes from elsewhere in the
+    tree (`include_str!`, `include_bytes!`, `include!`, or a `#[path]`
+    module). Today these are `docs/operator/register-stats-role.md`,
+    `docs/superpowers/reports/2026-05-14-model-bakeoff-result-a26.json`, and
+    `docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`;
+  - `Cargo.toml`, `Cargo.lock`, `rust-toolchain`, `rust-toolchain.toml`, and a
+    `.cargo` directory at the top level; `cloudbuild.yaml` (the features the
+    release is built with); and `migrations/`;
+  - what a qualification run reads besides those: `scripts/operator/pipeline.py`,
+    `scripts/operator/pipeline_tooling/`,
+    `scripts/operator/pipeline-deployment-inventory.py`,
+    `scripts/operator/test_pipeline_tooling.py`, the contract manifest
+    `docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json`,
+    and `docs/superpowers/specs/fixtures/` (the default corpus).
+
+  So a change to any other document, to a client shell (`macos/`,
+  `windows/`, `tauri-desktop/`, `crates/trace-commons-contributor-gtk`, the
+  contributor crates), to `community/`, to `deploy/`, or to CI keeps the
+  revision. The list of covered prefixes is `CODE_REVISION_COVERED` in
+  `scripts/operator/pipeline_tooling/environment.py`, and its self-tests pin
+  the crate list and check that every file the tooling reads is covered. The
+  tool refuses rather than guess: a crate whose `Cargo.toml` is missing or
+  unreadable (`code_revision_manifest_missing`,
+  `code_revision_manifest_invalid`), a path that leaves the checkout
+  (`code_revision_path_outside_tree`), an include whose argument is not a
+  string literal or `concat!(env!("CARGO_MANIFEST_DIR"), "...")`
+  (`code_revision_include_unresolved`), and an included file outside the
+  covered paths that is not in the checkout
+  (`code_revision_include_missing`).
+
+  Of those paths, it takes each file that git tracks, and each untracked
+  file that the repository's own `.gitignore` files do not ignore, except
+  under the top-level `.local`, `.vscode`, and `target` directories. It
   also leaves out an untracked `.cargo` directory at any depth (a local cargo
   configuration); a `.cargo` file that git tracks is part of it. The
   repository's `.gitignore` has no `.cargo/` line, so a host with a local
@@ -375,7 +417,7 @@ passed.
   adds `.cargo/` to its own `.git/info/exclude`. A
   host's `.git/info/exclude` and a user's global excludes file do not change
   it. Compute the revision, qualify, and build on the same clean checkout: a
-  stray untracked file changes the revision.
+  stray untracked file under a covered path changes the revision.
 
 An attestation is one file, `<check_id>.attestation.json`, next to the result it
 signs. It holds the schema `trace_commons.pipeline_check_attestation.v1`, the
