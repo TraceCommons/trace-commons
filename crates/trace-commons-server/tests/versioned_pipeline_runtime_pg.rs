@@ -47546,3 +47546,110 @@ async fn classifier_timeout_is_a_classifier_failure() {
         0
     );
 }
+
+/// Task 9 (regression pin, spec 2026-10-09): the pipeline's half of
+/// `main`'s retention purge (`follow_up_retention`, `Purged`) treats the
+/// Review-start privacy pass object like every other object ref of the
+/// submission -- the source and the approved revision among them: the ref
+/// is invalidated and one `delete_object_payload` item, under
+/// `pipeline_retention_purge`, is queued for `main`'s revocation-propagation
+/// worker, which deletes the payload.
+#[tokio::test]
+async fn retention_purge_deletes_the_privacy_pass_object() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = CountingPassBoundary::new();
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_markers(&service, "pass-purge", &["MARKER_SECRET"]).await;
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    let pass_ref_id = reviewed
+        .privacy_pass_object_ref_id
+        .expect("the pass is recorded");
+    assert_eq!(pass_ref_id, expected_pass_ref_id(created.run_id));
+    let approved_ref_id = reviewed
+        .approved_object_ref_id
+        .expect("Review approved a revision");
+
+    service
+        .store()
+        .follow_up_retention(
+            &tenant,
+            reviewed.submission_id,
+            PipelineRetentionAction::Purged,
+        )
+        .await
+        .expect("the purge follow-up runs");
+
+    // `(object_ref_id, artifact_kind, invalidated, purge deletions queued for it)`
+    // for every object ref of the submission.
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let rows = tx
+        .query(
+            "SELECT r.object_ref_id, r.artifact_kind, r.invalidated_at IS NOT NULL,
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items p
+                      WHERE p.tenant_id = r.tenant_id
+                        AND p.source_submission_id = r.submission_id
+                        AND p.action = 'delete_object_payload'
+                        AND p.status = 'pending'
+                        AND p.reason = 'pipeline_retention_purge'
+                        AND p.target_json->>'object_ref_id' = r.object_ref_id::text)
+               FROM trace_object_refs r
+              WHERE r.tenant_id = $1 AND r.submission_id = $2
+              ORDER BY r.object_ref_id",
+            &[&tenant, &reviewed.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let refs = rows
+        .iter()
+        .map(|row| {
+            (
+                row.get::<_, uuid::Uuid>(0),
+                row.get::<_, String>(1),
+                row.get::<_, bool>(2),
+                row.get::<_, i64>(3),
+            )
+        })
+        .collect::<Vec<_>>();
+    let pass = refs
+        .iter()
+        .find(|(id, ..)| *id == pass_ref_id)
+        .expect("the pass object is an object ref of the submission");
+    assert_eq!(pass.1, "review_snapshot", "{refs:?}");
+    assert!(pass.2, "the purge invalidates the pass ref: {refs:?}");
+    assert_eq!(
+        pass.3, 1,
+        "one payload deletion is queued for the pass object: {refs:?}"
+    );
+    let approved = refs
+        .iter()
+        .find(|(id, ..)| *id == approved_ref_id)
+        .expect("the approved revision is an object ref");
+    assert!(
+        refs.iter()
+            .any(|(_, kind, ..)| kind == "submitted_envelope"),
+        "the source is an object ref: {refs:?}"
+    );
+    for (id, kind, invalidated, queued) in &refs {
+        assert!(
+            *invalidated && *queued == 1,
+            "{kind} {id} is purged like the pass object (approved {approved:?}): {refs:?}"
+        );
+    }
+    assert_eq!(boundary.calls(), 1);
+}

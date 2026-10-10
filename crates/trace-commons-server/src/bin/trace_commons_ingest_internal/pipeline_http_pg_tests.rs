@@ -3884,6 +3884,511 @@ async fn the_revocation_worker_deletes_every_object_of_a_withdrawn_complete_run(
 }
 
 // ---------------------------------------------------------------------------
+// The Review-start privacy pass object after the run (async rescrub plan,
+// Task 9): its deletion on a withdrawal, and `main`'s legacy readers'
+// refusal of a pipeline source.
+// ---------------------------------------------------------------------------
+
+/// One tenant whose receipts the router hands to a pipeline service over
+/// `MarkerRedactingBoundary` and the service-owned local encrypted store,
+/// which `main`'s state holds too (the revocation-propagation worker deletes
+/// only from a service-owned store). `state` holds a contributor token
+/// (`token`), a reviewer token (`reviewer_token`) and a process-evaluation
+/// worker token (`process_eval_token`), and reads reviewer metadata from the
+/// database when `db_reviewer_reads`.
+struct PassObjectFixture {
+    state: Arc<AppState>,
+    service: Arc<PipelineService>,
+    runtime: Arc<PgBackend>,
+    owner: Arc<PgBackend>,
+    tenant: String,
+    token: String,
+    reviewer_token: String,
+    process_eval_token: String,
+    artifacts: Arc<LocalEncryptedTraceArtifactStore>,
+    _dir: tempfile::TempDir,
+}
+
+async fn pass_object_fixture(label: &str, db_reviewer_reads: bool) -> Option<PassObjectFixture> {
+    let runtime = runtime_backend(4).await?;
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-pass-{label}-{suffix}");
+    let token = format!("token-pass-{label}-{suffix}");
+    let reviewer_token = format!("token-pass-reviewer-{label}-{suffix}");
+    let process_eval_token = format!("token-pass-process-eval-{label}-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, &reviewer_token, TokenRole::Reviewer);
+    insert_token(
+        &mut tokens,
+        &tenant,
+        &process_eval_token,
+        TokenRole::ProcessEvalWorker,
+    );
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let configured_store = || {
+        ConfiguredTraceArtifactStore::new(
+            TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            artifacts.clone(),
+        )
+    };
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &configured_store(),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(MarkerRedactingBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        db_reviewer_reads,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.artifact_store = Some(configured_store());
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    Some(PassObjectFixture {
+        state,
+        service,
+        runtime,
+        owner,
+        tenant,
+        token,
+        reviewer_token,
+        process_eval_token,
+        artifacts,
+        _dir: dir,
+    })
+}
+
+/// A receipt through the router (`POST /v1/traces`) whose envelope carries
+/// `MARKER_SECRET`, which only the classifier half of the fixture's boundary
+/// removes, then the worker's phases until the run is complete. Returns the
+/// complete run, which has a privacy pass record.
+async fn pass_object_run(
+    fixture: &PassObjectFixture,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    let tenant = fixture.tenant.as_str();
+    fixture
+        .service
+        .register_default_bundle(tenant)
+        .await
+        .expect("register the bundle");
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.trace_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    envelope
+        .privacy
+        .warnings
+        .push("MARKER_SECRET in a free-text field".to_string());
+    let body = serde_json::to_vec(&envelope).expect("envelope serialises");
+    let (status, receipt) = route_trace(&fixture.state, &fixture.token, &body).await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert_eq!(receipt["status"], "processing", "{receipt}");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        tenant,
+        envelope.submission_id,
+    )
+    .await;
+    for _ in 0..3 {
+        fixture
+            .service
+            .process_run(tenant, created.run_id)
+            .await
+            .expect("the phase runs");
+    }
+    let run = fixture
+        .service
+        .store()
+        .get_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(run.state, PipelineRunState::Complete, "{run:?}");
+    assert!(
+        run.privacy_pass_object_ref_id.is_some(),
+        "Review recorded the privacy pass: {run:?}"
+    );
+    let source = String::from_utf8(fixture.service.load_source_bytes(&run).await.unwrap()).unwrap();
+    assert!(
+        source.contains("MARKER_SECRET"),
+        "the stored source is the post-deterministic envelope, with the prose marker"
+    );
+    let approved =
+        String::from_utf8(fixture.service.load_approved_bytes(&run).await.unwrap()).unwrap();
+    assert!(!approved.contains("MARKER_SECRET"), "{approved}");
+    run
+}
+
+/// `(status, invalidated)` of the `delete_object_payload` item a withdrawal
+/// queued for `object_ref_id`, and whether that ref is invalidated; `None`
+/// for the status when no such item exists.
+async fn withdrawal_deletion_of(
+    owner: &Arc<PgBackend>,
+    tenant_id: &str,
+    submission_id: Uuid,
+    object_ref_id: Uuid,
+) -> (Option<String>, i64, bool) {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant_id).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT MIN(p.status) FROM trace_revocation_propagation_items p
+                      WHERE p.tenant_id = r.tenant_id
+                        AND p.source_submission_id = r.submission_id
+                        AND p.action = 'delete_object_payload'
+                        AND p.reason = 'pipeline_withdrawal'
+                        AND p.target_json->>'object_ref_id' = r.object_ref_id::text),
+                    (SELECT COUNT(*) FROM trace_revocation_propagation_items p
+                      WHERE p.tenant_id = r.tenant_id
+                        AND p.source_submission_id = r.submission_id
+                        AND p.action = 'delete_object_payload'
+                        AND p.reason = 'pipeline_withdrawal'
+                        AND p.target_json->>'object_ref_id' = r.object_ref_id::text),
+                    r.invalidated_at IS NOT NULL
+               FROM trace_object_refs r
+              WHERE r.tenant_id = $1 AND r.submission_id = $2 AND r.object_ref_id = $3",
+            &[&tenant_id, &submission_id, &object_ref_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    (row.get(0), row.get(1), row.get(2))
+}
+
+/// Async rescrub plan, Task 9 (regression pin, critique 9; P2): the privacy
+/// pass object is deleted when its submission is withdrawn, on both paths a
+/// pipeline submission's objects leave the store by. A receipt through the
+/// router runs to completion (the pass recorded) and is then taken off one
+/// of two ways (a fresh run each):
+///
+/// - The owner's withdrawal (`POST /v1/contributors/me/pipeline-submissions
+///   /{id}/withdraw`). It runs `main`'s whole-submission delete
+///   (`delete_withdrawn_trace_objects`) in the request, which deletes every
+///   object ref's payload by its key -- under
+///   `trace_artifact_kind_from_storage`'s receipt kind, `Other` for a
+///   `review_snapshot` -- and marks the refs deleted; the pipeline queues
+///   one `delete_object_payload` item per ref, which the
+///   revocation-propagation worker then completes as already deleted.
+/// - `main`'s revocation route (`POST /v1/traces/{id}/revoke`). It deletes
+///   nothing in the request; the pipeline's follow-up invalidates the refs
+///   and queues the items, and the worker verifies each object before it
+///   deletes it. The pass ref is a `review_snapshot`, which the worker's own
+///   mapping verifies as a `ContributionEnvelope` (the object is a P1
+///   wrapper that reads under that kind); under `Other` the worker has no
+///   verification arm and would never delete it.
+///
+/// Either way the pass ref gets one item, the worker completes it with
+/// nothing failed or skipped, and the object is gone and its ref marked
+/// deleted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_withdrawal_deletes_the_privacy_pass_object() {
+    let Some(fixture) = pass_object_fixture("withdraw", false).await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let tenant_ref = tenant_storage_ref(tenant);
+    let store = fixture
+        .state
+        .artifact_store
+        .clone()
+        .expect("main's state holds the store");
+    let present = |object_key: &str| {
+        fixture
+            .artifacts
+            .artifact_present_by_object_key(
+                &tenant_ref,
+                TraceArtifactKind::ContributionEnvelope,
+                object_key,
+                "",
+            )
+            .expect("the store answers")
+    };
+    for through_the_withdrawal_route in [true, false] {
+        let leg = if through_the_withdrawal_route {
+            "the contributor withdrawal route"
+        } else {
+            "main's revocation route"
+        };
+        let run = pass_object_run(&fixture).await;
+        let pass_ref_id = run
+            .privacy_pass_object_ref_id
+            .expect("the pass is recorded");
+        let object_refs = fixture
+            .owner
+            .list_trace_object_refs(tenant, run.submission_id)
+            .await
+            .unwrap();
+        let pass_ref = object_refs
+            .iter()
+            .find(|object_ref| object_ref.object_ref_id == pass_ref_id)
+            .expect("the pass object is an object ref of the submission")
+            .clone();
+        assert_eq!(
+            pass_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::ReviewSnapshot
+        );
+        assert_eq!(pass_ref.created_by_job_id, Some(run.run_id));
+        assert_eq!(
+            pass_ref.object_store, TRACE_COMMONS_SERVICE_LOCAL_ENCRYPTED_OBJECT_STORE,
+            "a service-owned object, which the worker deletes rather than skips"
+        );
+        let wrapper = store
+            .get_json_by_object_key::<serde_json::Value>(
+                &tenant_ref,
+                TraceArtifactKind::ContributionEnvelope,
+                &pass_ref.object_key,
+                &pass_ref.content_sha256,
+            )
+            .expect("the pass object reads as a ContributionEnvelope, as the worker verifies it");
+        assert!(is_pipeline_artifact_wrapper(&wrapper));
+        assert_eq!(present(&pass_ref.object_key), Some(true));
+        assert_eq!(
+            withdrawal_deletion_of(&fixture.owner, tenant, run.submission_id, pass_ref_id).await,
+            (None, 0, false),
+            "{leg}: nothing is queued before the withdrawal"
+        );
+
+        if through_the_withdrawal_route {
+            let session = account_session_headers(&fixture.state, &fixture.token).await;
+            let (status, withdrawal) = route_request(
+                fixture.state.clone(),
+                "POST",
+                &format!(
+                    "/v1/contributors/me/pipeline-submissions/{}/withdraw",
+                    run.submission_id
+                ),
+                session,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{withdrawal}");
+            assert_eq!(withdrawal["submission_id"], run.submission_id.to_string());
+        } else {
+            let (status, revoked) = route_request(
+                fixture.state.clone(),
+                "POST",
+                &format!("/v1/traces/{}/revoke", run.submission_id),
+                auth_headers(&fixture.token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{revoked}");
+        }
+        assert_eq!(
+            withdrawal_deletion_of(&fixture.owner, tenant, run.submission_id, pass_ref_id).await,
+            (Some("pending".to_string()), 1, true),
+            "{leg}: the pass ref is invalidated and its payload deletion queued"
+        );
+        assert_eq!(
+            present(&pass_ref.object_key),
+            Some(!through_the_withdrawal_route),
+            "{leg}: the withdrawal route deletes the payload in the request; the \
+             revocation route leaves it to the worker"
+        );
+
+        let pass = run_revocation_propagation_worker(
+            fixture.state.as_ref(),
+            &revocation_worker_tenant_auth(tenant),
+            TraceRevocationPropagationWorkerRequest {
+                purpose: Some("privacy pass object deletion".to_string()),
+                dry_run: false,
+                limit: 100,
+            },
+        )
+        .await
+        .expect("the worker runs");
+        assert_eq!(
+            (pass.failed, pass.skipped),
+            (0, 0),
+            "{leg}: no deletion fails or is skipped"
+        );
+        assert_eq!(pass.completed, pass.checked, "{leg}: every item completes");
+        assert!(
+            pass.completed >= object_refs.len(),
+            "{leg}: one per object ({} of {})",
+            pass.completed,
+            object_refs.len()
+        );
+        assert_eq!(
+            withdrawal_deletion_of(&fixture.owner, tenant, run.submission_id, pass_ref_id)
+                .await
+                .0
+                .as_deref(),
+            Some("done"),
+            "{leg}"
+        );
+        assert_eq!(
+            present(&pass_ref.object_key),
+            Some(false),
+            "{leg}: the pass object is physically gone from the store"
+        );
+        let after = fixture
+            .owner
+            .list_trace_object_refs(tenant, run.submission_id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|object_ref| object_ref.object_ref_id == pass_ref_id)
+            .expect("the ref row stays");
+        assert!(
+            after.deleted_at.is_some(),
+            "{leg}: the pass ref is marked deleted"
+        );
+    }
+}
+
+/// Async rescrub plan, Task 9 (regression pin, Q3, critique 2): `main`'s
+/// legacy readers never emit a pipeline submission's stored source, which
+/// since the async rescrub is the post-deterministic envelope and can still
+/// hold prose PII that only the Review-start privacy pass removes. Here the
+/// source carries `MARKER_SECRET` and the run is complete (`accepted`).
+///
+/// - `read_envelope_from_active_db_object_ref`, the
+///   `get_latest_active_envelope_object_ref` read every database-backed
+///   legacy body reader goes through, refuses it: the active
+///   `submitted_envelope` ref holds the pipeline's P1 byte wrapper, which does
+///   not decode as an envelope. So does `read_envelope_from_object_ref` for
+///   every other object ref of the submission (the pass object and the
+///   approved revision are `review_snapshot` refs, a kind that reader's kind
+///   check admits).
+/// - The benchmark conversion, the two ranker training exports and the
+///   process-evaluation worker, run for the tenant, either refuse or answer
+///   without the marker.
+///
+/// These readers are still `main`'s, and refuse only because the wrapper
+/// does not decode. Moving them onto `read_mains_reviewer_metadata_view` is
+/// a follow-up the owner files separately (async rescrub plan, Q3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_readers_never_emit_a_pipeline_source() {
+    let Some(fixture) = pass_object_fixture("legacy-readers", true).await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let run = pass_object_run(&fixture).await;
+    let submission = fixture
+        .owner
+        .get_trace_submission(tenant, run.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row exists");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Accepted);
+
+    let Err(refused) =
+        read_envelope_from_active_db_object_ref(fixture.state.as_ref(), tenant, run.submission_id)
+            .await
+    else {
+        panic!("the active envelope read refuses a pipeline source")
+    };
+    assert!(
+        !format!("{refused:#}").contains("MARKER_SECRET"),
+        "{refused:#}"
+    );
+    let object_refs = fixture
+        .owner
+        .list_trace_object_refs(tenant, run.submission_id)
+        .await
+        .unwrap();
+    assert!(
+        object_refs
+            .iter()
+            .any(|object_ref| Some(object_ref.object_ref_id) == run.privacy_pass_object_ref_id),
+        "{object_refs:?}"
+    );
+    for object_ref in object_refs.iter().filter(|object_ref| {
+        matches!(
+            object_ref.artifact_kind,
+            StorageTraceObjectArtifactKind::SubmittedEnvelope
+                | StorageTraceObjectArtifactKind::RescrubbedEnvelope
+                | StorageTraceObjectArtifactKind::ReviewSnapshot
+        )
+    }) {
+        let refused = read_envelope_from_object_ref(fixture.state.as_ref(), tenant, object_ref)
+            .expect_err("a pipeline object never reads as a legacy envelope");
+        assert!(
+            !format!("{refused:#}").contains("MARKER_SECRET"),
+            "{:?}: {refused:#}",
+            object_ref.artifact_kind
+        );
+    }
+
+    let jobs = [
+        (
+            "POST",
+            "/v1/benchmarks/convert".to_string(),
+            fixture.reviewer_token.as_str(),
+            Some(serde_json::json!({
+                "limit": 10,
+                "purpose": "legacy reader pin",
+            })),
+        ),
+        (
+            "GET",
+            "/v1/ranker/training-candidates?limit=10&purpose=legacy_reader_pin".to_string(),
+            fixture.reviewer_token.as_str(),
+            None,
+        ),
+        (
+            "GET",
+            "/v1/ranker/training-pairs?limit=10&purpose=legacy_reader_pin".to_string(),
+            fixture.reviewer_token.as_str(),
+            None,
+        ),
+        (
+            "POST",
+            "/v1/workers/process-evaluations/run".to_string(),
+            fixture.process_eval_token.as_str(),
+            Some(serde_json::json!({
+                "limit": 10,
+                "evaluator_ref": "legacy-reader-pin",
+                "reason": "legacy reader pin",
+            })),
+        ),
+    ];
+    for (method, uri, token, body) in jobs {
+        let (status, response) = route_request(
+            fixture.state.clone(),
+            method,
+            &uri,
+            auth_headers(token),
+            body,
+        )
+        .await;
+        // A refusal is any answer but a malformed request: each job must run.
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{method} {uri} is a well-formed request: {response}"
+        );
+        assert!(
+            !response.to_string().contains("MARKER_SECRET"),
+            "{method} {uri} answered {status} with the pipeline source's marker: {response}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Pipeline product routes through the router: the status block, the score
 // attestation, exports, and the administrator reads, with the product store
 // on the runtime role.
