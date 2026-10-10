@@ -20,11 +20,15 @@ fail() {
   FAIL=1
 }
 
-# The default destination is Insights. Require its heading and an interactive
-# file-selection control, rather than OCR of a neighboring navigation tab.
+# The default destination is Insights, which opens on its Overview tab.
+# Require the page's own tab switcher on one line (Overview, Patterns,
+# Sessions, Analyze) -- an interactive control on the Insights page, not the
+# sidebar's "Insights" entry -- and the Overview's "Tokens by day" card
+# heading, which shows its body rendered. The capture loop below retries while
+# the body loads.
 insights_frame() {
-  grep -qiE '^[[:space:]]*Insights[[:space:]]*$' <<< "$1" &&
-    grep -qi 'Choose file' <<< "$1"
+  grep -qiE 'Overview[[:space:]]+Patterns[[:space:]]+Sessions[[:space:]]+Analyze' <<< "$1" &&
+    grep -qi 'Tokens by day' <<< "$1"
 }
 
 # `cargo test <filter> -- --exact --ignored` exits 0 when the filter matches
@@ -291,9 +295,9 @@ else
       echo "$OCR_TEXT"
       echo "----------------"
       if insights_frame "$OCR_TEXT"; then
-        echo "OCR found the Insights heading and Choose file control"
+        echo "OCR found the Insights tab switcher and the Overview's Tokens by day card"
       else
-        fail "OCR did not find the Insights heading and Choose file control in the screenshot"
+        fail "OCR did not find the Insights tab switcher and the Overview's Tokens by day card in the screenshot"
       fi
     else
       fail "tesseract not available -- OCR text-presence check could not run"
