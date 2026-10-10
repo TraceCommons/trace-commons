@@ -459,7 +459,9 @@ mod tests {
                 assert!(!source.contains(name), "{file} names {name}");
             }
         }
-        let supervisor = include_str!("daemon/mod.rs");
+        // A Windows checkout has CRLF line endings; normalise them so the
+        // split below finds the test module there too.
+        let supervisor = include_str!("daemon/mod.rs").replace("\r\n", "\n");
         let production = supervisor
             .split("#[cfg(test)]\nmod tests {")
             .next()
