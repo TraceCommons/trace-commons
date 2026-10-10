@@ -3994,8 +3994,12 @@ async fn pass_object_run(
     make_metadata_only_low_risk(&mut envelope);
     envelope.consent.scopes = vec![ConsentScope::ModelTraining];
     envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
-    envelope.trace_card.allowed_uses =
-        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    envelope.trace_card.allowed_uses = vec![
+        TraceAllowedUse::Evaluation,
+        TraceAllowedUse::BenchmarkGeneration,
+        TraceAllowedUse::RankingModelTraining,
+        TraceAllowedUse::ModelTraining,
+    ];
     envelope
         .privacy
         .warnings
@@ -4274,8 +4278,13 @@ async fn pipeline_withdrawal_deletes_the_privacy_pass_object() {
 ///   approved revision are `review_snapshot` refs, a kind that reader's kind
 ///   check admits).
 /// - The benchmark conversion, the two ranker training exports and the
-///   process-evaluation worker, run for the tenant, either refuse or answer
-///   without the marker.
+///   process-evaluation worker, run for the tenant, select the pipeline
+///   submissions (two, so the pair export has a pair; the fixture grants
+///   every allowed use these jobs filter on, and the worker's dry run lists
+///   them) and are refused at their envelope read with a 500 that names no
+///   pipeline submission and carries no marker. No export manifest names
+///   them and no process-evaluation record is written. Without that
+///   selection the jobs answer 200 with nothing, which would pin nothing.
 ///
 /// These readers are still `main`'s, and refuse only because the wrapper
 /// does not decode. Moving them onto `read_mains_reviewer_metadata_view` is
@@ -4333,6 +4342,48 @@ async fn legacy_readers_never_emit_a_pipeline_source() {
         );
     }
 
+    // A second pipeline submission: the ranker pair export pairs two
+    // candidates, so with one it selects nothing.
+    let second = pass_object_run(&fixture).await;
+    let pipeline_submissions = [run.submission_id, second.submission_id];
+
+    // Each job selects the pipeline submissions: the fixture gives them every
+    // allowed use the four jobs filter on, and the tenant has no other
+    // submission. The process-evaluation worker's dry run, which reads no
+    // body, shows that selection.
+    let (status, dry_run) = route_request(
+        fixture.state.clone(),
+        "POST",
+        "/v1/workers/process-evaluations/run",
+        auth_headers(&fixture.process_eval_token),
+        Some(serde_json::json!({
+            "limit": 10,
+            "dry_run": true,
+            "evaluator_ref": "legacy-reader-pin",
+            "reason": "legacy reader pin",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{dry_run}");
+    let mut evaluated = dry_run["evaluated_submission_ids"]
+        .as_array()
+        .expect("the dry run lists what it evaluated")
+        .iter()
+        .map(|id| id.as_str().unwrap().parse::<Uuid>().unwrap())
+        .collect::<Vec<_>>();
+    evaluated.sort();
+    let mut expected = pipeline_submissions.to_vec();
+    expected.sort();
+    assert_eq!(
+        evaluated, expected,
+        "the worker selects the pipeline submissions: {dry_run}"
+    );
+
+    // Then each job, run for real, is refused at its envelope read: the
+    // exports' `revalidate_db_export_sources` and the worker's
+    // `read_envelope_for_process_evaluation` read the active
+    // `submitted_envelope` ref, which holds the P1 wrapper. With no
+    // pipeline submission selected these jobs answer 200 with nothing.
     let jobs = [
         (
             "POST",
@@ -4375,17 +4426,48 @@ async fn legacy_readers_never_emit_a_pipeline_source() {
             body,
         )
         .await;
-        // A refusal is any answer but a malformed request: each job must run.
-        assert_ne!(
+        assert_eq!(
             status,
-            StatusCode::BAD_REQUEST,
-            "{method} {uri} is a well-formed request: {response}"
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{method} {uri} refuses the pipeline submissions it selected: {response}"
         );
+        let answer = response.to_string();
         assert!(
-            !response.to_string().contains("MARKER_SECRET"),
-            "{method} {uri} answered {status} with the pipeline source's marker: {response}"
+            !answer.contains("MARKER_SECRET"),
+            "{method} {uri} answered with the pipeline source's marker: {answer}"
         );
+        for submission_id in pipeline_submissions {
+            assert!(
+                !answer.contains(&submission_id.to_string()),
+                "{method} {uri} names a pipeline submission: {answer}"
+            );
+        }
     }
+
+    // Nothing was exported or evaluated from them.
+    let manifests = fixture
+        .owner
+        .list_trace_export_manifests(tenant)
+        .await
+        .unwrap();
+    assert!(
+        manifests.iter().all(|manifest| !manifest
+            .source_submission_ids
+            .iter()
+            .any(|id| pipeline_submissions.contains(id))),
+        "{manifests:?}"
+    );
+    let derived = fixture
+        .owner
+        .list_trace_derived_records(tenant)
+        .await
+        .unwrap();
+    assert!(
+        derived
+            .iter()
+            .all(|record| record.worker_kind != StorageTraceWorkerKind::ProcessEvaluation),
+        "{derived:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
