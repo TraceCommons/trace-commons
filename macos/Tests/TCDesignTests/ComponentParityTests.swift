@@ -93,6 +93,15 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertTrue(GlassBarGraph.dotAlphas(.infinity, of: 40).allSatisfy { $0 <= 1 })
     }
 
+    /// A thin graph's outer labels hug its edges, so a label wider than its
+    /// column is never cut; a wide graph centres every label.
+    func test_theBarGraphKeepsItsOuterLabelsInside() {
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 0, count: 42, thin: true), .leading)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 41, count: 42, thin: true), .trailing)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 6, count: 42, thin: true), .center)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 0, count: 11, thin: false), .center)
+    }
+
     /// A later window slides in from the trailing side, an earlier one from
     /// the leading side; the same window does not slide.
     func test_theBarGraphSlidesFromTheSideTheWindowLiesOn() {

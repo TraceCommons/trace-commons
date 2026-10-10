@@ -381,13 +381,13 @@ public struct GlassBarGraph: View {
         // label, and on the bottom it would lift the labelled columns' dots
         // off the others' rows.
         return HStack(alignment: .top, spacing: thin ? 2 : 6) {
-            ForEach(buckets) { bucket in
+            ForEach(Array(buckets.enumerated()), id: \.element.id) { index, bucket in
                 let isHovered = hovered == bucket.id
                 VStack(spacing: GlassTokens.Space.s2) {
                     Canvas { context, size in
                         Self.drawMatrix(
                             in: &context, size: size, columns: thin ? 1 : 3,
-                            radius: thin ? 1.6 : 2.1, inset: thin ? 1 : 5,
+                            radius: thin ? 1.5 : 1.9, inset: thin ? 1 : 5, end: Self.matrixEnd,
                             up: Self.dotAlphas(bucket.up, of: maximum),
                             down: Self.dotAlphas(bucket.down, of: maximum),
                             unlit: GlassColor.ink(isHovered ? 0.2 : 0.09))
@@ -406,7 +406,8 @@ public struct GlassBarGraph: View {
                         // `white-space: nowrap`, without widening the bar.
                         .lineLimit(1)
                         .fixedSize()
-                        .frame(width: 0)
+                        .frame(width: 0, alignment: Self.labelAlignment(index: index, count: buckets.count, thin: thin))
+                        .frame(maxWidth: .infinity, alignment: Self.labelAlignment(index: index, count: buckets.count, thin: thin))
                         .frame(minHeight: 12)
                 }
                 .onHover { hovered = $0 ? bucket.id : nil }
@@ -418,6 +419,21 @@ public struct GlassBarGraph: View {
 
     /// Dots in each half of a column, from the axis out.
     static let rows = 7
+
+    /// The space between the matrix and the column's top and foot, so the
+    /// hover wash stands clear of the dots (owner, 2026-10-10).
+    static let matrixEnd: CGFloat = 6
+
+    /// Where a label sits under its column. Centred, except that in a thin
+    /// graph the first and last labels hug the outer edge, where a centred
+    /// label wider than its column would run past the graph and be cut
+    /// ("Mon" read "on" at 42 days).
+    static func labelAlignment(index: Int, count: Int, thin: Bool) -> Alignment {
+        guard thin else { return .center }
+        if index == 0 { return .leading }
+        if index == count - 1 { return .trailing }
+        return .center
+    }
 
     /// The tapered matrix (owner, 2026-10-10): each half of a column is
     /// `rows` dots, lit from the axis out in proportion to the value. Lit
@@ -440,13 +456,13 @@ public struct GlassBarGraph: View {
     /// (#1146 `.tc-bar-graph__down { top: 50% }`), on a 1pt axis rule.
     private static func drawMatrix(
         in context: inout GraphicsContext, size: CGSize, columns: Int, radius: CGFloat, inset: CGFloat,
-        up: [Double], down: [Double], unlit: Color
+        end: CGFloat, up: [Double], down: [Double], unlit: Color
     ) {
         let half = size.height / 2
         // Rows keep one pitch in every column, whatever its width, so a
         // narrow range's dots line up across the graph; only the columns
         // close in.
-        let pitch = (half - 1) / CGFloat(rows)
+        let pitch = (half - 1 - end) / CGFloat(rows)
         let across = min(pitch, (size.width - inset * 2) / CGFloat(columns))
         let left = (size.width - across * CGFloat(columns)) / 2 + across / 2
         let shared = GlassTokens.Color.dataShared.color
