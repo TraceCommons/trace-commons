@@ -599,7 +599,7 @@ enum GlassMapMarks {
     static let shimmerEvery: Duration = .seconds(40)
     static let shimmerDuration: Double = 2.4
     /// The shimmer band's half-width, as a fraction of the field's diagonal.
-    static let shimmerHalfWidth: CGFloat = 0.14
+    static let shimmerHalfWidth: CGFloat = 0.1
     /// How far the light reaches from the pointer.
     static let reach: CGFloat = 140
 
