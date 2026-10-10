@@ -302,7 +302,8 @@ pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_alr
 /// writes nothing.
 pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
 /// Safe label of a run the Review-start privacy pass escalated (its risk is
-/// above the receipt-time risk, decision P3), held for a human whatever
+/// High and above the receipt-time risk, decision P3 as amended 2026-10-10,
+/// `privacy_pass_outcome`), held for a human whatever
 /// Admission decided: the run's parking label, the review queue's hold
 /// reason, and a reason an approving assessment must resolve. Distinct from
 /// Admission's `privacy_review_required`.
@@ -1003,6 +1004,33 @@ pub fn pipeline_privacy_risk(
         }
         ResidualPiiRisk::Medium => PrivacyRisk::Medium,
         ResidualPiiRisk::High => PrivacyRisk::High,
+    }
+}
+
+/// The Review-start privacy pass's outcome (decision P3, as amended by the
+/// owner decision of 2026-10-10, "once PII removed we should go to
+/// accepted"). `receipt_risk` and `pass_risk` are both on Admission's scale
+/// (`pipeline_privacy_risk`).
+///
+/// The pass escalates only when its risk is High and strictly above the
+/// receipt's. A post-pass Medium is the found-and-removed (or consent-flag)
+/// floor: the classifier found prose PII and the envelope Review reads is
+/// the redacted one, so the pass clears and the run goes on to the Review
+/// policy on the scrubbed bytes, with the merged basis
+/// (`found_and_removed`) and the redaction counts recorded for audit. High
+/// means something redaction did not resolve (a key finding, a coverage gap,
+/// a survivor, a residual scan that could not run) and is held for a human,
+/// never rejected (D1). A receipt already at High never reaches the pass
+/// (Admission rejects it), and a Medium receipt Admission quarantined keeps
+/// Admission's hold whatever the pass clears.
+pub fn privacy_pass_outcome(
+    receipt_risk: PrivacyRisk,
+    pass_risk: PrivacyRisk,
+) -> PrivacyPassOutcome {
+    if pass_risk == PrivacyRisk::High && pass_risk > receipt_risk {
+        PrivacyPassOutcome::Escalated
+    } else {
+        PrivacyPassOutcome::Cleared
     }
 }
 
@@ -5631,13 +5659,13 @@ impl PgPipelineStore {
     /// is reached only if the outcome changed between the two.
     ///
     /// The duplicate verdict ([`PipelineDuplicateControls`]) is decided once
-    /// per run and never re-decided here. A run with a Trace Credit leg
-    /// decided it before that leg could pay (`novelty_utility_withheld_reason`):
-    /// the row reads the leg, so a paid leg means no duplicate label and a
-    /// withheld one its label. A run with no leg (a zero delta) passes the
-    /// verdict its Settle computed just before this commit
-    /// (`PgPipelineStore::duplicate_verdict_for_commit`) as
-    /// `duplicate_verdict`. A duplicate label is recorded as
+    /// per run, when its Settle selection is persisted
+    /// (`PgPipelineStore::duplicate_verdict_for_selection`), and never
+    /// re-decided here. That verdict kept a duplicate out of the index and
+    /// withheld its Trace Credit leg before the leg could pay; the row reads
+    /// the leg, so a paid leg means no duplicate label and a withheld one
+    /// its label. A run with no leg (a zero delta) passes the selection's
+    /// verdict as `duplicate_verdict`. A duplicate label is recorded as
     /// `credit_withheld_reason` with no credit quality, the shape of
     /// `main`'s `skipped_duplicate` and `cached` rows, which the contributor
     /// status reads as a duplicate with no pending credit. Every other
@@ -5796,11 +5824,10 @@ impl PgPipelineStore {
         }
     }
 
-    /// The duplicate verdict of a run with no Trace Credit leg, which its
-    /// Settle passes to `commit_settle`: `duplicate_withheld_reason_on_tx`
-    /// in a transaction of its own. `None` for a run with a leg, whose leg
-    /// already carries the verdict, and when `controls` is `None`.
-    pub async fn duplicate_verdict_for_commit(
+    /// The run's duplicate verdict, decided once, when its Settle
+    /// selection is persisted: `duplicate_withheld_reason_on_tx` in a
+    /// transaction of its own. `None` when `controls` is `None`.
+    pub async fn duplicate_verdict_for_selection(
         &self,
         run: &PipelineRunRecord,
         controls: Option<&PipelineDuplicateControls>,
@@ -5810,24 +5837,7 @@ impl PgPipelineStore {
         }
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
-        let has_leg: bool = tx
-            .query_one(
-                "SELECT EXISTS (
-                     SELECT 1 FROM pipeline_run_settlements
-                      WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = $3)",
-                &[
-                    &run.tenant_id,
-                    &run.run_id,
-                    &InstrumentId::trace_credit().as_str(),
-                ],
-            )
-            .await?
-            .get(0);
-        let verdict = if has_leg {
-            None
-        } else {
-            Self::duplicate_withheld_reason_on_tx(&tx, run, controls).await?
-        };
+        let verdict = Self::duplicate_withheld_reason_on_tx(&tx, run, controls).await?;
         tx.commit().await?;
         Ok(verdict)
     }
@@ -8575,8 +8585,11 @@ pub struct PipelineNoveltyUtilityChecks {
 /// (`PgPipelineStore::duplicate_withheld_reason_on_tx`): the row keeps its
 /// Score values, records the label, and holds no credit quality, and the
 /// run's `NoveltyUtility` leg is withheld under the same label, as `main`
-/// never emits that event for a submission it did not score. The Score
-/// evidence is unchanged.
+/// never emits that event for a submission it did not score, and the run is
+/// kept out of the index, as `main` never indexes a submission it did not
+/// score. Settle decides the verdict once, when it persists its selection
+/// (`PgPipelineStore::duplicate_verdict_for_selection`). The Score evidence
+/// and the bundle are unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PipelineDuplicateControls {
     pub skip_duplicates: bool,
@@ -8598,6 +8611,31 @@ pub const PIPELINE_CACHED_DUPLICATE_LABEL: &str = "cached";
 
 fn is_duplicate_withheld_label(label: &str) -> bool {
     label == PIPELINE_SKIPPED_DUPLICATE_LABEL || label == PIPELINE_CACHED_DUPLICATE_LABEL
+}
+
+/// The duplicate verdict a run's persisted Settle selection carries: the
+/// label of an `Exclude` that Step 3 of `complete_settle_phase` wrote for a
+/// duplicate (`PgPipelineStore::duplicate_verdict_for_selection`), `None`
+/// for any other membership. A selection persisted before the verdict moved
+/// to Step 3 carries none, and reads as no duplicate.
+fn selection_duplicate_verdict(
+    selection: &StoredPhaseResult,
+) -> anyhow::Result<Option<&'static str>> {
+    let decision = serde_json::from_value::<SettleDecision>(selection.decision.clone())
+        .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+    Ok(match &decision.index_membership {
+        IndexMembershipDecision::Exclude { reason }
+            if reason.as_str() == PIPELINE_SKIPPED_DUPLICATE_LABEL =>
+        {
+            Some(PIPELINE_SKIPPED_DUPLICATE_LABEL)
+        }
+        IndexMembershipDecision::Exclude { reason }
+            if reason.as_str() == PIPELINE_CACHED_DUPLICATE_LABEL =>
+        {
+            Some(PIPELINE_CACHED_DUPLICATE_LABEL)
+        }
+        _ => None,
+    })
 }
 
 /// `main`'s withheld-reason labels for a `NoveltyUtility` credit its checks
@@ -11452,9 +11490,12 @@ impl PipelineService {
     /// (decision P7). Otherwise the pass loads the source (the receipt's
     /// post-deterministic envelope), runs the boundary's classifier half on
     /// it under `privacy_pass_timeout`, and merges the receipt's basis with
-    /// the classifier's conditions. It escalates when the classified risk is
-    /// strictly above the receipt-time risk, both on Admission's scale
-    /// (`pipeline_privacy_risk`, decision P3). It stores the output under
+    /// the classifier's conditions. It escalates only when the classified
+    /// risk is High and strictly above the receipt-time risk, both on
+    /// Admission's scale (`pipeline_privacy_risk`, `privacy_pass_outcome`,
+    /// decision P3 as amended 2026-10-10): a Medium from PII the classifier
+    /// found and removed clears, and Review reads the redacted output. It
+    /// stores the output under
     /// this attempt's own key (staged as `privacy-pass`, so the sweep deletes
     /// it if nothing commits it), then records the pass on the run
     /// (`record_privacy_pass`). A refused record deletes this attempt's
@@ -11518,11 +11559,7 @@ impl PipelineService {
         }
         let receipt_risk = pipeline_privacy_risk(&receipt.residual_pii_risk, &receipt_basis);
         let risk = pipeline_privacy_risk(&envelope.privacy.residual_pii_risk, &merged);
-        let outcome = if risk > receipt_risk {
-            PrivacyPassOutcome::Escalated
-        } else {
-            PrivacyPassOutcome::Cleared
-        };
+        let outcome = privacy_pass_outcome(receipt_risk, risk);
         let basis_labels = safe_residual_risk_basis_labels(&merged);
 
         let bytes = serde_json::to_vec(&envelope)?;
@@ -13341,9 +13378,34 @@ impl PipelineService {
                     Err(_) if !guard.operable => None,
                     Err(error) => return Err(error),
                 };
+                // `main`'s duplicate short-circuits, decided here, once per
+                // run, before the index write this selection arms: `main`'s
+                // driver records a duplicate without scoring it, so a
+                // duplicate never enters its index. The verdict is a server
+                // runtime input (`PipelineNoveltyUtilityChecks::
+                // duplicate_controls`), not bundle policy, so it overrides
+                // the policy's index membership below rather than changing
+                // the policy: the bundle and its package hash stay as they
+                // were. The persisted selection then carries it, and the
+                // Trace Credit leg (Step 6) and the gate decision row
+                // (`commit_settle`) read it from there
+                // (`selection_duplicate_verdict`), never deciding again.
+                // Its own pooled connection, returned before the policy runs.
+                let duplicate_verdict = if bundle.package.manifest.score.implementation_id
+                    == COMPATIBILITY_SCORE_IMPLEMENTATION
+                {
+                    self.store
+                        .duplicate_verdict_for_selection(
+                            &run,
+                            self.novelty_utility_checks.duplicate_controls.as_ref(),
+                        )
+                        .await?
+                } else {
+                    None
+                };
                 let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
                 self.settle_evaluations.fetch_add(1, Ordering::SeqCst);
-                let result = bundle
+                let mut result = bundle
                     .settle
                     .execute(&SettleInput {
                         run_id: run.run_id,
@@ -13360,6 +13422,19 @@ impl PipelineService {
                     .decision
                     .matches_score(&score_decision)
                     .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                // A duplicate is excluded under its label whatever the
+                // policy chose; its settlement operations stay the policy's.
+                if let Some(label) = duplicate_verdict {
+                    result.decision = SettleDecision::new(
+                        IndexMembershipDecision::Exclude {
+                            reason: ReasonCode::new(label)?,
+                        },
+                        &score_decision,
+                        result.decision.settlement_operations().to_vec(),
+                    )
+                    .map_err(|_| anyhow::anyhow!("settlement_operation_mismatch"))?;
+                    result.evidence.index_operation_required = false;
+                }
                 for operation in result.decision.settlement_operations() {
                     let award = score_decision
                         .awards()
@@ -13410,6 +13485,11 @@ impl PipelineService {
                 stored
             }
         };
+
+        // The run's duplicate verdict, as Step 3 decided it and the
+        // selection persisted it: the one value the leg and the gate
+        // decision row read.
+        let duplicate_verdict = selection_duplicate_verdict(&selection)?;
 
         // Step 5: dispatch to the index only when a prior attempt left it
         // pending (an include whose entries are not yet all applied). The
@@ -13706,7 +13786,9 @@ impl PipelineService {
                                 &run,
                                 amount.get(),
                                 authority.as_ref(),
-                                settlement.dispatched_at.is_none(),
+                                // Only a leg not yet dispatched is withheld
+                                // as a duplicate (poldsam P-1 below).
+                                duplicate_verdict.filter(|_| settlement.dispatched_at.is_none()),
                             )
                             .await?;
                         tx.commit().await?;
@@ -14175,17 +14257,10 @@ impl PipelineService {
             evaluation,
         };
         let outcome = StoredPhaseResult::from_result(Phase::Settle, &result)?;
-        // A run with no Trace Credit leg decides its duplicate verdict here,
-        // once, in its own transaction, so the commit's locked transaction
-        // reads no summaries; a run with a leg decided it before the leg
-        // could pay.
-        let duplicate_verdict = self
-            .store
-            .duplicate_verdict_for_commit(
-                run,
-                self.novelty_utility_checks.duplicate_controls.as_ref(),
-            )
-            .await?;
+        // The duplicate verdict the selection persisted (Step 3), the same
+        // one that kept the run out of the index and withheld its leg; the
+        // commit's locked transaction reads no summaries.
+        let duplicate_verdict = selection_duplicate_verdict(selection)?;
         let updated = match self
             .store
             .commit_settle(run, outcome, final_membership, duplicate_verdict)
@@ -14533,8 +14608,8 @@ impl PipelineService {
                     run,
                     amount.get(),
                     novelty_utility_authority.as_ref(),
-                    // Decided by the pre-dispatch check, never here.
-                    false,
+                    // Applied by the pre-dispatch check, never here.
+                    None,
                 )
                 .await?
             {
@@ -14712,27 +14787,18 @@ impl PipelineService {
         run: &PipelineRunRecord,
         amount_microcredits: u64,
         authority: Option<&crate::trace_authority::SubmissionAuthority>,
-        decide_duplicate: bool,
+        duplicate_verdict: Option<&'static str>,
     ) -> anyhow::Result<Option<&'static str>> {
         let checks = &self.novelty_utility_checks;
         // `main` records a duplicate without scoring it, so it never reaches
-        // the credit checks below or emits the event. The verdict is
-        // decided once, by the pre-dispatch check of a leg not yet
-        // dispatched (`decide_duplicate`); a leg that check let through is
-        // never re-decided as a duplicate, so a neighbour's later progress
-        // cannot withhold a leg already on its way to paying.
-        let duplicate = if decide_duplicate {
-            PgPipelineStore::duplicate_withheld_reason_on_tx(
-                tx,
-                run,
-                checks.duplicate_controls.as_ref(),
-            )
-            .await?
-        } else {
-            None
-        };
-        if duplicate.is_some() {
-            return Ok(duplicate);
+        // the credit checks below or emits the event. The verdict was
+        // decided once, when the run's Settle selection was persisted
+        // (`selection_duplicate_verdict`), and the pre-dispatch check of a
+        // leg not yet dispatched passes it as `duplicate_verdict`; nothing
+        // here decides it again, so a neighbour's later progress cannot
+        // withhold a leg already on its way to paying.
+        if duplicate_verdict.is_some() {
+            return Ok(duplicate_verdict);
         }
         if checks.require_production_gate {
             let qualification = self.dependency_qualification();
@@ -17187,6 +17253,39 @@ mod tests {
         assert_eq!(
             pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
             PrivacyRisk::High
+        );
+    }
+
+    /// Decision P3 as amended 2026-10-10: only a High pass risk above the
+    /// receipt's escalates; a Medium pass risk (PII found and removed, or a
+    /// consent flag) clears, whatever the receipt's risk was.
+    #[test]
+    fn privacy_pass_escalates_only_at_high() {
+        use PrivacyRisk::{High, Low, Medium};
+        for (receipt, pass, expected) in [
+            (Low, Low, PrivacyPassOutcome::Cleared),
+            (Low, Medium, PrivacyPassOutcome::Cleared),
+            (Medium, Medium, PrivacyPassOutcome::Cleared),
+            (Medium, Low, PrivacyPassOutcome::Cleared),
+            (Low, High, PrivacyPassOutcome::Escalated),
+            (Medium, High, PrivacyPassOutcome::Escalated),
+            (High, High, PrivacyPassOutcome::Cleared),
+        ] {
+            assert_eq!(
+                privacy_pass_outcome(receipt, pass),
+                expected,
+                "{receipt:?} -> {pass:?}"
+            );
+        }
+        // The pilot's prose-PII probe: a Low receipt whose classifier found
+        // and removed names, a date of birth and an address.
+        let pass = pipeline_privacy_risk(
+            &ResidualPiiRisk::Medium,
+            &[ResidualRiskCondition::FoundAndRemoved],
+        );
+        assert_eq!(
+            privacy_pass_outcome(PrivacyRisk::Low, pass),
+            PrivacyPassOutcome::Cleared
         );
     }
 
