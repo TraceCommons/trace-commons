@@ -46081,8 +46081,14 @@ async fn process_one_pii_backstop(
     record.privacy_risk = envelope.privacy.residual_pii_risk;
     record.redaction_counts = envelope.privacy.redaction_counts.clone();
 
-    // Status is chosen from the POST-backstop residual risk: a filter that
-    // still leaves Medium/High risk re-quarantines rather than accepts.
+    // Status is chosen from the POST-backstop residual risk through
+    // `status_for_risk`: Low is accepted, High is quarantined, and Medium is
+    // accepted only under TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS (as on
+    // the pilot), quarantined otherwise. PII the classifier found and removed
+    // raises the risk to Medium, not High, so with that setting a trace whose
+    // PII was removed is accepted. High (a key finding, incomplete coverage,
+    // a residual survivor, or a residual scan that could not run) always
+    // quarantines.
     let target_status = status_for_risk(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
@@ -57977,8 +57983,11 @@ struct RequeueQuarantinedAck {
 /// Move quarantined submissions back to `AwaitingPiiBackstop` for re-assessment.
 ///
 /// Quarantine is not always a verdict about the trace. A submission is
-/// quarantined when its POST-backstop residual risk is Medium or High, and that
-/// assessment is only as good as the classifier that produced it -- the pilot's
+/// quarantined when its POST-backstop residual risk is High, or Medium on a
+/// deployment that does not set TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS
+/// (see `status_for_risk`; the pilot sets it, so there Medium is accepted), or
+/// when its backstop attempts are exhausted. That assessment is only as good
+/// as the classifier that produced it -- the pilot's
 /// 114 quarantined submissions were all assessed between 2026-08-25 and 08-27,
 /// inside the window when the hosted classifier's token ceiling was collapsing.
 /// A window that failed leaves its PII unredacted, which then presents as a
