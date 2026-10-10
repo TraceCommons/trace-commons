@@ -281,8 +281,8 @@ either direction is a finding.
 | Drill | How | Must hold |
 |---|---|---|
 | Object store fault | Point the tenant's store at a missing object, or remove one object a run needs | The run fails as an integrity failure on spaced, charged attempts and ends after its per-phase budget; it does not end within seconds; a transport error is not charged |
-| Worker lost mid-Score | Stop the worker while a run is in Score | The lease expires; a commit from the old holder is refused as stale; another worker completes the run |
-| Restart with parked runs | Restart ingest while runs are parked | Parked runs are released in bounded batches and complete |
+| Worker lost mid-Score | Freeze the worker while a run is in Score (`SIGSTOP` the ingest process past the run's `lease_expires_at`, then `SIGCONT`); lower `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` first so the freeze is minutes, keeping four times the lease above a real Score | The lease expires; the old holder's commit is refused as stale (`lease_expired`, attempt not charged); the run is reclaimed and completes. On a single host the same process reclaims it. A killed worker (`SIGKILL`) writes nothing, so its run stays `leased` until the lease expires and is then reclaimed as a charged attempt |
+| Restart with held and parked runs | Restart ingest while runs are held by a suspended phase (`POST /v1/admin/pipeline/policy-interventions`), one is leased in Score, and any are parked (`awaiting_review`) | Held runs keep their state across the restart and complete once the phase is resumed; the leased run is reclaimed after its lease and completes. A parked run whose submission is still operable stays parked until a reviewer assesses it -- a restart does not release it. Parked runs whose submission is no longer operable are released in batches of 32 and end `failed` with `submission_inoperable` |
 | Revocation and withdrawal | Revoke one submission and withdraw another at each phase (before Score, after Score, after Settle) | Each follow-up is applied, export snapshot items are invalidated, the tombstone carries the caller's reason, and a lost follow-up is recovered by the worker |
 | Containment | Upload a large in-flight probe, then `POST /v1/admin/pipeline/contain` while its run is still in progress (see below) | New uploads are `503` and write nothing; work already received completes; uploads are accepted again after re-opening (this is the test `containment_refuses_new_receipts_and_keeps_pending_work` against the deployment) |
 | Deactivation | `POST /v1/admin/pipeline/deactivate`, then move the tenant to `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` | New uploads take the legacy path; in-flight runs and settlement legs complete on the drain list; `GET /v1/admin/pipeline/legacy-drain` reaches zero, except as noted below |
@@ -296,6 +296,17 @@ is usually finished before the contain lands and proves nothing. Use the
 long, chunk-capped body of the synthetic set (about 356 KB) as the in-flight
 probe, and confirm it is not yet terminal when the contain returns. On the
 pilot it completed while contained in about five minutes.
+
+Resuming a suspended phase does not wake the runs it held: each waits for its
+`next_attempt_at`, which is the phase's age clamped to between 1 second and
+1 hour.
+
+On the pilot (2026-10-10, build f6f76f0c), no client-side trace could be made
+to park (`awaiting_review`). Admission's Medium quarantine is unreachable
+from a client (#1344), and the privacy pass only escalates at High. The
+parked half of this drill is covered in CI by
+`releasing_parked_runs_is_bounded_per_call` and
+`parked_run_with_an_inoperable_submission_is_released`.
 
 On a deployment with `main`'s vector index worker off
 (`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED` unset), the legacy drain report
