@@ -4339,6 +4339,81 @@ async fn account_traces_list_cursor_pages_are_disjoint_and_ordered() {
 }
 
 #[tokio::test]
+async fn account_traces_list_pages_past_a_received_row() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let state = test_state_with_db(temp.path().to_path_buf(), db_mirror);
+
+    let _ = mint_login_link_handler(State(state.clone()), auth_headers("token-a"))
+        .await
+        .expect("mint");
+    let device_principal = static_token_principal_ref("token-a");
+
+    // Insert oldest first, so the list reads newest first: accepted,
+    // received, accepted, accepted. The received row is not a list item.
+    let mut accepted = Vec::new();
+    for status in [
+        StorageTraceCorpusStatus::Accepted,
+        StorageTraceCorpusStatus::Accepted,
+        StorageTraceCorpusStatus::Received,
+        StorageTraceCorpusStatus::Accepted,
+    ] {
+        let is_accepted = matches!(status, StorageTraceCorpusStatus::Accepted);
+        let id = insert_account_test_submission_with_status(
+            backend.as_ref(),
+            "tenant-a",
+            &device_principal,
+            status,
+        )
+        .await;
+        if is_accepted {
+            accepted.push(id);
+        }
+    }
+
+    let mut pages = Vec::new();
+    let mut cursor = None;
+    loop {
+        let ext = account_ctx_ext(&state, &account_session_headers(&state, "token-a").await).await;
+        let Json(page) = account_traces_list_handler(
+            State(state.clone()),
+            ext,
+            Query(AccountTracesListQuery {
+                limit: Some(2),
+                cursor: cursor.take(),
+            }),
+        )
+        .await
+        .expect("page");
+        cursor = page.next_cursor.clone();
+        pages.push(page);
+        assert!(pages.len() <= 4, "paging must end");
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(pages[0].items.len(), 1, "the received row is not an item");
+    assert!(
+        pages.len() > 1,
+        "the first page has a cursor although it holds fewer items than the limit"
+    );
+    let mut seen: Vec<Uuid> = pages
+        .iter()
+        .flat_map(|page| page.items.iter().map(|item| item.submission_id))
+        .collect();
+    seen.sort();
+    accepted.sort();
+    assert_eq!(seen, accepted, "the pages hold each accepted row one time");
+
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+#[tokio::test]
 async fn account_trace_detail_owned_returns_metadata_unowned_and_missing_are_uniform_404() {
     let Some(backend) = postgres_backend_for_ingest_test().await else {
         return;
@@ -12272,8 +12347,12 @@ impl trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter
     async fn confirmation(
         &self,
         idempotency_key: &str,
-    ) -> Option<trace_commons_server::versioned_pipeline_credit::NearConfirmationEvidence> {
-        self.0.confirmation(idempotency_key)
+    ) -> trace_commons_server::versioned_pipeline_credit::NearPayoutConfirmation {
+        trace_commons_server::versioned_pipeline_credit::NearPayoutAdapter::confirmation(
+            &self.0,
+            idempotency_key,
+        )
+        .await
     }
 }
 
@@ -18254,6 +18333,7 @@ fn audit_mirror_normalization_rejects_noncanonical_maintenance_purpose_hash() {
         &audit_event,
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("noncanonical maintenance purpose_hash must fail closed");
 
@@ -18293,6 +18373,7 @@ fn audit_mirror_normalization_rejects_raw_maintenance_purpose() {
         &audit_event,
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("live maintenance mirror must reject raw purpose text");
 
@@ -18589,6 +18670,7 @@ fn audit_mirror_normalization_derives_credit_hold_metadata_from_reason() {
         &audit_event,
         StorageTraceAuditAction::CreditMutate,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("credit hold metadata normalizes");
     let metadata_json = serde_json::to_value(&metadata).expect("hold metadata serializes");
@@ -18660,6 +18742,7 @@ fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_re
         &audit_event,
         StorageTraceAuditAction::CreditMutate,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("NEAR status metadata normalizes");
     let metadata_json = serde_json::to_value(&metadata).expect("NEAR status metadata serializes");
@@ -18842,6 +18925,7 @@ fn audit_mirror_normalization_derives_benchmark_registry_outbox_status_metadata_
         &audit_event,
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("benchmark registry status metadata normalizes");
     let metadata_json =
@@ -19052,6 +19136,7 @@ fn audit_mirror_normalization_derives_trace_content_read_metadata_from_reason() 
         &audit_event,
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("trace-content read metadata normalizes");
 
@@ -19091,6 +19176,7 @@ fn audit_mirror_normalization_derives_revocation_metadata_from_reason() {
         &audit_event,
         StorageTraceAuditAction::Revoke,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("revocation metadata normalizes");
 
@@ -19127,6 +19213,7 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
         &audit_event,
         StorageTraceAuditAction::Submit,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("submitted audit metadata is required");
     assert!(
@@ -19142,6 +19229,7 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
             status: StorageTraceCorpusStatus::Rejected,
             privacy_risk: "low".to_string(),
         },
+        false,
     )
     .expect_err("submitted audit metadata status drift fails closed");
     assert!(
@@ -19149,6 +19237,74 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
             .to_string()
             .contains("metadata status does not match")
     );
+
+    // A `submitted` event with no status is a pipeline receipt's only:
+    // any other keeps `main`'s error.
+    let unstatused = TraceCommonsAuditEvent {
+        status: None,
+        ..audit_event
+    };
+    let received = StorageTraceAuditSafeMetadata::Submission {
+        status: StorageTraceCorpusStatus::Received,
+        privacy_risk: "low".to_string(),
+    };
+    let missing_status_error = normalize_audit_event_metadata(
+        &unstatused,
+        StorageTraceAuditAction::Submit,
+        received.clone(),
+        false,
+    )
+    .expect_err("a submitted event with no status requires a pipeline receipt");
+    assert!(
+        missing_status_error
+            .to_string()
+            .contains("requires canonical status")
+    );
+    assert_eq!(
+        normalize_audit_event_metadata(
+            &unstatused,
+            StorageTraceAuditAction::Submit,
+            received.clone(),
+            true,
+        )
+        .expect("a pipeline receipt's event with no status is received"),
+        received
+    );
+}
+
+/// The reconciliation leaves a risk mismatch of a pipeline submission out
+/// only when the run has a recorded privacy pass, or when the row is one the
+/// database backfill wrote (risk `unknown`). `main`'s own rows keep the
+/// comparison.
+#[test]
+fn reconciliation_leaves_out_only_the_risk_mismatches_a_pipeline_has_by_design() {
+    let (passed, waiting, legacy) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let pipeline_rows = PipelineReconciliationRows {
+        submission_ids: BTreeSet::from([passed, waiting]),
+        privacy_pass_submission_ids: BTreeSet::from([passed]),
+        ..PipelineReconciliationRows::default()
+    };
+    let mismatch =
+        |submission_id: Uuid, metadata_privacy_risk: &str| TraceDbAuditSubmissionMetadataMismatch {
+            audit_event_id: Uuid::new_v4(),
+            submission_id,
+            metadata_privacy_risk: metadata_privacy_risk.to_string(),
+            db_privacy_risk: "high".to_string(),
+        };
+    for (submission_id, row_risk, by_design) in [
+        (passed, "low", true),
+        (passed, "unknown", true),
+        (waiting, "low", false),
+        (waiting, "unknown", true),
+        (legacy, "low", false),
+        (legacy, "unknown", false),
+    ] {
+        assert_eq!(
+            pipeline_risk_differs_by_design(&mismatch(submission_id, row_risk), &pipeline_rows),
+            by_design,
+            "{row_risk}"
+        );
+    }
 }
 
 #[test]
@@ -31300,6 +31456,7 @@ fn legacy_mirror_row(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
     )
     .expect("legacy mirror row builds");
@@ -41282,7 +41439,8 @@ async fn pipeline_index_rebuild_worker_route_answers_404_without_a_pipeline_runt
 fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
     use pipeline_runtime::pipeline_index_rebuild_error;
     use trace_commons_server::versioned_pipeline::{
-        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
     };
     for (label, status) in [
         (
@@ -41291,6 +41449,10 @@ fn pipeline_index_rebuild_errors_map_to_fixed_labels() {
         ),
         (
             PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+            StatusCode::SERVICE_UNAVAILABLE,
+        ),
+        (
+            PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL,
             StatusCode::SERVICE_UNAVAILABLE,
         ),
         ("index_command_invalid", StatusCode::CONFLICT),

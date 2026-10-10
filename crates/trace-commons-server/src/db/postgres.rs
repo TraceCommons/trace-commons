@@ -1774,6 +1774,14 @@ const MIGRATIONS: &[(i32, &str, &str)] = &[
         "pipeline_privacy_pass",
         include_str!("../../../../migrations/V117__pipeline_privacy_pass.sql"),
     ),
+    // V118 adds the marker of a review audit event that the worker must still
+    // append: `pipeline_runs.review_audit_pending_at`, with its work index
+    // and the runtime role's column grant.
+    (
+        118,
+        "pipeline_review_audit_marker",
+        include_str!("../../../../migrations/V118__pipeline_review_audit_marker.sql"),
+    ),
 ];
 
 /// One account's active strong authenticators (unrevoked passkeys plus

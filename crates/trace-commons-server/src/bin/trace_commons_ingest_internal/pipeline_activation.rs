@@ -1963,7 +1963,8 @@ mod tests {
                 normalize_audit_event_metadata(
                     &event,
                     StorageTraceAuditAction::PolicyUpdate,
-                    live.clone()
+                    live.clone(),
+                    false,
                 )
                 .expect("the mirror accepts the row"),
                 live
@@ -1978,7 +1979,8 @@ mod tests {
                 normalize_audit_event_metadata(
                     &event,
                     StorageTraceAuditAction::PolicyUpdate,
-                    other
+                    other,
+                    false,
                 )
                 .is_err(),
                 "{label}: a row of another label is refused"

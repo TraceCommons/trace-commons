@@ -77,7 +77,7 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter,
+    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter, NearPayoutConfirmation,
     PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
@@ -8334,26 +8334,37 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 }
 
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
-/// bound to another tenant, or bound to another run of the same tenant
-/// makes Settle fail closed with the safe label `index_command_invalid`,
-/// without completing the run or writing a Settle outcome.
+/// bound to another tenant, read under the wrong key, or bound to another
+/// run of the same tenant makes Settle fail closed, without completing the
+/// run or writing a Settle outcome. Plan RB-D6 as the owner decided it on
+/// 2026-10-10 (review of #1331, minor finding 1): each failure the store
+/// reports, an integrity failure included, is `index_command_unreadable`,
+/// with the hourly wait (`mark_retry`, C5), because a store fault (a root
+/// that is not mounted, a wrong key) reads the same. That is cases a, b, c
+/// and e: the store refuses another tenant's command (case c) before any
+/// check of the pipeline, because it looks the key up under the run's own
+/// tenant, where no such object is. Only content that the store read and
+/// decrypted, and that fails a later check (case d: another run's command
+/// fails the hash check), is `index_command_invalid`, with the short backoff.
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
 
-    async fn assert_fails_closed(service: &PipelineService, tenant: &str, run_id: uuid::Uuid) {
+    async fn assert_fails_closed(
+        service: &PipelineService,
+        tenant: &str,
+        run_id: uuid::Uuid,
+        label: &str,
+    ) {
         let processed = service
             .process_run(tenant, run_id)
             .await
             .unwrap()
             .expect("the Settle attempt runs and fails closed rather than erroring out");
         assert_ne!(processed.state, PipelineRunState::Complete);
-        assert_eq!(
-            processed.last_error_label.as_deref(),
-            Some("index_command_invalid")
-        );
+        assert_eq!(processed.last_error_label.as_deref(), Some(label));
         assert!(
             !service
                 .store()
@@ -8395,7 +8406,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::remove_file(&path).unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (b) overwrite the file with other bytes.
@@ -8423,7 +8434,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (c) point index_command_ref at another tenant's stored command.
@@ -8457,7 +8468,13 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant_a, run_a.run_id).await;
+        assert_fails_closed(
+            &service,
+            &tenant_a,
+            run_a.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 
     // (d) point it at another run's command of the same tenant.
@@ -8486,7 +8503,41 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant, run_1.run_id).await;
+        assert_fails_closed(&service, &tenant, run_1.run_id, "index_command_invalid").await;
+    }
+
+    // (e) read the command under another key: the same root, the same
+    // package, a store with another master key.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let wrong_key: Arc<dyn TraceArtifactStore> =
+            Arc::new(LocalEncryptedTraceArtifactStore::new(
+                dir.path(),
+                SecretsCrypto::new(SecretString::from(
+                    "pipeline-runtime-test-other-master-key-32b".to_string(),
+                ))
+                .unwrap(),
+            ));
+        let (wrong_key_service, _, _) =
+            test_service(backend.clone(), wrong_key, minimal_config(true), None).await;
+        assert_eq!(service.bundle_id(), wrong_key_service.bundle_id());
+        let tenant = format!("settle-binding-e-{}", uuid::Uuid::new_v4());
+        let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+        assert_fails_closed(
+            &wrong_key_service,
+            &tenant,
+            run.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 }
 
@@ -24024,7 +24075,7 @@ impl NearPayoutAdapter for CountingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         self.confirmations.fetch_add(1, Ordering::SeqCst);
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
@@ -24067,6 +24118,9 @@ struct NearOutboxRow {
     instrument_id: Option<String>,
     amount_micros: Option<i64>,
     near_call_json: serde_json::Value,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+    confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Every `trace_near_credit_outbox` row of `tenant_id`.
@@ -24081,7 +24135,8 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
         .query(
             "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
                     (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
-                    near_call_json
+                    near_call_json, near_transaction_hash, last_error_hash,
+                    confirmed_at
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1
               ORDER BY created_at, near_outbox_id",
@@ -24098,6 +24153,9 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
             instrument_id: row.get("instrument_id"),
             amount_micros: row.get("amount_micros"),
             near_call_json: row.get("near_call_json"),
+            near_transaction_hash: row.get("near_transaction_hash"),
+            last_error_hash: row.get("last_error_hash"),
+            confirmed_at: row.get("confirmed_at"),
         })
         .collect()
 }
@@ -24232,6 +24290,122 @@ async fn payout_submits_once_and_confirms() {
         0,
         "a confirmed payout is not listed again"
     );
+}
+
+/// The hash a line that failed on chain stores in `last_error_hash`.
+fn near_transaction_failed_hash_text() -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes())
+    )
+}
+
+/// A submitted line whose transaction the adapter reports as failed on
+/// chain becomes `failed` and keeps its transaction hash; the leg's payout
+/// is `failed` under `near_transaction_failed`, and no later pass submits
+/// the line again.
+#[tokio::test]
+async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox[0].status, "submitted");
+    let transaction_hash = outbox[0].near_transaction_hash.clone();
+    assert!(transaction_hash.is_some());
+
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(
+        outbox[0].near_transaction_hash, transaction_hash,
+        "the failed line keeps its transaction hash"
+    );
+    assert!(outbox[0].confirmed_at.is_none());
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
+    );
+
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a failed payout is not listed again"
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
+}
+
+/// A direct `process_payout` takes up a `failed` line again, but not one
+/// that failed on chain: no second submit, and the line keeps its marker.
+#[tokio::test]
+async fn a_direct_payout_does_not_submit_a_line_that_failed_on_chain_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-direct-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let transaction_hash = near_outbox_rows(&backend, &tenant).await[0]
+        .near_transaction_hash
+        .clone();
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(outbox[0].near_transaction_hash, transaction_hash);
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
 }
 
 /// Review Focus 5: a crash right after the outbox records the submit
@@ -24655,9 +24829,9 @@ impl NearPayoutAdapter for BadEvidenceNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.bad_keys.lock().unwrap().contains(idempotency_key) {
-            return Some(NearConfirmationEvidence {
+            return NearPayoutConfirmation::Confirmed(NearConfirmationEvidence {
                 transaction_hash_hash: "plain-transaction-reference".to_string(),
                 receipt_hash: format!("sha256:{}", "b".repeat(64)),
             });
@@ -24876,7 +25050,7 @@ impl NearPayoutAdapter for HoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
 }
@@ -24999,7 +25173,7 @@ impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;
@@ -30332,6 +30506,95 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
     );
 }
 
+/// Multi-lens review C5, residual: a failed store call of Settle's read of
+/// the stored index command (here an outage) is charged as
+/// `index_command_unreadable`, one hour between attempts, so a store fault
+/// spans hours in which an operator can correct it. The run fails only
+/// after its last attempt, and its open legs are forfeited. (A missing,
+/// corrupt or wrongly keyed command is a failure the store reports, and is
+/// `index_command_unreadable` too; only a command that the store read and
+/// that is wrong keeps `index_command_invalid` and the short backoff:
+/// `stored_command_binding_failures_fail_closed`.)
+#[tokio::test]
+async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, _, _) =
+        test_service(backend.clone(), store.clone(), scored_config(true), None).await;
+    let tenant = format!("unreadable-command-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(!legs.is_empty(), "Score created the legs before Settle");
+    // The store's reads fail from here on, as in an outage.
+    store.set(true, false);
+
+    let first = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some("index_command_unreadable"),
+            run.attempt_count + 1
+        ),
+        "an unreadable command is charged"
+    );
+    assert_integrity_retry_waits_an_hour(&first);
+    let charged = first.attempt_count;
+    let mut last = first;
+    while last.attempt_count < last.max_attempts {
+        force_due(&backend, &tenant, run.run_id).await;
+        last = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs again");
+        assert!(last.attempt_count > charged, "each attempt is charged");
+        if last.attempt_count < last.max_attempts {
+            assert_eq!(
+                (last.state, last.last_error_label.as_deref()),
+                (PipelineRunState::Retry, Some("index_command_unreadable")),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "every open leg is forfeited: {settlements:?}"
+    );
+    assert_eq!(settlements.len(), legs.len(), "no leg is added or lost");
+}
+
 /// ZA-2 follow-up: an in-memory Google Cloud Storage client that records
 /// each key written, and whose fetches fail with an untyped error (an
 /// outage, as a 503 or a refused connection is) while `fetches_down` is set.
@@ -32352,6 +32615,81 @@ async fn index_rebuild_fails_closed_on_a_tampered_command() {
         0,
         "a fail-closed rebuild must write no entry from the tampered run"
     );
+}
+
+/// C5 residual (plan RB-D6, as the owner decided it on 2026-10-10): the
+/// rebuild reads each stored command through Settle's read, so it splits the
+/// same way. A store outage and a missing command object are both failures
+/// the store reports, `index_command_unreadable` (the route's `503`: a rerun
+/// helps once the store is back). A command that the store reads and that
+/// fails the run's hash is `index_command_invalid` (the route's `409`). None
+/// writes an entry.
+#[tokio::test]
+async fn index_rebuild_splits_a_store_fault_from_bad_content() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, index, _adapters) =
+        test_service(backend.clone(), store.clone(), minimal_config(true), None).await;
+    let tenant = format!("index-rebuild-unreadable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    let (ready_2, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled_2 = settle_included(&service, &tenant, &ready_2).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    store.set(true, false);
+    let rebuilt = IsolatedPipelineIndex::new();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a store outage fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    store.set(false, false);
+    let (object_key, _) = settled
+        .index_command_ref
+        .as_deref()
+        .unwrap()
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        tenant_ref.as_str(),
+        object_key,
+    ))
+    .unwrap();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a missing command fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    // Bad content: the first run's ref names the second run's command,
+    // which the store reads and which fails the first run's hash.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_ref = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id, &settled_2.index_command_ref],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a command that fails its hash fails the rebuild closed");
+    assert_eq!(error.to_string(), "index_command_invalid");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
 /// Task 8: a rebuild is strictly tenant-scoped -- run under tenant B's id, it

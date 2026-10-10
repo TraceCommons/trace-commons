@@ -697,16 +697,19 @@ async fn rebuild_index_and_audit(
 }
 
 /// Maps `rebuild_index_from_authoritative_commands`'s anyhow errors to their
-/// HTTP shape. `index_command_invalid` -- a sealed command that failed
-/// validation against its run or its own committed Score evidence -- is
-/// surfaced as 409 Conflict, a state of the store rather than a transient
-/// service fault. `index_unavailable` -- a run's writes that passed their
-/// deadline -- and `index_rebuild_fence_unavailable` -- a fence write that
-/// failed before a run's writes (V113) -- are 503. Everything else falls
-/// back to the generic hash-only internal error.
+/// HTTP shape. `index_command_invalid` -- a sealed command that the store
+/// read and that failed validation against its run or its own committed
+/// Score evidence -- is surfaced as 409 Conflict, a state of the store
+/// rather than a transient service fault. `index_command_unreadable` -- a
+/// failure the artifact store reported, a missing object or a wrong key
+/// included (plan RB-D6) -- `index_unavailable` -- a run's writes that
+/// passed their deadline -- and `index_rebuild_fence_unavailable` -- a fence
+/// write that failed before a run's writes (V113) -- are 503. Everything
+/// else falls back to the generic hash-only internal error.
 pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
     use trace_commons_server::versioned_pipeline::{
-        PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL, PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL, PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_UNAVAILABLE_LABEL,
     };
     if error.to_string() == "index_command_invalid" {
         return api_error(StatusCode::CONFLICT, "index_command_invalid");
@@ -717,6 +720,7 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
     // a rerun is safe too.
     for label in [
         PIPELINE_INDEX_UNAVAILABLE_LABEL,
+        PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL,
         PIPELINE_INDEX_REBUILD_FENCE_UNAVAILABLE_LABEL,
     ] {
         if error.to_string() == label {
@@ -804,6 +808,8 @@ const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_sec
 /// The most `CreditMutate` audit events the worker appends for one tenant
 /// in one pass.
 const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
+/// The review audit events one pass appends for a tenant (V118).
+const PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT: usize = 32;
 
 /// A follow-up step of a tenant's drain, after its runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1192,11 +1198,43 @@ pub(crate) async fn drain_pipeline_tenant(
             }
         }
     }
-    if due.payouts {
-        match service
-            .process_payouts(&tenant_id, PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT)
-            .await
+    if due.credit_audits {
+        match append_pipeline_review_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant_id,
+            PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT,
+        )
+        .await
         {
+            Ok(pass) => {
+                if pass.used_its_limit(PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT) {
+                    lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::CreditAudits);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_failed",
+                    tenant_storage_ref = %tenant_storage_ref(&tenant_id),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit failed"
+                );
+            }
+        }
+    }
+    if due.payouts {
+        let mut tally = trace_commons_server::versioned_pipeline::PipelinePayoutTally::default();
+        let result = service
+            .process_payouts_tallied(
+                &tenant_id,
+                PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT,
+                &mut tally,
+            )
+            .await;
+        // Appended on an error too: the lines that changed before it are
+        // changed for good.
+        append_pipeline_payout_audit_events(state.as_ref(), &tenant_id, &tally).await;
+        match result {
             Ok(processed) => {
                 if processed >= PIPELINE_WORKER_MAX_PAYOUTS_PER_TENANT {
                     lock_cadence().run_again(&tenant_id, PipelineFollowUpStep::Payouts);
@@ -1308,12 +1346,356 @@ pub(crate) async fn append_pipeline_credit_audit_events(
     }
 }
 
+/// The review audit events of the runs the tenant's review audit markers
+/// name (V118, `review_audit_pending_at`): a run has up to three audit events
+/// (a hold of the privacy pass, the human assessment, the committed Review
+/// decision), or the one event of a failed privacy classification, and the
+/// marker is cleared once each event of the run exists. The order is the hold or the failure, the assessment, then
+/// the Review commit. The hold event (the privacy pass escalated the run) and
+/// the failure event (the run ended `failed` under
+/// `privacy_classification_failed`) are `lifecycle_status_change` events with
+/// the status `quarantined`; their ids derive from the run, with the labels
+/// `pipeline-privacy-pass-hold-audit` and
+/// `pipeline-privacy-classification-failed-audit`. The assessment event's id
+/// is the assessment's, so the route's own append and this repair of a missed
+/// one are the same event; the automatic Review's event takes the id of the
+/// Review `phase_outcomes` row. Each event is read by id
+/// and appended only when absent, so a pass that stopped before it cleared a
+/// marker finds the events again and only clears it. That holds only in the
+/// required order, the database row first and the file line second
+/// (`require_db_mirror_writes`): with a mirror that is not required the file
+/// line comes first, and a failed mirror write would leave an event the read
+/// cannot see. The pass therefore appends nothing in that configuration and
+/// returns `pipeline_review_audit_mirror_not_required`. After a failed file
+/// append the row exists: the next pass finds it by id and clears the marker,
+/// and the audit-chain repair writes the file line.
+///
+/// As the credit pass does: an item that fails keeps its marker and does not
+/// stop the items after it, the failure is logged by label with a hash of
+/// the run id, and the pass returns the first error only when it cleared no
+/// marker and one failed.
+pub(crate) async fn append_pipeline_review_audit_events(
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    limit: usize,
+) -> anyhow::Result<PipelineCreditAuditPass> {
+    let items = service
+        .store()
+        .list_pending_review_audits(tenant_id, i64::try_from(limit).unwrap_or(i64::MAX))
+        .await?;
+    if items.is_empty() {
+        return Ok(PipelineCreditAuditPass {
+            audited: 0,
+            failed: 0,
+        });
+    }
+    let db = match state.db_mirror.as_ref() {
+        Some(db) if state.require_db_mirror_writes => db,
+        _ => anyhow::bail!("pipeline_review_audit_mirror_not_required"),
+    };
+    let mut audited = 0;
+    let mut failed = 0;
+    let mut first_error = None;
+    for item in &items {
+        match append_pipeline_review_audit_item(state, db.as_ref(), service, tenant_id, item).await
+        {
+            Ok(()) => audited += 1,
+            Err(error) => {
+                tracing::warn!(
+                    error_class = "pipeline_worker_review_audit_item_failed",
+                    tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                    run_ref_hash = %sha256_prefixed(&item.run_id.to_string()),
+                    error_hash = %safe_display_error_hash(&error),
+                    "pipeline worker review audit event failed"
+                );
+                failed += 1;
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) if audited == 0 => Err(error),
+        _ => Ok(PipelineCreditAuditPass { audited, failed }),
+    }
+}
+
+/// The label of the purpose in the payout audit events of a pass, hashed
+/// into `purpose_hash` as `main` hashes the purpose of its own workers.
+const PIPELINE_PAYOUT_AUDIT_PURPOSE: &str = "pipeline_near_payout";
+
+/// Appends `main`'s two payout audit kinds for a payout pass that changed an
+/// outbox line: `near_credit_outbox_confirm` when the pass confirmed or
+/// failed a line on chain, `near_credit_outbox_submit` when it submitted a
+/// line or its submit failed. Each event holds counts only. A pass that
+/// changed no line appends nothing: a leg that waits for a NEAR account is
+/// listed again each interval and changes none. A failed append is logged by
+/// label with a hash of the error, and the step goes on; the lost event is
+/// not appended again.
+async fn append_pipeline_payout_audit_events(
+    state: &AppState,
+    tenant_id: &str,
+    tally: &trace_commons_server::versioned_pipeline::PipelinePayoutTally,
+) {
+    let events = [
+        (
+            "near_credit_outbox_confirm",
+            [
+                ("confirmed", tally.confirmed),
+                ("failed", tally.chain_failed),
+            ],
+        ),
+        (
+            "near_credit_outbox_submit",
+            [
+                ("submitted", tally.submitted),
+                ("failed", tally.submit_failed),
+            ],
+        ),
+    ];
+    for (kind, counts) in events {
+        if counts.iter().all(|(_, count)| *count == 0) {
+            continue;
+        }
+        if let Err(error) = append_pipeline_payout_audit_event(state, tenant_id, kind, counts).await
+        {
+            tracing::warn!(
+                error_class = "pipeline_worker_payout_audit_failed",
+                tenant_storage_ref = %tenant_storage_ref(tenant_id),
+                audit_kind = kind,
+                error_hash = %safe_display_error_hash(&error),
+                "pipeline worker payout audit event failed"
+            );
+        }
+    }
+}
+
+/// One event of `append_pipeline_payout_audit_events`, in the shape of
+/// `append_near_credit_outbox_submit_audit` and
+/// `append_near_credit_outbox_confirm_audit`.
+async fn append_pipeline_payout_audit_event(
+    state: &AppState,
+    tenant_id: &str,
+    kind: &'static str,
+    counts: [(&'static str, u64); 2],
+) -> anyhow::Result<()> {
+    let action_counts = counts
+        .iter()
+        .map(|(name, count)| {
+            (
+                (*name).to_string(),
+                (*count).min(u64::from(u32::MAX)) as u32,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let changed = counts.iter().map(|(_, count)| *count).sum::<u64>();
+    let purpose_hash = sha256_prefixed(PIPELINE_PAYOUT_AUDIT_PURPOSE);
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant_id.to_string(),
+        submission_id: Uuid::nil(),
+        kind: kind.to_string(),
+        created_at: Utc::now(),
+        status: None,
+        actor_role: None,
+        actor_principal_ref: Some(actor.principal_ref.clone()),
+        reason: Some(trace_maintenance_audit_reason(
+            Some(&purpose_hash),
+            false,
+            &action_counts,
+        )),
+        export_count: Some(usize::try_from(changed).unwrap_or(usize::MAX)),
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Retain,
+            metadata: StorageTraceAuditSafeMetadata::Maintenance {
+                surface: Some(kind.to_string()),
+                purpose_hash: Some(purpose_hash),
+                dry_run: false,
+                action_counts,
+            },
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+            pipeline_receipt: false,
+        },
+        "pipeline payout audit event",
+    )
+    .await?;
+    Ok(())
+}
+
+/// One item of `append_pipeline_review_audit_events`: appends each event of
+/// `item` that is absent, then clears its marker.
+async fn append_pipeline_review_audit_item(
+    state: &AppState,
+    db: &dyn Database,
+    service: &PipelineService,
+    tenant_id: &str,
+    item: &trace_commons_server::versioned_pipeline::PipelineReviewAuditItem,
+) -> anyhow::Result<()> {
+    if item.privacy_pass_escalated {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-pass-hold-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL,
+            "pipeline privacy pass hold audit event",
+        )
+        .await?;
+    }
+    if item.privacy_classification_failed {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-classification-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+            "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
+    if let Some(assessment) = &item.assessment {
+        if db
+            .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
+            .await?
+            .is_none()
+        {
+            let (status, _) = review_audit_status(assessment.approved)?;
+            let reviewer = TenantAuth {
+                principal_ref: assessment.reviewer_principal_ref.clone(),
+                ..system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF)
+            };
+            let mut event = TraceCommonsAuditEvent::review_decision(
+                &reviewer,
+                item.submission_id,
+                status,
+                Some(&trace_free_text_audit_reason(&assessment.reason_code)),
+            );
+            event.event_id = assessment.assessment_id;
+            event.actor_role = None;
+            append_audit_event_mirrored(
+                state,
+                &reviewer,
+                event,
+                review_decision_audit_row(status, &assessment.reason_code, Some("reviewer"))?,
+                "pipeline review assessment audit event",
+            )
+            .await?;
+        }
+    }
+    if let Some(outcome) = &item.outcome {
+        let (status, _) = review_audit_status(outcome.approved)?;
+        let reason_label = if outcome.approved {
+            "pipeline_review_approved"
+        } else {
+            "pipeline_review_rejected"
+        };
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            outcome.outcome_id,
+            status,
+            reason_label,
+            "pipeline review audit event",
+        )
+        .await?;
+    }
+    service
+        .store()
+        .clear_review_audit_pending(tenant_id, item)
+        .await?;
+    Ok(())
+}
+
+/// Appends the system `lifecycle_status_change` event `event_id` of
+/// `submission_id`, with `status` and `reason_label`, when the database has no
+/// row of that id.
+#[allow(clippy::too_many_arguments)]
+async fn append_pipeline_lifecycle_audit_event(
+    state: &AppState,
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+    event_id: Uuid,
+    status: TraceCorpusStatus,
+    reason_label: &'static str,
+    context: &'static str,
+) -> anyhow::Result<()> {
+    if db
+        .get_trace_audit_event_by_id(tenant_id, event_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let mut event = TraceCommonsAuditEvent::lifecycle_status_change(
+        &actor,
+        LifecycleAuditActor::System,
+        submission_id,
+        status,
+        reason_label,
+    );
+    event.event_id = event_id;
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: lifecycle_status_audit_action(status),
+            metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+            pipeline_receipt: false,
+        },
+        context,
+    )
+    .await?;
+    Ok(())
+}
+
+/// The corpus status a Review decision leads to, and its storage label.
+fn review_audit_status(approved: bool) -> anyhow::Result<(TraceCorpusStatus, String)> {
+    let status = if approved {
+        TraceCorpusStatus::Accepted
+    } else {
+        TraceCorpusStatus::Rejected
+    };
+    let label = serde_storage_string(&storage_corpus_status(status))?;
+    Ok((status, label))
+}
+
 /// What one pass of `append_pipeline_credit_audit_events` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PipelineCreditAuditPass {
-    /// Legs whose event is in the audit log and that are now marked.
+    /// Legs (or, for the review audit pass, runs) whose event is in the audit
+    /// log and that are now marked.
     pub(crate) audited: usize,
-    /// Legs whose event failed; they stay unmarked for the next pass.
+    /// Legs (or runs) whose event failed; they stay unmarked for the next pass.
     pub(crate) failed: usize,
 }
 
@@ -1416,6 +1798,7 @@ async fn append_pipeline_credit_audit_event(
             },
             object_ref_id: None,
             actor_role_label,
+            pipeline_receipt: false,
         };
         match in_file {
             Some(event) => {

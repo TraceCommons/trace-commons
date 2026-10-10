@@ -2353,6 +2353,92 @@ async fn queued_index_invalidation(
     (row.get(0), row.get(1))
 }
 
+/// `/v1/account/traces/{id}/withdraw` runs the pipeline's follow-up for each
+/// withdrawn submission whether or not a runtime is injected. The route
+/// reaches it with a runtime only in a race (a run that appears after the
+/// unlocked read), so the test calls `follow_up_account_withdrawal` directly:
+/// a run still before Review, with no index work and no export item, gets
+/// its submission's tombstone, and a second call adds nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_withdrawal_follow_up_tombstones_a_run_with_no_index_work() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.token);
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let ext = account_ctx_ext(&fixture.state, &session).await;
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    fixture
+        .service
+        .register_default_bundle(tenant)
+        .await
+        .expect("register the bundle");
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    let run = fixture
+        .service
+        .store()
+        .get_run(tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_ne!(
+        run.state,
+        PipelineRunState::Complete,
+        "the run is not processed"
+    );
+
+    let tombstones = || async {
+        let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, tenant).await;
+        let count: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM trace_tombstones
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant, &envelope.submission_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        count
+    };
+    assert_eq!(tombstones().await, 0, "nothing is withdrawn yet");
+
+    follow_up_account_withdrawal(&fixture.state, &ext.0, &[envelope.submission_id])
+        .await
+        .expect("the follow-up succeeds");
+    assert_eq!(tombstones().await, 1, "the submission is tombstoned");
+    follow_up_account_withdrawal(&fixture.state, &ext.0, &[envelope.submission_id])
+        .await
+        .expect("the follow-up repeats");
+    assert_eq!(tombstones().await, 1, "a second call adds no row");
+}
+
 /// Owner ruling T7-8: `main`'s legacy route `POST /v1/account/traces/{id}/withdraw`
 /// uses the pipeline withdrawal when the pipeline runtime is present and the
 /// withdrawal reaches a pipeline run: the requested submission's own, or one
@@ -4300,9 +4386,12 @@ async fn pipeline_withdrawal_deletes_the_privacy_pass_object() {
 ///   them and no process-evaluation record is written. Without that
 ///   selection the jobs answer 200 with nothing, which would pin nothing.
 ///
-/// These readers are still `main`'s, and refuse only because the wrapper
-/// does not decode. Moving them onto `read_mains_reviewer_metadata_view` is
-/// a follow-up the owner files separately (async rescrub plan, Q3).
+/// The three exports read `read_mains_reviewer_metadata_view` and the
+/// process-evaluation worker leaves a pipeline submission out (#1185,
+/// L1-2), so a process with a pipeline store never selects one. This
+/// fixture's state has no `pipeline_store`, which makes that filter a no-op:
+/// the jobs select the pipeline submissions here, and the test pins the
+/// second barrier, the wrapper that does not decode.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_readers_never_emit_a_pipeline_source() {
     let Some(fixture) = pass_object_fixture("legacy-readers", true).await else {
@@ -9741,6 +9830,211 @@ async fn mains_operational_summary_leaves_a_failed_pipeline_payout_line_out() {
     );
 }
 
+/// The worker's payout step appends `main`'s two payout audit kinds for a
+/// pass that changed a line, under the actor `pipeline_worker` and the
+/// purpose `pipeline_near_payout`, with the counts of the lines it changed.
+/// A pass over a leg that waits for a NEAR account changes no line and
+/// appends nothing. `main`'s audit verification finds no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_payout_pass_appends_mains_payout_audit_rows() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    Arc::make_mut(&mut fixture.state).require_db_mirror_writes = true;
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    let payout_events = |kind: &str| -> Vec<TraceCommonsAuditEvent> {
+        read_all_audit_events(&root, &tenant)
+            .expect("the file audit log reads")
+            .into_iter()
+            .filter(|event| event.kind == kind)
+            .collect()
+    };
+    let drain = || {
+        pipeline_runtime::drain_pipeline_tenant(
+            fixture.state.clone(),
+            fixture.service.clone(),
+            tenant.clone(),
+            cadence.clone(),
+        )
+    };
+    let audit_row = |event_id: Uuid| {
+        let db = fixture
+            .state
+            .db_mirror
+            .clone()
+            .expect("the state has a database");
+        let tenant = tenant.clone();
+        async move {
+            db.list_trace_audit_events(&tenant)
+                .await
+                .expect("the audit rows read")
+                .into_iter()
+                .find(|row| row.audit_event_id == event_id)
+                .expect("the event has its database row")
+        }
+    };
+
+    // 1. The pass that submits the line.
+    drain().await;
+    let requests = near.requests();
+    assert_eq!(requests.len(), 1, "the settled credit is submitted");
+    let submits = payout_events("near_credit_outbox_submit");
+    assert_eq!(submits.len(), 1, "{submits:?}");
+    assert!(payout_events("near_credit_outbox_confirm").is_empty());
+    assert_eq!(
+        submits[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let row = audit_row(submits[0].event_id).await;
+    let StorageTraceAuditSafeMetadata::Maintenance {
+        surface,
+        dry_run,
+        action_counts,
+        ..
+    } = &row.metadata
+    else {
+        panic!("a maintenance row: {:?}", row.metadata);
+    };
+    assert_eq!(surface.as_deref(), Some("near_credit_outbox_submit"));
+    assert!(!dry_run);
+    assert_eq!(
+        action_counts.get("submitted"),
+        Some(&1),
+        "{action_counts:?}"
+    );
+    assert_eq!(action_counts.get("failed"), Some(&0), "{action_counts:?}");
+
+    // 2. The pass that confirms it.
+    near.record_confirmation(
+        &requests[0].idempotency_key,
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .expect("confirm the submitted request");
+    drain().await;
+    let confirms = payout_events("near_credit_outbox_confirm");
+    assert_eq!(confirms.len(), 1, "{confirms:?}");
+    assert_eq!(
+        confirms[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let row = audit_row(confirms[0].event_id).await;
+    let StorageTraceAuditSafeMetadata::Maintenance { action_counts, .. } = &row.metadata else {
+        panic!("a maintenance row: {:?}", row.metadata);
+    };
+    assert_eq!(
+        action_counts.get("confirmed"),
+        Some(&1),
+        "{action_counts:?}"
+    );
+    assert_eq!(action_counts.get("failed"), Some(&0), "{action_counts:?}");
+    assert_eq!(payout_events("near_credit_outbox_submit").len(), 1);
+
+    // 3. A leg whose account has no NEAR payout target is held: no line
+    // changes, so the pass appends nothing.
+    let held_principal = format!("principal_sha256:held-{}", Uuid::new_v4().simple());
+    let account_id = Uuid::new_v4();
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "INSERT INTO trace_accounts (tenant_id, account_id) VALUES ($1, $2)",
+        &[&tenant, &account_id],
+    )
+    .await
+    .expect("insert the account");
+    tx.execute(
+        "INSERT INTO trace_account_principals (tenant_id, account_id, principal_ref)
+         VALUES ($1, $2, $3)",
+        &[&tenant, &account_id, &held_principal],
+    )
+    .await
+    .expect("link the principal");
+    tx.commit().await.unwrap();
+    drop(client);
+    completed_pipeline_run(&fixture.service, &tenant, &held_principal).await;
+    drain().await;
+    assert_eq!(near.requests().len(), 1, "the held leg is not submitted");
+    assert_eq!(payout_events("near_credit_outbox_submit").len(), 1);
+    assert_eq!(payout_events("near_credit_outbox_confirm").len(), 1);
+
+    // 4. `main`'s audit verification finds no mismatch.
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// `main`'s operational summary leaves the derived records of pipeline
+/// submissions out of its vector counts and its `missing_active_vectors`
+/// gate: the pipeline indexes its own submissions, so only the legacy
+/// record, which has no vector entry, is missing. The record list is not
+/// filtered: the submission counts include both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_operational_summary_leaves_pipeline_submissions_out_of_the_vector_gate() {
+    let near = Arc::new(RecordingNearAdapter::new());
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| trace_credit_payout_service(runtime, artifacts, near.clone()),
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let admin_token = format!("{}-admin", fixture.token);
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &tenant, &admin_token, TokenRole::Admin);
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+        state.require_derived_export_object_refs = true;
+    }
+    let state = fixture.state.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&fixture.token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+
+    let (status, body) = route_request(
+        state,
+        "GET",
+        "/v1/admin/operational-summary",
+        auth_headers(&admin_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let gates = body["promotion_gates"]["blocking_gates"]
+        .as_array()
+        .expect("the blocking gates")
+        .iter()
+        .map(|gate| gate.as_str().expect("a gate label").to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        gates.iter().any(|gate| gate == "missing_active_vectors=1"),
+        "{gates:?}"
+    );
+    assert_eq!(body["vectors"]["accepted_current_derived"], 1, "{body}");
+    assert_eq!(body["submissions"]["total"], 2, "{body}");
+}
+
 /// Finding 18: `main`'s replay export with database replay reads leaves the
 /// submissions with a pipeline run out of its source selection (they are
 /// exported through pipeline snapshots, and their stored bodies are
@@ -9789,6 +10083,200 @@ async fn mains_database_replay_export_leaves_pipeline_submissions_out() {
         .collect::<Vec<_>>();
     assert_eq!(exported, vec![serde_json::json!(legacy_id)], "{replay}");
     assert_ne!(exported, vec![serde_json::json!(run.submission_id)]);
+}
+
+/// Consent that lets a submission into `main`'s benchmark export, ranker
+/// export and process evaluation, so that only the pipeline filter can leave
+/// one out.
+fn allow_exports_and_evaluation(envelope: &mut TraceContributionEnvelope) {
+    envelope.consent.scopes = vec![
+        ConsentScope::DebuggingEvaluation,
+        ConsentScope::RankingTraining,
+    ];
+    envelope.trace_card.consent_scope = ConsentScope::DebuggingEvaluation;
+    envelope.trace_card.allowed_uses = vec![
+        TraceAllowedUse::Evaluation,
+        TraceAllowedUse::BenchmarkGeneration,
+        TraceAllowedUse::RankingModelTraining,
+    ];
+}
+
+/// One accepted pipeline submission and one accepted legacy submission of
+/// one tenant, database reviewer reads on, for the tests of `main`'s
+/// exports and process evaluation.
+async fn mixed_submissions_fixture() -> Option<(ProductFixture, Arc<AppState>, Uuid, Uuid)> {
+    let mut fixture = product_fixture().await?;
+    {
+        let state = Arc::make_mut(&mut fixture.base.state);
+        state.db_reviewer_reads = true;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.base.runtime.clone())));
+    }
+    let state = fixture.base.state.clone();
+    let tenant = fixture.base.tenant.as_str();
+    let principal = static_token_principal_ref(&fixture.base.token);
+    let mut pipeline = sample_envelope().await;
+    pipeline.submission_id = Uuid::new_v4();
+    pipeline.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    set_metadata_only_tool_name(&mut pipeline, "pipeline-tool");
+    allow_exports_and_evaluation(&mut pipeline);
+    let run = completed_run_of(&fixture.base.service, tenant, &principal, &pipeline).await;
+    let mut legacy = sample_envelope().await;
+    make_metadata_only_low_risk(&mut legacy);
+    set_metadata_only_tool_name(&mut legacy, "legacy-tool");
+    allow_exports_and_evaluation(&mut legacy);
+    let legacy_id = legacy.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers(&fixture.base.token),
+        submit_body(legacy),
+    )
+    .await
+    .expect("the legacy submission mirrors to the database");
+    Some((fixture, state, run.submission_id, legacy_id))
+}
+
+/// `main`'s benchmark export leaves the submissions with a pipeline run out
+/// of its sources (their stored bodies are pipeline artifacts, which the
+/// export cannot decode): the export runs, and a legacy submission is still
+/// exported.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_benchmark_export_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, artifact) = route_request(
+        state,
+        "POST",
+        "/v1/workers/benchmark-convert",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({"purpose": "trace_commons_benchmark_candidate_conversion"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{artifact}");
+    assert_eq!(
+        artifact["source_submission_ids"],
+        serde_json::json!([legacy_id]),
+        "{artifact}"
+    );
+    assert_ne!(
+        artifact["source_submission_ids"],
+        serde_json::json!([pipeline_id])
+    );
+}
+
+/// The same for `main`'s ranker training candidates export.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_ranker_export_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, export) = route_request(
+        state,
+        "GET",
+        "/v1/ranker/training-candidates",
+        auth_headers(&fixture.export_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{export}");
+    let exported = export["candidates"]
+        .as_array()
+        .expect("the exported candidates")
+        .iter()
+        .map(|candidate| candidate["submission_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(exported, vec![serde_json::json!(legacy_id)], "{export}");
+    assert_ne!(exported, vec![serde_json::json!(pipeline_id)]);
+}
+
+/// `main`'s process-evaluation worker leaves the submissions with a pipeline
+/// run out of its candidates, and its job route refuses one with `409`
+/// `pipeline_run_owns_submission`: the evaluation of a pipeline submission
+/// is the pipeline's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_process_evaluation_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, run) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/process-evaluations/run",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({
+            "dry_run": true,
+            "limit": 10,
+            "evaluator_ref": "judge-v1",
+            "reason": "process evaluation of a mixed tenant",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    assert_eq!(
+        run["evaluated_submission_ids"],
+        serde_json::json!([legacy_id]),
+        "{run}"
+    );
+    let job = |submission_id: Uuid| {
+        route_request(
+            state.clone(),
+            "POST",
+            "/v1/workers/process-evaluation",
+            auth_headers(&fixture.admin_token),
+            Some(serde_json::json!({
+                "submission_id": submission_id,
+                "process_evaluation": {"evaluator_version": "judge-v1"},
+                "reason": "process evaluation of a mixed tenant",
+            })),
+        )
+    };
+    let (status, refused) = job(pipeline_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refused}");
+    assert_eq!(
+        refused["error"], "pipeline_run_owns_submission",
+        "{refused}"
+    );
+    let (_, legacy) = job(legacy_id).await;
+    assert_ne!(legacy["error"], "pipeline_run_owns_submission", "{legacy}");
+}
+
+/// `main`'s ranking-feature run leaves the submissions with a pipeline run
+/// out, as its ranker exports do (L1-2): since #1325 the pipeline's Review
+/// commit stores a `canonical_summary_hash` on its derived record, which
+/// alone no longer tells the two apart. A legacy submission still gets its
+/// server features.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_ranking_feature_run_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, run) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/ranking/features/run",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({
+            "dry_run": false,
+            "target_use": "ranking_model_training",
+            "feature_schema_version": "ranking-features-server-v1",
+            "reason": "ranking features of a mixed tenant",
+            "limit": 10,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let featured = state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_ranking_features(&fixture.base.tenant)
+        .await
+        .expect("the ranking features read")
+        .into_iter()
+        .map(|feature| feature.submission_id)
+        .collect::<BTreeSet<_>>();
+    assert!(!featured.contains(&pipeline_id), "{run}");
+    assert_eq!(featured, BTreeSet::from([legacy_id]), "{run}");
 }
 
 /// Zaki review 1, round 2, N-2: the pipeline assessment route applies the
@@ -13452,6 +13940,1407 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
     }
 }
 
+/// A routed tenant's fixture for the tests of the `submitted` audit event of
+/// a pipeline receipt: the receipts list holds the tenant, the service
+/// routes without a routing row, and an audit append writes its database
+/// row before its file line, the order a routed tenant has in production.
+async fn submitted_audit_fixture() -> Option<WithdrawalFixture> {
+    submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_test_pipeline_service_configured(
+            runtime,
+            artifacts,
+            IsolatedPipelineIndex::new(),
+            None,
+            Vec::new(),
+            None,
+            true,
+        )
+    })
+    .await
+}
+
+/// `submitted_audit_fixture`, with the pipeline service `service` builds.
+async fn submitted_audit_fixture_with(
+    service: impl FnOnce(Arc<PgBackend>, Arc<LocalEncryptedTraceArtifactStore>) -> Arc<PipelineService>,
+) -> Option<WithdrawalFixture> {
+    let mut fixture = withdrawal_fixture_with(service, false).await?;
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+    let tenant = fixture.tenant.clone();
+    let state_mut = Arc::make_mut(&mut fixture.state);
+    state_mut.require_db_mirror_writes = true;
+    state_mut.accept_medium_risk_submissions = true;
+    state_mut.tenant_rollout_gates = TraceTenantRolloutGates::for_feature(
+        TraceTenantRolloutFeature::PipelineReceipts,
+        &[tenant.as_str()],
+    );
+    Some(fixture)
+}
+
+/// The tenant's `submitted` events for `submission_id`, from the file log.
+fn submitted_file_events(
+    root: &Path,
+    tenant: &str,
+    submission_id: Uuid,
+) -> Vec<TraceCommonsAuditEvent> {
+    read_all_audit_events(root, tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.kind == "submitted" && event.submission_id == submission_id)
+        .collect()
+}
+
+/// A new pipeline receipt appends `main`'s `submitted` audit event, in the
+/// file log and as a database row, as `main`'s upload appends it: the
+/// uploader's principal reference, the `auth_method` reason, and no status
+/// for an admitted receipt (its stored status is `received`, which `main`'s
+/// audit status type does not have). The row says `submit` with the stored
+/// status and the privacy risk of the submission row. `main`'s chain
+/// verification and the backfill projection accept it. A replay appends
+/// nothing. When the file append fails after the database row committed, the
+/// route answers 500 and the run exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pipeline_receipt_appends_mains_submitted_audit_event() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    let root = fixture.state.root.clone();
+
+    let Json(receipt) = test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .expect("the receipt of the routed tenant succeeds");
+    assert_eq!(receipt.status, "processing");
+
+    // 1. One event in the file log, the uploader's reference, no status.
+    let events = submitted_file_events(&root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let event = &events[0];
+    assert_eq!(
+        event.actor_principal_ref.as_deref(),
+        Some(principal.as_str())
+    );
+    assert_eq!(event.actor_role, Some(TokenRole::Contributor));
+    assert_eq!(event.reason.as_deref(), Some("auth_method=static_token"));
+    assert_eq!(event.status, None);
+
+    // 2. Its database row.
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event.event_id)
+        .expect("the event has its database row");
+    assert_eq!(row.action, StorageTraceAuditAction::Submit);
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: submission.privacy_risk.clone(),
+        }
+    );
+    assert_eq!(submission.privacy_risk, "low");
+
+    // 3. `main`'s audit verification finds no mismatch.
+    let report = verify_audit_chain(fixture.state.as_ref(), &tenant)
+        .await
+        .expect("the audit chain verifies");
+    assert!(report.verified, "{:?}", report.failures);
+    let mirror = report.db_mirror.expect("the database chain is verified");
+    assert!(mirror.verified, "{:?}", mirror.failures);
+    let projection = collect_db_audit_canonical_projection_failures(&rows)
+        .into_iter()
+        .map(|failure| failure.first_failure)
+        .collect::<Vec<_>>();
+    assert!(projection.is_empty(), "{projection:?}");
+
+    // 4. A replay answers success and appends nothing.
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the replay succeeds");
+    assert_eq!(
+        submitted_file_events(&root, &tenant, envelope.submission_id).len(),
+        1
+    );
+
+    // 5. The backfill projection of the event is accepted.
+    let (action, metadata) = audit_backfill_storage_projection(event);
+    let metadata = normalize_audit_event_metadata(event, action, metadata, true)
+        .expect("the backfill projection of the event is accepted");
+    assert_eq!(action, StorageTraceAuditAction::Submit);
+    assert_eq!(
+        metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+
+    // 6. The last step: the file append fails after the database row
+    // committed, which leaves the tenant's chain stale. The tenant is this
+    // test's own, so no later test reads it.
+    let mut failing = sample_envelope().await;
+    failing.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut failing);
+    fail_next_audit_file_append(&root, &tenant);
+    let (status, _) = test_submit(fixture.state.clone(), &fixture.token, failing.clone())
+        .await
+        .expect_err("the failed append answers an error");
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let run = fixture
+        .service
+        .replay_receipt(
+            &tenant,
+            &failing.submission_id.to_string(),
+            &serde_json::to_vec(&failing).unwrap(),
+        )
+        .await
+        .expect("the run reads");
+    assert!(run.is_some(), "the run exists");
+}
+
+/// A `submitted` event with no status is a pipeline receipt's only for a
+/// submission with no file record: a legacy submission always has one, and a
+/// pipeline submission never does. The database backfill writes such an
+/// event of a pipeline submission (its stored status `received`), and
+/// refuses one of a submission with a file record, as `main` refused every
+/// `submitted` event with no status before the pipeline appended one. The
+/// legacy record here is `purged`, so the backfill skips its submission row
+/// and the test reads only the audit rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let store = Arc::new(PgPipelineStore::new(fixture.runtime.clone()));
+    Arc::make_mut(&mut fixture.state).pipeline_store = Some(store);
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // Two file lines with no database row, as after a database restore: a
+    // `submitted` event with no status for the pipeline submission, then
+    // one for a submission with no pipeline run.
+    let file_only = |submission_id: Uuid| {
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.clone(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some(caller.principal_ref.clone()),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+        write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+        event
+    };
+    let pipeline_event = file_only(envelope.submission_id);
+    let legacy_submission_id = Uuid::new_v4();
+    let legacy_event = file_only(legacy_submission_id);
+    let mut legacy_record = submission_record_with_principal(&caller.principal_ref);
+    legacy_record.tenant_id = tenant.clone();
+    legacy_record.submission_id = legacy_submission_id;
+    legacy_record.status = TraceCorpusStatus::Purged;
+
+    let report = backfill_db_mirror_from_files(
+        fixture.state.as_ref(),
+        &caller,
+        &[legacy_record],
+        &[],
+        true,
+        false,
+    )
+    .await
+    .expect("the backfill runs");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    assert!(
+        rows.iter()
+            .any(|row| row.audit_event_id == pipeline_event.event_id),
+        "the pipeline submission's event is backfilled: {report:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.audit_event_id == legacy_event.event_id),
+        "a legacy submitted event with no status is refused: {report:?}"
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|failure| failure.item_kind == "audit_event"
+                && failure.item_ref == legacy_event.event_id.to_string()),
+        "{report:?}"
+    );
+}
+
+/// Review of #1331, finding 1 (major): a database restore loses each
+/// pipeline run admitted after the backup, and the `trace_submissions` row
+/// with it, while the audit file keeps the receipt's `submitted` event with
+/// no status. The backfill takes the event as a pipeline receipt's because
+/// the submission has no file record (a signal that survives the restore),
+/// writes it as `received`, and writes the tenant's later events, which
+/// chain from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_writes_a_receipt_event_whose_run_a_restore_lost() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let store = Arc::new(PgPipelineStore::new(fixture.runtime.clone()));
+    Arc::make_mut(&mut fixture.state).pipeline_store = Some(store.clone());
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // The restore: the submission row and its run are gone (the run
+    // cascades with its submission).
+    {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "DELETE FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("delete the run");
+        tx.execute(
+            "DELETE FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("delete the submission row");
+        tx.commit().await.expect("commit the deletes");
+    }
+    assert!(
+        !store
+            .submission_has_pipeline_run(&tenant, envelope.submission_id)
+            .await
+            .expect("the run lookup reads"),
+        "the restore left no run row"
+    );
+
+    // Two file lines with no database row: the receipt's `submitted` event
+    // with no status, then a later event of the tenant.
+    let file_only = |submission_id: Uuid, status: Option<TraceCorpusStatus>| {
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.clone(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status,
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some(caller.principal_ref.clone()),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+        write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+        event
+    };
+    let receipt_event = file_only(envelope.submission_id, None);
+    let later_event = file_only(Uuid::new_v4(), Some(TraceCorpusStatus::Accepted));
+
+    let report =
+        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
+            .await
+            .expect("the backfill runs");
+    assert!(
+        !report
+            .failures
+            .iter()
+            .any(|failure| failure.item_kind == "audit_event"),
+        "{report:?}"
+    );
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let receipt_row = rows
+        .iter()
+        .find(|row| row.audit_event_id == receipt_event.event_id)
+        .unwrap_or_else(|| panic!("the receipt's event is backfilled: {report:?}"));
+    assert_eq!(receipt_row.action, StorageTraceAuditAction::Submit);
+    assert_eq!(
+        receipt_row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.audit_event_id == later_event.event_id),
+        "the later event, which chains from it, is backfilled: {report:?}"
+    );
+}
+
+/// The database backfill writes a pipeline submission's `submitted` row with
+/// the risk `unknown`: the pipeline has no file record to take the risk from.
+/// The audit table is insert-only, so that row can never agree with the
+/// stored risk, and the reconciliation leaves it out for a pipeline
+/// submission, also for a run with no recorded privacy pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_leaves_out_the_unknown_risk_of_a_backfilled_pipeline_row() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    {
+        let runtime = fixture.runtime.clone();
+        let state = Arc::make_mut(&mut fixture.state);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(runtime.clone())));
+        state.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime)));
+    }
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    assert!(created.privacy_pass_recorded_at.is_none(), "{created:?}");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // A file line with no database row, as after a database restore.
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: envelope.submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status: None,
+        actor_role: Some(TokenRole::Contributor),
+        actor_principal_ref: Some(caller.principal_ref.clone()),
+        reason: Some("auth_method=static_token".to_string()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+    write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+    let report =
+        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
+            .await
+            .expect("the backfill runs");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event.event_id)
+        .unwrap_or_else(|| panic!("the event is backfilled: {report:?}"));
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_submission_metadata_mismatches.is_empty(),
+        "{:?}",
+        report.db_audit_submission_metadata_mismatches
+    );
+}
+
+/// An admitted receipt's event has no status; a receipt that Admission
+/// quarantines has the status `quarantined`, in the event and in the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quarantined_pipeline_receipt_appends_a_quarantined_submitted_event() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Quarantined));
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Quarantined,
+            privacy_risk: "medium".to_string(),
+        }
+    );
+}
+
+/// A privacy boundary whose deterministic rescrub, the one the receipt runs,
+/// raises the residual risk to Medium. Its classifier half changes nothing.
+struct RiskRaisingBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for RiskRaisingBoundary {
+    async fn rescrub_deterministic(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+}
+
+/// The receipt re-scrubs its own copy of the envelope, and a re-scrub can
+/// raise the risk: the `submitted` event's row carries the risk the receipt
+/// stored in `trace_submissions`, not the risk of the uploaded envelope.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_submitted_audit_row_carries_the_risk_the_receipt_stored() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(RiskRaisingBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    assert_eq!(envelope.privacy.residual_pii_risk, ResidualPiiRisk::Low);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.privacy_risk, "medium");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    let StorageTraceAuditSafeMetadata::Submission { privacy_risk, .. } = &row.metadata else {
+        panic!("a submission row: {:?}", row.metadata);
+    };
+    assert_eq!(privacy_risk, &submission.privacy_risk);
+}
+
+// ---------------------------------------------------------------------------
+// The worker's review audit pass (V118, `review_audit_pending_at`).
+// ---------------------------------------------------------------------------
+
+/// A fixture for the tests of the review audit pass: the tenant is the
+/// test's own, a reviewer token exists, and an audit append writes its
+/// database row before its file line, the order a routed tenant has in
+/// production.
+async fn review_audit_fixture() -> Option<(WithdrawalFixture, String)> {
+    let mut fixture = withdrawal_fixture().await?;
+    let reviewer = format!("token-review-audit-pass-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    let state = Arc::make_mut(&mut fixture.state);
+    state.tokens = Arc::new(tokens);
+    state.require_db_mirror_writes = true;
+    Some((fixture, reviewer))
+}
+
+/// Whether `run_id` has a review audit marker.
+async fn review_audit_marker_is_set(fixture: &WithdrawalFixture, run_id: Uuid) -> bool {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let set: bool = tx
+        .query_one(
+            "SELECT review_audit_pending_at IS NOT NULL FROM pipeline_runs
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&fixture.tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    set
+}
+
+/// Sets the review audit marker of `run_id` again, as a new decision would.
+async fn set_review_audit_marker(fixture: &WithdrawalFixture, run_id: Uuid) {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs SET review_audit_pending_at = clock_timestamp()
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&fixture.tenant, &run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// The id of the run's Review `phase_outcomes` row.
+async fn review_outcome_id(fixture: &WithdrawalFixture, run_id: Uuid) -> Uuid {
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let id: Uuid = tx
+        .query_one(
+            "SELECT outcome_id FROM phase_outcomes
+              WHERE tenant_id = $1 AND run_id = $2 AND phase = 'review'",
+            &[&fixture.tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    id
+}
+
+/// The tenant's file audit events of `kind` for `submission_id`.
+fn audit_file_events_of_kind(
+    fixture: &WithdrawalFixture,
+    submission_id: Uuid,
+    kind: &str,
+) -> Vec<TraceCommonsAuditEvent> {
+    read_all_audit_events(&fixture.state.root, &fixture.tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.kind == kind && event.submission_id == submission_id)
+        .collect()
+}
+
+async fn run_review_audit_pass(
+    fixture: &WithdrawalFixture,
+) -> anyhow::Result<pipeline_runtime::PipelineCreditAuditPass> {
+    pipeline_runtime::append_pipeline_review_audit_events(
+        fixture.state.as_ref(),
+        fixture.service.as_ref(),
+        &fixture.tenant,
+        32,
+    )
+    .await
+}
+
+/// `main`'s audit verification of the tenant: the file chain and the
+/// database chain both report no mismatch.
+async fn assert_audit_verification_is_clean(fixture: &WithdrawalFixture) {
+    let report = verify_audit_chain(fixture.state.as_ref(), &fixture.tenant)
+        .await
+        .expect("the audit chain verifies");
+    assert!(report.verified, "{:?}", report.failures);
+    let mirror = report.db_mirror.expect("the database chain is verified");
+    assert!(mirror.verified, "{:?}", mirror.failures);
+}
+
+/// A reviewer's claim on `run_id` through the route: the lease token.
+async fn claim_review_through_the_route(
+    fixture: &WithdrawalFixture,
+    reviewer: &str,
+    run_id: Uuid,
+) -> serde_json::Value {
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+        auth_headers(reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    claim["lease_token"].clone()
+}
+
+/// Each automatic Review decision gets one `lifecycle_status_change` audit
+/// event, with the id of the Review `phase_outcomes` row, in the file log
+/// and as a database row. An approval is `accepted`, a rejection `rejected`;
+/// the actor is `pipeline_worker`; the marker is cleared; a second pass over
+/// a marker set again appends nothing; and `main`'s audit verification finds
+/// no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_an_automatic_review() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+
+    // 1. An approved Review.
+    let approved = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, approved.run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let outcome_id = review_outcome_id(&fixture, approved.run_id).await;
+    let events =
+        audit_file_events_of_kind(&fixture, approved.submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, outcome_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Accepted));
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let row_role: String = tx
+        .query_one(
+            "SELECT actor_role FROM trace_audit_events
+              WHERE tenant_id = $1 AND audit_event_id = $2",
+            &[&tenant, &outcome_id],
+        )
+        .await
+        .expect("the event has its database row")
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(row_role, "system");
+    assert!(!review_audit_marker_is_set(&fixture, approved.run_id).await);
+
+    // 2. A rejected Review: a reviewer's rejection, then the run's Review.
+    let quarantined = parked_pipeline_run(&fixture.service, &tenant, &principal).await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, quarantined.run_id).await;
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", quarantined.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": lease_token,
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    fixture
+        .service
+        .process_run(&tenant, quarantined.run_id)
+        .await
+        .expect("Review runs");
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let outcome_id = review_outcome_id(&fixture, quarantined.run_id).await;
+    let events = audit_file_events_of_kind(
+        &fixture,
+        quarantined.submission_id,
+        "lifecycle_status_change",
+    );
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, outcome_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert!(!review_audit_marker_is_set(&fixture, quarantined.run_id).await);
+
+    // 3. A marker set again appends no second event.
+    set_review_audit_marker(&fixture, approved.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, approved.submission_id, "lifecycle_status_change")
+            .len(),
+        1
+    );
+    assert!(!review_audit_marker_is_set(&fixture, approved.run_id).await);
+
+    // 4. `main`'s audit verification.
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// An assessment that the route recorded has one `review_decision` event,
+/// with the assessment's id and the reviewer's reference. The pass finds it
+/// and appends no second one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_assessment_event_is_appended_one_time() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let run = parked_pipeline_run(&fixture.service, &tenant, "principal_sha256:rv-once").await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, run.run_id).await;
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", run.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": lease_token,
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+
+    let events = audit_file_events_of_kind(&fixture, run.submission_id, "review_decision");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(
+        events[0].event_id.to_string(),
+        assessed["assessment_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some(static_token_principal_ref(&reviewer).as_str())
+    );
+    assert!(!review_audit_marker_is_set(&fixture, run.run_id).await);
+}
+
+/// An assessment that was recorded through the service, so that no route
+/// appended its event, gets its `review_decision` event from the pass: the
+/// id is the assessment's, the actor is the stored `reviewer_sha256:`
+/// reference, and the status is the one the recommendation leads to. A
+/// second pass adds none, and `main`'s audit verification finds no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_repairs_a_missed_review_assessment_event() {
+    let Some((fixture, reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let run = parked_pipeline_run(&fixture.service, &tenant, "principal_sha256:rv-repair").await;
+    let lease_token = claim_review_through_the_route(&fixture, &reviewer, run.run_id).await;
+    let reviewer_ref = format!(
+        "reviewer_sha256:{}",
+        hex::encode(Sha256::digest(
+            static_token_principal_ref(&reviewer).as_bytes()
+        ))
+    );
+    let assessment = fixture
+        .service
+        .store()
+        .record_review_assessment(
+            &PipelineReviewClaim {
+                tenant_id: tenant.clone(),
+                run_id: run.run_id,
+                reviewer_principal_ref: reviewer_ref.clone(),
+                lease_token: serde_json::from_value(lease_token).unwrap(),
+                lease_expires_at: Utc::now(),
+            },
+            ReviewRecommendation::Reject,
+            ReasonCode::new("privacy_review_required".to_string()).unwrap(),
+            Vec::new(),
+        )
+        .await
+        .expect("the assessment records");
+    assert!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "review_decision").is_empty(),
+        "no route appended an event"
+    );
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let events = audit_file_events_of_kind(&fixture, run.submission_id, "review_decision");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, assessment.assessment_id);
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some(reviewer_ref.as_str())
+    );
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert!(!review_audit_marker_is_set(&fixture, run.run_id).await);
+
+    set_review_audit_marker(&fixture, run.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "review_decision").len(),
+        1
+    );
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// An item whose append fails keeps its marker and does not stop the item
+/// before it: the pass counts one cleared and one failed item. The fault is
+/// the last step, because a failed file append leaves the tenant's audit
+/// chain stale; the tenant is this test's own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_audit_item_that_fails_keeps_its_marker() {
+    let Some((fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    // The first run's event is appended, and its marker is set again: its
+    // item needs no append. The second run's marker is newer.
+    let first = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    set_review_audit_marker(&fixture, first.run_id).await;
+    let second = completed_pipeline_run(&fixture.service, &tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
+
+    fail_next_audit_file_append(&fixture.state.root, &tenant);
+    let pass = run_review_audit_pass(&fixture)
+        .await
+        .expect("one item cleared, so the pass answers");
+    assert_eq!((pass.audited, pass.failed), (1, 1));
+    assert!(!review_audit_marker_is_set(&fixture, first.run_id).await);
+    assert!(review_audit_marker_is_set(&fixture, second.run_id).await);
+}
+
+/// The clear is conditional on the listed marker: a marker set again after
+/// the list (a newer decision) stays, so its event is not lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_review_audit_marker_set_after_the_list_is_not_cleared() {
+    let Some((fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let store = fixture.service.store();
+    let listed = store
+        .list_pending_review_audits(&fixture.tenant, 32)
+        .await
+        .expect("the list reads");
+    let item = listed
+        .iter()
+        .find(|item| item.run_id == run.run_id)
+        .expect("the run is listed");
+    set_review_audit_marker(&fixture, run.run_id).await;
+    store
+        .clear_review_audit_pending(&fixture.tenant, item)
+        .await
+        .expect("the clear runs");
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+}
+
+/// With a database mirror that is not required, the file line is written
+/// before the row, so a failed mirror write would leave an event that the
+/// read by id cannot see. The pass appends nothing there, answers an error
+/// with a label, and keeps the marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_review_audit_pass_appends_nothing_when_the_mirror_is_not_required() {
+    let Some((mut fixture, _reviewer)) = review_audit_fixture().await else {
+        return;
+    };
+    Arc::make_mut(&mut fixture.state).require_db_mirror_writes = false;
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+
+    let error = run_review_audit_pass(&fixture)
+        .await
+        .expect_err("the pass refuses");
+    assert_eq!(
+        error.to_string(),
+        "pipeline_review_audit_mirror_not_required"
+    );
+    assert!(
+        audit_file_events_of_kind(&fixture, run.submission_id, "lifecycle_status_change")
+            .is_empty()
+    );
+    assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
+}
+
+/// Asserts that the pass appended exactly one `lifecycle_status_change`
+/// event of `submission_id` with `event_id`, status `quarantined` and the
+/// actor `pipeline_worker`, and that its database row is a `Review` row with
+/// the role `system` and `reason` as its reason code.
+async fn assert_one_quarantined_lifecycle_event(
+    fixture: &WithdrawalFixture,
+    submission_id: Uuid,
+    event_id: Uuid,
+    reason: &str,
+) {
+    let events = audit_file_events_of_kind(fixture, submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, event_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Quarantined));
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&fixture.tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event_id)
+        .expect("the event has its database row");
+    assert_eq!(row.action, StorageTraceAuditAction::Review);
+    assert_eq!(row.actor_role, "system");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: "quarantined".to_string(),
+            resulting_status: StorageTraceCorpusStatus::Quarantined,
+            reason_code: Some(reason.to_string()),
+        }
+    );
+}
+
+/// A run that the Review-start privacy pass holds for a human (the pass
+/// escalates it) gets one `lifecycle_status_change` event, status
+/// `quarantined` and reason `privacy_pass_review_required`, as `main`'s PII
+/// backstop appends for the same state. The event id is derived from the run,
+/// the marker is cleared, a second pass over a marker set again adds none, and
+/// `main`'s audit verification and its reconciliation find no audit gap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary {
+                risk: ResidualPiiRisk::High,
+            }),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    assert_eq!(
+        held.privacy_pass_outcome,
+        Some(trace_commons_server::versioned_pipeline::PrivacyPassOutcome::Escalated)
+    );
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let hold_id =
+        deterministic_trace_uuid_for("pipeline-privacy-pass-hold-audit", &tenant, created.run_id);
+    assert_one_quarantined_lifecycle_event(
+        &fixture,
+        envelope.submission_id,
+        hold_id,
+        "privacy_pass_review_required",
+    )
+    .await;
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change")
+            .len(),
+        1
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    assert_audit_verification_is_clean(&fixture).await;
+
+    // The hold event says `quarantined`, as the stored status does since
+    // #1332 (the escalated pass moved the admitted row from `received`):
+    // `main`'s reconciliation reports no audit gap for it.
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Quarantined);
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_hash_chain_failures.is_empty(),
+        "{:?}",
+        report.db_audit_hash_chain_failures
+    );
+    assert!(
+        report.db_audit_canonical_projection_failures.is_empty(),
+        "{:?}",
+        report.db_audit_canonical_projection_failures
+    );
+    assert!(report.db_audit_submission_metadata_mismatches.is_empty());
+}
+
+/// The whole sequence of a held run, possible since #1332: the privacy pass
+/// escalates an admitted run, a reviewer rejects it, and the server commits
+/// the rejection. The submission's audit events are, in order, the receipt's
+/// `submitted`, the hold (`quarantined`), the reviewer's `review_decision`
+/// from the assessment route, and the Review commit (`rejected`). The marker
+/// is cleared and `main`'s audit verification is clean.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_run_that_a_reviewer_rejects_has_its_audit_events_in_order() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary {
+                risk: ResidualPiiRisk::High,
+            }),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let reviewer = format!("token-review-held-audit-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass appends the hold event");
+
+    let run_id = created.run_id;
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/claim"),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    let (status, recorded) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{run_id}/assessment"),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{recorded}");
+    let ended = fixture
+        .service
+        .process_run(&tenant, run_id)
+        .await
+        .expect("the server commits the rejection")
+        .expect("the run was claimed");
+    assert_eq!(ended.state, PipelineRunState::Complete, "{ended:?}");
+    assert!(review_audit_marker_is_set(&fixture, run_id).await);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass appends the Review commit event");
+    assert!(!review_audit_marker_is_set(&fixture, run_id).await);
+
+    let events = read_all_audit_events(&fixture.state.root, &tenant)
+        .expect("the file audit log reads")
+        .into_iter()
+        .filter(|event| event.submission_id == envelope.submission_id)
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "submitted" | "lifecycle_status_change" | "review_decision"
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| (event.kind.as_str(), event.status))
+            .collect::<Vec<_>>(),
+        vec![
+            ("submitted", None),
+            (
+                "lifecycle_status_change",
+                Some(TraceCorpusStatus::Quarantined)
+            ),
+            ("review_decision", Some(TraceCorpusStatus::Rejected)),
+            ("lifecycle_status_change", Some(TraceCorpusStatus::Rejected)),
+        ],
+        "{events:?}"
+    );
+    assert_eq!(
+        events[1].event_id,
+        deterministic_trace_uuid_for("pipeline-privacy-pass-hold-audit", &tenant, run_id)
+    );
+    let review = fixture
+        .service
+        .store()
+        .outcome_for_phase(&tenant, run_id, Phase::Review)
+        .await
+        .unwrap()
+        .expect("the Review outcome");
+    assert_eq!(events[3].event_id, review.outcome_id);
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// A run whose privacy classification fails until its attempts end (state
+/// `failed`, `privacy_classification_failed`) gets one
+/// `lifecycle_status_change` event, status `quarantined`, as `main`'s PII
+/// backstop appends for an exhausted classification. The marker is set only
+/// by the terminal attempt: the retries before it set none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_a_failed_privacy_classification() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(FailingPrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+
+    let mut run = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review meets the classifier outage")
+        .expect("the run was claimed");
+    assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+    assert!(
+        !review_audit_marker_is_set(&fixture, created.run_id).await,
+        "a charged retry is not the end of the run"
+    );
+    while run.state == PipelineRunState::Retry {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        drop(client);
+        run = fixture
+            .service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the retry runs")
+            .expect("the run was claimed");
+    }
+    assert_eq!(run.state, PipelineRunState::Failed, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some("privacy_classification_failed")
+    );
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let failed_id = deterministic_trace_uuid_for(
+        "pipeline-privacy-classification-failed-audit",
+        &tenant,
+        created.run_id,
+    );
+    assert_one_quarantined_lifecycle_event(
+        &fixture,
+        envelope.submission_id,
+        failed_id,
+        "privacy_classification_failed",
+    )
+    .await;
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
 /// Task 6: a privacy boundary whose classifier half removes the prose-PII
 /// marker `PROSE_PII_MARKER` (wherever the envelope carries it), sets the
 /// envelope's residual risk to `risk` and reports `FoundAndRemoved`. At
@@ -13483,6 +15372,169 @@ impl PipelinePrivacyBoundary for EscalatingClassifierBoundary {
         envelope.privacy.residual_pii_risk = self.risk;
         Ok(vec![ResidualRiskCondition::FoundAndRemoved])
     }
+}
+
+/// The Review-start privacy pass rewrites a pipeline submission's stored
+/// risk (V117), and its `submitted` audit row keeps the risk the receipt
+/// stored: `main`'s reconciliation does not report that difference as
+/// `db_audit_submission_metadata_mismatches`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_accepts_a_submitted_row_whose_risk_the_privacy_pass_changed() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary {
+                risk: ResidualPiiRisk::High,
+            }),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.privacy_risk, "high");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == events[0].event_id)
+        .expect("the event has its database row");
+    let StorageTraceAuditSafeMetadata::Submission { privacy_risk, .. } = &row.metadata else {
+        panic!("a submission row: {:?}", row.metadata);
+    };
+    assert_eq!(privacy_risk, "low", "the row keeps the receipt's risk");
+
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_submission_metadata_mismatches.is_empty(),
+        "{:?}",
+        report.db_audit_submission_metadata_mismatches
+    );
+}
+
+/// Only a run whose Review-start privacy pass is recorded has its stored
+/// risk rewritten (V117), so only such a run's `submitted` row is left out
+/// of the risk comparison. A run with no recorded pass (here a pending one)
+/// whose stored risk differs from its `submitted` row is still reported as
+/// `db_audit_submission_metadata_mismatches`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_reports_a_risk_mismatch_of_a_run_with_no_recorded_privacy_pass() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let events = submitted_file_events(&fixture.state.root, &tenant, envelope.submission_id);
+    assert_eq!(events.len(), 1, "{events:?}");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    assert!(created.privacy_pass_recorded_at.is_none(), "{created:?}");
+
+    // Drift that no privacy pass made: the stored risk of a run with no
+    // recorded pass changes behind the audit log.
+    let url = pipeline_http_database_url().await.unwrap();
+    let (owner, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect as the database owner");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let updated = owner
+        .execute(
+            "UPDATE trace_submissions SET privacy_risk = 'medium'
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("change the stored risk");
+    assert_eq!(updated, 1);
+
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    let mismatches = report
+        .db_audit_submission_metadata_mismatches
+        .iter()
+        .filter(|mismatch| mismatch.submission_id == envelope.submission_id)
+        .collect::<Vec<_>>();
+    assert_eq!(mismatches.len(), 1, "{mismatches:?}");
+    assert_eq!(mismatches[0].audit_event_id, events[0].event_id);
+    assert_eq!(mismatches[0].metadata_privacy_risk, "low");
+    assert_eq!(mismatches[0].db_privacy_risk, "medium");
 }
 
 /// Owner decision 2026-10-10 ("once PII removed we should go to accepted"),

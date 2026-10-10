@@ -1922,6 +1922,18 @@ async fn a_submission_with_a_pipeline_run_is_never_counted_whatever_its_rows_say
         ],
         "the NEAR outbox",
     );
+    // The pipeline's own summary counts its outbox lines alone: the one
+    // `pending` line, and none of `main`'s five.
+    let pipeline_summary =
+        PipelineProductStore::new(runtime_backend(6).await.expect("the runtime backend"))
+            .operational_summary(tenant)
+            .await
+            .expect("the pipeline operational summary reads");
+    assert_eq!(
+        pipeline_summary.near_outbox_by_state,
+        std::collections::BTreeMap::from([("pending".to_string(), 1u64)]),
+        "the pipeline summary counts the pipeline's outbox lines only"
+    );
 }
 
 /// A missing gate decision is owed work only in a deployment that runs the gate

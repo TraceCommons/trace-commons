@@ -63,10 +63,10 @@ use crate::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_IMPLEMENTATION, UnappliedIndexCommandsReader,
 };
 use crate::versioned_pipeline_credit::{
-    DryRunNearPayoutAdapter, NearPayoutAdapter, PIPELINE_CREDIT_ACTOR_ROLE, PIPELINE_CREDIT_REASON,
-    PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE, PIPELINE_SETTLEMENT_POLICY_VERSION,
-    SettlementAdapterRegistry, credit_account_hash, disabled_near_call,
-    microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
+    DryRunNearPayoutAdapter, NearPayoutAdapter, NearPayoutConfirmation, PIPELINE_CREDIT_ACTOR_ROLE,
+    PIPELINE_CREDIT_REASON, PIPELINE_NOVELTY_UTILITY_ACTOR_ROLE,
+    PIPELINE_SETTLEMENT_POLICY_VERSION, SettlementAdapterRegistry, credit_account_hash,
+    disabled_near_call, microcredits_to_settled_i64, payout_state_label, pipeline_credit_event_id,
     pipeline_ledger_source_key, pipeline_near_outbox_line_id, pipeline_novelty_utility_reason,
     pipeline_settlement_batch_id, source_list_hash,
 };
@@ -272,6 +272,12 @@ pub(crate) const PIPELINE_ADMIN_LOCK_TIMEOUT_SQL: &str = "SET LOCAL lock_timeout
 pub const PIPELINE_POLICY_INTERVENTION_NO_TRANSITION_LABEL: &str =
     "policy_intervention_no_transition";
 pub const PIPELINE_INDEX_UNAVAILABLE_LABEL: &str = "index_unavailable";
+/// Settle's read of the stored index command failed in the artifact store
+/// call, an integrity failure the store reports included (a missing object,
+/// a wrong key). The attempt is charged and the next one waits an hour, as
+/// for `artifact_integrity_failed`. A command that the store read and that
+/// is wrong stays `index_command_invalid`.
+pub const PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL: &str = "index_command_unreadable";
 /// An index rebuild whose committed fence (V113,
 /// `PgPipelineStore::set_index_rebuild_fence`) could not be written before a
 /// run's writes: the rebuild stops before that run's first write
@@ -425,6 +431,10 @@ pub const PIPELINE_SUBMISSION_INOPERABLE_LABEL: &str = "submission_inoperable";
 /// A Trace Credit leg's payout label when the NEAR adapter refused or
 /// failed its submit; the payout is then `failed`.
 pub const PIPELINE_NEAR_SUBMIT_FAILED_LABEL: &str = "near_submit_failed";
+/// A Trace Credit leg's payout label when the adapter reports the
+/// transaction of a submitted line as failed on chain; the payout is then
+/// `failed`.
+pub const PIPELINE_NEAR_TRANSACTION_FAILED_LABEL: &str = "near_transaction_failed";
 /// Payout labels for an error in one run's payout (Ruling T10-5): the
 /// payout pass records it on that run's leg, which ends `failed`, and goes
 /// on with the next run. `payout_operation_failed` covers any error without
@@ -1451,6 +1461,43 @@ pub struct PipelineCreditAuditItem {
     pub external_ref: Option<String>,
     pub actor_principal_ref: String,
     pub actor_role: String,
+}
+
+/// A Review decision of a run's automatic Review, as the review audit pass
+/// reads it from `phase_outcomes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditOutcome {
+    pub outcome_id: Uuid,
+    pub approved: bool,
+}
+
+/// A human review assessment of a run, as the review audit pass reads it
+/// from `pipeline_review_assessments`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditAssessment {
+    pub assessment_id: Uuid,
+    pub approved: bool,
+    pub reason_code: String,
+    pub reviewer_principal_ref: String,
+}
+
+/// A run with a review audit marker (`review_audit_pending_at`,
+/// `PgPipelineStore::list_pending_review_audits`): the Review outcome and
+/// the assessment whose audit events the worker may still have to append,
+/// and whether the privacy pass escalated the run or the run failed at its
+/// privacy classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewAuditItem {
+    pub run_id: Uuid,
+    pub submission_id: Uuid,
+    pub pending_at: DateTime<Utc>,
+    pub outcome: Option<PipelineReviewAuditOutcome>,
+    pub assessment: Option<PipelineReviewAuditAssessment>,
+    /// The privacy pass escalated the run (`privacy_pass_outcome = 'escalated'`):
+    /// the run is, or was, held for a human under `privacy_pass_review_required`.
+    pub privacy_pass_escalated: bool,
+    /// The run ended `failed` under `privacy_classification_failed`.
+    pub privacy_classification_failed: bool,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
@@ -2836,6 +2883,7 @@ impl PgPipelineStore {
                      approved_revision_id = $5,
                      approved_object_ref_id = $6,
                      approved_content_hash = $7,
+                     review_audit_pending_at = clock_timestamp(),
                      privacy_pass_approval_assessment_hash = CASE
                          WHEN privacy_pass_outcome = 'escalated' THEN $9::text
                          ELSE privacy_pass_approval_assessment_hash END,
@@ -3050,6 +3098,8 @@ impl PgPipelineStore {
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
             ));
         }
+        // V118: an escalated pass sets the review audit marker, so the
+        // worker's review audit pass appends the hold's audit event.
         let Some(row) = tx
             .query_opt(
                 "UPDATE pipeline_runs
@@ -3059,6 +3109,8 @@ impl PgPipelineStore {
                      privacy_pass_residual_risk_basis = $7,
                      privacy_pass_outcome = $8,
                      privacy_pass_recorded_at = NOW(),
+                     review_audit_pending_at = CASE WHEN $8 = 'escalated'
+                         THEN clock_timestamp() ELSE review_audit_pending_at END,
                      updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
                    AND next_phase = 'review'
@@ -3465,6 +3517,14 @@ impl PgPipelineStore {
                 &resolved_json,
                 &evidence_hash,
             ],
+        )
+        .await?;
+        // V118: the worker's review audit pass appends this assessment's
+        // audit event when the route's own append missed it.
+        tx.execute(
+            "UPDATE pipeline_runs SET review_audit_pending_at = clock_timestamp()
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&claim.tenant_id, &claim.run_id],
         )
         .await?;
         tx.execute(
@@ -4079,6 +4139,119 @@ impl PgPipelineStore {
                 &item.instrument_id,
                 &item.credit_event_id,
             ],
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// The runs of the tenant with a review audit marker, oldest marker
+    /// first, at most `limit`: a Review decision or a human assessment
+    /// committed, the privacy pass escalated the run, or the run failed at
+    /// its privacy classification, and its audit event is not known to be
+    /// appended. The work index (V118) holds only the marked runs.
+    pub async fn list_pending_review_audits(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+    ) -> Result<Vec<PipelineReviewAuditItem>, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        let rows = tx
+            .query(
+                "SELECT p.run_id, p.submission_id, p.review_audit_pending_at,
+                        o.outcome_id, o.decision ->> 'kind' AS decision_kind,
+                        a.assessment_id, a.recommendation, a.reason_code,
+                        a.reviewer_principal_ref,
+                        p.privacy_pass_outcome IS NOT DISTINCT FROM 'escalated'
+                            AS privacy_pass_escalated,
+                        (p.state = 'failed' AND p.last_error_label IS NOT DISTINCT FROM $3)
+                            AS privacy_classification_failed
+                   FROM pipeline_runs p
+                   LEFT JOIN phase_outcomes o
+                     ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
+                    AND o.phase = 'review'
+                   LEFT JOIN pipeline_review_assessments a
+                     ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
+                  WHERE p.tenant_id = $1 AND p.review_audit_pending_at IS NOT NULL
+                  ORDER BY p.review_audit_pending_at, p.run_id
+                  LIMIT $2",
+                &[
+                    &tenant_id,
+                    &limit,
+                    &PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+                ],
+            )
+            .await?;
+        tx.commit().await?;
+        rows.iter()
+            .map(|row| {
+                let outcome = match row.get::<_, Option<Uuid>>("outcome_id") {
+                    Some(outcome_id) => {
+                        let approved =
+                            match row.get::<_, Option<String>>("decision_kind").as_deref() {
+                                Some("approved") => true,
+                                Some("rejected") => false,
+                                _ => {
+                                    return Err(DatabaseError::Serialization(
+                                        "unknown pipeline review decision".to_string(),
+                                    ));
+                                }
+                            };
+                        Some(PipelineReviewAuditOutcome {
+                            outcome_id,
+                            approved,
+                        })
+                    }
+                    None => None,
+                };
+                let assessment = match row.get::<_, Option<Uuid>>("assessment_id") {
+                    Some(assessment_id) => {
+                        let approved =
+                            match row.get::<_, Option<String>>("recommendation").as_deref() {
+                                Some("approve") => true,
+                                Some("reject") => false,
+                                _ => {
+                                    return Err(DatabaseError::Serialization(
+                                        "unknown review recommendation".to_string(),
+                                    ));
+                                }
+                            };
+                        Some(PipelineReviewAuditAssessment {
+                            assessment_id,
+                            approved,
+                            reason_code: row.get("reason_code"),
+                            reviewer_principal_ref: row.get("reviewer_principal_ref"),
+                        })
+                    }
+                    None => None,
+                };
+                Ok(PipelineReviewAuditItem {
+                    run_id: row.get("run_id"),
+                    submission_id: row.get("submission_id"),
+                    pending_at: row.get("review_audit_pending_at"),
+                    outcome,
+                    assessment,
+                    privacy_pass_escalated: row.get("privacy_pass_escalated"),
+                    privacy_classification_failed: row.get("privacy_classification_failed"),
+                })
+            })
+            .collect()
+    }
+
+    /// Clears `item`'s review audit marker once each of its audit events
+    /// exists. A marker set again since the list (a newer time) stays.
+    pub async fn clear_review_audit_pending(
+        &self,
+        tenant_id: &str,
+        item: &PipelineReviewAuditItem,
+    ) -> Result<(), DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
+        tx.execute(
+            "UPDATE pipeline_runs SET review_audit_pending_at = NULL
+              WHERE tenant_id = $1 AND run_id = $2 AND review_audit_pending_at = $3",
+            &[&tenant_id, &item.run_id, &item.pending_at],
         )
         .await?;
         tx.commit().await?;
@@ -5893,11 +6066,15 @@ impl PgPipelineStore {
         let exponent = run.attempt_count.saturating_sub(1).min(9);
         let multiplier = 1_i64 << exponent;
         let delay_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(multiplier);
-        let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL;
+        let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL
+            || error_label == PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL;
         let privacy_classification = error_label == PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL;
         let privacy_delay_seconds = PIPELINE_PRIVACY_RETRY_BASE_SECONDS.saturating_mul(multiplier);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // V118: a run that ends `failed` under the privacy label sets the
+        // review audit marker, so the worker's review audit pass appends the
+        // failure's audit event. A charged retry sets none.
         let row = tx
             .query_opt(
                 concat!(
@@ -5920,6 +6097,9 @@ impl PgPipelineStore {
                          WHEN attempt_count >= max_attempts AND NOT $8::boolean THEN $4
                          ELSE $3
                      END,
+                     review_audit_pending_at = CASE
+                         WHEN attempt_count >= max_attempts AND $8::boolean
+                         THEN clock_timestamp() ELSE review_audit_pending_at END,
                      updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
                    AND lease_token = $6 AND lease_expires_at > NOW()
@@ -11488,10 +11668,11 @@ impl PipelineService {
     /// outcome stored, per decision P1 (the byte wrapper) and the runtime
     /// plan's ruling A7. `evidence` is the same Score outcome's own
     /// evidence; `None` when Score proposed no command
-    /// (`embedding_artifact_hash` absent). Any failure -- a failed store
-    /// read, a missing or malformed reference, a decode failure, or a
-    /// mismatch against the evidence or the run's own recorded hash/revision
-    /// -- is the safe label `index_command_invalid`.
+    /// (`embedding_artifact_hash` absent). Any failure -- a failure the
+    /// store reports, an integrity failure included
+    /// (`index_command_unreadable`), or a missing or malformed reference, a
+    /// decode failure, or a mismatch against the evidence or the run's own
+    /// recorded hash/revision (`index_command_invalid`) -- is a safe label.
     pub async fn load_index_command(
         &self,
         run: &PipelineRunRecord,
@@ -11521,8 +11702,15 @@ impl PipelineService {
 
     /// Reads the index command a run committed at Score from its stored ref
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
-    /// `command_hash` and names `revision_id`. Any failure, the store read's
-    /// included, is the safe label `index_command_invalid`.
+    /// `command_hash` and names `revision_id`. Each failure the store
+    /// reports is the safe label `index_command_unreadable`, an integrity
+    /// failure included (the object missing, corrupt, bound to another
+    /// tenant, kind or hash, or not decrypted under the loaded key): a store
+    /// fault (a root that is not mounted, a wrong key, a wrong bucket) reads
+    /// the same, and gets the hourly wait (plan RB-D6 as the owner decided it
+    /// on 2026-10-10, review of #1331). Content that the store read, and
+    /// that fails a later check (the byte wrapper, the decode, the hash, the
+    /// revision), is `index_command_invalid`.
     async fn read_index_command(
         &self,
         tenant_id: &str,
@@ -11537,14 +11725,13 @@ impl PipelineService {
         let store = self.artifact_store.clone();
         let (object_key, ciphertext_sha256) =
             (object_key.to_string(), ciphertext_sha256.to_string());
-        // Not `artifact_store_call`: a stored command that cannot be read
-        // stays the charged `index_command_invalid`, whatever the store's
-        // error -- a transport failure too (ruling RB-35 on multi-lens
-        // review L2-2, kept when the store's errors were typed, ZA-2). A
-        // Settle run suspended on an unreadable command for good would keep
-        // it in every compatibility Score's unapplied set, which fails each
-        // of them closed (`index_unavailable`), while a charged failure ends
-        // the run after its Settle budget and the tenant recovers.
+        // Not `artifact_store_call`: a stored command that cannot be read is
+        // a charged failure, not an uncharged suspension. A suspended Settle
+        // run would keep the command in every compatibility Score's
+        // unapplied set, which fails each of them closed
+        // (`index_unavailable`), while a charged failure ends the run after
+        // its Settle budget and the tenant recovers. The wait between
+        // charged attempts is one hour (`mark_retry`).
         let wrapper = on_blocking_pool(move || {
             store.read_json_by_object_key(
                 tenant.as_str(),
@@ -11554,7 +11741,7 @@ impl PipelineService {
             )
         })
         .await
-        .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
+        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL))?;
         let bytes = decode_pipeline_artifact_bytes(&wrapper)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)
@@ -11608,7 +11795,9 @@ impl PipelineService {
     /// is meant to be re-run after the operator resolves the tampered row,
     /// and every entry write is idempotent (`writer.upsert`'s `Unchanged`
     /// result) so a re-run never double-counts what an earlier attempt
-    /// already applied.
+    /// already applied. A stored command that the store cannot read (an
+    /// outage, a missing object, a wrong key) fails the rebuild the same way
+    /// with `index_command_unreadable` (`read_index_command`).
     pub async fn rebuild_index_from_authoritative_commands(
         &self,
         tenant_id: &str,
@@ -12106,6 +12295,7 @@ impl PipelineService {
                 // the raw message itself.
                 let retry_label = match label.as_str() {
                     "index_command_invalid"
+                    | PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL
                     | "artifact_integrity_failed"
                     | "approved_content_mismatch"
                     | "score_outcome_invalid"
@@ -14855,6 +15045,19 @@ impl PipelineService {
     /// Only a database error ends the pass, as does an injected crash (a
     /// test's stand-in for the process dying).
     pub async fn process_payouts(&self, tenant_id: &str, limit: usize) -> anyhow::Result<usize> {
+        self.process_payouts_tallied(tenant_id, limit, &mut PipelinePayoutTally::default())
+            .await
+    }
+
+    /// `process_payouts`, adding to `tally` each outbox line the pass
+    /// changed. The counts stay in `tally` when the pass ends with an error,
+    /// so the caller can audit the lines that changed before it.
+    pub async fn process_payouts_tallied(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+        tally: &mut PipelinePayoutTally,
+    ) -> anyhow::Result<usize> {
         let Some((_, config)) = self.payout.as_ref() else {
             return Ok(0);
         };
@@ -14883,7 +15086,7 @@ impl PipelineService {
             .map(|(run_id, _)| run_id)
             .collect::<Vec<_>>();
         let mut processed = self
-            .pay_out_runs_on(&mut client, tenant_id, &to_confirm, false)
+            .pay_out_runs_on(&mut client, tenant_id, &to_confirm, false, tally)
             .await?;
         drop(client);
         if to_submit.is_empty() {
@@ -14894,7 +15097,7 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.pay_out_runs_on(client, tenant_id, &to_submit, true)
+                self.pay_out_runs_on(client, tenant_id, &to_submit, true, tally)
                     .await
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
@@ -14904,12 +15107,14 @@ impl PipelineService {
         Ok(processed)
     }
 
-    /// Pays out one run's settled Trace Credit (`dispatch_near_settlements`)
-    /// once the run is complete, under the same tenant lock as the pass's
-    /// submits (Finding I1): while a pass or `main`'s submitter holds it,
-    /// this is refused with `payout_lock_held`. `None` when the run does not
-    /// exist; a run that is not complete is returned untouched. Unlike the
-    /// pass, this also takes up a `failed` payout again, does not wait for
+    /// Pays out one run's completed Trace Credit legs
+    /// (`dispatch_near_settlements`), whatever the state of the run, under
+    /// the same tenant lock as the pass's submits (Finding I1): while a pass
+    /// or `main`'s submitter holds it, this is refused with
+    /// `payout_lock_held`. `None` when the run does not exist; a run with no
+    /// completed, payout-eligible leg is returned untouched. Unlike the
+    /// pass, this also takes up a `failed` payout again (each `failed` line
+    /// but one that failed on chain), does not wait for
     /// the confirmation interval, and returns a per-run error to its caller
     /// instead of recording it.
     ///
@@ -14937,14 +15142,21 @@ impl PipelineService {
         };
         let result = match lock.client_mut() {
             Some(client) => {
-                self.process_payout_on(client, tenant_id, run_id, true, true)
-                    .await
-                    .map(|attempt| match attempt {
-                        PayoutAttempt::NoRun => None,
-                        // A held run is returned as a run with nothing to pay
-                        // now is: untouched.
-                        PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
-                    })
+                self.process_payout_on(
+                    client,
+                    tenant_id,
+                    run_id,
+                    true,
+                    true,
+                    &mut PipelinePayoutTally::default(),
+                )
+                .await
+                .map(|attempt| match attempt {
+                    PayoutAttempt::NoRun => None,
+                    // A held run is returned as a run with nothing to pay
+                    // now is: untouched.
+                    PayoutAttempt::Done(run) | PayoutAttempt::Held(run) => Some(run),
+                })
             }
             None => Err(anyhow::anyhow!(PIPELINE_PAYOUT_LOCK_HELD_LABEL)),
         };
@@ -14978,11 +15190,12 @@ impl PipelineService {
         tenant_id: &str,
         run_ids: &[Uuid],
         may_submit: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<usize> {
         let mut processed = 0;
         for &run_id in run_ids {
             match self
-                .process_payout_on(client, tenant_id, run_id, may_submit, false)
+                .process_payout_on(client, tenant_id, run_id, may_submit, false, tally)
                 .await
             {
                 Ok(PayoutAttempt::Done(_)) => processed += 1,
@@ -15020,6 +15233,7 @@ impl PipelineService {
         run_id: Uuid,
         may_submit: bool,
         retry_failed: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<PayoutAttempt> {
         let tx = PgPipelineStore::tenant_transaction(client, tenant_id).await?;
         let row = tx
@@ -15039,7 +15253,7 @@ impl PipelineService {
         // withdrawal does not stop one. `dispatch_near_settlements` pays only
         // complete, payout-eligible legs.
         let held = self
-            .dispatch_near_settlements(client, &run, may_submit, retry_failed)
+            .dispatch_near_settlements(client, &run, may_submit, retry_failed, tally)
             .await?;
         Ok(if held {
             PayoutAttempt::Held(run)
@@ -15086,12 +15300,18 @@ impl PipelineService {
     /// - A failed submit marks the line and the payout `failed` under
     ///   `near_submit_failed`; the pass does not list it again.
     /// - `retry_failed` is true only from a direct `process_payout`
-    ///   (Ruling F-I3). Without it, a `failed` payout, or a `failed` line of
+    ///   (Ruling F-I3). It takes up each `failed` line again, apart from a
+    ///   line that failed on chain (`near_transaction_failed`), which no
+    ///   pass submits again. Without it, a `failed` payout, or a `failed` line of
     ///   a payout still `pending`, is never submitted again: another replica
     ///   can fail a payout after this pass listed it as `pending`, and the
     ///   re-read here sees that.
     /// - Confirmation evidence is hash-only (else `near_confirmation_invalid`);
     ///   the evidence and the `confirmed` status commit together.
+    /// - A `submitted` line whose transaction the adapter reports as failed
+    ///   on chain becomes `failed` under `near_transaction_failed`, in the
+    ///   mode that submitted it, and keeps its transaction hash. The pass
+    ///   does not submit it again.
     /// - The one policy guard (GRD-004) sits at the dispatch, where a line
     ///   would be sent to the adapter -- a first submit, or a new submit of a
     ///   `failed` line under `retry_failed` -- and before anything that
@@ -15111,6 +15331,7 @@ impl PipelineService {
         run: &PipelineRunRecord,
         may_submit: bool,
         retry_failed: bool,
+        tally: &mut PipelinePayoutTally,
     ) -> anyhow::Result<bool> {
         let mut any_held = false;
         let Some((injected, config)) = self.payout.as_ref() else {
@@ -15172,53 +15393,60 @@ impl PipelineService {
                     batch_id,
                     &line.credit_account_hash,
                 );
-                let (status, submission_mode, call) = match near_outbox_line(client, run, outbox_id)
-                    .await?
-                {
-                    Some((status, stored_call)) => {
-                        // Multi-lens review C3 (owner decision): a line with
-                        // no key was submitted by code from before the key.
-                        // It reads as `http`, so `http` confirms it and the
-                        // dry-run adapter never puts a synthetic hash on it.
-                        let submission_mode = Some(
-                            stored_call
-                                .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or(PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label())
-                                .to_string(),
-                        );
-                        let call: crate::near_credit::NearCreditReceiptCall =
-                            serde_json::from_value(stored_call)
+                let (status, chain_failed, submission_mode, call) =
+                    match near_outbox_line(client, run, outbox_id).await? {
+                        Some((status, last_error_hash, stored_call)) => {
+                            let chain_failed = status == "failed"
+                                && last_error_hash.as_deref()
+                                    == Some(near_transaction_failed_hash().as_str());
+                            // Multi-lens review C3 (owner decision): a line with
+                            // no key was submitted by code from before the key.
+                            // It reads as `http`, so `http` confirms it and the
+                            // dry-run adapter never puts a synthetic hash on it.
+                            let submission_mode = Some(
+                                stored_call
+                                    .get(PIPELINE_NEAR_SUBMISSION_MODE_KEY)
+                                    .and_then(serde_json::Value::as_str)
+                                    .unwrap_or(PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label())
+                                    .to_string(),
+                            );
+                            let call: crate::near_credit::NearCreditReceiptCall =
+                                serde_json::from_value(stored_call).map_err(|_| {
+                                    anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL)
+                                })?;
+                            call.validate()
                                 .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
-                        call.validate()
-                            .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?;
-                        (Some(status), submission_mode, call)
-                    }
-                    None => (
-                        None,
-                        None,
-                        disabled_near_call(
-                            near_contract_id,
-                            batch_id,
-                            &line.credit_account_hash,
-                            &batch_source_list_hash,
-                            line.settled_credit_delta_micros,
-                        )
-                        .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?,
-                    ),
-                };
-                work.push((line, call, outbox_id, status, submission_mode));
+                            (Some(status), chain_failed, submission_mode, call)
+                        }
+                        None => (
+                            None,
+                            false,
+                            None,
+                            disabled_near_call(
+                                near_contract_id,
+                                batch_id,
+                                &line.credit_account_hash,
+                                &batch_source_list_hash,
+                                line.settled_credit_delta_micros,
+                            )
+                            .map_err(|_| anyhow::anyhow!(PIPELINE_NEAR_CALL_INVALID_LABEL))?,
+                        ),
+                    };
+                work.push((line, call, outbox_id, status, chain_failed, submission_mode));
             }
 
             let mut contract_changed = false;
             let mut held_payout = None;
             let mut dispatch_held = false;
             let mode = config.controls.settlement_mode.as_label();
-            for (line, call, outbox_id, status, submission_mode) in &work {
+            for (line, call, outbox_id, status, chain_failed, submission_mode) in &work {
                 let outbox_id = *outbox_id;
                 let mut submission_mode = submission_mode.clone();
                 match status.as_deref() {
                     Some("confirmed") | Some("disabled") => continue,
+                    // A line that failed on chain is final: not even a direct
+                    // `process_payout` submits it again.
+                    Some("failed") if *chain_failed => continue,
                     Some("failed") if !retry_failed => continue,
                     Some("submitted") => {}
                     _ => {
@@ -15272,6 +15500,7 @@ impl PipelineService {
                                     mode,
                                 )
                                 .await?;
+                                tally.submitted += 1;
                                 submission_mode = Some(mode.to_string());
                                 self.inject_crash(PipelineCrashPoint::AfterNearSubmit)?;
                             }
@@ -15283,6 +15512,7 @@ impl PipelineService {
                                     &sha256_prefixed(PIPELINE_NEAR_SUBMIT_FAILED_LABEL.as_bytes()),
                                 )
                                 .await?;
+                                tally.submit_failed += 1;
                                 continue;
                             }
                         }
@@ -15296,8 +15526,40 @@ impl PipelineService {
                 if submission_mode.as_deref() != Some(mode) {
                     continue;
                 }
-                let Some(evidence) = adapter.confirmation(&call.idempotency_key).await else {
-                    continue;
+                let evidence = match adapter.confirmation(&call.idempotency_key).await {
+                    NearPayoutConfirmation::Pending => continue,
+                    NearPayoutConfirmation::Confirmed(evidence) => evidence,
+                    NearPayoutConfirmation::Failed => {
+                        // The transaction failed on chain. The line becomes
+                        // `failed` only in the mode that submitted it, and
+                        // keeps its transaction hash; no pass submits it
+                        // again.
+                        let tx =
+                            PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
+                        let failed_rows = tx
+                            .execute(
+                                "UPDATE trace_near_credit_outbox
+                                    SET status = 'failed', confirmed_at = NULL,
+                                        last_error_hash = $3
+                                  WHERE tenant_id = $1 AND near_outbox_id = $2
+                                    AND status = 'submitted'
+                                    AND COALESCE(
+                                            near_call_json ->> 'pipeline_submission_mode',
+                                            $5::TEXT
+                                        ) = $4",
+                                &[
+                                    &run.tenant_id,
+                                    &outbox_id,
+                                    &near_transaction_failed_hash(),
+                                    &mode,
+                                    &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
+                                ],
+                            )
+                            .await?;
+                        tx.commit().await?;
+                        tally.chain_failed += failed_rows;
+                        continue;
+                    }
                 };
                 if !(evidence.transaction_hash_hash.starts_with("sha256:")
                     && evidence.receipt_hash.starts_with("sha256:"))
@@ -15305,8 +15567,9 @@ impl PipelineService {
                     anyhow::bail!(PIPELINE_NEAR_CONFIRMATION_INVALID_LABEL);
                 }
                 let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
-                tx.execute(
-                    "UPDATE trace_near_credit_outbox
+                let confirmed_rows = tx
+                    .execute(
+                        "UPDATE trace_near_credit_outbox
                         SET near_call_json = jsonb_set(
                                 near_call_json,
                                 '{confirmation_evidence}',
@@ -15325,17 +15588,18 @@ impl PipelineService {
                         AND COALESCE(
                                 near_call_json ->> 'pipeline_submission_mode', $6::TEXT
                             ) = $5",
-                    &[
-                        &run.tenant_id,
-                        &outbox_id,
-                        &evidence.transaction_hash_hash,
-                        &evidence.receipt_hash,
-                        &mode,
-                        &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
-                    ],
-                )
-                .await?;
+                        &[
+                            &run.tenant_id,
+                            &outbox_id,
+                            &evidence.transaction_hash_hash,
+                            &evidence.receipt_hash,
+                            &mode,
+                            &PIPELINE_NEAR_SUBMISSION_MODE_DEFAULT.as_label(),
+                        ],
+                    )
+                    .await?;
                 tx.commit().await?;
+                tally.confirmed += confirmed_rows;
                 self.inject_crash(PipelineCrashPoint::AfterNearConfirm)?;
             }
             if dispatch_held {
@@ -15372,6 +15636,20 @@ impl PipelineService {
         }
         Ok(any_held)
     }
+}
+
+/// The outbox lines a payout pass changed, by what changed them. A statement
+/// that changed no row counts nothing: two replicas can poll one line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelinePayoutTally {
+    /// Lines a submit moved to `submitted`.
+    pub submitted: u64,
+    /// Lines a refused submit moved to `failed`.
+    pub submit_failed: u64,
+    /// Lines the confirmation moved to `confirmed`.
+    pub confirmed: u64,
+    /// Lines the chain reported as failed, moved to `failed`.
+    pub chain_failed: u64,
 }
 
 /// What one run's payout attempt came to (`process_payout_on`).
@@ -15471,22 +15749,35 @@ async fn load_payout_batch(
     Ok((row.get("source_list_hash"), lines))
 }
 
-/// The status and stored call of one outbox line, or `None` when it has no
-/// row yet.
+/// The hash an outbox line stores in `last_error_hash` when its transaction
+/// failed on chain (`PIPELINE_NEAR_TRANSACTION_FAILED_LABEL`).
+fn near_transaction_failed_hash() -> String {
+    sha256_prefixed(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes())
+}
+
+/// The status, `last_error_hash` and stored call of one outbox line, or
+/// `None` when it has no row yet.
 async fn near_outbox_line(
     client: &mut deadpool_postgres::Client,
     run: &PipelineRunRecord,
     outbox_id: Uuid,
-) -> anyhow::Result<Option<(String, serde_json::Value)>> {
+) -> anyhow::Result<Option<(String, Option<String>, serde_json::Value)>> {
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let line = tx
         .query_opt(
-            "SELECT status, near_call_json FROM trace_near_credit_outbox
+            "SELECT status, last_error_hash, near_call_json
+               FROM trace_near_credit_outbox
               WHERE tenant_id = $1 AND near_outbox_id = $2",
             &[&run.tenant_id, &outbox_id],
         )
         .await?
-        .map(|row| (row.get("status"), row.get("near_call_json")));
+        .map(|row| {
+            (
+                row.get("status"),
+                row.get("last_error_hash"),
+                row.get("near_call_json"),
+            )
+        });
     tx.commit().await?;
     Ok(line)
 }
@@ -15616,7 +15907,8 @@ async fn mark_near_outbox_line_failed(
 
 /// Records a leg's payout state from its batch's outbox lines: every line
 /// `confirmed` is `confirmed`, any `failed` line is `failed` under
-/// `near_submit_failed`, every line `submitted` or `confirmed` is
+/// `near_submit_failed` (`near_transaction_failed` when each `failed` line's
+/// stored hash is that label's), every line `submitted` or `confirmed` is
 /// `submitted`, and otherwise (no line yet, or one still `pending`)
 /// `pending`.
 async fn record_payout_state_on(
@@ -15627,7 +15919,7 @@ async fn record_payout_state_on(
     let tx = PgPipelineStore::tenant_transaction(client, &run.tenant_id).await?;
     let statuses = tx
         .query(
-            "SELECT status
+            "SELECT status, last_error_hash
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1 AND settlement_batch_id = $2
                 AND instrument_id = $3",
@@ -15639,21 +15931,38 @@ async fn record_payout_state_on(
         )
         .await?
         .iter()
-        .map(|row| row.get::<_, String>("status"))
+        .map(|row| {
+            (
+                row.get::<_, String>("status"),
+                row.get::<_, Option<String>>("last_error_hash"),
+            )
+        })
         .collect::<Vec<_>>();
     tx.commit().await?;
+    let transaction_failed_hash = near_transaction_failed_hash();
     let (payout, label) =
-        if !statuses.is_empty() && statuses.iter().all(|status| status == "confirmed") {
+        if !statuses.is_empty() && statuses.iter().all(|(status, _)| status == "confirmed") {
             (TraceCreditSettlementNearStatus::Confirmed, None)
-        } else if statuses.iter().any(|status| status == "failed") {
+        } else if statuses.iter().any(|(status, _)| status == "failed") {
+            // A pipeline batch has one line now, so a leg cannot hold both
+            // failure hashes. If it ever does, the leg reads `near_submit_failed`:
+            // the runbook has the operator check that line against NEAR by hand.
+            let transaction_failed = statuses
+                .iter()
+                .filter(|(status, _)| status == "failed")
+                .all(|(_, hash)| hash.as_deref() == Some(transaction_failed_hash.as_str()));
             (
                 TraceCreditSettlementNearStatus::Failed,
-                Some(PIPELINE_NEAR_SUBMIT_FAILED_LABEL),
+                Some(if transaction_failed {
+                    PIPELINE_NEAR_TRANSACTION_FAILED_LABEL
+                } else {
+                    PIPELINE_NEAR_SUBMIT_FAILED_LABEL
+                }),
             )
         } else if !statuses.is_empty()
             && statuses
                 .iter()
-                .all(|status| status == "submitted" || status == "confirmed")
+                .all(|(status, _)| status == "submitted" || status == "confirmed")
         {
             (TraceCreditSettlementNearStatus::Submitted, None)
         } else {
