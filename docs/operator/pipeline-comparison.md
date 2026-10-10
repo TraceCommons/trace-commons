@@ -644,8 +644,8 @@ The full run is long (see [Time and memory](#time-and-memory)):
 - Change no file of the checkout during the run, and commit your work
   first. The command hashes the tree at its start and at its end, and a run
   that passed fails with `code_revision_changed` if the hashes differ. The
-  hash leaves out `.local/`, `target/`, and each file that `.gitignore`
-  ignores.
+  hash leaves out `.local/`, `.vscode/`, `target/`, and each file that
+  `.gitignore` ignores.
 - The command prints nothing until its end. For the progress, count the
   lines of `compare_run-timing.jsonl` in the newest run directory: one line
   for the calibration, then one line for each trace.
@@ -653,8 +653,19 @@ The full run is long (see [Time and memory](#time-and-memory)):
   removes its databases and its container. A hang-up or a `kill` runs no
   cleanup, so use a terminal multiplexer. Remove a container that stayed
   with `docker rm -f tc-pipeline-<run id>`. With `--postgres-admin-url`
-  there is no container: drop the database `pipeline_tooling_lock` on that
-  server, or the next command fails with `pipeline_tooling_server_busy`.
+  there is no container, and two kinds of database stay on that server.
+  First, drop the database `pipeline_tooling_lock`, or the next command
+  fails with `pipeline_tooling_server_busy`. Second, drop the databases of
+  the scenarios of the run. A scenario has the databases
+  `admission_test_<run8>_<NN>` and `pipeline_test_<run8>_<NN>`. A scenario
+  can also have `admission_test_<run8>_<NN>_pilot` and
+  `admission_test_<run8>_<NN>_restored`, and the cleanup drops these too if
+  they exist. `<run8>` is the run id without its first letter `q`. The run id
+  is the name of the newest directory under `.local/pipeline/runs/`.
+  `<NN>` is the number of the scenario with two digits: a `compare --corpus`
+  run has `01`, and a `compare --self-test` run has `01` to `04`. To list the
+  databases that stayed, run `psql postgres://trace@127.0.0.1:<port>/postgres -qtA -c "SELECT datname FROM pg_database WHERE datname LIKE 'admission\_test\_%' OR datname LIKE 'pipeline\_test\_%'"`.
+  To remove one, run `DROP DATABASE "<name>" WITH (FORCE);` on that server.
 - The optimized build had a peak memory of about 7.7 GB on the 12-core
   server of the measurements.
 
