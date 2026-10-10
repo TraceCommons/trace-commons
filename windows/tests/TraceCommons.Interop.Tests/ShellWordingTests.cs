@@ -102,7 +102,9 @@ public class ShellWordingTests
             // (tc_quit_prompt_json).
             { "TraceCommons.App/MainWindow.xaml.cs", 1 },
             { "TraceCommons.App/StartupRegistration.cs", 4 },
-            { "TraceCommons.App/TrayIcon.cs", 3 },
+            // Lowered from 3 (button rule, 2026-10-08): "For 1 hour" became
+            // "1 hour", a length rather than a sentence.
+            { "TraceCommons.App/TrayIcon.cs", 2 },
 
             // XAML views. Literal Text=, Header=, PlaceholderText= and
             // ToolTipService.ToolTip= content -- the accessibility labels
@@ -110,7 +112,9 @@ public class ShellWordingTests
             { "TraceCommons.App/Controls/HistoryView.xaml", 8 },
             { "TraceCommons.App/Controls/PreviewSheet.xaml", 20 },
             { "TraceCommons.App/Controls/SettingsView.xaml", 15 },
-            { "TraceCommons.App/MainWindow.xaml", 18 },
+            // Lowered from 18 (button rule, 2026-10-08): the pause flyout's
+            // "For 1 hour" became "1 hour".
+            { "TraceCommons.App/MainWindow.xaml", 17 },
             { "TraceCommons.App/OnboardingWindow.xaml", 16 },
             { "TraceCommons.App/SessionRootsWindow.xaml", 3 },
         };

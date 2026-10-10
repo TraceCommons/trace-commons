@@ -55,9 +55,12 @@ final class OnboardingNavigationTests: XCTestCase {
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
         XCTAssertEqual(state.account, .enrolled)
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state), "no second invite over the enrolment")
-        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
-        XCTAssertNotEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
+        // An enrollment with no invite or account to show reads "Skip"
+        // (owner ruling, 2026-10-08), with no watch-only note, and goes on
+        // as that enrollment.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
         XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
+        XCTAssertTrue(JoinScreenLayout.canForward(state))
         XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state))
 
         state = JoinScreenLayout.forward(state)

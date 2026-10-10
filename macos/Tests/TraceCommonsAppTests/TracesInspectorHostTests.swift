@@ -58,10 +58,9 @@ final class TracesInspectorHostTests: XCTestCase {
     func test_healthBannersStayVisibleWithASessionSelected() throws {
         XCTAssertFalse(MonitorWindowView.promptsInInspector(.traces), "Traces draws them above the tree")
         XCTAssertTrue(MonitorWindowView.promptsInInspector(.home))
-        XCTAssertTrue(MonitorWindowView.promptsInInspector(.inference))
-        let (_, arms) = try Self.inspectorArms()
-        let host = try XCTUnwrap(arms.first { $0.hasPrefix(".home, .traces:") })
-        let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(tab) {"))
+        XCTAssertFalse(MonitorWindowView.promptsInInspector(.inference), "Inference draws them atop its page")
+        let host = try Self.inspectorColumn()
+        let guarded = try XCTUnwrap(host.range(of: "if Self.promptsInInspector(shownTab) {"))
         let header = try XCTUnwrap(host.range(of: "InspectorPromptsHeader(traces: traces)"))
         let history = try XCTUnwrap(host.range(of: "HistoryInspectorPane(row: row)"))
         let selection = try XCTUnwrap(host.range(of: "TracesInspectorHost(traces: traces, home: home, selection: selection)"))
@@ -89,14 +88,17 @@ final class TracesInspectorHostTests: XCTestCase {
     /// (Ron's shell mounts `WaitingPrompts` there), Home and History above
     /// the host. So any tab that offers Contribute also offers its Undo,
     /// and the Private AI offer is on Inference.
-    func test_everyInspectorArmDrawsThePrompts() throws {
-        let (_, arms) = try Self.inspectorArms()
-        XCTAssertEqual(arms.count, 2)
-        let inference = try XCTUnwrap(arms.first { $0.hasPrefix(".inference:") })
+    func test_everyPageWithoutTheTreeDrawsThePrompts() throws {
+        let host = try Self.inspectorColumn()
+        XCTAssertTrue(host.contains("InspectorPromptsHeader(traces: traces)"), "History skips the prompts")
+        // Home's page and Inference's page, where the inspector stays
+        // closed, draw them at their top.
+        let inference = try Self.text("Views/Monitor/InferenceViews.swift")
         XCTAssertEqual(inference.components(separatedBy: "InspectorPrompts(store: traces)").count - 1, 1,
                        "Inference skips the prompts")
-        let host = try XCTUnwrap(arms.first { $0.hasPrefix(".home, .traces:") })
-        XCTAssertTrue(host.contains("InspectorPromptsHeader(traces: traces)"), "Home and History skip the prompts")
+        let home = try Self.text("Views/Monitor/HomeViews.swift")
+        XCTAssertEqual(home.components(separatedBy: "InspectorPromptsHeader(traces: traces)").count - 1, 1,
+                       "Home skips the prompts")
     }
 
     /// V5 and V6 of the #1146 delta: the undos, the offers and the
@@ -138,10 +140,10 @@ final class TracesInspectorHostTests: XCTestCase {
                        "the prompts are drawn above the tree's scroll again")
         XCTAssertTrue(body.contains("maxQueueEntries: model.daemonSettings?.maxQueueEntries"),
                       "the queue-full banner names the configured limit")
-        // The inspector draws them only where the tree is not shown: once
-        // above Inference's own inspector, once under the Traces guard.
+        // The inspector draws them only where the tree is not shown: once,
+        // under the guard that limits them to Home (History).
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 1)
+        XCTAssertEqual(window.components(separatedBy: "InspectorPrompts(").count - 1, 0)
         XCTAssertEqual(window.components(separatedBy: "InspectorPromptsHeader(").count - 1, 1)
     }
 
@@ -218,50 +220,47 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertFalse(host.contains("showsInspector"), "the host never touches the pane")
     }
 
-    /// The window's inspector pane, from `} inspector: {` to the window
-    /// modifiers, and its arms split at each `case`.
-    static func inspectorArms() throws -> (pane: String, arms: [String]) {
+    /// The window's inspector column (`inspectorContent`, which the
+    /// inspector pane scrolls).
+    static func inspectorColumn() throws -> String {
         let window = try text("Views/MonitorWindowView.swift")
-        let inspector = try XCTUnwrap(window.range(of: "} inspector: {"))
-        let end = try XCTUnwrap(window.range(of: ".glassWindow()", range: inspector.upperBound..<window.endIndex))
-        let pane = String(window[inspector.upperBound..<end.lowerBound])
-        // The switch is on the shown tab inside the onboarding gate (R15).
-        let switchStart = try XCTUnwrap(pane.range(of: "switch Self.shownTab(tab, requiresOnboarding: model.requiresOnboarding) {"))
-        let arms = pane[switchStart.upperBound...].components(separatedBy: "\n                    case ").dropFirst()
-        return (pane, Array(arms))
+        let inspector = try XCTUnwrap(window.range(of: "private var inspectorContent: some View {"))
+        let end = try XCTUnwrap(window.range(
+            of: "/// Whether the inspector draws the prompts", range: inspector.upperBound..<window.endIndex))
+        return String(window[inspector.upperBound..<end.lowerBound])
     }
 
-    /// Inference keeps `PrivateAIInspectorView`, under the prompts, as
-    /// Ron's shell mounts `WaitingPrompts` above `InferenceInspector`; Home,
-    /// Traces and History get the host.
-    func test_inferenceKeepsItsOwnInspector() throws {
-        let (pane, arms) = try Self.inspectorArms()
-        let inference = try XCTUnwrap(arms.first { $0.hasPrefix(".inference:") })
-        let prompts = try XCTUnwrap(inference.range(of: "InspectorPrompts(store: traces)"))
-        let own = try XCTUnwrap(inference.range(of: "PrivateAIInspectorView(store: inference"))
-        XCTAssertLessThan(prompts.lowerBound, own.lowerBound, "the prompts sit above Inference's own inspector")
-        XCTAssertFalse(inference.contains("TracesHealth.banners("), "the health banners are the Traces inspector's")
-        XCTAssertFalse(inference.contains("TracesInspectorHost("))
+    /// The inspector stays closed on Inference (owner, 2026-10-09): its
+    /// Private AI summary heads the tab's main pane, and the inspector
+    /// column draws nothing of Inference's.
+    func test_inferenceHasNoInspector() throws {
+        XCTAssertFalse(MonitorWindowView.inspectorAvailable(.inference, homePage: .overview))
+        let pane = try Self.inspectorColumn()
+        XCTAssertTrue(pane.contains("if !model.onboardingKnown || !inspectorAvailable {"))
+        XCTAssertFalse(pane.contains("PrivateAIInspectorView("), "the inspector draws Inference's summary again")
         XCTAssertFalse(pane.contains("SessionReviewCard("), "the session card is the host's to draw")
         XCTAssertFalse(pane.contains("HomeSummaryInspector("), "Home's summary is the host's to draw")
-        XCTAssertEqual(pane.components(separatedBy: "PrivateAIInspectorView(").count - 1, 1)
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertFalse(window.contains("PrivateAIInspectorView("))
+        let views = try Self.text("Views/Monitor/InferenceViews.swift")
+        XCTAssertEqual(views.components(separatedBy: "PrivateAIInspectorView(\n").count - 1, 1)
     }
 
-    /// Every arm but Inference draws the host; an opened History row shows
-    /// in `HistoryInspectorPane` only on History, else the host.
-    func test_everyInspectorArmButInferenceDrawsTheHost() throws {
-        let (pane, arms) = try Self.inspectorArms()
-        XCTAssertEqual(arms.count, 2, "one arm for Inference, one host for the rest")
-        for arm in arms where !arm.hasPrefix(".inference:") {
-            XCTAssertTrue(arm.contains("TracesInspectorHost("), "an arm skips the host: \(arm)")
-        }
+    /// The column draws the host; an opened History row shows in
+    /// `HistoryInspectorPane` only on History, else the host.
+    func test_theInspectorDrawsTheHost() throws {
+        let pane = try Self.inspectorColumn()
+        XCTAssertTrue(pane.contains("TracesInspectorHost("), "the column skips the host")
         XCTAssertFalse(pane.contains("HistoryDetailInspector("), "History's detail is drawn in History's left pane")
         let flat = pane.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         // History included: the inspector keeps the Traces selection's card
         // (Task 8 of the #1146 port).
         XCTAssertTrue(flat.contains("TracesInspectorHost(traces: traces, home: home, selection: selection)"))
-        // Ron's inspector inset: 16 across and 18 down (L5).
-        XCTAssertTrue(flat.contains("GlassPane(insets: GlassPaneInsets.inspector) {"))
+        // Ron's inspector inset: 16 across and 18 down (L5), on the column
+        // the pane scrolls.
+        let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("inspectorContent\n"))
+        XCTAssertTrue(window.contains(".padding(GlassPaneInsets.inspector)"))
     }
 
     /// A demand already there when the window opens opens the inspector,
@@ -326,10 +325,15 @@ final class TracesInspectorHostTests: XCTestCase {
         XCTAssertTrue(offered.contains("offer:private-ai"))
         XCTAssertTrue(InspectorDemand.opens(previous: before, current: offered))
 
-        // The window adds the offers only where the inspector draws them.
+        // The window adds the offers only where the inspector draws them
+        // and may open (not on Home's page, where they head the main pane).
         let window = try Self.text("Views/MonitorWindowView.swift")
         XCTAssertTrue(window.contains(
-            ".union(Self.promptsInInspector(shownTab) ? InspectorDemand.offerKeys(model: model) : [])"))
+            ".union(Self.promptsInInspector(shownTab) && inspectorAvailable ? InspectorDemand.offerKeys(model: model) : [])"))
+        XCTAssertTrue(MonitorWindowView.inspectorAvailable(.home, homePage: .history))
+        XCTAssertFalse(MonitorWindowView.inspectorAvailable(.home, homePage: .overview))
+        XCTAssertTrue(MonitorWindowView.inspectorAvailable(.traces, homePage: .overview))
+        XCTAssertFalse(MonitorWindowView.inspectorAvailable(.inference, homePage: .overview))
     }
 
     /// A folder's Submit all is a demand while it is in flight, and not

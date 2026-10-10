@@ -439,7 +439,7 @@ mod tests {
         assert_eq!(frames[0]["kind"], "idle_sessions");
         assert_eq!(
             frames[0]["body"],
-            "1 session from Codex has been idle for 3 days. Contribute it?"
+            "1 trace from Codex has been idle for 3 days or more. Review it to send or keep."
         );
         assert_eq!(frames[0]["actions"][0]["id"], nudge_render::ACTION_REVIEW);
         {
@@ -520,7 +520,7 @@ mod tests {
         let frames = reengage_frames(&mut rx);
         assert_eq!(
             frames[0]["body"],
-            "2 sessions accepted and 1 held for privacy review. 2.5 credit is now final."
+            "2 traces accepted and 1 held for privacy review. 2.5 credit is now final."
         );
         let two_hours = noon() + Duration::hours(2);
         assert_eq!(tick(&s, two_hours, &Utc, digest(false, 0)).standalone, None);

@@ -489,11 +489,11 @@ mod tests {
         let many = idle_card(&batch(3, &["Claude Code"], 3));
         assert_eq!(
             many.title,
-            "3 sessions from Claude Code have been idle for 3 days or more"
+            "3 traces from Claude Code have been idle for 3 days or more"
         );
         assert_eq!(
             many.panel_row,
-            "Some sessions have been idle for 3 days or more"
+            "Some traces have been idle for 3 days or more"
         );
         assert_eq!(
             many.actions,
@@ -505,9 +505,9 @@ mod tests {
         let one = idle_card(&batch(1, &["Codex"], 1));
         assert_eq!(
             one.title,
-            "1 session from Codex has been idle for 1 day or more"
+            "1 trace from Codex has been idle for 1 day or more"
         );
-        assert_eq!(one.panel_row, "A session has been idle for 1 day or more");
+        assert_eq!(one.panel_row, "A trace has been idle for 1 day or more");
         assert!(one.body.starts_with("It looks finished."), "{}", one.body);
         card_filled(&many);
         card_filled(&one);
@@ -577,10 +577,10 @@ mod tests {
     #[test]
     fn backlog_card_uses_the_plain_title_and_reads_singular() {
         let many = backlog_card(&batch(6, &[], 0));
-        assert_eq!(many.title, "6 unpurposed traces are waiting");
+        assert_eq!(many.title, "6 traces to review");
         assert_eq!(many.actions[0].label, "Review the 6 in Traces");
         let one = backlog_card(&batch(1, &[], 0));
-        assert_eq!(one.title, "1 unpurposed trace is waiting");
+        assert_eq!(one.title, "1 trace to review");
         assert_eq!(one.actions[0].label, "Review it in Traces");
         assert_eq!(one.panel_row, copy::NUDGE_PANEL_BACKLOG_ONE);
         card_filled(&many);
@@ -628,13 +628,13 @@ mod tests {
         let n1 = idle_notification(&batch(1, &["Codex"], 3));
         assert_eq!(
             n1.body,
-            "1 session from Codex has been idle for 3 days. Contribute it?"
+            "1 trace from Codex has been idle for 3 days or more. Review it to send or keep."
         );
         assert_eq!(n1.title, copy::NOTIFY_TITLE);
         let n2 = verdicts_notification(&verdicts(1, 2, Some(15)));
         assert_eq!(
             n2.body,
-            "1 session accepted and 2 held for privacy review. 1.5 credit is now final."
+            "1 trace accepted and 2 held for privacy review. 1.5 credit is now final."
         );
         assert_eq!(
             verdicts_notification(&verdicts(0, 0, Some(15))).body,
@@ -642,7 +642,7 @@ mod tests {
         );
         assert_eq!(
             digest_verdict_sentence(&verdicts(3, 0, None)),
-            "3 sessions accepted and 0 held for privacy review."
+            "3 traces accepted and 0 held for privacy review."
         );
         let mut b = batch(2, &["Codex", "Claude Code"], 2);
         b.mission_fit = Some(1);

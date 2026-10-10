@@ -400,7 +400,7 @@ struct ManagedLaunchSheet: View {
 
     var body: some View {
         GlassModal(
-            title: model.managedText("launch"), width: .narrow,
+            title: model.managedText("launch_title"), width: .narrow,
             actions: [
                 .cancel(model.managedText("cancel"), action: onClose),
                 GlassModalAction(

@@ -190,7 +190,6 @@ final class GlassParityRoundOneTests: XCTestCase {
         XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/a", home: "/Users/a"), "~")
         XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/Users/ab/x", home: "/Users/a"), "/Users/ab/x")
         XCTAssertEqual(ToolAnswerRowLayout.homeRelative("/tmp/x", home: "/Users/a"), "/tmp/x")
-        XCTAssertEqual(UsesScreenLayout.checkCaptionIndent, 15 + GlassTokens.Space.s4)
     }
 
     // MARK: #1273 review, macOS minors

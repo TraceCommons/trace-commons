@@ -13,6 +13,7 @@ struct ComparisonSpecificationsView: View {
             HStack {
                 Text(text("comparison_specification_title")).insightsTitle()
                 Spacer(); Button(text("comparison_specification_refresh")) { model.refresh() }
+                    .accessibilityLabel(text("comparison_specification_refresh_accessibility"))
                 if model.busy { GlassSpinner() }
             }
             Text(text("comparison_retrospective_notice")).foregroundStyle(GlassColor.textSecondary)
@@ -22,7 +23,10 @@ struct ComparisonSpecificationsView: View {
             if let specification = model.previewSpecification, let result = model.previewResult {
                 InsightsRule(); Text(text("comparison_preview_notice")).insightsHeading()
                 specificationView(specification); resultView(result)
+                // Save is short; what it cannot undo is said beside it.
+                Text(text("comparison_specification_immutable_notice")).insightsCaption()
                 Button(text("comparison_specification_save")) { model.save() }
+                    .accessibilityLabel(text("comparison_specification_save_accessibility"))
             }
             InsightsRule(); saved
         }.disabled(model.busy)

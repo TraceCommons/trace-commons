@@ -108,7 +108,7 @@ public sealed class HealthCopy : IEquatable<HealthCopy>
                 + "automatically.",
                 null),
             "claim-mint-failed" or "ingest-unreachable" => new HealthCopy(
-                "Can't reach Trace Commons right now.",
+                "Can't upload right now.",
                 "Your queue is safe; it'll retry on its own.",
                 null),
             "queue-full" => new HealthCopy(

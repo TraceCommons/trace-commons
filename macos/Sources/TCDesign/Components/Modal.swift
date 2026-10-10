@@ -139,6 +139,12 @@ public struct GlassModal<Content: View>: View {
     /// Whether anything may cancel the modal now: not while it is busy,
     /// and not while its own cancel action is disabled (work in flight that
     /// a cancel would leave unanswered or out of sight).
+    /// An action's box in the modal's action bar: bar-sized against the
+    /// small CTA, whatever its kind.
+    static func actionMetrics(_ action: GlassModalAction, isDefault: Bool) -> GlassButtonMetrics {
+        GlassButtonStyle.metrics(GlassModalAction.kind(action, isDefault: isDefault), size: .bar, small: true)
+    }
+
     static func cancellable(actions: [GlassModalAction], busy: Bool) -> Bool {
         !busy && !actions.contains { $0.role == .cancel && !$0.isEnabled }
     }
@@ -180,12 +186,15 @@ public struct GlassModal<Content: View>: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if !actions.isEmpty {
+                // The modal's action bar: its CTA is the small one, and every
+                // other button in the bar is that CTA's size (owner ruling,
+                // 2026-10-08), so Cancel stands as tall as Confirm.
                 HStack(spacing: GlassTokens.Space.s4) {
                     Spacer(minLength: 0)
                     ForEach(GlassModalAction.ordered(actions)) { action in
                         let isDefault = action.id == defaultAction?.id
                         Button(action.title, action: action.action)
-                            .buttonStyle(GlassButtonStyle(GlassModalAction.kind(action, isDefault: isDefault), small: true))
+                            .buttonStyle(GlassButtonStyle(GlassModalAction.kind(action, isDefault: isDefault), size: .bar, small: true))
                             .disabled(!action.isEnabled || (action.role == .cancel && !cancellable))
                             .keyboardShortcut(Self.shortcut(for: action, isDefault: isDefault, isTopmost: isTopmost))
                     }

@@ -20,7 +20,13 @@
 //!   passkey, so Ron's "Losing it means losing access" claimed more than is
 //!   true (Kristi's review of #1252).
 //! - Frame adds `undo`, which takes back a passkey or near.ai chosen on Join
-//!   and not yet acted on.
+//!   and not yet acted on, and `back`, the first-run footer's Back on every
+//!   step after Join (owner, 2026-10-08, reversing Ron's review of #1235,
+//!   item 9) and the passkey popups' Back alike.
+//! - Folders has no line for a tool missing from this Mac: its row asks
+//!   nothing and offers "Get {tool}" (owner, 2026-10-08).
+//! - Uses has no note asking for the first use to be ticked: the required
+//!   use is always included, its box ticked and locked (owner, 2026-10-08).
 //! - Join adds `invite_dead` for a real invite the daemon refused,
 //!   `pay_range_points` and `pay_range_points_one` to word the invite's
 //!   credit range in the one unit the daemon accepts, `passkey_chosen` and
@@ -59,8 +65,14 @@
 //! - Preview-only strings (the mock-data tag, the simulated system sheets
 //!   P-3, P-4 and P-6, the preview's automatic-sharing refusal) are absent.
 //!
+//! - Uses adds `more_about`, the accessible name of the info button that
+//!   holds a scope's description or a Sharing answer's detail, and the
+//!   Private AI card adds `offer_lead`, `offer_more` and `learn_more`: the
+//!   card shows the offer's first two sentences and discloses the rest in
+//!   place (owner, 2026-10-08).
+//!
 //! Placeholders are `{tool}`, `{host}`, `{pay_range}`, `{count}`, `{folder}`,
-//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, and the
+//! `{name}`, `{min}`, `{max}`, `{selected}`, `{total}`, `{tools}`, `{title}`, and the
 //! session date and duration's `{weekday}`, `{day}`, `{month}`, `{hours}` and
 //! `{minutes}`; the shell fills them and adds nothing else.
 
@@ -77,6 +89,7 @@ pub const PLACEHOLDERS: &[&str] = &[
     "selected",
     "total",
     "tools",
+    "title",
     "weekday",
     "day",
     "month",
@@ -94,6 +107,7 @@ pub struct FrameCopy {
     pub step_tools: &'static str,
     pub step_rules: &'static str,
     pub step_uses: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub custom_setup_instead: &'static str,
     pub continue_button: &'static str,
     /// Why Continue is off while a found tool is unanswered.
@@ -106,6 +120,9 @@ pub struct FrameCopy {
     /// What an unanswered picker reads: Ron's design-system `Picker`
     /// placeholder. The picker's question stays its accessible label.
     pub choose: &'static str,
+    /// The footer's Back on every step after Join, and the passkey popups'
+    /// Back. Approved 2026-10-08.
+    pub back: &'static str,
 }
 
 /// Join: the invite, the account cards and skipping (`join-screen.tsx`).
@@ -113,8 +130,10 @@ pub struct FrameCopy {
 pub struct JoinCopy {
     pub title_light: &'static str,
     pub title_bold: &'static str,
+    /// One paragraph (owner ruling, 2026-10-08): the "later" sentence is
+    /// back in it. The button it names reads "Skip" whenever no account
+    /// was signed into on Join.
     pub body: &'static str,
-    pub body_emphasis: &'static str,
     pub invite_eyebrow: &'static str,
     pub invite_placeholder: &'static str,
     pub look_up: &'static str,
@@ -161,6 +180,7 @@ pub struct JoinCopy {
     pub signed_in: &'static str,
     pub no_sharing: &'static str,
     pub skip_note: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub skip: &'static str,
     /// After the passkey verification is cancelled (`ftux-page.tsx`).
     pub signed_out: &'static str,
@@ -193,7 +213,6 @@ pub struct FoldersCopy {
     /// Where "Get {tool}" sends a person for each tool the Mac is asked about:
     /// the tool's own install page, over https.
     pub install_urls: InstallUrls,
-    pub not_installed: &'static str,
     /// Discovery returned no row the shell could read.
     pub discovery_failed: &'static str,
     /// Runs discovery again after `discovery_failed`.
@@ -254,13 +273,14 @@ pub struct RulesCopy {
     pub selected_summary: &'static str,
     pub folder_selected: &'static str,
     pub include_every: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub show_all: &'static str,
     pub show_fewer: &'static str,
     pub never_count: &'static str,
     pub never_label: &'static str,
     /// The folders could not be read; Continue stays disabled, and the
-    /// card offers `retry`. No screen has a Back (Ron's review of #1235,
-    /// item 9), so it does not say to go back. Approved 2026-10-06.
+    /// card offers `retry` beside it, so the line points at no other way
+    /// on. Approved 2026-10-06.
     pub unavailable: &'static str,
     /// Reads the folders again after `unavailable`: Rules' own word, not
     /// Folders' `retry`. Approved 2026-10-06.
@@ -306,7 +326,10 @@ pub struct UsesCopy {
     pub sharing: &'static str,
     pub sharing_loading: &'static str,
     pub sharing_unavailable: &'static str,
-    pub base_use_note: &'static str,
+    /// `{title}`: a scope's or the Sharing card's title. The accessible
+    /// name of the info button holding its longer text. Approved
+    /// 2026-10-08: the owner's example wording.
+    pub more_about: &'static str,
     pub start: &'static str,
     /// Start finished on Ask me because the Automatic grant was refused.
     pub sharing_refused: &'static str,
@@ -326,14 +349,18 @@ pub struct UsesCopy {
 /// and P-6 are system sheets macOS draws, so they have no row.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PasskeyCopy {
-    pub back: &'static str,
     pub close: &'static str,
     pub cancel: &'static str,
     pub choose_title: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub use_existing: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub create_new: &'static str,
     pub choose_note: &'static str,
+    /// The Name popup's title.
     pub name_title: &'static str,
+    /// The Name popup's submit button. Approved 2026-10-08 (button rule).
+    pub name_submit: &'static str,
     pub name_field: &'static str,
     pub clear_name: &'static str,
     pub default_name: &'static str,
@@ -350,7 +377,9 @@ pub struct PasskeyCopy {
     pub verify_note: &'static str,
     pub welcome_title: &'static str,
     pub welcome_body: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub welcome_sign_in: &'static str,
+    /// Approved 2026-10-08 (button rule).
     pub other_options: &'static str,
     /// A passkey ceremony the daemon or the system refused; its label is
     /// never shown.
@@ -375,6 +404,17 @@ pub struct PrivateAiCopy {
     pub loading: &'static str,
     pub unavailable: &'static str,
     pub toggle_loading: &'static str,
+    /// The first two sentences of `private_inference_copy::OFFER_WHAT`,
+    /// the only words the Uses card shows before "Learn more" (owner,
+    /// 2026-10-08). `offer_lead`, a space and `offer_more` are `OFFER_WHAT`
+    /// exactly, so nothing of the disclosure is reworded or lost.
+    pub offer_lead: &'static str,
+    /// The rest of `OFFER_WHAT`, shown with the exposure and no-repoint
+    /// sentences once "Learn more" is pressed.
+    pub offer_more: &'static str,
+    /// Discloses the rest of the Private AI offer in place. Approved
+    /// 2026-10-08 (owner).
+    pub learn_more: &'static str,
 }
 
 /// Every first-run string, grouped by screen.
@@ -401,18 +441,18 @@ pub fn first_run_copy() -> FirstRunCopy {
             step_tools: "Tools",
             step_rules: "Rules",
             step_uses: "Uses",
-            custom_setup_instead: "Custom setup instead",
+            custom_setup_instead: "Customize",
             continue_button: "Continue",
             answer_every_tool: "Answer every tool above to continue",
             session_count: "{count} sessions",
             undo: "Undo",
             choose: "Choose…",
+            back: "Back",
         },
         join: JoinCopy {
             title_light: "Get started on ",
             title_bold: "your terms",
-            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\".",
-            body_emphasis: "You'll be able to setup or connect your account later to receive credits and manage access to the near.ai ecosystem.",
+            body: "Start with an invite link, sign-up or sign-in with an existing account, or just click \"Skip\". You'll be able to setup or connect your account later.",
             invite_eyebrow: "Invite link",
             invite_placeholder: "https://issuer.tracecommons.ai/onboard#…",
             look_up: "Look up",
@@ -437,7 +477,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             signed_in: "Signed in",
             no_sharing: "Connecting or creating an account doesn't authorize any data sharing.",
             skip_note: "Skipping sets up watching only. Contributing needs a near.ai account; sign in any time.",
-            skip: "Skip: watch only",
+            skip: "Skip",
             signed_out: "Passkey not verified, so you were signed out. Join again whenever you like.",
         },
         folders: FoldersCopy {
@@ -445,11 +485,14 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "app watch?",
             body: "We've found the following tools on your device. Traces work by reading coding-session transcripts from locations you specify. Select an option from each of the tools below to continue.",
             loading: "Looking for coding tools on this Mac…",
-            watch: "Watch this folder",
-            dont_use: "I don’t use it",
+            // Approved 2026-10-08 (button rule): the picker's answers.
+            watch: "Watch",
+            dont_use: "Not used",
             watch_question: "{tool}: watch this folder?",
             choose_folder: "Choose a different folder for {tool}",
-            get_tool: "Get {tool}",
+            // Approved 2026-10-08 (button rule); the row names the tool, and
+            // `download_tool` is the button's accessible name.
+            get_tool: "Download",
             download_tool: "Download {tool}",
             install_urls: InstallUrls {
                 claude_code: "https://claude.com/product/claude-code",
@@ -458,7 +501,6 @@ pub fn first_run_copy() -> FirstRunCopy {
                 cline: "https://cline.bot/",
                 opencode: "https://opencode.ai/",
             },
-            not_installed: "Install it, then this row asks again.",
             discovery_failed: "Could not look for coding tools on this Mac.",
             retry: "Look again",
             enroll_refused: "Your invite was found, but joining with it did not go through. Press Continue to try again.",
@@ -476,7 +518,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",
             neither: "Neither",
-            one_folder_per_tool: "{tool} can watch only one folder. Answer “I don’t use it” on one of its rows.",
+            one_folder_per_tool: "{tool} can watch only one folder. Answer “Not used” on one of its rows.",
         },
         rules: RulesCopy {
             title_light: "Set your ",
@@ -489,7 +531,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             selected_summary: "{selected} of {total} selected",
             folder_selected: "{selected} of {total}",
             include_every: "Include every past session in {folder}",
-            show_all: "Show all {count}",
+            show_all: "Show all",
             show_fewer: "Show fewer",
             never_count: "{count} · rule is Never",
             never_label: "{folder}: rule is Never",
@@ -518,7 +560,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             sharing: "Sharing",
             sharing_loading: "Loading sharing copy…",
             sharing_unavailable: "Sharing copy unavailable. Starting is disabled.",
-            base_use_note: "Tick the first use to contribute. Without it nothing is shared.",
+            more_about: "More about {title}",
             start: "Start sharing",
             sharing_refused: "Setup finished, but Automatic wasn't turned on. Sharing is on Ask me.",
             scopes_failed: "How your traces may be used couldn't be saved. Setup hasn't finished; try Start sharing again.",
@@ -527,14 +569,14 @@ pub fn first_run_copy() -> FirstRunCopy {
             complete_failed: "Your choices were saved, but setup couldn't be marked done. Setup hasn't finished; try Start sharing again.",
         },
         passkey: PasskeyCopy {
-            back: "Back",
             close: "Close",
             cancel: "Cancel",
             choose_title: "Continue with passkey",
-            use_existing: "Use existing passkey",
-            create_new: "Create new passkey",
+            use_existing: "Use existing",
+            create_new: "Create new",
             choose_note: "A passkey is your sign-in for Trace Commons and near.ai. Nothing about your sessions is sent by signing in.",
             name_title: "Create new passkey",
+            name_submit: "Create",
             name_field: "Passkey name",
             clear_name: "Clear name",
             default_name: "My trace passkey",
@@ -547,8 +589,8 @@ pub fn first_run_copy() -> FirstRunCopy {
             verify_note: "Cancelling signs you out.",
             welcome_title: "Welcome back",
             welcome_body: "Sign in with your passkey.",
-            welcome_sign_in: "Sign in with passkey",
-            other_options: "Other sign-in options",
+            welcome_sign_in: "Sign in",
+            other_options: "Other options",
             refused: "The passkey step didn't go through. Try again, or close this and choose another way to join.",
             bound_elsewhere: "This passkey's account wasn't created with a passkey, and adding a Mac to it with a passkey isn't possible yet, so you were signed out here. Close this to choose another way to join, or to watch only.",
             near_ai_mismatch: "This Mac is signed in to a different near.ai account from the one this passkey's account uses, so this Mac wasn't added to it, and you were signed out here. Sign in to near.ai with the account you use on your other Mac and try again, or close this to choose another way to join.",
@@ -557,6 +599,9 @@ pub fn first_run_copy() -> FirstRunCopy {
             loading: "Loading disclosure…",
             unavailable: "Disclosure unavailable. Enabling is disabled.",
             toggle_loading: "Loading disclosure",
+            offer_lead: "Lets your tools send AI requests through this app, answered by NEAR AI once you sign in. No tool switches over until you connect it.",
+            offer_more: "Requests are logged on this computer.",
+            learn_more: "Learn more",
         },
     }
 }
@@ -682,8 +727,8 @@ mod tests {
         );
     }
 
-    /// No first-run screen has a Back, so nothing tells the person to go
-    /// back.
+    /// Back is a button in the footer, never an instruction: no line tells
+    /// the person to go back.
     #[test]
     fn no_line_says_to_go_back() {
         let json = serde_json::to_string(&first_run_copy()).unwrap();
@@ -721,8 +766,8 @@ mod tests {
         assert!(!join.unknown.chars().any(|c| c.is_ascii_digit()));
     }
 
-    /// The Rules screen has no Back link, so its unavailable line points at
-    /// no way back: the screen offers a retry beside it instead.
+    /// Rules' unavailable line points at no way back: the screen offers a
+    /// retry beside it.
     #[test]
     fn unreadable_rules_point_at_no_back_link() {
         let copy = first_run_copy();
@@ -732,6 +777,54 @@ mod tests {
         // Rules has its own retry word, not Folders' "Look again".
         assert_eq!(copy.rules.retry, "Try again");
         assert_ne!(copy.rules.retry, copy.folders.retry);
+    }
+
+    /// The required use is always included, so nothing asks for it to be
+    /// ticked (owner, 2026-10-08).
+    #[test]
+    fn nothing_asks_for_the_required_use_to_be_ticked() {
+        let json = serde_json::to_value(first_run_copy()).unwrap();
+        assert!(json["uses"].get("base_use_note").is_none());
+        assert!(!json.to_string().contains("Tick the first use"));
+    }
+
+    /// The Private AI card's lead and the rest it discloses are the offer's
+    /// own sentences, split once: together they are `OFFER_WHAT` exactly,
+    /// in the core's NEAR AI spelling (owner, 2026-10-08).
+    #[test]
+    fn the_private_ai_lead_and_rest_are_the_offer_split_once() {
+        let copy = first_run_copy().private_ai;
+        assert_eq!(
+            format!("{} {}", copy.offer_lead, copy.offer_more),
+            crate::private_inference_copy::OFFER_WHAT
+        );
+        assert!(
+            copy.offer_lead
+                .starts_with("Lets your tools send AI requests through this app")
+        );
+        assert!(!copy.offer_lead.contains("Near.AI"));
+        assert_eq!(copy.offer_lead.matches(". ").count(), 1, "two sentences");
+        assert_eq!(copy.learn_more, "Learn more");
+    }
+
+    /// The info button's name carries the row's title.
+    #[test]
+    fn the_info_buttons_name_carries_the_title() {
+        assert!(first_run_copy().uses.more_about.contains("{title}"));
+    }
+
+    /// Back is the frame's one word, read by the first-run footer and the
+    /// passkey popups alike (one string, one key). A tool missing from this
+    /// Mac has no line of its own (owner, 2026-10-08).
+    #[test]
+    fn back_is_the_frames_and_a_missing_tool_has_no_line() {
+        let copy = first_run_copy();
+        assert_eq!(copy.frame.back, "Back");
+        let json = serde_json::to_value(&copy).unwrap();
+        assert!(json["passkey"].get("back").is_none());
+        assert!(json["folders"].get("not_installed").is_none());
+        let text = json.to_string();
+        assert!(!text.contains("this row asks again"), "{text}");
     }
 
     /// Enroll runs only after the invite was looked up and accepted, so its
@@ -776,7 +869,7 @@ mod tests {
     fn a_tool_watched_twice_has_its_own_line() {
         let tools = first_run_copy().tools;
         assert!(tools.one_folder_per_tool.contains("{tool}"));
-        assert!(tools.one_folder_per_tool.contains("I don’t use it"));
+        assert!(tools.one_folder_per_tool.contains("“Not used”"));
     }
 
     /// Start's failures each have a sentence that is true when it is shown.
@@ -906,9 +999,10 @@ mod tests {
     /// with its reason.
     #[test]
     fn no_two_keys_carry_the_same_string() {
-        // P-1's button and P-2's title are two of Ron's strings that read
-        // the same today; one is an action, the other names a sheet.
-        const MAY_DIVERGE: &[&[&str]] = &[&[".passkey.create_new", ".passkey.name_title"]];
+        // Join's near.ai sign-in and Welcome back's passkey sign-in both
+        // read "Sign in" under the button rule (2026-10-08); they start
+        // different ceremonies and may diverge.
+        const MAY_DIVERGE: &[&[&str]] = &[&[".join.near_ai_sign_in", ".passkey.welcome_sign_in"]];
         fn leaves(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
             match value {
                 serde_json::Value::String(text) => out.push((text.clone(), path.to_owned())),

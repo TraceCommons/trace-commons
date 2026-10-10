@@ -11,11 +11,16 @@
 //! uses, or the protocol's built-in table. It never serves an empty table.
 //!
 //! `POST /v1/admin/credit-estimate-eval` returns one label-only row per
-//! labelled decision: the `lef1` features of the stored envelope, the credit
-//! quality, its calibration version, the withheld label, and a tenant hash.
-//! The features are derived inside the gate service, so this handler never
-//! holds plaintext. Rows carry no submission id, trace id, decision time or
-//! content, and are shuffled. With `fit=true` it also runs the E9 time split
+//! labelled decision: the `lef1` features of the stored envelope, the
+//! displayed credit (2 decimals), its calibration version, the withheld
+//! label, and a tenant tag. The features are derived inside the gate
+//! service, so this handler never holds plaintext. Rows carry no submission
+//! id, trace id, decision time or content, and are shuffled. They also carry
+//! nothing stored beside a submission id that would join them back to it:
+//! not the exact credit quality, and not a tenant hash, since an unsalted
+//! hash of a tenant id is recomputable by anyone holding the id. The tenant
+//! tag is assigned per run in a random order and only says which rows share
+//! a tenant. With `fit=true` it also runs the E9 time split
 //! and returns the metrics and a candidate table. It writes nothing.
 
 use std::path::Path;
@@ -23,7 +28,8 @@ use std::path::Path;
 use rand::seq::SliceRandom as _;
 use trace_commons_protocol::local_credit_estimate::LocalEstimateTable;
 use trace_commons_server::credit_estimate_fit::{
-    EstimateEvalRow, EstimateFitInput, EstimateFitReport, eval_label, fit_estimate_table,
+    EstimateEvalRow, EstimateFitInput, EstimateFitReport, displayed_credit, eval_label,
+    fit_estimate_table,
 };
 
 use super::*;
@@ -37,6 +43,12 @@ pub(super) const CREDIT_ESTIMATE_TABLE_PATH_ENV: &str = "TRACE_COMMONS_CREDIT_ES
 /// invalid activity-missions policy, so a bad file is caught at deploy
 /// rather than served.
 const TABLE_INVALID: &str = "credit_estimate_table_invalid";
+
+/// The most decisions one eval run enumerates, and the default when no
+/// `limit` is given. Each labelled submission is decrypted and derived
+/// within the one request and every row is held in memory, so a run is
+/// bounded rather than sized by the corpus. A larger `limit` is refused.
+pub(super) const CREDIT_ESTIMATE_EVAL_MAX_LIMIT: i64 = 10_000;
 
 pub(super) fn table_from_env() -> anyhow::Result<Arc<LocalEstimateTable>> {
     let path = std::env::var_os(CREDIT_ESTIMATE_TABLE_PATH_ENV).map(std::path::PathBuf::from);
@@ -78,7 +90,8 @@ pub(super) struct CreditEstimateEvalQuery {
     /// for it.
     #[serde(default)]
     pub(super) dry_run: bool,
-    /// Bounds the decisions enumerated, oldest first.
+    /// Bounds the decisions enumerated, newest first. Defaults to, and
+    /// may not exceed, [`CREDIT_ESTIMATE_EVAL_MAX_LIMIT`].
     #[serde(default)]
     pub(super) limit: Option<i64>,
     /// Also fit and evaluate a candidate table.
@@ -115,8 +128,8 @@ pub(super) struct CreditEstimateEvalResponse {
     pub(super) fit: Option<EstimateFitReport>,
 }
 
-/// One eval run. Enumerates decisions cross-tenant on the gate-driver pool
-/// (identifiers and decision times only), reads each tenant's labels through
+/// One eval run. Enumerates decisions cross-tenant on the gate-driver pool,
+/// newest first (identifiers and decision times only), reads each tenant's labels through
 /// the tenant-scoped pool (the calibration version and withheld reason are
 /// not granted to the gate-driver role), and derives features for each
 /// labelled submission inside the gate service from the envelope the corpus
@@ -129,15 +142,21 @@ pub(super) async fn run_credit_estimate_eval(
         .db_mirror
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("credit estimate eval requires a configured DB mirror"))?;
-    let limit = query.limit.unwrap_or(i64::MAX).max(0);
-    let decisions = db.list_dedup_rederive_rows(limit).await?;
+    let limit = query
+        .limit
+        .unwrap_or(CREDIT_ESTIMATE_EVAL_MAX_LIMIT)
+        .clamp(0, CREDIT_ESTIMATE_EVAL_MAX_LIMIT);
+    let decisions = db.list_recent_gate_decision_keys(limit).await?;
     let mut counts = CreditEstimateEvalCounts {
         decisions: decisions.len(),
         ..CreditEstimateEvalCounts::default()
     };
 
     // Latest decision time per (tenant, submission), matching the label
-    // read, which is latest-per-submission.
+    // read, which is latest-per-submission. The enumeration is newest
+    // first, so every decision newer than the cut is in it: a submission it
+    // reaches has its latest decision here, and the time split uses the
+    // decision the label came from.
     let mut latest: BTreeMap<(String, Uuid), chrono::DateTime<Utc>> = BTreeMap::new();
     for row in &decisions {
         let slot = latest
@@ -155,6 +174,18 @@ pub(super) async fn run_credit_estimate_eval(
             .or_default()
             .push(*submission_id);
     }
+
+    // Per-run tenant tags, handed out in a random order so a tag carries
+    // neither the tenant id nor its place in the enumeration.
+    let tenant_tags: BTreeMap<&str, String> = {
+        let mut tenants: Vec<&str> = by_tenant.keys().copied().collect();
+        tenants.shuffle(&mut rand::thread_rng());
+        tenants
+            .into_iter()
+            .enumerate()
+            .map(|(i, tenant_id)| (tenant_id, format!("t{i}")))
+            .collect()
+    };
 
     let mut inputs: Vec<EstimateFitInput> = Vec::new();
     for (tenant_id, submission_ids) in by_tenant {
@@ -187,12 +218,19 @@ pub(super) async fn run_credit_estimate_eval(
                     load_trace_ciphertext_and_wrapped_dek(state, tenant_id, submission_id).await?;
                 // Canonical tenant_storage_ref, as every gate path uses.
                 let tenant_ctx = GateTenantCtx::from_canonical(tenant_storage_ref(tenant_id));
-                state.gate_service.derive_estimate_features(
-                    &tenant_ctx,
-                    &ciphertext,
-                    &wrapped_dek,
-                    TraceArtifactKind::ContributionEnvelope,
-                )
+                // Decrypting and deriving is CPU work: off the async
+                // runtime, so one eval run does not stall request handling.
+                let gate_service = state.gate_service.clone();
+                tokio::task::spawn_blocking(move || {
+                    gate_service.derive_estimate_features(
+                        &tenant_ctx,
+                        &ciphertext,
+                        &wrapped_dek,
+                        TraceArtifactKind::ContributionEnvelope,
+                    )
+                })
+                .await
+                .map_err(|_| anyhow::anyhow!("credit estimate derive task failed"))?
             }
             .await;
             let features = match derived {
@@ -212,11 +250,11 @@ pub(super) async fn run_credit_estimate_eval(
             inputs.push(EstimateFitInput {
                 row: EstimateEvalRow {
                     features,
-                    credit_quality_micros: label_row.credit_quality_micros,
+                    displayed_credit: label_row.credit_quality_micros.map(displayed_credit),
                     credit_quality_calibration_version: label_row
                         .credit_quality_calibration_version,
                     withheld,
-                    tenant_hash: tenant_hash.clone(),
+                    tenant_tag: tenant_tags[tenant_id].clone(),
                 },
                 decided_at: latest[&(tenant_id.to_string(), submission_id)],
             });
@@ -226,7 +264,8 @@ pub(super) async fn run_credit_estimate_eval(
     let fit = query.fit.then(|| fit_estimate_table(&inputs));
     let mut rows: Vec<EstimateEvalRow> = inputs.into_iter().map(|input| input.row).collect();
     // Enumeration order is decision-time order; shuffling keeps a row from
-    // being matched back to a submission by its position.
+    // being matched back to a submission by its position. The row's values
+    // are unlinkable on their own: see the module docs.
     rows.shuffle(&mut rand::thread_rng());
     Ok(CreditEstimateEvalResponse {
         dry_run: query.dry_run,
@@ -240,7 +279,7 @@ pub(super) async fn run_credit_estimate_eval(
 ///
 /// Auth: the admin bearer credential (`require_admin`), as the other
 /// `/v1/admin/*` maintenance routes. Synchronous, because it returns rows;
-/// bound a first run with `limit`.
+/// `limit` defaults to and is capped at [`CREDIT_ESTIMATE_EVAL_MAX_LIMIT`].
 pub(super) async fn eval_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -252,6 +291,15 @@ pub(super) async fn eval_handler(
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "credit_estimate_eval_fit_needs_rows",
+        ));
+    }
+    if query
+        .limit
+        .is_some_and(|limit| !(0..=CREDIT_ESTIMATE_EVAL_MAX_LIMIT).contains(&limit))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "credit_estimate_eval_limit_out_of_range",
         ));
     }
     if state.db_mirror.is_none() {

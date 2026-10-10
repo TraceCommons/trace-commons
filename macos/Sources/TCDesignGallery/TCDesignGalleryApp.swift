@@ -8,6 +8,7 @@ import TCDesign
 struct TCDesignGalleryApp: App {
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
+        GlassAppearance.applyStored()
     }
 
     var body: some Scene {

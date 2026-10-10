@@ -1131,8 +1131,11 @@ folder label, an id or a title.
   decimal (half away from zero). It is present only beside the fields above
   and only when it rounds to at least 0.1: absent, never 0. Credit becoming
   final with nothing to say is not news at all: finals whose credit rounds
-  to zero add nothing to `count` and arm nothing on their own. It is never
-  logged.
+  to zero add nothing to `count` and arm nothing on their own, and `final`
+  is then 0, so `count` is always `accepted + held + final`. A submission
+  whose own final credit is zero is never news and is not kept to be counted
+  later, when another final's credit makes the sum worth reporting. It is
+  never logged.
 - `text` is present exactly when there is a lead: `{title, body, actions:
   [{id, label}], panel_row}`, the leading card's words and its menu-bar panel
   row, composed by the daemon from the same counts as the fields above (with
@@ -2973,7 +2976,10 @@ it. What a fetch changes:
 - A 404, a network failure, or no config leaves the table in force as it is,
   so a daemon works against a server that publishes none.
 - A fetched table not re-fetched for 7 days is no longer in force: rows and
-  `status` render with the built-in table until a fetch succeeds.
+  `status` render with the built-in table until a fetch succeeds. The tick
+  that finds it lapsed publishes `queue_changed` and `status_changed`, with
+  no fetch, and a later fetch of the same table publishes them again as it
+  comes back into force.
 
 **Entries queued before the features existed** carry no estimate until the
 daemon re-reads them: at most 4 waiting entries per full watcher pass, oldest

@@ -11,7 +11,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PACKAGE_DIR="$PWD"
-APP="$PACKAGE_DIR/.build/TraceCommons.app"
+# TC_DEMO_APP runs another copy of the bundle (a second demo beside the
+# first, for comparing themes); TC_DEMO_SKIP_BUILD=1 launches it as it is.
+# Rebuilding the bundle under a running demo kills that demo, so a second
+# one runs from a copy outside .build.
+APP="${TC_DEMO_APP:-$PACKAGE_DIR/.build/TraceCommons.app}"
 
 # Short path on purpose: the control socket is <dir>/daemon.sock and the
 # daemon refuses a socket path over 104 bytes.
@@ -104,7 +108,9 @@ echo "state dir: $STATE_DIR"
 #
 # make-app-bundle.sh runs `swift build`, which is incremental, so an unchanged
 # tree costs almost nothing here.
-"$PACKAGE_DIR/scripts/make-app-bundle.sh"
+if [ "${TC_DEMO_SKIP_BUILD:-}" != "1" ]; then
+  "$PACKAGE_DIR/scripts/make-app-bundle.sh"
+fi
 
 TRACE_COMMONS_CONTRIBUTOR_DIR="$STATE_DIR" \
 TRACE_COMMONS_SHOW_WINDOW="${TRACE_COMMONS_SHOW_WINDOW:-1}" \
@@ -115,6 +121,8 @@ TRACE_COMMONS_SHOW_WINDOW="${TRACE_COMMONS_SHOW_WINDOW:-1}" \
   --env TRACE_COMMONS_DEMO_PREVIEW="${TRACE_COMMONS_DEMO_PREVIEW:-}" \
   --env TRACE_COMMONS_QUIT_AFTER_SHOT="${TRACE_COMMONS_QUIT_AFTER_SHOT:-}" \
   --env TRACE_COMMONS_SELFTEST_OUT="${TRACE_COMMONS_SELFTEST_OUT:-}" \
-  --env TRACE_COMMONS_APPEARANCE="${TRACE_COMMONS_APPEARANCE:-}"
+  --env TRACE_COMMONS_APPEARANCE="${TRACE_COMMONS_APPEARANCE:-}" \
+  --env TC_GLASS_THEME="${TC_GLASS_THEME:-}" \
+  --env TC_GLASS_MATERIAL="${TC_GLASS_MATERIAL:-}"
 
 echo "launched. quit from the menu bar when done; then: rm -rf $STATE_DIR"

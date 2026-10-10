@@ -987,10 +987,7 @@ final class TracesFolderFirstTreeTests: XCTestCase {
 
         let labels = try XCTUnwrap(TracesStore.disclosureCopy).folderModeLabels
         XCTAssertEqual(TracesTreeView.folderSub(folder, words: words, modeLabels: labels), words.tree.ignoredFolder)
-        // The switch on is Ask me, a direct write; off is Never, which asks
-        // first when sessions are waiting.
-        XCTAssertEqual(TracesTreeView.watchChoice(true), .ask)
-        XCTAssertEqual(TracesTreeView.watchChoice(false), .ignore)
+        // Back to Ask me (the Folder inspector's picker) is a direct write.
         guard case .apply = TracesTreeView.modeChange(folder, .ask) else {
             return XCTFail("switching an ignored folder back to Ask me is a direct write")
         }
@@ -1005,10 +1002,11 @@ final class TracesFolderFirstTreeTests: XCTestCase {
         XCTAssertTrue(sub.hasSuffix(words.counts.sessionsWaitingOne), sub)
 
         let source = try TracesParityTests.text("Views/Monitor/TracesViews.swift")
-        for needle in ["off: folder.mode == .ignore", "watchLabel: words?.tree.watchFolder ?? \"\"",
-                       "request(folder, Self.watchChoice($0))", "menuLabel: ignorable ? words?.tree.ignoreFolder ?? \"\" : \"\""] {
+        for needle in ["off: folder.mode == .ignore", "menuLabel: ignorable ? words?.tree.ignoreFolder ?? \"\" : \"\""] {
             XCTAssertTrue(source.contains(needle), "TracesViews.swift lacks \(needle)")
         }
+        // No watch switch on a folder row (owner, 2026-10-08).
+        XCTAssertFalse(source.contains("watched:"), "a folder row draws a switch again")
     }
 
     /// A session row's menu offers Dismiss session, which asks first: the

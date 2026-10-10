@@ -18,7 +18,10 @@ final class HomeViewTests: XCTestCase {
     func test_homeLinksToTraces() throws {
         let home = try Self.flat("Views/Monitor/HomeViews.swift")
         for needle in [
-            "Button(action: openTraces) { HStack(spacing: GlassTokens.Space.s1) { Text(HomeFormat.openTracesWord)",
+            // The whole card opens Traces (owner, 2026-10-08), its words
+            // the hint.
+            "return Button(action: openTraces) { GlassCard(interactive: true) {",
+            ".accessibilityHint(HomeFormat.openTracesWord)",
             "static var openTracesWord: String { MonitorWords.table?.openTraces ?? \"\" }",
             "store: store, traces: traces, statusLabel: statusLabel, openTraces: openTraces, ",
             // Ron's Missions is the drafts; the catalogue and Insights sit
@@ -47,7 +50,7 @@ final class HomeViewTests: XCTestCase {
         XCTAssertEqual(body.components(separatedBy: ".alignmentGuide(.homeStatusText) { $0[.leading] }").count - 1,
                        texts.count, "a status line starts at the dot")
         XCTAssertTrue(home.contains(".foregroundStyle(GlassColor.textSecondary)\n"
-            + "                            .alignmentGuide(.homeStatusText) { $0[.leading] }"),
+            + "                                .alignmentGuide(.homeStatusText) { $0[.leading] }"),
                       "the waiting line starts under the dot")
         XCTAssertTrue(home.contains(".overlay(alignment: .bottom) {\n            GlassHairline(GlassColor.hairline)"),
                       "a history row lost its rule")
