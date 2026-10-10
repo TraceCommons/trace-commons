@@ -983,3 +983,48 @@ async fn the_mission_slot_does_not_carry_over_to_a_new_enrollment() {
     assert!(s.mission_catalogue.lock().unwrap().is_some());
     server.abort();
 }
+
+/// A catalogue that comes back after the enrollment it was asked for has
+/// gone -- `unenroll` ran, or the config moved to another server, while the
+/// request was in flight -- is dropped: the slot stays as `unenroll` or the
+/// move left it, checked on the very tick the response lands.
+#[tokio::test]
+async fn the_mission_slot_drops_a_catalogue_that_lands_after_the_enrollment_went() {
+    use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+    for unenroll in [true, false] {
+        let s = Arc::new(shared());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/v1/activity-missions",
+            get({
+                let s = s.clone();
+                let calls = calls.clone();
+                move || {
+                    let s = s.clone();
+                    let calls = calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        if unenroll {
+                            crate::daemon::unenroll::unenroll(&s).unwrap();
+                        } else {
+                            let mut cfg = s.store.load_config().unwrap().unwrap();
+                            cfg.ingest_url = "http://127.0.0.1:9/v1/traces".into();
+                            s.store.save_config(&cfg).unwrap();
+                        }
+                        Json(predicate_catalogue(&[claude_rust()]))
+                    }
+                }
+            }),
+        );
+        let (base, server) = mission_server(app).await;
+        configure_catalogue(&s, &base);
+        let mut schedule = MissionSlotSchedule::default();
+        refresh_mission_slot(&s, Utc::now(), &mut schedule).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "unenroll: {unenroll}");
+        assert!(
+            s.mission_catalogue.lock().unwrap().is_none(),
+            "unenroll: {unenroll}"
+        );
+        server.abort();
+    }
+}
