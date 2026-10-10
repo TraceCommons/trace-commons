@@ -95,6 +95,32 @@ impl Prepared {
     }
 }
 
+/// What [`prepare`] read from disk on this thread: the config (for the
+/// consent hold) and the mission join (the history cache, via
+/// `read_gates`). The arbiter runs on every poll tick, so a test holds it
+/// to reading only when something could be announced.
+#[cfg(test)]
+mod reads {
+    use std::cell::Cell;
+    thread_local! {
+        pub(super) static CONFIG: Cell<u32> = const { Cell::new(0) };
+        pub(super) static JOIN: Cell<u32> = const { Cell::new(0) };
+    }
+    pub(super) fn take() -> (u32, u32) {
+        (CONFIG.with(|c| c.replace(0)), JOIN.with(|c| c.replace(0)))
+    }
+}
+
+fn note_config_read() {
+    #[cfg(test)]
+    reads::CONFIG.with(|c| c.set(c.get() + 1));
+}
+
+fn note_join_read() {
+    #[cfg(test)]
+    reads::JOIN.with(|c| c.set(c.get() + 1));
+}
+
 fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // Each in its own short lock, none nested: the renderer count, then the
     // settings, then the state, then (inside the idle section) the policy
@@ -118,10 +144,17 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
             state.nudges.clone(),
         )
     };
-    let closed = shared.is_paused(now)
-        || !shared.logged_in()
-        || crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
-            .is_some();
+    // Only the kinds this tick could announce are gathered. With the master
+    // switch off or both kinds off nothing can be, so the tick reads
+    // nothing from disk: the arbiter runs on every poll tick.
+    let wants_idle = settings.master && settings.idle_sessions;
+    let wants_verdicts = settings.master && settings.verdicts_landed;
+    let closed =
+        !(wants_idle || wants_verdicts) || shared.is_paused(now) || !shared.logged_in() || {
+            note_config_read();
+            crate::config::consent_hold(shared.store.load_config().ok().flatten().as_ref())
+                .is_some()
+        };
     let mut prepared = Prepared {
         candidates: Vec::new(),
         idle: None,
@@ -138,32 +171,41 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // said it to the notification too.
     let window = super::nudge::idle_window(queue_ttl_days);
     let silenced = super::nudge::shared_cooldown_until(queue_ttl_days, &ledger, now).is_some();
-    if let (Some(window), false) = (window, silenced) {
-        let join = super::mission_matching::MissionJoin::read(
-            shared,
-            now,
-            super::mission_matching::Probe::CacheOnly,
-        );
-        let policy = shared.policy.lock().expect("policy lock");
-        let queue = shared.queue.lock().expect("queue lock");
-        let fresh: Vec<&super::queue::QueueEntry> =
+    if let (Some(window), true, false) = (window, wants_idle, silenced) {
+        // The fresh candidates first, under the policy and queue locks,
+        // cloned out and released: the mission join below takes those
+        // locks itself, and reads the history cache, so it is built only
+        // once something is fresh.
+        let fresh: Vec<super::queue::QueueEntry> = {
+            let policy = shared.policy.lock().expect("policy lock");
+            let queue = shared.queue.lock().expect("queue lock");
             super::queue::idle_candidates(&queue, &policy, now, window.idle_days)
                 .into_iter()
                 .filter(|e| !announced.contains(&e.entry_id))
-                .collect();
+                .cloned()
+                .collect()
+        };
         if let Some(since) = fresh
             .iter()
             .map(|e| e.last_modified_at.unwrap_or(e.discovered_at) + window.idle())
             .min()
         {
-            let mission_fit = join
-                .as_ref()
-                .map(|j| fresh.iter().filter(|e| j.fit(&policy, e) > 0).count() as u64);
+            note_join_read();
+            let join = super::mission_matching::MissionJoin::read(
+                shared,
+                now,
+                super::mission_matching::Probe::CacheOnly,
+            );
+            let mission_fit = join.as_ref().map(|j| {
+                let policy = shared.policy.lock().expect("policy lock");
+                fresh.iter().filter(|e| j.fit(&policy, e) > 0).count() as u64
+            });
+            let refs: Vec<&super::queue::QueueEntry> = fresh.iter().collect();
             prepared.idle = Some(IdleAnnouncement {
                 ids: fresh.iter().map(|e| e.entry_id).collect(),
                 batch: Batch {
                     count: fresh.len() as u64,
-                    tools: ipc::batch_text_tools(&fresh),
+                    tools: ipc::batch_text_tools(&refs),
                     idle_days: window.idle_days as u32,
                     mission_fit,
                     estimate: None,
@@ -185,7 +227,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
     // all of it; news that grew since is a candidate again, under its kind
     // cap.
     let fresh_poll = super::nudge::history_is_fresh(last_history_poll_at, history_poll_secs, now);
-    if let Some(news) = verdicts_pending.filter(|d| fresh_poll && d.total() > 0) {
+    if let Some(news) = verdicts_pending.filter(|d| wants_verdicts && fresh_poll && d.total() > 0) {
         let covered = prepared
             .log
             .iter()
@@ -407,6 +449,43 @@ mod tests {
             .filter(|e| e.event == ipc::EVENT_REENGAGE_DUE)
             .map(|e| e.data)
             .collect()
+    }
+
+    /// The arbiter runs on every poll tick, so it reads nothing from disk
+    /// when nothing could be announced: not the config with the master
+    /// switch off or every kind off, and not the mission join (which loads
+    /// the history cache) until some idle session is fresh.
+    #[test]
+    fn the_arbiter_reads_nothing_when_nothing_can_be_announced() {
+        let s = live();
+        digest_off(&s);
+        let _r = renderer(&s);
+        seed_idle(&s, 5);
+        reads::take();
+
+        s.settings.lock().unwrap().notifications_enabled = false;
+        tick(&s, noon(), &Utc, digest(false, 1));
+        assert_eq!(reads::take(), (0, 0), "master off");
+
+        {
+            let mut settings = s.settings.lock().unwrap();
+            settings.notifications_enabled = true;
+            settings.notify.idle_sessions = false;
+            settings.notify.verdicts_landed = false;
+        }
+        tick(&s, noon(), &Utc, digest(false, 1));
+        assert_eq!(reads::take(), (0, 0), "every kind off");
+
+        s.settings.lock().unwrap().notify.idle_sessions = true;
+        let got = tick(&s, noon(), &Utc, digest(false, 1));
+        assert_eq!(got.standalone, Some(Kind::IdleSessions));
+        assert_eq!(reads::take(), (1, 1), "a fresh idle session reads both");
+
+        // Its session is now announced: the window is open, nothing is
+        // fresh, so the join is not built.
+        let got = tick(&s, noon(), &Utc, digest(false, 1));
+        assert_eq!(got.standalone, None);
+        assert_eq!(reads::take(), (1, 0), "nothing fresh, no join");
     }
 
     /// With nobody able to draw it, nothing posts and no budget is spent.
