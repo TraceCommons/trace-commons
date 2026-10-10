@@ -17539,6 +17539,15 @@ fn submission_status_from_pipeline(
         | PipelineCreditStatus::NotSettlementEligible => 0.0,
         _ => trace_credit_points,
     };
+    // #1346: a run that failed before Review decided its submission moved
+    // the submission to `rejected`; Review's own rejection completes the run.
+    let explanation = if status.submission_status == "rejected"
+        && status.processing == PipelineProcessingStatus::Failed
+    {
+        vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+    } else {
+        Vec::new()
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
@@ -17548,7 +17557,7 @@ fn submission_status_from_pipeline(
             .then_some(trace_credit_points),
         credit_points_ledger: 0.0,
         credit_points_total: None,
-        explanation: Vec::new(),
+        explanation,
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
         pipeline: Some(pipeline_status_for_protocol(status)),
@@ -17570,7 +17579,9 @@ fn submission_status_from_pipeline(
 /// failed because its Review-start privacy classification kept failing
 /// (`privacy_classification_failed`, owner decision Q1): its content was
 /// never classified, so it reports `quarantined`, held content, rather
-/// than `accepted`.
+/// than `accepted`. Since #1346 any other run that fails before Review
+/// decided it moves its stored row to `rejected` in the failing
+/// transaction, so it reports `rejected` through the first arms.
 fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
     match status.submission_status.as_str() {
         "accepted" => "accepted",
@@ -64186,6 +64197,22 @@ const GATE_DUPLICATE_WITHHELD_REASONS: [&str; 2] = ["skipped_duplicate", "cached
 const SCORING_IN_PROGRESS_LINE: &str =
     "Scoring in progress; credit is assigned when the gate's evaluation completes.";
 
+/// #1346: the line a contributor sees for a submission whose pipeline run
+/// ended `failed` before Review decided it (status `rejected`, status reason
+/// `pipeline_processing_failed`). It says what happened to the trace, not
+/// why the server failed: the cause is an operator's, and stays in the run.
+const PIPELINE_PROCESSING_FAILED_EXPLANATION: &str =
+    "This trace could not be processed. It was not scored and earns no credit.";
+
+/// Whether `record` is a submission its failed pipeline run rejected
+/// (#1346): status `rejected` under the status reason
+/// `pipeline_processing_failed`.
+fn pipeline_processing_failed_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    record.status == TraceCorpusStatus::Rejected
+        && record.last_status_reason.as_deref()
+            == Some(trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON)
+}
+
 /// The gate's credit quality on the estimate's scale: `round(10 * q, 2)`,
 /// the same expression `compute_value_scorecard` applies to its online
 /// score, so a contributor comparing the two figures compares like with
@@ -64377,6 +64404,9 @@ fn receipt_from_record(
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Revoked => vec!["Revoked and marked with a tombstone.".to_string()],
+        TraceCorpusStatus::Rejected if pipeline_processing_failed_record(record) => {
+            vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+        }
         TraceCorpusStatus::Rejected => vec!["Rejected by ingestion policy.".to_string()],
         TraceCorpusStatus::Expired => vec!["Expired under the retention policy.".to_string()],
         TraceCorpusStatus::Purged => vec!["Purged under the retention policy.".to_string()],
@@ -78209,6 +78239,11 @@ struct TraceCommonsTraceListItem {
     /// trace list; the account views that share this item leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     witness_provenance_class: Option<TraceWitnessProvenanceClass>,
+    /// Lines that explain the status, when the status alone does not (#1346:
+    /// a submission rejected because its pipeline run failed). Absent
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    explanation: Vec<String>,
 }
 
 impl TraceCommonsTraceListItem {
@@ -78217,6 +78252,11 @@ impl TraceCommonsTraceListItem {
         derived_by_submission: &BTreeMap<Uuid, TraceCommonsDerivedRecord>,
     ) -> Self {
         let derived = derived_by_submission.get(&record.submission_id);
+        let explanation = if pipeline_processing_failed_record(&record) {
+            vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+        } else {
+            Vec::new()
+        };
         Self {
             tenant_storage_ref: record.tenant_storage_ref,
             submission_id: record.submission_id,
@@ -78242,6 +78282,7 @@ impl TraceCommonsTraceListItem {
             duplicate_score: derived.map(|record| record.duplicate_score),
             novelty_score: derived.map(|record| record.novelty_score),
             witness_provenance_class: None,
+            explanation,
         }
     }
 }
