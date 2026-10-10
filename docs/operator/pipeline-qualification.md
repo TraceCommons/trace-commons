@@ -388,9 +388,13 @@ passed.
   - what a qualification run reads besides those: `scripts/operator/pipeline.py`,
     `scripts/operator/pipeline_tooling/`,
     `scripts/operator/pipeline-deployment-inventory.py`,
-    `scripts/operator/test_pipeline_tooling.py`, the contract manifest
+    `scripts/operator/test_pipeline_tooling.py`,
+    `scripts/operator/fixtures/pipeline-package-digests-vector.json`, the
+    contract manifest
     `docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json`,
-    and `docs/superpowers/specs/fixtures/` (the default corpus).
+    `docs/superpowers/specs/fixtures/` (the default corpus), and the top-level
+    `.gitignore` (the self-test reads it, and it decides which files are
+    listed).
 
   So a change to any other document, to a client shell (`macos/`,
   `windows/`, `tauri-desktop/`, `crates/trace-commons-contributor-gtk`, the

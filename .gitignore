@@ -70,7 +70,7 @@ node_modules/
 # here because the pipeline's code revision (`pipeline.py revision`) reads the
 # repository's own ignore rules only: an untracked file that only a local
 # exclude hides enters the revision on that host when it lies under a path
-# the revision covers (a `.DS_Store` in a server crate). No tracked file lives
+# the revision covers. No tracked file lives
 # under `.claude/`.
 #
 # `.cargo/` is not listed. An ignore rule does not apply to a tracked file,

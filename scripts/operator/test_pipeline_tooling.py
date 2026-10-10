@@ -5069,6 +5069,11 @@ class CodeRevisionRepositoryTests(unittest.TestCase):
             promote.HF_NETWORK_PIN_PATH,
             Path("scripts/operator/pipeline.py"),
             Path("scripts/operator/pipeline_tooling/environment.py"),
+            # Read by `test_package_digests_match_the_rust_vector` and by
+            # `versioned_pipeline_qualification.rs`'s tests.
+            Path("scripts/operator/fixtures/pipeline-package-digests-vector.json"),
+            # Read by `test_the_repository_gitignore_has_no_cargo_line`.
+            Path(".gitignore"),
         ]
         for step in (*checks.CONTRACTS_STEPS, *checks.RUNTIME_STEPS):
             for argument in step.argv:

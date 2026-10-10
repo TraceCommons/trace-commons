@@ -140,8 +140,11 @@ def _invoke_psql(command, *, env, input_text):
 #   with.
 # - `migrations/` is the schema the binary applies at start.
 # - The rest is what a qualification run reads: its tooling, the contract
-#   manifest, and the default corpus (`CodeRevisionRepositoryTests` checks
-#   that every input the tooling names is covered).
+#   manifest, the default corpus, the package digest vector that the
+#   qualification module's tests and the self-test both read, and the
+#   top-level `.gitignore`, which the self-test reads and which decides the
+#   files listed here (`CodeRevisionRepositoryTests` checks that every input
+#   the tooling names is covered).
 CODE_REVISION_ROOT_CRATE = "crates/trace-commons-server"
 CODE_REVISION_COVERED = (
     "Cargo.toml",
@@ -155,8 +158,10 @@ CODE_REVISION_COVERED = (
     "scripts/operator/pipeline_tooling",
     "scripts/operator/pipeline-deployment-inventory.py",
     "scripts/operator/test_pipeline_tooling.py",
+    "scripts/operator/fixtures/pipeline-package-digests-vector.json",
     "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json",
     "docs/superpowers/specs/fixtures",
+    ".gitignore",
 )
 
 # The dependency tables whose `path` entries are part of a crate's build. A
