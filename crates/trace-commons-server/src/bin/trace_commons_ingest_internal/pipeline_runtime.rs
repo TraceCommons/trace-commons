@@ -1345,10 +1345,10 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 }
 
 /// The review audit events of the runs the tenant's review audit markers
-/// name (V118, `review_audit_pending_at`): a run has up to four audit events
-/// (a hold, or a failure, of the privacy pass; the human assessment; the
-/// committed Review decision), and the marker is cleared once each event of
-/// the run exists. The order is the hold or the failure, the assessment, then
+/// name (V118, `review_audit_pending_at`): a run has up to three audit events
+/// (a hold of the privacy pass, the human assessment, the committed Review
+/// decision), or the one event of a failed privacy classification, and the
+/// marker is cleared once each event of the run exists. The order is the hold or the failure, the assessment, then
 /// the Review commit. The hold event (the privacy pass escalated the run) and
 /// the failure event (the run ended `failed` under
 /// `privacy_classification_failed`) are `lifecycle_status_change` events with

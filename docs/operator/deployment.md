@@ -1254,8 +1254,11 @@ the migrator before you install the binary, after V117. V118 locks
 tenants, the pipeline worker and `main`'s gate driver wait.
 
 A build from before V118 runs on a V118 database. A Review decision that it
-commits, a hold of the privacy pass and a failed privacy classification get no audit event. An assessment that it records gets a second
-`review_decision` event when a newer build commits its Review.
+commits and a failed privacy classification get no audit event. A hold of
+the privacy pass that it records gets its event late, when a newer build
+next sets the run's marker (an assessment or a Review commit). An assessment
+that it records gets a second `review_decision` event when a newer build
+commits its Review.
 
 Check before deploying:
 

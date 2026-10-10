@@ -2008,8 +2008,8 @@ a human (status `quarantined`, reason `privacy_pass_review_required`) and one
 for a run that ends with `privacy_classification_failed` (status
 `quarantined`, that reason). The transaction that records an escalated pass,
 and the one that ends the run, set the marker. The stored status of such a
-run stays `received`. The pass clears the marker once each event of the run
-exists. The time of an event is the time of the append. A decision from
+run does not change (`received`, or `quarantined` when Admission quarantined
+it). The pass clears the marker once each event of the run exists. The time of an event is the time of the append. A decision from
 before V118 gets no event. A failed event keeps its marker and logs
 `pipeline_worker_review_audit_item_failed` with a hash of the run id. A
 failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit

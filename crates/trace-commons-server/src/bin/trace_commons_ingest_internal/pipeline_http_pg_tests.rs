@@ -14534,10 +14534,10 @@ async fn assert_one_quarantined_lifecycle_event(
 /// `quarantined` and reason `privacy_pass_review_required`, as `main`'s PII
 /// backstop appends for the same state. The event id is derived from the run,
 /// the marker is cleared, a second pass over a marker set again adds none, and
-/// `main`'s audit verification finds no mismatch.
+/// `main`'s audit verification and its reconciliation find no audit gap.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
-    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
         assemble_compatibility_pipeline_service(
             runtime,
             &ConfiguredTraceArtifactStore::legacy(artifacts),
@@ -14550,6 +14550,9 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
     else {
         return;
     };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
     let tenant = fixture.tenant.clone();
     let mut envelope = sample_envelope().await;
     envelope.submission_id = Uuid::new_v4();
@@ -14572,6 +14575,10 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
         .expect("Review runs the privacy pass")
         .expect("the run was claimed");
     assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    assert_eq!(
+        held.privacy_pass_outcome,
+        Some(trace_commons_server::versioned_pipeline::PrivacyPassOutcome::Escalated)
+    );
     assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
 
     run_review_audit_pass(&fixture)
@@ -14599,6 +14606,30 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
     );
     assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
     assert_audit_verification_is_clean(&fixture).await;
+
+    // The hold event says `quarantined` and the stored status stays
+    // `received`: `main`'s reconciliation reports no audit gap for it.
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_hash_chain_failures.is_empty(),
+        "{:?}",
+        report.db_audit_hash_chain_failures
+    );
+    assert!(
+        report.db_audit_canonical_projection_failures.is_empty(),
+        "{:?}",
+        report.db_audit_canonical_projection_failures
+    );
+    assert!(report.db_audit_submission_metadata_mismatches.is_empty());
 }
 
 /// A run whose privacy classification fails until its attempts end (state
