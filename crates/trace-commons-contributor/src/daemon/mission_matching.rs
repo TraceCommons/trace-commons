@@ -98,19 +98,25 @@ pub const MISSION_CATALOGUE_MAX_AGE: std::time::Duration =
 ///
 /// - **Memory only.** Never persisted: a restarted daemon starts empty, and
 ///   `unenroll` empties it. Empty means unknown.
-/// - **One writer.** In production nothing writes it yet: the writer is the
-///   fetch Z7/Z8's server catalogue will bring. `mission_matches` never
-///   writes it -- its catalogue is a parameter, and matching changes
-///   nothing (M2). Tests seed it with [`receive_catalogue`].
+/// - **One writer.** The daemon's scheduled refresh
+///   ([`super::activity_missions::refresh_mission_slot`]) fills it from the
+///   published activity catalogue's missions that carry a supported
+///   predicate, and empties it when none do. `mission_matches` never writes
+///   it -- its catalogue is a parameter, and matching changes nothing (M2).
+///   Tests also seed it with [`receive_catalogue`].
 /// - **Holds the parsed catalogue, when it arrived, and a per-folder
 ///   language cache** -- nothing derived from which sessions exist.
 ///   Replacing the catalogue drops the cache.
-/// - **Ages out** after [`MISSION_CATALOGUE_MAX_AGE`]; an expired slot reads
-///   as empty.
+/// - **Ages out** after [`MISSION_CATALOGUE_MAX_AGE`], or sooner at the end
+///   of the policy it came from; an expired slot reads as empty.
 #[derive(Debug, Clone)]
 pub struct MissionCatalogueSlot {
     catalogue: ContributionMissionCatalogue,
     received_at: DateTime<Utc>,
+    /// The instant the published policy's missions stop being on offer
+    /// (its `ends_before`, at 00:00 UTC), when the catalogue came from one.
+    /// The slot is not live from then on, whatever its age.
+    not_after: Option<DateTime<Utc>>,
     /// Languages of the folders the join has already looked at. Filled with
     /// no lock held, the first time `list_pending` sees a folder, and only
     /// while the catalogue asks about languages.
@@ -125,6 +131,7 @@ impl MissionCatalogueSlot {
         let age = now.signed_duration_since(self.received_at);
         age >= chrono::TimeDelta::zero()
             && chrono::TimeDelta::from_std(MISSION_CATALOGUE_MAX_AGE).is_ok_and(|max| age <= max)
+            && self.not_after.is_none_or(|end| now < end)
     }
 }
 
@@ -138,6 +145,18 @@ pub fn receive_catalogue(
     raw: &serde_json::Value,
     now: DateTime<Utc>,
 ) -> Result<(), CatalogueError> {
+    receive_catalogue_until(slot, raw, now, None)
+}
+
+/// [`receive_catalogue`] for a catalogue that is on offer only until
+/// `not_after`: from then on the slot reads as empty, even inside
+/// [`MISSION_CATALOGUE_MAX_AGE`].
+pub fn receive_catalogue_until(
+    slot: &Mutex<Option<MissionCatalogueSlot>>,
+    raw: &serde_json::Value,
+    now: DateTime<Utc>,
+    not_after: Option<DateTime<Utc>>,
+) -> Result<(), CatalogueError> {
     let read = ContributionMissionCatalogue::from_value(raw);
     let mut slot = slot.lock().expect("mission catalogue lock");
     match read {
@@ -145,6 +164,7 @@ pub fn receive_catalogue(
             *slot = Some(MissionCatalogueSlot {
                 catalogue,
                 received_at: now,
+                not_after,
                 folder_languages: BTreeMap::new(),
             });
             Ok(())
@@ -159,6 +179,17 @@ pub fn receive_catalogue(
 /// Empty the slot. `unenroll` calls this: a next account starts unknown.
 pub fn clear_catalogue(slot: &Mutex<Option<MissionCatalogueSlot>>) {
     *slot.lock().expect("mission catalogue lock") = None;
+}
+
+/// The catalogue the slot holds, when it is live at `now`.
+pub fn live_catalogue(
+    slot: &Mutex<Option<MissionCatalogueSlot>>,
+    now: DateTime<Utc>,
+) -> Option<ContributionMissionCatalogue> {
+    let slot = slot.lock().expect("mission catalogue lock");
+    slot.as_ref()
+        .filter(|s| s.is_live(now))
+        .map(|s| s.catalogue.clone())
 }
 
 /// A session the daemon has seen, as its cwd cache records it: the
@@ -556,8 +587,8 @@ impl MissionJoin {
 /// this contributor's local work fits, and how many tools and folders
 /// matching was allowed to read -- counts only.
 ///
-/// The catalogue is a parameter until Z7/Z8's server catalogue exists; the
-/// daemon fetches nothing here. Every input is read under its own lock and
+/// The catalogue is a parameter; the daemon fetches nothing here, and the
+/// slot the scheduled refresh fills is neither read nor written. Every input is read under its own lock and
 /// released, none mutably: no policy, queue, state or file is written, no
 /// audit row is appended, and the log gets [`LOG_LABEL`] and nothing else
 /// (M1, M2). The answer goes back over the local socket only.
