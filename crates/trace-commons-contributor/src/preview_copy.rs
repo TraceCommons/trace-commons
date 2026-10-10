@@ -974,8 +974,6 @@ pub struct MonitorFlowMapCopy {
     /// The map's accessible name, and its zoom controls'.
     pub map_label: &'static str,
     pub zoom_label: &'static str,
-    /// Under a card shown by hovering, not pinned.
-    pub hint: &'static str,
     pub sessions_one: &'static str,
     pub sessions: &'static str,
     pub traces_one: &'static str,
@@ -1352,7 +1350,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             projects_empty: "No projects seen yet. Traces appear here after discovery.",
             changes_heading: "Change log",
             tab_home: "Home",
-            tab_inference: "Inference",
+            tab_inference: "Private AI",
             tab_traces: "Traces",
             tabs_label: "Monitor",
             map_views_label: "Map view",
@@ -1388,7 +1386,6 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
         flow_map: MonitorFlowMapCopy {
             map_label: "Flow map",
             zoom_label: "Map zoom",
-            hint: "hover to peek \u{00b7} click to pin",
             sessions_one: "1 trace",
             sessions: "{count} traces",
             traces_one: "1 trace",

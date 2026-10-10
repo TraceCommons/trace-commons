@@ -434,11 +434,11 @@ public enum GlassTokens {
         public static let listRow: CGFloat = 40
         public static let paneLeftWidth: CGFloat = 400
         public static let paneLeftCompactWidth: CGFloat = 360
-        public static let mapWidth: CGFloat = 600
+        public static let mapWidth: CGFloat = 440
         public static let mapMinWidth: CGFloat = 360
         public static let inspectorWidth: CGFloat = 300
         public static let windowWidth: CGFloat = 1320
-        public static let windowHeight: CGFloat = 760
+        public static let windowHeight: CGFloat = 614
         public static let paneLeftMinWidth: CGFloat = 320
         public static let paneLeftWindowShare: CGFloat = 0.34
         public static let mapBreakpoint: CGFloat = 1100

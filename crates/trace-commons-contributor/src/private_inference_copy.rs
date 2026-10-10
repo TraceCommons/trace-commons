@@ -754,6 +754,14 @@ pub struct PrivateInferenceCopy {
     pub panel_connection_eyebrow: &'static str,
     pub panel_balance_eyebrow: &'static str,
     pub panel_balance_refresh: &'static str,
+    /// The card at the foot of the Private AI tab that opens the Private AI
+    /// section of Settings: [`PANEL_SETTINGS_EYEBROW`], its heading, its
+    /// sentence, its button and the button's accessible name.
+    pub panel_settings_eyebrow: &'static str,
+    pub panel_settings_title: &'static str,
+    pub panel_settings_body: &'static str,
+    pub panel_settings_open: &'static str,
+    pub panel_settings_open_accessibility: &'static str,
     /// The page's two stat tiles and the runtime tile's words, chosen by
     /// [`runtime_word`].
     pub stat_inference_access: &'static str,
@@ -2115,6 +2123,18 @@ pub const PANEL_CONNECTION_EYEBROW: &str = "Connection";
 pub const PANEL_BALANCE_EYEBROW: &str = "Account balance";
 /// The balance panel's own re-read link.
 pub const PANEL_BALANCE_REFRESH: &str = "Refresh";
+/// The eyebrow over the card that opens the Private AI section of Settings,
+/// where the standard settings, the local tools and the connection live.
+pub const PANEL_SETTINGS_EYEBROW: &str = "Settings";
+/// That card's heading.
+pub const PANEL_SETTINGS_TITLE: &str = "Tools and connection";
+/// That card's sentence: what is in the section it opens.
+pub const PANEL_SETTINGS_BODY: &str =
+    "Standard settings, your local tools and the Private AI connection are in Settings.";
+/// That card's button.
+pub const PANEL_SETTINGS_OPEN: &str = "Open settings";
+/// The button's accessible name, which names the section it opens.
+pub const PANEL_SETTINGS_OPEN_ACCESSIBILITY: &str = "Open Private AI settings";
 /// The stat tile whose value is the credential's state line.
 pub const STAT_INFERENCE_ACCESS: &str = "NEAR AI";
 /// The stat tile whose value is one of the `RUNTIME_*` words.
@@ -2340,6 +2360,11 @@ pub fn private_inference_copy() -> PrivateInferenceCopy {
         panel_connection_eyebrow: PANEL_CONNECTION_EYEBROW,
         panel_balance_eyebrow: PANEL_BALANCE_EYEBROW,
         panel_balance_refresh: PANEL_BALANCE_REFRESH,
+        panel_settings_eyebrow: PANEL_SETTINGS_EYEBROW,
+        panel_settings_title: PANEL_SETTINGS_TITLE,
+        panel_settings_body: PANEL_SETTINGS_BODY,
+        panel_settings_open: PANEL_SETTINGS_OPEN,
+        panel_settings_open_accessibility: PANEL_SETTINGS_OPEN_ACCESSIBILITY,
         stat_inference_access: STAT_INFERENCE_ACCESS,
         stat_runtime: STAT_RUNTIME,
         runtime_on: RUNTIME_ON,
@@ -4633,7 +4658,7 @@ mod tests {
         let fields = payload.as_object().expect("a JSON object");
         assert_eq!(
             fields.len(),
-            173,
+            178,
             "the payload's field count changed -- update the shells' decoders \
              and the tests that pin the set"
         );

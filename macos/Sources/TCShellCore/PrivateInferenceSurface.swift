@@ -260,6 +260,13 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
     public let panelConnectionEyebrow: String
     public let panelBalanceEyebrow: String
     public let panelBalanceRefresh: String
+    /// The card at the foot of the Private AI tab that opens the Private AI
+    /// section of Settings.
+    public let panelSettingsEyebrow: String
+    public let panelSettingsTitle: String
+    public let panelSettingsBody: String
+    public let panelSettingsOpen: String
+    public let panelSettingsOpenAccessibility: String
     public let statInferenceAccess: String
     public let statRuntime: String
     public let runtimeOn: String
@@ -439,6 +446,11 @@ public struct PrivateInferenceCopy: Decodable, Equatable, Sendable {
         case panelConnectionEyebrow = "panel_connection_eyebrow"
         case panelBalanceEyebrow = "panel_balance_eyebrow"
         case panelBalanceRefresh = "panel_balance_refresh"
+        case panelSettingsEyebrow = "panel_settings_eyebrow"
+        case panelSettingsTitle = "panel_settings_title"
+        case panelSettingsBody = "panel_settings_body"
+        case panelSettingsOpen = "panel_settings_open"
+        case panelSettingsOpenAccessibility = "panel_settings_open_accessibility"
         case statInferenceAccess = "stat_inference_access"
         case statRuntime = "stat_runtime"
         case runtimeOn = "runtime_on"

@@ -611,10 +611,10 @@ final class MonitorNavigationTests: XCTestCase {
                        "open(MenuPanelData.manageRules(requiresOnboarding: model.requiresOnboarding))"] {
             XCTAssertTrue(panel.contains(needle), "the menu panel never opens \(needle)")
         }
+        // Settings' Private AI section holds the switch and the tools now
+        // (owner, 2026-10-10): no pointer back to the Monitor.
         let pointer = try Self.text("Views/Settings/PrivateAISection.swift")
-        // Outside the Settings modal (which closes itself and opens the
-        // Inference tab, `SettingsModalTests`), the pointer opens the Monitor.
-        XCTAssertTrue(pointer.contains("} else {\n                                OpenMonitor.request(.inference)\n"))
+        XCTAssertFalse(pointer.contains("OpenMonitor.request(.inference)"))
         // The Monitor consumes the destination on an always-present
         // container, initially too, per request rather than per value, and
         // lands Inference on its inspector.
