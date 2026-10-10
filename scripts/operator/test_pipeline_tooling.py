@@ -36,6 +36,24 @@ def _fake_hash(label):
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
 
+_SERVER_CRATE = "crates/trace-commons-server"
+
+# The smallest tree the code revision accepts: a workspace manifest and the
+# server crate's manifest.
+_MINIMAL_WORKSPACE = {
+    "Cargo.toml": '[workspace]\nmembers = ["crates/trace-commons-server"]\n',
+    f"{_SERVER_CRATE}/Cargo.toml": '[package]\nname = "trace-commons-server"\n',
+    f"{_SERVER_CRATE}/src/lib.rs": "// server\n",
+}
+
+
+def _write_tree(root, files):
+    for relative, content in files.items():
+        path = Path(root) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+
 def _iso(when):
     return when.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -4679,8 +4697,12 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         self.addCleanup(env.stop)
         self._git("init", "-q")
         (self.repo / ".gitignore").write_text("ignored.txt\n")
-        (self.repo / "tracked.txt").write_text("tracked\n")
-        self._git("add", ".gitignore", "tracked.txt")
+        # The revision covers the server crate (#1249): the files these
+        # tests write live in it, so that only the ignore rules decide.
+        _write_tree(self.repo, _MINIMAL_WORKSPACE)
+        self.crate = self.repo / _SERVER_CRATE
+        (self.crate / "tracked.txt").write_text("tracked\n")
+        self._git("add", ".")
         info = self.repo / ".git" / "info"
         info.mkdir(exist_ok=True)
         (info / "exclude").write_text("locally_excluded.txt\n")
@@ -4692,7 +4714,7 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)
 
     def _revision_after_writing(self, name, content):
-        (self.repo / name).write_text(content)
+        (self.crate / name).write_text(content)
         return environment._code_revision_hash()
 
     def test_local_and_global_excludes_hide_no_file(self):
@@ -4715,11 +4737,10 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         the revision leaves out an untracked `.cargo/` directory itself, at
         the root and nested, as that line did."""
         base = environment._code_revision_hash()
-        (self.repo / "crates" / "one").mkdir(parents=True)
-        (self.repo / "crates" / "one" / "lib.rs").write_text("// one\n")
+        (self.crate / "src" / "one.rs").write_text("// one\n")
         with_crate = environment._code_revision_hash()
         self.assertNotEqual(base, with_crate)
-        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+        for directory in (self.repo / ".cargo", self.crate / ".cargo"):
             directory.mkdir()
             for content in ("[build]\njobs = 5\n", "[build]\njobs = 6\n"):
                 (directory / "config.toml").write_text(content)
@@ -4734,8 +4755,7 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         """A checked-in `.cargo/config.toml` is visible to git (no ignore
         line hides it) and changes the revision with each edit, at the root
         and nested."""
-        (self.repo / "crates" / "one").mkdir(parents=True)
-        for directory in (self.repo / ".cargo", self.repo / "crates" / "one" / ".cargo"):
+        for directory in (self.repo / ".cargo", self.crate / ".cargo"):
             directory.mkdir()
             config = directory / "config.toml"
             config.write_text("[build]\njobs = 5\n")
@@ -4759,6 +4779,317 @@ class CodeRevisionExcludeTests(unittest.TestCase):
         cargo config shows in `git status`."""
         lines = (Path(__file__).resolve().parents[2] / ".gitignore").read_text().splitlines()
         self.assertEqual([line for line in lines if line.strip().strip("/") == ".cargo"], [])
+
+
+# A workspace shaped like this repository's (#1249). The server crate
+# depends on `dep-a` (which depends on `dep-a-inner`), on `dep-ws` through
+# the workspace table, on `dep-target` for one target, and builds with
+# `dep-build`; `dev-only` is only a dev-dependency, and `unrelated` (a
+# client crate) is not a dependency at all. The server includes one document
+# from `docs/`.
+_SCOPE_WORKSPACE = {
+    "Cargo.toml": (
+        "[workspace]\n"
+        'members = ["crates/trace-commons-server", "crates/dep-a", "crates/unrelated"]\n'
+        "[workspace.dependencies]\n"
+        'dep-ws = { path = "crates/dep-ws" }\n'
+        'serde = "1"\n'
+    ),
+    "Cargo.lock": "# lock v1\n",
+    "README.md": "readme\n",
+    "cloudbuild.yaml": "steps: []\n",
+    "deny.toml": "[licenses]\n",
+    ".github/workflows/ci.yml": "on: push\n",
+    f"{_SERVER_CRATE}/Cargo.toml": (
+        "[package]\n"
+        'name = "trace-commons-server"\n'
+        "[dependencies]\n"
+        'dep-a = { path = "../dep-a" }\n'
+        "dep-ws = { workspace = true }\n"
+        "serde = { workspace = true }\n"
+        "[build-dependencies]\n"
+        'dep-build = { path = "../dep-build" }\n'
+        "[target.'cfg(unix)'.dependencies]\n"
+        'dep-target = { path = "../dep-target" }\n'
+        "[dev-dependencies]\n"
+        'dev-only = { path = "../dev-only" }\n'
+    ),
+    f"{_SERVER_CRATE}/src/lib.rs": (
+        'pub const RUNBOOK: &str = include_str!("../../../docs/included.md");\n'
+        'pub const SCHEMA: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/schema.bin"));\n'
+        '// A message that names the macro is text: "include_str!(\\"../{file}\\")".\n'
+    ),
+    f"{_SERVER_CRATE}/tests/fixtures/pin.json": "{}\n",
+    "crates/dep-a/Cargo.toml": '[package]\nname = "dep-a"\n[dependencies]\ndep-a-inner = { path = "../dep-a-inner" }\n',
+    "crates/dep-a/src/lib.rs": "// dep-a\n",
+    "crates/dep-a-inner/Cargo.toml": '[package]\nname = "dep-a-inner"\n',
+    "crates/dep-a-inner/src/lib.rs": "// dep-a-inner\n",
+    "crates/dep-ws/Cargo.toml": '[package]\nname = "dep-ws"\n',
+    "crates/dep-ws/src/lib.rs": "// dep-ws\n",
+    "crates/dep-build/Cargo.toml": '[package]\nname = "dep-build"\n',
+    "crates/dep-build/src/lib.rs": "// dep-build\n",
+    "crates/dep-target/Cargo.toml": '[package]\nname = "dep-target"\n',
+    "crates/dep-target/src/lib.rs": "// dep-target\n",
+    "crates/dev-only/Cargo.toml": '[package]\nname = "dev-only"\n',
+    "crates/dev-only/src/lib.rs": 'pub const ICON: &str = include_str!("../../../macos/icon.txt");\n',
+    "crates/unrelated/Cargo.toml": '[package]\nname = "unrelated"\n[dependencies]\ndep-a = { path = "../dep-a" }\n',
+    "crates/unrelated/src/lib.rs": "// unrelated\n",
+    "crates/trace-commons-contributor-gtk/Cargo.toml": '[package]\nname = "gtk"\n',
+    "crates/trace-commons-contributor-gtk/src/main.rs": "// gtk\n",
+    "migrations/V1__init.sql": "CREATE TABLE t ();\n",
+    "assets/schema.bin": "schema\n",
+    "assets/logo.svg": "<svg/>\n",
+    "docs/guide.md": "guide\n",
+    "docs/included.md": "included\n",
+    "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json": "{}\n",
+    "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json": "{}\n",
+    "docs/superpowers/specs/other-spec.md": "spec\n",
+    "macos/icon.txt": "icon\n",
+    "macos/App.swift": "// app\n",
+    "windows/App.cs": "// app\n",
+    "tauri-desktop/src-tauri/src/main.rs": "// tauri\n",
+    "community/index.astro": "<p/>\n",
+    "scripts/operator/pipeline.py": "# pipeline\n",
+    "scripts/operator/pipeline_tooling/environment.py": "# environment\n",
+    "scripts/operator/pipeline-deployment-inventory.py": "# inventory\n",
+    "scripts/operator/test_pipeline_tooling.py": "# self-test\n",
+    "scripts/operator/bakeoff_paraphrase.py": "# unrelated tool\n",
+    "scripts/windows/verify.ps1": "# windows\n",
+}
+
+
+class CodeRevisionScopeTests(unittest.TestCase):
+    """#1249: the code revision covers what can change the server's
+    binaries or the qualification's outcome, and nothing else, so a deploy
+    of a document or a client shell keeps every qualification. Real `git`
+    in a temporary repository."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="revision-scope-"))
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        env = mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True, capture_output=True)
+        _write_tree(self.repo, _SCOPE_WORKSPACE)
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True, capture_output=True)
+        root = mock.patch.object(environment, "ROOT", self.repo)
+        root.start()
+        self.addCleanup(root.stop)
+        self.base = environment._code_revision_hash()
+
+    def _write(self, relative, content=None):
+        """Writes `content`; by default appends a comment line to the file
+        (a valid manifest stays valid), creating it if it is not there."""
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if content is None:
+            content = (path.read_text() if path.exists() else "") + "# edited\n"
+        path.write_text(content)
+
+    def _after(self, relative, content=None):
+        self._write(relative, content)
+        return environment._code_revision_hash()
+
+    def test_a_document_or_client_shell_change_keeps_the_revision(self):
+        for relative in (
+            "docs/guide.md",
+            "docs/new-runbook.md",
+            "docs/superpowers/specs/other-spec.md",
+            "README.md",
+            "deny.toml",
+            ".github/workflows/ci.yml",
+            "macos/App.swift",
+            "windows/App.cs",
+            "tauri-desktop/src-tauri/src/main.rs",
+            "community/index.astro",
+            "crates/trace-commons-contributor-gtk/src/main.rs",
+            "crates/unrelated/src/lib.rs",
+            "assets/logo.svg",
+            "scripts/operator/bakeoff_paraphrase.py",
+            "scripts/windows/verify.ps1",
+        ):
+            with self.subTest(relative=relative):
+                self.assertEqual(self._after(relative), self.base, relative)
+
+    def test_a_dev_dependency_and_what_only_it_includes_keep_the_revision(self):
+        """Owner decision (#1249): a dev-dependency never links into a
+        binary, so the crate, and a file that only it includes, are outside
+        the revision."""
+        for relative in ("crates/dev-only/src/lib.rs", "crates/dev-only/Cargo.toml", "macos/icon.txt"):
+            with self.subTest(relative=relative):
+                self.assertEqual(self._after(relative), self.base, relative)
+
+    def test_a_change_the_binary_or_the_qualification_can_see_moves_the_revision(self):
+        for relative in (
+            f"{_SERVER_CRATE}/src/lib.rs",
+            f"{_SERVER_CRATE}/src/new_module.rs",
+            f"{_SERVER_CRATE}/tests/fixtures/pin.json",
+            f"{_SERVER_CRATE}/Cargo.toml",
+            "crates/dep-a/src/lib.rs",
+            "crates/dep-a-inner/src/lib.rs",
+            "crates/dep-ws/src/lib.rs",
+            "crates/dep-build/src/lib.rs",
+            "crates/dep-target/src/lib.rs",
+            "Cargo.lock",
+            "Cargo.toml",
+            "rust-toolchain.toml",
+            "cloudbuild.yaml",
+            "migrations/V1__init.sql",
+            "migrations/V2__next.sql",
+            "docs/included.md",
+            "assets/schema.bin",
+            "docs/superpowers/specs/2026-09-11-versioned-pipeline-contract-test-manifest.json",
+            "docs/superpowers/specs/fixtures/versioned-pipeline-minimal-corpus-v1.json",
+            "scripts/operator/pipeline.py",
+            "scripts/operator/pipeline_tooling/environment.py",
+            "scripts/operator/pipeline-deployment-inventory.py",
+            "scripts/operator/test_pipeline_tooling.py",
+        ):
+            with self.subTest(relative=relative):
+                self.assertNotEqual(self._after(relative), self.base, relative)
+                subprocess.run(["git", "checkout", "-q", "--", "."], cwd=self.repo, check=True, capture_output=True)
+                subprocess.run(["git", "clean", "-qfd"], cwd=self.repo, check=True, capture_output=True)
+                self.assertEqual(environment._code_revision_hash(), self.base, "restored")
+
+    def _refused(self, label):
+        with self.assertRaises(errors.ToolingError) as caught:
+            environment._code_revision_hash()
+        self.assertEqual(str(caught.exception), label)
+
+    def test_a_server_crate_without_a_manifest_is_refused(self):
+        (self.repo / _SERVER_CRATE / "Cargo.toml").unlink()
+        self._refused("code_revision_manifest_missing")
+
+    def test_a_path_dependency_without_a_manifest_is_refused(self):
+        (self.repo / "crates/dep-a-inner/Cargo.toml").unlink()
+        self._refused("code_revision_manifest_missing")
+
+    def test_a_path_dependency_outside_the_tree_is_refused(self):
+        self._write("crates/dep-a/Cargo.toml", '[package]\nname = "dep-a"\n[dependencies]\nx = { path = "../../../x" }\n')
+        self._refused("code_revision_path_outside_tree")
+
+    def test_an_include_it_cannot_resolve_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", "const X: &str = include_str!(some_macro!());\n")
+        self._refused("code_revision_include_unresolved")
+
+    def test_an_include_of_a_file_that_is_not_there_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../docs/gone.md");\n')
+        self._refused("code_revision_include_missing")
+
+    def test_an_include_outside_the_tree_is_refused(self):
+        self._write("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../../outside.md");\n')
+        self._refused("code_revision_path_outside_tree")
+
+    def test_an_include_by_a_dependency_is_covered(self):
+        self._after("crates/dep-a/src/lib.rs", 'const X: &str = include_str!("../../../docs/guide.md");\n')
+        with_include = environment._code_revision_hash()
+        self.assertNotEqual(self._after("docs/guide.md", "guide v2\n"), with_include)
+
+    def test_a_path_module_outside_the_crate_is_covered(self):
+        self._write("crates/dep-a/src/lib.rs", '#[path = "../../../tools/shared.rs"]\nmod shared;\n')
+        self._refused("code_revision_include_missing")
+        with_module = self._after("tools/shared.rs", "// shared\n")
+        self.assertNotEqual(self._after("tools/shared.rs", "// shared v2\n"), with_module)
+
+    def test_a_patched_crate_is_covered(self):
+        self._write("Cargo.toml", _SCOPE_WORKSPACE["Cargo.toml"] + '[patch.crates-io]\nserde = { path = "vendor/serde" }\n')
+        self._refused("code_revision_manifest_missing")
+        _write_tree(self.repo, {"vendor/serde/Cargo.toml": '[package]\nname = "serde"\n', "vendor/serde/src/lib.rs": "// v1\n"})
+        patched = environment._code_revision_hash()
+        self.assertNotEqual(self._after("vendor/serde/src/lib.rs", "// v2\n"), patched)
+
+    def test_the_revision_is_the_framed_hash_of_the_covered_files(self):
+        """The framing is unchanged (length-prefixed path, length-prefixed
+        content, in sorted path order); only the set of paths narrowed."""
+        paths = environment._code_revision_paths()
+        self.assertIn("Cargo.lock", paths)
+        self.assertNotIn("docs/guide.md", paths)
+        self.assertEqual(paths, sorted(paths))
+        tree = hashlib.sha256()
+        for relative in paths:
+            raw = relative.encode()
+            content = (self.repo / relative).read_bytes()
+            tree.update(len(raw).to_bytes(8, "big") + raw + len(content).to_bytes(8, "big") + content)
+        self.assertEqual(environment._code_revision_hash(), "sha256:" + tree.hexdigest())
+
+
+class CodeRevisionRepositoryTests(unittest.TestCase):
+    """#1249, on this repository's own tree: which crates the revision
+    covers, and that every file the qualification reads is inside it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.paths = set(environment._code_revision_paths())
+
+    def _covered(self, relative):
+        relative = Path(relative).as_posix()
+        return relative in self.paths or any(path.startswith(relative + "/") for path in self.paths)
+
+    def test_the_covered_crates_are_the_server_binaries_dependency_closure(self):
+        self.assertEqual(
+            environment._code_revision_crates(environment.ROOT),
+            [
+                "crates/trace-commons-attestation",
+                "crates/trace-commons-build-info",
+                "crates/trace-commons-gate-api",
+                "crates/trace-commons-gate-enclave",
+                "crates/trace-commons-operator-client",
+                "crates/trace-commons-protocol",
+                "crates/trace-commons-server",
+            ],
+        )
+
+    def test_documents_and_client_shells_are_outside_the_revision(self):
+        for prefix in (
+            "docs/operator/pipeline-activation.md",
+            "macos/",
+            "windows/",
+            "tauri-desktop/",
+            "community/",
+            "crates/trace-commons-contributor/",
+            "crates/trace-commons-contributor-ffi/",
+            "crates/trace-commons-contributor-gtk/",
+            "crates/trace-commons-mark/",
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertEqual([path for path in self.paths if path.startswith(prefix)], [], prefix)
+
+    def test_every_file_the_qualification_reads_is_covered(self):
+        from pipeline_tooling import promote
+
+        root = environment.ROOT
+        inputs = [
+            pipeline.CONTRACT_MANIFEST.relative_to(root),
+            pipeline.HF_LOCAL_PIN.relative_to(root),
+            corpus.DEFAULT_CORPUS.relative_to(root),
+            promote._PIN_DIR.relative_to(root),
+            promote.HF_NETWORK_PIN_PATH,
+            Path("scripts/operator/pipeline.py"),
+            Path("scripts/operator/pipeline_tooling/environment.py"),
+        ]
+        for step in (*checks.CONTRACTS_STEPS, *checks.RUNTIME_STEPS):
+            for argument in step.argv:
+                if argument.endswith(".py") and Path(argument).is_absolute():
+                    inputs.append(Path(argument).relative_to(root))
+        self.assertGreaterEqual(len(inputs), 9)
+        for relative in inputs:
+            with self.subTest(relative=str(relative)):
+                self.assertTrue(self._covered(relative), relative)
+
+    def test_the_release_build_takes_the_revision_from_this_computation(self):
+        """There is one computation: `cloudbuild.yaml` and the deployment
+        runbook pass `pipeline.py revision`'s output into the build, which
+        embeds it unchanged (`DEPLOYED_CODE_REVISION_HASH`)."""
+        cloudbuild = (environment.ROOT / "cloudbuild.yaml").read_text()
+        self.assertIn("REV=$(python3 scripts/operator/pipeline.py revision)", cloudbuild)
+        self.assertIn('export TRACE_COMMONS_BUILD_CODE_REVISION_HASH="${_CODE_REVISION_HASH}"', cloudbuild)
+        qualification = (
+            environment.ROOT / "crates/trace-commons-server/src/versioned_pipeline_qualification.rs"
+        ).read_text()
+        self.assertIn('option_env!("TRACE_COMMONS_BUILD_CODE_REVISION_HASH")', qualification)
 class ActivityMissionInventoryTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
