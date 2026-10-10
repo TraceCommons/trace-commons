@@ -19,25 +19,26 @@ check; it is not passed by exception.
 | 3. One throwaway tenant | One routing row | one, created for the test |
 | 4. First real tenant | One routing row | one |
 
-## What is not possible yet
+## Limits
 
 Read "Current completion" in [pipeline-activation.md](pipeline-activation.md)
 first. In short:
 
-- The repository binary injects no pipeline runtime. With it, stages 3 and 4
-  cannot run: no tenant can be served on the pipeline, and no activation can
-  pass the gate, because the three promotion-only checks
+- Only a `near-ai-scorer` build started with
+  `TRACE_COMMONS_PIPELINE_RUNTIME=production` injects a pipeline runtime ("The
+  production assembly" in [pipeline-activation.md](pipeline-activation.md)).
+  Any other build serves no tenant on the pipeline, and no activation can pass
+  the gate on it, because the three promotion-only checks
   (`pipeline_production_adapters`, `pipeline_remote_restore`,
-  `pipeline_hf_network_canary`) need the production assembly.
+  `pipeline_hf_network_canary`) need the production assembly. Stages 3 and 4
+  run on that build only. Stage 3 first ran on the pilot on 2026-10-09/10;
+  what it taught is folded into the stage 3 checks below.
 - There is no shadow or dual-run mode. Each receipt has exactly one owner. A
   tenant on the pipeline is not scored by the legacy path, and its
   pipeline-owned receipts never move back to it. No tool compares the two
   paths on the same traces; stage 3 compares the pipeline's decisions with
   what the legacy gate recorded for the same synthetic traces on another
   tenant.
-
-Stages 1 and 2 can run today. Stages 3 and 4 are written down now so that the
-production assembly is built to pass them.
 
 ## Stage 1: deploy with the pipeline off
 
@@ -162,9 +163,54 @@ Preconditions:
   ([pipeline-qualification.md](pipeline-qualification.md)).
 - The tenant is created for the test, holds no real contributor's work, and
   is in `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` on **every** replica.
+- `TRACE_COMMONS_PIPELINE_CREDIT_ISSUER_PRINCIPAL_REF` is set on every replica,
+  to a canonical hashed principal ref (`principal_sha256:` and 64 hexadecimal
+  characters). Once a tenant is on the receipts list, a runtime that serves
+  the compatibility bundle without it refuses to start
+  (`pipeline_credit_issuer_principal_missing`); any other form of the value
+  is refused too.
 - NEAR settlement mode is `disabled` (see [settlement-mode.md](settlement-mode.md)).
-- Vector indexing is running for the tenant: the pipeline's Score phase needs
-  a live embedder and index.
+- The production assembly's embedder and index are configured: the
+  pipeline's Score phase needs a live embedder and index, and it takes both
+  from the assembly's own environment. It does not use `main`'s vector index
+  worker. The `vector-index` drill's `scheduler_enabled` reports that worker
+  (`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED`), so do not require it to be
+  true for the pipeline.
+
+### Before activation: the boot and the qualification
+
+These caught the first stage 3 run on the pilot (2026-10-09/10).
+
+- **The adapters check variables are for one boot.** The deployed host emits
+  `pipeline_production_adapters` at startup when
+  `TRACE_COMMONS_PIPELINE_CHECK_RESULT_DIR`, `TRACE_COMMONS_PIPELINE_CHECK_RUN_ID`
+  and `TRACE_COMMONS_PIPELINE_CHECK_CODE_REVISION_HASH` are set
+  ("`pipeline_production_adapters`" in
+  [pipeline-activation.md](pipeline-activation.md), #1295). Remove all
+  three from the env file once that boot has written its result. Left in
+  place, a restart of the same revision only logs
+  `pipeline_production_adapters_already_emitted` and continues, but the first
+  boot of a new revision is refused (`pipeline_check_revision_mismatch`),
+  because the variables still name the old one.
+- **The result directory must be writable by the service.** A unit with
+  `ProtectSystem=strict` and no `ReadWritePaths=` for that directory refuses
+  the start. Builds since #1315 name this `pipeline_check_write_failed`;
+  earlier builds reported it as `pipeline_check_already_emitted`, which is
+  what the pilot showed on 2026-10-09, with no result file anywhere.
+- **Every new revision needs a new qualification for every routed tenant.**
+  After any deploy, `GET /v1/admin/pipeline/routing` for each tenant whose row
+  says `pipeline` must show `active_bundle_qualified_on_revision: true`. Until
+  the bundle is qualified on the running revision, that tenant's new uploads
+  are `503 pipeline_bundle_not_qualified`, and ingest logs
+  `pipeline_active_bundle_not_qualified` at start, once for each such tenant.
+  This holds for the throwaway tenants of this stage as much as for a real one.
+- **`qualify` against a shared server leaves roles behind.** A
+  `pipeline.py qualify --postgres-admin-url ...` run leaves three cluster-wide
+  owner-probe roles from `migration_atomicity_pg` on that PostgreSQL server,
+  and the next `qualify` on it fails at `postgres_migration_atomicity`. Until
+  #1335 is fixed, drop them by hand before qualifying again (`DROP OWNED BY`
+  the role in each database, then `DROP ROLE`), or qualify against a
+  disposable container.
 
 Before activating, build a synthetic trace set that covers the cases that
 matter, not only clean traces: short single-turn sessions, chunk-capped long
@@ -174,12 +220,38 @@ tenant's consent scope, and a session with a tool the redactor does not know.
 No real contributor's trace goes in it.
 
 Upload the whole set to a **second** throwaway tenant that stays on the legacy
-path, and record per trace: admitted or refused, the refusal label, the
-credit quality, and the pending credit. That is the reference the checks below
-compare with, scored by the deployment's own legacy gate and settings.
+path, and record per trace, once it is terminal (below): admitted or refused,
+the refusal label, the credit quality, and the pending credit. That is the
+reference the checks below compare with, scored by the deployment's own
+legacy gate and settings.
 
 Then activate the pipeline tenant ("Activate, roll back, contain, deactivate"
 in [pipeline-activation.md](pipeline-activation.md)), and run these checks.
+
+### When a submission is terminal
+
+Do not record a submission the moment it reads `accepted`. A pipeline
+submission reads `accepted` as soon as Admission admits it, and its credit
+figure arrives later, when the run has been scored. Until then its status
+shows 0.00 pending and the line "Scoring in progress; credit is assigned when
+the gate's evaluation completes." A comparison that records at that point
+records a zero that is not the pipeline's answer.
+
+A submission is terminal when its status is not `accepted` (refused,
+quarantined, rejected), or when it is `accepted` and carries a credit basis
+line: either "Credit reflects the gate's scoring ..." (the scored figure), or
+"This trace duplicates an earlier submission under your account and earns no
+separate credit." Poll until every submission of the set is terminal before
+comparing. The same rule applies to the legacy reference tenant.
+
+### Re-running the comparison
+
+Submission ids are derived from content (the contributor derives each from
+the session hash), so uploading the same set again to the same pipeline
+tenant replays the earlier receipts and their results; it does not run the
+new code. To re-run after a code change, create a fresh pipeline tenant (a
+new run id), add it to `TRACE_COMMONS_PIPELINE_RECEIPTS_TENANT_IDS` on every
+replica, qualify the bundle for it on the running revision, and activate it.
 
 ### 3a. The happy path
 
@@ -191,10 +263,18 @@ in writing. The client shows the same pending credit the pipeline recorded.
 
 ### 3b. The gates refuse what they must
 
-Upload the PII, out-of-scope-consent, unknown-tool and duplicate traces. Each
-is refused or quarantined with the same label the legacy tenant recorded, and
-none earns credit. This comparison has no tolerance: a trace the legacy gate
-refuses for privacy or consent and the pipeline admits is a release blocker.
+Upload the PII and duplicate traces. Each is refused, quarantined, or (the
+duplicate) withheld with the same label or line the legacy tenant recorded,
+and none earns credit. This comparison has no tolerance: a trace the legacy
+gate refuses for privacy or consent and the pipeline admits is a release
+blocker.
+
+Upload the out-of-scope-consent and unknown-tool traces too, and compare them
+with the legacy record the same way. Do not expect them to earn nothing: on
+the pilot (2026-10-09/10) both were admitted and credited 3.00 on **both**
+paths. The earlier expectation of "no credit" for them was wrong, not the
+pipeline. What must hold is agreement with the legacy path; a difference in
+either direction is a finding.
 
 ### 3c. Failure drills
 
@@ -204,8 +284,25 @@ refuses for privacy or consent and the pipeline admits is a release blocker.
 | Worker lost mid-Score | Stop the worker while a run is in Score | The lease expires; a commit from the old holder is refused as stale; another worker completes the run |
 | Restart with parked runs | Restart ingest while runs are parked | Parked runs are released in bounded batches and complete |
 | Revocation and withdrawal | Revoke one submission and withdraw another at each phase (before Score, after Score, after Settle) | Each follow-up is applied, export snapshot items are invalidated, the tombstone carries the caller's reason, and a lost follow-up is recovered by the worker |
-| Containment | `POST /v1/admin/pipeline/contain` | New uploads are `503` and write nothing; work already received completes; uploads are accepted again after re-opening (this is the test `containment_refuses_new_receipts_and_keeps_pending_work` against the deployment) |
-| Deactivation | `POST /v1/admin/pipeline/deactivate`, then move the tenant to `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` | New uploads take the legacy path; in-flight runs and settlement legs complete on the drain list; `GET /v1/admin/pipeline/legacy-drain` reaches zero |
+| Containment | Upload a large in-flight probe, then `POST /v1/admin/pipeline/contain` while its run is still in progress (see below) | New uploads are `503` and write nothing; work already received completes; uploads are accepted again after re-opening (this is the test `containment_refuses_new_receipts_and_keeps_pending_work` against the deployment) |
+| Deactivation | `POST /v1/admin/pipeline/deactivate`, then move the tenant to `TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS` | New uploads take the legacy path; in-flight runs and settlement legs complete on the drain list; `GET /v1/admin/pipeline/legacy-drain` reaches zero, except as noted below |
+
+"Work in flight at the contain" is judged by the rule in "When a submission
+is terminal": an `accepted` submission without a credit basis line is still
+in flight, and it must reach a terminal status while the tenant is contained.
+Since #1324 moved the classifier rescrub to a privacy pass at the start of
+Review, a small trace clears the whole pipeline in seconds, so a small probe
+is usually finished before the contain lands and proves nothing. Use the
+long, chunk-capped body of the synthetic set (about 356 KB) as the in-flight
+probe, and confirm it is not yet terminal when the contain returns. On the
+pilot it completed while contained in about five minutes.
+
+On a deployment with `main`'s vector index worker off
+(`TRACE_COMMONS_VECTOR_INDEX_SCHEDULER_ENABLED` unset), the legacy drain report
+keeps `vector_index_pending` above zero for the tenant's legacy uploads (the
+reference tenant's, and any taken after deactivation). That is legacy work
+for a worker that is not running, not pipeline work; the drain is judged on
+the other counts.
 
 The store-fault, lease, revocation, and parked-run behaviour described above is
 what the open pipeline follow-ups specify; run these drills on a build that
@@ -225,6 +322,26 @@ either zero or a known, documented pipeline-row difference.
 
 Pass: every check in 3a to 3e holds. Then contain, deactivate, drain, and
 remove the throwaway tenant.
+
+A run held for review does not drain by itself: a run Admission quarantined,
+or one the Review-start privacy pass escalated (its submission reads
+`quarantined` since #1332), stays held until a reviewer assesses it, and the
+tenant does not drain cleanly until then. Reject each synthetic probe that is
+held, as a reviewer for the tenant:
+
+1. `GET /v1/review/pipeline/quarantine` lists the held runs and what holds
+   each (`hold_reason`).
+2. `POST /v1/review/pipeline/runs/{run_id}/claim`, which returns the lease
+   token.
+3. `POST /v1/review/pipeline/runs/{run_id}/assessment` with that
+   `lease_token`, `"recommendation": "reject"`, and a `reason` that is a
+   reason code: 1 to 64 characters of lowercase letters, digits and `_` (for
+   example `synthetic_probe_teardown`). Free text answers `422 invalid reason
+   code`; a recommendation other than `approve` or `reject` answers
+   `422 invalid review recommendation`.
+
+"Quarantined runs and human review" in [pipeline-activation.md](pipeline-activation.md)
+describes the routes in full.
 
 ## Stage 4: first real tenant
 
