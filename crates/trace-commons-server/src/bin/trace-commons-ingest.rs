@@ -8936,6 +8936,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(pii_backstop_clear_stale_prior_risk_handler),
         )
         .route(
+            "/v1/admin/pii-backstop-rederive-released",
+            post(pii_backstop_rederive_released_handler),
+        )
+        .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
         )
@@ -46044,8 +46048,9 @@ async fn quarantine_exhausted_pii_backstop(
 /// Re-redact a single held submission through the NEAR AI prose PII filter and,
 /// on success, release the hold. Loads the record + envelope, runs
 /// `rescrub_envelope_prose_pii_with`, then re-stores the rescrubbed envelope,
-/// updates the record's object pointers, mirrors a `RescrubbedEnvelope` object
-/// ref, and transitions the submission to `Accepted`/`Quarantined` based on the
+/// updates the record's object pointers, redaction counts and privacy risk,
+/// mirrors a `RescrubbedEnvelope` object ref, rebuilds the derived record from
+/// the rescrubbed envelope (DB and file), and transitions the submission to `Accepted`/`Quarantined` based on the
 /// POST-backstop residual PII risk. Any error propagates to the caller, which
 /// bumps the attempt counter and leaves the submission on
 /// `AwaitingPiiBackstop`.
@@ -46070,13 +46075,41 @@ async fn process_one_pii_backstop(
     let residual_risk_basis =
         rescrub_envelope_prose_pii_with(adapter, &mut envelope, classify_policy).await?;
     record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
+    // Written in the same breath as the basis, as the operator rescrub does:
+    // the submission row must record what THIS pass found, not the submit-time
+    // counts and risk the classifier has just superseded.
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
 
-    // Status is chosen from the POST-backstop residual risk: a filter that
-    // still leaves Medium/High risk re-quarantines rather than accepts.
+    // Status is chosen from the POST-backstop residual risk through
+    // `status_for_risk`: Low is accepted, High is quarantined, and Medium is
+    // accepted only under TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS (as on
+    // the pilot), quarantined otherwise. PII the classifier found and removed
+    // raises the risk to Medium, not High, so with that setting a trace whose
+    // PII was removed is accepted. High (a key finding, incomplete coverage,
+    // a residual survivor, or a residual scan that could not run) always
+    // quarantines.
     let target_status = status_for_risk(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+
+    // Rebuild the derived duplicate-precheck record from the RESCRUBBED
+    // envelope. The one written at submit was built from the pre-backstop
+    // envelope, and its `canonical_summary` copies the first events'
+    // `redacted_content` verbatim -- the very prose PII this pass removed.
+    // Once the hold is released that row is consumer-visible (exports,
+    // reviewer views, the vector worker's embedding input), so it must be
+    // replaced while the submission is still held. The envelope's own
+    // embedding metadata is refreshed to match, as submit does.
+    let existing_derived = read_all_derived_records(&state.root, &item.tenant_id)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != item.submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    apply_embedding_precheck(&mut envelope, &derived_precheck);
+    let derived_record =
+        build_derived_record(&item.tenant_id, target_status, &envelope, derived_precheck);
 
     let stored = store_envelope(
         state,
@@ -46120,10 +46153,7 @@ async fn process_one_pii_backstop(
         db.upsert_trace_submission(storage_submission_write_from_record(
             &record,
             &envelope,
-            envelope
-                .embedding_analysis
-                .as_ref()
-                .map(|analysis| analysis.canonical_summary_hash.clone()),
+            Some(derived_record.canonical_summary_hash.clone()),
         )?)
         .await
         .context("failed to mirror rescrubbed trace submission metadata")?;
@@ -46145,9 +46175,31 @@ async fn process_one_pii_backstop(
             object_ref.object_store.clone(),
             object_ref.object_key.clone(),
         ));
+        let rescrubbed_ref_id = object_ref.object_ref_id;
+        let rescrubbed_content_sha256 = object_ref.content_sha256.clone();
         db.append_trace_object_ref(object_ref)
             .await
             .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 2b: replace the derived record built from the pre-backstop
+        // envelope, in the DB and then on disk, still BEFORE any status
+        // release. Its input is the rescrubbed ref just written (the store
+        // checks the ref belongs to this submission, so this follows step 2).
+        // A failure here propagates like any other step: the hold is not
+        // released and the next tick retries. A rebuilt row left behind by a
+        // later failure is harmless -- it holds only the rescrubbed summary,
+        // and the retry rewrites it.
+        db.append_trace_derived_record(storage_precheck_derived_write(
+            &record,
+            &derived_record,
+            &envelope,
+            rescrubbed_ref_id,
+            rescrubbed_content_sha256,
+        )?)
+        .await
+        .context("failed to mirror rebuilt trace derived record")?;
+        write_derived_record(&state.root, &derived_record)
+            .context("failed to write rebuilt trace derived record")?;
 
         // Step 3: now flip the on-disk record and release the DB hold. The file
         // record's object_key was already repointed to the rescrubbed artifact
@@ -57617,6 +57669,302 @@ async fn clear_one_stale_prior_risk(
     Ok(())
 }
 
+/// Query params for `POST /v1/admin/pii-backstop-rederive-released`.
+#[derive(Debug, Deserialize)]
+// A mistyped `dry_run` must be refused rather than read as the default,
+// because the default writes.
+#[serde(deny_unknown_fields)]
+struct RederiveBackstopReleasedQuery {
+    /// Submissions to rewrite in this call. Bounded on purpose; an omitted
+    /// limit is a small batch, never everything.
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Count-only acknowledgement. No submission ids, no tenant, no content.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+struct RederiveBackstopReleasedAck {
+    dry_run: bool,
+    /// Accepted or quarantined, unrevoked submissions in the tenant.
+    examined: u64,
+    /// Of those, the ones whose active envelope is the backstop's rescrubbed
+    /// artifact: the candidates.
+    backstop_released: u64,
+    /// Candidates whose derived row already names the rescrubbed artifact as
+    /// its input. Nothing to do; this is what makes a rerun cheap.
+    already_current: u64,
+    /// Candidates rewritten by this call (in a dry run: that would be).
+    rederived: u64,
+    /// Of `rederived`, those whose canonical summary actually changed --
+    /// i.e. whose derived row was still carrying pre-backstop text.
+    summary_changed: u64,
+    /// Vector entries marked invalidated so the vector worker re-embeds the
+    /// rebuilt summary.
+    vector_entries_invalidated: u64,
+    /// Candidates whose row moved on (revoked, purged, re-held) between the
+    /// listing and the write. Left alone.
+    skipped_status_changed: u64,
+    failed: u64,
+    /// Candidates still needing work after this call. Call again until 0.
+    remaining: u64,
+}
+
+/// Re-derive the derived records of submissions the PII backstop released
+/// before it rebuilt them itself (GHSA-q7pr-c684-grrq).
+///
+/// Until that fix the backstop replaced a held trace's envelope but left the
+/// derived duplicate-precheck row built at submit from the pre-backstop
+/// envelope, whose `canonical_summary` copies the first events' prose -- the
+/// PII the classifier had removed. It also left the submission row's
+/// `redaction_counts` and `privacy_risk` at their submit-time values. Those
+/// rows cannot tell which submissions the classifier actually redacted, so
+/// every backstop-released submission is a candidate.
+///
+/// For each candidate (accepted or quarantined, active envelope ref is a
+/// `RescrubbedEnvelope`) whose derived row does not already name that ref as
+/// its input: load the rescrubbed envelope, record its privacy risk, counts
+/// and summary hash on the submission row (a narrow UPDATE that refuses a row
+/// that has moved on), rewrite the derived row (DB, and the file copy where
+/// one exists), and, when the summary changed, invalidate the submission's
+/// vector entries so the vector worker re-embeds the rebuilt summary.
+///
+/// Tenant-scoped to the admin credential's tenant, bounded by `limit`, and
+/// idempotent: a rewritten row names the rescrubbed ref, so the next call
+/// counts it as `already_current`. Call repeatedly until `remaining` is 0.
+/// The response and the log line are counts only.
+async fn pii_backstop_rederive_released_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RederiveBackstopReleasedQuery>,
+) -> ApiResult<Json<RederiveBackstopReleasedAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backstop re-derivation requires a configured DB mirror",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(25).clamp(1, 500) as u64;
+    let ack =
+        rederive_backstop_released(state.as_ref(), db, &tenant.tenant_id, limit, query.dry_run)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons backstop re-derivation enumeration failed"
+                );
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "backstop re-derivation failed",
+                )
+            })?;
+    tracing::info!(
+        dry_run = ack.dry_run,
+        examined = ack.examined,
+        backstop_released = ack.backstop_released,
+        already_current = ack.already_current,
+        rederived = ack.rederived,
+        summary_changed = ack.summary_changed,
+        vector_entries_invalidated = ack.vector_entries_invalidated,
+        skipped_status_changed = ack.skipped_status_changed,
+        failed = ack.failed,
+        remaining = ack.remaining,
+        "Trace Commons backstop-released derived records re-derived"
+    );
+    Ok(Json(ack))
+}
+
+/// Outcome of re-deriving one candidate.
+enum RederiveBackstopOutcome {
+    Rederived {
+        summary_changed: bool,
+        vector_entries_invalidated: u64,
+    },
+    StatusChanged,
+}
+
+async fn rederive_backstop_released(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    limit: u64,
+    dry_run: bool,
+) -> anyhow::Result<RederiveBackstopReleasedAck> {
+    let mut ack = RederiveBackstopReleasedAck {
+        dry_run,
+        ..RederiveBackstopReleasedAck::default()
+    };
+    let mut submissions = db
+        .list_trace_submissions(tenant_id)
+        .await
+        .context("failed to list trace submissions")?
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.status,
+                StorageTraceCorpusStatus::Accepted | StorageTraceCorpusStatus::Quarantined
+            ) && row.revoked_at.is_none()
+                && row.purged_at.is_none()
+        })
+        .collect::<Vec<_>>();
+    submissions.sort_by_key(|row| row.submission_id);
+    let derived_by_id = db
+        .list_trace_derived_records(tenant_id)
+        .await
+        .context("failed to list trace derived records")?
+        .into_iter()
+        .map(|row| (row.derived_id, row))
+        .collect::<BTreeMap<_, _>>();
+    // Read once per call: the precheck's neighbour scores are computed
+    // against the tenant's other derived records, as submit does.
+    let file_derived = read_all_derived_records(&state.root, tenant_id)?;
+
+    for row in submissions {
+        ack.examined += 1;
+        let submission_id = row.submission_id;
+        let Some(object_ref) = db
+            .get_latest_active_trace_object_ref(
+                tenant_id,
+                submission_id,
+                StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            )
+            .await
+            .context("failed to read active rescrubbed envelope ref")?
+        else {
+            continue;
+        };
+        ack.backstop_released += 1;
+        let derived_id = deterministic_trace_uuid_for("derived-precheck", tenant_id, submission_id);
+        let existing = derived_by_id.get(&derived_id);
+        if existing.is_some_and(|derived| derived.input_hash == object_ref.content_sha256) {
+            ack.already_current += 1;
+            continue;
+        }
+        if ack.rederived + ack.skipped_status_changed + ack.failed >= limit {
+            ack.remaining += 1;
+            continue;
+        }
+        let outcome = rederive_one_backstop_released(
+            state,
+            db,
+            row,
+            &object_ref,
+            existing.and_then(|derived| derived.canonical_summary_hash.as_deref()),
+            &file_derived,
+            dry_run,
+        )
+        .await;
+        match outcome {
+            Ok(RederiveBackstopOutcome::Rederived {
+                summary_changed,
+                vector_entries_invalidated,
+            }) => {
+                ack.rederived += 1;
+                ack.summary_changed += u64::from(summary_changed);
+                ack.vector_entries_invalidated += vector_entries_invalidated;
+            }
+            Ok(RederiveBackstopOutcome::StatusChanged) => ack.skipped_status_changed += 1,
+            Err(error) => {
+                ack.failed += 1;
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons backstop re-derivation failed for one submission"
+                );
+            }
+        }
+    }
+    Ok(ack)
+}
+
+async fn rederive_one_backstop_released(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    row: StorageTraceSubmissionRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+    prior_summary_hash: Option<&str>,
+    file_derived: &[TraceCommonsDerivedRecord],
+    dry_run: bool,
+) -> anyhow::Result<RederiveBackstopOutcome> {
+    let tenant_id = row.tenant_id.clone();
+    let submission_id = row.submission_id;
+    let mut record = trace_commons_record_from_storage_submission(row)
+        .context("released submission has no corpus status")??;
+    let envelope = read_envelope_from_object_ref(state, &tenant_id, object_ref)?;
+    let existing = file_derived
+        .iter()
+        .filter(|derived| derived.submission_id != submission_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let precheck = build_derived_precheck(&envelope, &existing);
+    let derived_record = build_derived_record(&tenant_id, record.status, &envelope, precheck);
+    let summary_changed =
+        prior_summary_hash != Some(derived_record.canonical_summary_hash.as_str());
+    if dry_run {
+        return Ok(RederiveBackstopOutcome::Rederived {
+            summary_changed,
+            vector_entries_invalidated: 0,
+        });
+    }
+
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
+    // First, and guarded: if the row is no longer a live released submission
+    // (revoked, purged, re-held since the listing), touch nothing else.
+    let updated = db
+        .record_released_submission_privacy_summary(
+            &tenant_id,
+            submission_id,
+            &serde_storage_string(&record.privacy_risk)?,
+            &record.redaction_counts,
+            &derived_record.canonical_summary_hash,
+        )
+        .await
+        .context("failed to record released submission privacy summary")?;
+    if updated == 0 {
+        return Ok(RederiveBackstopOutcome::StatusChanged);
+    }
+    db.append_trace_derived_record(storage_precheck_derived_write(
+        &record,
+        &derived_record,
+        &envelope,
+        object_ref.object_ref_id,
+        object_ref.content_sha256.clone(),
+    )?)
+    .await
+    .context("failed to rewrite trace derived record")?;
+    // The file copy is rewritten only where one exists; this pass does not
+    // create file state for a DB-primary submission.
+    if let Some(mut file_record) = read_derived_record(&state.root, &tenant_id, submission_id)? {
+        file_record.canonical_summary = derived_record.canonical_summary.clone();
+        file_record.canonical_summary_hash = derived_record.canonical_summary_hash.clone();
+        file_record.privacy_risk = derived_record.privacy_risk;
+        file_record.event_count = derived_record.event_count;
+        file_record.tool_sequence = derived_record.tool_sequence.clone();
+        file_record.tool_categories = derived_record.tool_categories.clone();
+        file_record.coverage_tags = derived_record.coverage_tags.clone();
+        file_record.duplicate_score = derived_record.duplicate_score;
+        file_record.novelty_score = derived_record.novelty_score;
+        write_derived_record(&state.root, &file_record)?;
+    }
+    // A changed summary has a new hash, hence a new vector entry id, so the
+    // vector worker indexes it on its next run. The entries embedded from the
+    // old summary are retired here so nothing keeps serving them.
+    let vector_entries_invalidated = if summary_changed {
+        db.invalidate_trace_vector_entries_for_submission(&tenant_id, submission_id)
+            .await
+            .context("failed to invalidate stale vector entries")?
+    } else {
+        0
+    };
+    Ok(RederiveBackstopOutcome::Rederived {
+        summary_changed,
+        vector_entries_invalidated,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct RequeueQuarantinedQuery {
     /// Bounded on purpose. The first use of this route is a SAMPLE: re-run a
@@ -57635,8 +57983,11 @@ struct RequeueQuarantinedAck {
 /// Move quarantined submissions back to `AwaitingPiiBackstop` for re-assessment.
 ///
 /// Quarantine is not always a verdict about the trace. A submission is
-/// quarantined when its POST-backstop residual risk is Medium or High, and that
-/// assessment is only as good as the classifier that produced it -- the pilot's
+/// quarantined when its POST-backstop residual risk is High, or Medium on a
+/// deployment that does not set TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS
+/// (see `status_for_risk`; the pilot sets it, so there Medium is accepted), or
+/// when its backstop attempts are exhausted. That assessment is only as good
+/// as the classifier that produced it -- the pilot's
 /// 114 quarantined submissions were all assessed between 2026-08-25 and 08-27,
 /// inside the window when the hosted classifier's token ceiling was collapsing.
 /// A window that failed leaves its PII unredacted, which then presents as a
@@ -64418,6 +64769,58 @@ async fn mirror_submission_to_db(
     .await
 }
 
+/// The duplicate-precheck `trace_derived_records` row for one submission.
+///
+/// One `derived_id` per submission (`deterministic_trace_uuid("derived-precheck",
+/// ..)`), so every writer -- submit, operator rescrub, the PII backstop and its
+/// remediation pass -- replaces the same row through the store's
+/// `ON CONFLICT (tenant_id, derived_id) DO UPDATE` rather than adding a second
+/// one beside a stale one. `input_object_ref_id` / `input_hash` name the
+/// envelope artifact the summary was built from.
+fn storage_precheck_derived_write(
+    record: &TraceCommonsSubmissionRecord,
+    derived_record: &TraceCommonsDerivedRecord,
+    envelope: &TraceContributionEnvelope,
+    input_object_ref_id: Uuid,
+    input_hash: String,
+) -> anyhow::Result<StorageTraceDerivedRecordWrite> {
+    Ok(StorageTraceDerivedRecordWrite {
+        derived_id: deterministic_trace_uuid("derived-precheck", record),
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: storage_derived_status(record.status),
+        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+        worker_version: "trace_commons_ingest_v1".to_string(),
+        input_object_ref: Some(
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id: input_object_ref_id,
+            },
+        ),
+        input_hash,
+        output_object_ref: None,
+        canonical_summary: Some(derived_record.canonical_summary.clone()),
+        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
+        summary_model: derived_record.summary_model.clone(),
+        task_success: Some(derived_record.task_success.clone()),
+        privacy_risk: Some(serde_storage_string(&record.privacy_risk)?),
+        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
+        tool_sequence: derived_record.tool_sequence.clone(),
+        tool_categories: derived_record.tool_categories.clone(),
+        coverage_tags: derived_record.coverage_tags.clone(),
+        duplicate_score: Some(derived_record.duplicate_score),
+        novelty_score: Some(derived_record.novelty_score),
+        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
+            analysis
+                .cluster_id
+                .clone()
+                .or_else(|| analysis.nearest_cluster_id.clone())
+        }),
+    })
+}
+
 /// Mirrors a submission's rows. The audit event for the write is appended
 /// separately, through [`append_audit_event_mirrored`].
 async fn mirror_submission_to_db_with_options(
@@ -64440,8 +64843,6 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
-    let derived_id = deterministic_trace_uuid("derived-precheck", record);
-    let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
         .contributor
         .credit_account_ref
@@ -64482,41 +64883,13 @@ async fn mirror_submission_to_db_with_options(
         .await
         .context("failed to mirror trace object ref")?;
 
-    db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
-        derived_id,
-        tenant_id: record.tenant_id.clone(),
-        submission_id: record.submission_id,
-        trace_id: record.trace_id,
-        status: storage_derived_status(record.status),
-        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
-        worker_version: "trace_commons_ingest_v1".to_string(),
-        input_object_ref: Some(
-            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
-                tenant_id: record.tenant_id.clone(),
-                submission_id: record.submission_id,
-                object_ref_id,
-            },
-        ),
-        input_hash: content_sha256,
-        output_object_ref: None,
-        canonical_summary: Some(derived_record.canonical_summary.clone()),
-        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
-        summary_model: derived_record.summary_model.clone(),
-        task_success: Some(derived_record.task_success.clone()),
-        privacy_risk: Some(privacy_risk.clone()),
-        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
-        tool_sequence: derived_record.tool_sequence.clone(),
-        tool_categories: derived_record.tool_categories.clone(),
-        coverage_tags: derived_record.coverage_tags.clone(),
-        duplicate_score: Some(derived_record.duplicate_score),
-        novelty_score: Some(derived_record.novelty_score),
-        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
-            analysis
-                .cluster_id
-                .clone()
-                .or_else(|| analysis.nearest_cluster_id.clone())
-        }),
-    })
+    db.append_trace_derived_record(storage_precheck_derived_write(
+        record,
+        derived_record,
+        envelope,
+        object_ref_id,
+        content_sha256,
+    )?)
     .await
     .context("failed to mirror trace derived metadata")?;
 
