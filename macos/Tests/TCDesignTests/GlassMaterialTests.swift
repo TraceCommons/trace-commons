@@ -23,15 +23,19 @@ final class GlassMaterialTests: XCTestCase {
         XCTAssertEqual(GlassMaterial.current(), expected)
     }
 
-    /// Liquid Glass draws its own rim; a pane on it must not draw a second.
-    /// Every other tier, and every pane on the fallbacks, keeps its edge.
-    func test_onlyAPaneOnLiquidGlassSkipsItsOwnEdge() {
-        XCTAssertFalse(GlassTier.pane.drawsOwnEdge(on: .liquidGlass))
-        XCTAssertTrue(GlassTier.pane.drawsOwnEdge(on: .vibrancy))
-        XCTAssertTrue(GlassTier.pane.drawsOwnEdge(on: .opaque))
-        for tier in [GlassTier.card, .cardQuiet, .well, .control, .controlSelected, .popover, .menu, .nodeCard] {
-            XCTAssertTrue(tier.drawsOwnEdge(on: .liquidGlass), "\(tier)")
-        }
+    /// Every pane keeps #1146's pane gradient, veil and edge over its
+    /// native material, Liquid Glass included (owner ruling, 2026-10-07).
+    func test_everyPaneKeepsTheReferenceGradientVeilAndEdge() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TCDesign/Styling")
+        let backdrop = try String(contentsOf: url.appendingPathComponent("GlassBackdrop.swift"), encoding: .utf8)
+        let native = try XCTUnwrap(backdrop.range(of: "case .liquidGlass, .vibrancy:"))
+        let tail = backdrop[native.upperBound...].prefix(400)
+        XCTAssertTrue(tail.contains("glassVeil") && tail.contains("paneFill"))
+        let style = try String(contentsOf: url.appendingPathComponent("GlassStyle.swift"), encoding: .utf8)
+        XCTAssertTrue(style.contains(".glassEdge(edge ?? tier.edge, in: shape)"))
+        XCTAssertFalse(style.contains("drawsOwnEdge"))
     }
 
     /// The content-layer base is solid.

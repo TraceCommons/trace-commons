@@ -3,17 +3,18 @@ import XCTest
 
 @testable import TCDesign
 
-/// R5, as the owner revised it on #1241: the main pane is a compact fixed
-/// width that never changes when another pane opens or closes; the map and
-/// the inspector each open at a fixed default width, and opening one grows
+/// R5, as the owner revised it on #1241 and on 2026-10-08: the main pane is a
+/// fixed width that never changes when another pane opens or closes; the map
+/// and the inspector each open at a fixed default width (the inspector two
+/// thirds of the main pane), and opening one grows
 /// the window to the right by its width (closing shrinks it), so no other
 /// pane changes width. Hidden panes reserve no space.
 final class ThreePaneTests: XCTestCase {
     private let padding = GlassTokens.Space.windowPadding
     private let gap = GlassTokens.Space.paneGap
-    private let main = GlassTokens.Size.paneLeftCompactWidth
+    private let main = GlassPaneLayout.mainWidth
     private let mapWidth = GlassTokens.Size.mapWidth
-    private let inspector = GlassTokens.Size.inspectorWidth
+    private let inspector = GlassPaneLayout.inspectorWidth
     private typealias V = GlassPaneLayout.Visibility
 
     private static let compositions: [V] = [
@@ -22,13 +23,14 @@ final class ThreePaneTests: XCTestCase {
     ]
 
     func test_theDefaultWidthsAreTheTokens() {
-        XCTAssertEqual(main, 360)
+        XCTAssertEqual(main, 440)
+        XCTAssertEqual(main, GlassTokens.Size.paneLeftWidth + 40)
         XCTAssertEqual(mapWidth, 600)
-        XCTAssertEqual(inspector, 300)
+        XCTAssertEqual(inspector, 293)
         XCTAssertEqual(GlassTokens.Size.mapMinWidth, 360)
         XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth,
                        padding * 2 + main + gap + mapWidth + gap + inspector)
-        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1300)
+        XCTAssertEqual(GlassThreePane<EmptyView, EmptyView, EmptyView>.defaultWidth, 1353)
     }
 
     /// At its default width every composition is its panes, gaps and
@@ -109,11 +111,11 @@ final class ThreePaneTests: XCTestCase {
     func test_theWindowGrowsRightAndStaysOnScreen() {
         let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
         let frame = CGRect(x: 100, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1300, visible: screen),
-                       CGRect(x: 100, y: 200, width: 1300, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(frame, width: 1280, visible: screen),
+                       CGRect(x: 100, y: 200, width: 1280, height: 760))
         let nearEdge = CGRect(x: 1000, y: 200, width: 690, height: 760)
-        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1300, visible: screen),
-                       CGRect(x: 620, y: 200, width: 1300, height: 760))
+        XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 1280, visible: screen),
+                       CGRect(x: 640, y: 200, width: 1280, height: 760))
         XCTAssertEqual(GlassPaneLayout.windowFrame(nearEdge, width: 2400, visible: screen),
                        CGRect(x: 0, y: 200, width: 1920, height: 760))
         // Shrinking keeps the leading edge.
@@ -146,5 +148,51 @@ final class ThreePaneTests: XCTestCase {
         XCTAssertEqual(narrow.visibility, wide.visibility)
         let hidden = GlassPaneLayout(windowWidth: 1500, showsMap: false, showsInspector: true)
         XCTAssertNotEqual(hidden.visibility, wide.visibility)
+    }
+
+    /// While the window moves between compositions, every pane of either is
+    /// drawn on the leading edge: the main pane never moves, a map that stays
+    /// keeps its width, and a map that opens or closes takes exactly the room
+    /// past the fixed panes, from nothing at one end to its width at the other.
+    func test_aMoveKeepsThePanesOnTheLeadingEdge() {
+        for old in Self.compositions {
+            for new in Self.compositions where new != old {
+                let start = GlassPaneLayout.windowWidth(showsMap: old.map, showsInspector: old.inspector)
+                let end = GlassPaneLayout.windowWidth(current: start, from: old, to: new)
+                let before = GlassPaneLayout(windowWidth: start, showsMap: old.map, showsInspector: old.inspector)
+                let move = GlassPaneLayout.Transition(from: old, to: new, mapWidth: before.map)
+                for width in [start, (start + end) / 2, end] {
+                    let layout = GlassPaneLayout(windowWidth: width, transition: move)
+                    XCTAssertEqual(layout.main, main, "\(old) -> \(new) at \(width)")
+                    XCTAssertEqual(layout.map != nil, old.map || new.map, "\(old) -> \(new)")
+                    XCTAssertEqual(layout.inspector != nil, old.inspector || new.inspector, "\(old) -> \(new)")
+                    XCTAssertGreaterThanOrEqual(layout.map ?? 0, 0)
+                    if old.map && new.map { XCTAssertEqual(layout.map, before.map, "\(old) -> \(new)") }
+                }
+                // Only the map moving: with its gap it fills the room past
+                // the fixed panes, nothing at the closed end and its width at
+                // the open end.
+                guard old.map != new.map, old.inspector == new.inspector else { continue }
+                let closed = GlassPaneLayout(windowWidth: old.map ? end : start, transition: move)
+                let open = GlassPaneLayout(windowWidth: old.map ? start : end, transition: move)
+                XCTAssertEqual((closed.map ?? 0) + closed.mapGap, 0, "\(old) -> \(new)")
+                XCTAssertEqual(open.map, mapWidth, "\(old) -> \(new)")
+                XCTAssertEqual(open.mapGap, gap, "\(old) -> \(new)")
+            }
+        }
+    }
+
+    /// The window's limits during a move admit both ends, so neither is
+    /// clamped while the window animates between them.
+    func test_aMovesLimitsAdmitBothEnds() {
+        for old in Self.compositions {
+            for new in Self.compositions where new != old {
+                let limits = GlassPaneLayout.windowWidthLimits(.init(from: old, to: new, mapWidth: nil))
+                let start = GlassPaneLayout.windowWidth(showsMap: old.map, showsInspector: old.inspector)
+                let end = GlassPaneLayout.windowWidth(current: start, from: old, to: new)
+                XCTAssertTrue(limits.contains(start), "\(old) -> \(new)")
+                XCTAssertTrue(limits.contains(end), "\(old) -> \(new)")
+            }
+        }
     }
 }

@@ -1,7 +1,9 @@
 import Foundation
 import TCBridge
+import TCShellCore
 
-/// Every sentence this app says about withdrawal, in one file.
+/// Every sentence this app says about withdrawal, read from the core's table
+/// (`shell_words_copy::withdrawal_words`, through `ShellWords`).
 ///
 /// ## The copy is not this app's to write
 ///
@@ -9,7 +11,7 @@ import TCBridge
 /// and withdrawal is the one place where a plausible-sounding phrase becomes
 /// a false promise about erasure. So the per-tier confirmation bodies are
 /// fixed in that document's **"Canonical confirmation copy"** table rather
-/// than invented three times, and the three `canonical*` constants below are
+/// than invented three times, and the core's three canonical bodies are
 /// that table, reproduced word for word. They are not to be paraphrased,
 /// shortened, or "tightened". `WithdrawalCopyCheck` fails loudly if they are.
 ///
@@ -55,27 +57,22 @@ import TCBridge
 /// actually applied. That is a report, not the confirmation: the
 /// confirmation still comes first, as the contract requires.
 enum WithdrawalCopy {
+    /// The core's withdrawal table (`shell_words_copy::withdrawal_words`).
+    /// Nil when it does not decode, and then nothing here is confirmable.
+    static var words: ShellWordsCopy.Withdrawal? { ShellWords.table?.withdrawal }
+
     // MARK: - The canonical bodies
 
-    /// Canonical copy for `not_distributed`, verbatim.
-    static let canonicalNotDistributed =
-        "This trace never entered the commons. Withdrawing deletes it. Nothing was "
-        + "distributed and nothing needs recalling."
+    /// Canonical copy for `not_distributed`, verbatim (the core's).
+    static var canonicalNotDistributed: String { words?.notDistributed ?? "" }
 
-    /// Canonical copy for `commons_not_distributed`, verbatim.
-    static let canonicalCommonsNotDistributed =
-        "This trace is in the commons but has not been included in any published export "
-        + "or benchmark yet. Withdrawing deletes it and excludes it from everything "
-        + "published from here on."
+    /// Canonical copy for `commons_not_distributed`, verbatim (the core's).
+    static var canonicalCommonsNotDistributed: String { words?.commonsNotDistributed ?? "" }
 
-    /// Canonical copy for `commons_distributed`, verbatim. The clause from
-    /// "but copies" onward is the one sentence in this whole feature that
-    /// must never be softened, shortened, or quietly dropped.
-    static let canonicalCommonsDistributed =
-        "This trace has already been included in a published export or benchmark. "
-        + "Withdrawing deletes our copy and excludes it from everything published from "
-        + "here on, but copies that have already been distributed cannot be recalled. "
-        + "Withdrawing does not undo that."
+    /// Canonical copy for `commons_distributed`, verbatim (the core's). The
+    /// clause from "but copies" onward is the one sentence in this whole
+    /// feature that must never be softened, shortened, or quietly dropped.
+    static var canonicalCommonsDistributed: String { words?.commonsDistributed ?? "" }
 
     static func canonicalBody(_ reach: WithdrawalReach) -> String {
         switch reach {
@@ -86,11 +83,10 @@ enum WithdrawalCopy {
     }
 
     /// Settled credit is not clawed back; credit still pending is forfeited,
-    /// because settlement never picks up a withdrawn trace. The endpoint's
-    /// `credit_retained` is false exactly when pending credit was forfeited.
-    /// This app states only that -- nothing about how much credit, when it
-    /// would have settled, or what it is worth.
-    static let creditNote = "Credit that has already settled stays. Credit still pending is forfeited."
+    /// because settlement never picks up a withdrawn trace. This app states
+    /// only that -- nothing about how much credit, when it would have
+    /// settled, or what it is worth.
+    static var creditNote: String { words?.creditNote ?? "" }
 
     // MARK: - Before the action
 
@@ -120,10 +116,12 @@ enum WithdrawalCopy {
     /// the cannot-be-recalled body in the coral text token and leave the
     /// rest as body copy.
     struct Confirmation {
-        /// The heading. Nil where the core's prompt carries its own.
-        let question: String?
-        /// Present only where the tier is ambiguous: says so, in this app's
-        /// own words, before the canonical bodies it cannot choose between.
+        /// The heading (#1146's dialog title).
+        let question: String
+        /// Under the heading (#1146's dialog description).
+        let description: String
+        /// Present only where the tier is ambiguous: says so before the
+        /// canonical bodies it cannot choose between.
         let ambiguity: String?
         /// Canonical bodies that may apply, in order. One when the tier is
         /// known, two when it is not.
@@ -133,142 +131,135 @@ enum WithdrawalCopy {
         let gravest: Int?
         /// The credit note. Nil where the core's prompt carries its own.
         let credit: String?
-        /// "Withdraw" where the outcome is unambiguous, "Withdraw anyway"
-        /// where the contributor is being asked to accept a limit.
+        /// The action: #1146's "Confirm withdrawal" for every tier.
         let confirmLabel: String
+        /// The action while the request is in flight.
+        let busyLabel: String
     }
 
     /// The confirmation for `stage`, or nil when it cannot be worded: the
-    /// unknown stage's words are the core's, and without them withdrawal is
-    /// not confirmable.
+    /// words are the core's, and without them withdrawal is not confirmable.
     static func confirmation(for stage: Stage) -> Confirmation? {
+        guard let words else { return nil }
         switch stage {
         case .notInTheCommons:
             return Confirmation(
-                question: "Withdraw this trace?",
+                question: words.confirmTitle,
+                description: words.confirmDescription,
                 ambiguity: nil,
-                bodies: [canonicalNotDistributed],
+                bodies: [words.notDistributed],
                 gravest: nil,
-                credit: creditNote,
-                confirmLabel: "Withdraw"
+                credit: words.creditNote,
+                confirmLabel: words.confirm,
+                busyLabel: words.withdrawing
             )
         case .inTheCommons:
             return Confirmation(
-                question: "Withdraw this trace?",
-                ambiguity: "This trace is in the commons. Whether it has already gone into "
-                    + "a published export or benchmark is decided on the server, and this "
-                    + "app cannot tell from here which of these two applies:",
-                bodies: [canonicalCommonsNotDistributed, canonicalCommonsDistributed],
+                question: words.confirmTitle,
+                description: words.confirmDescription,
+                ambiguity: words.ambiguity,
+                bodies: [words.commonsNotDistributed, words.commonsDistributed],
                 gravest: 1,
-                credit: creditNote,
-                confirmLabel: "Withdraw anyway"
+                credit: words.creditNote,
+                confirmLabel: words.confirm,
+                busyLabel: words.withdrawing
             )
         case .unknown:
             // The core's prompt for a trace whose reach this machine cannot
             // know (`withdraw::confirmation_prompt_unknown`, through
             // `tc_withdrawal_confirmation_prompt_text`), the same text the
-            // other shells show: the question, what withdrawing does, that
-            // distributed copies cannot be recalled, and the credit note,
-            // as one block weighted as the gravest.
+            // other shells show: what withdrawing does, that distributed
+            // copies cannot be recalled, and the credit note, as one block
+            // weighted as the gravest.
             guard let prompt = TCCoreCopy.withdrawalConfirmationPrompt(), !prompt.isEmpty else {
                 return nil
             }
             return Confirmation(
-                question: nil,
+                question: words.confirmTitle,
+                description: words.confirmDescription,
                 ambiguity: nil,
                 bodies: [prompt],
                 gravest: 0,
                 credit: nil,
-                confirmLabel: "Withdraw anyway"
+                confirmLabel: words.confirm,
+                busyLabel: words.withdrawing
             )
         }
     }
 
+    /// Said in the confirmation's place when it cannot be worded.
+    static var disclosureUnavailable: String { words?.disclosureUnavailable ?? "" }
+
     // MARK: - After the action
 
+    /// Over a completed withdrawal's result.
+    static var resultHeading: String { words?.resultHeading ?? "" }
+
     /// What actually happened, from the tier the server applied. Never a
-    /// generic "withdrawn": the canonical body for the tier that applied is
-    /// what says which of the three outcomes this was.
+    /// generic "withdrawn": each tier has its own sentence.
     static func resultSentence(_ reach: WithdrawalReach?) -> String {
-        guard let reach else {
+        guard let words else { return "" }
+        switch reach {
+        case nil:
             // The daemon sent a label this build does not know. The
             // withdrawal happened; what cannot be stated is how far the
             // trace had travelled -- so the furthest tier is not ruled out.
-            return "Withdrawn, but the server did not report which of the three tiers "
-                + "applied, so this app cannot tell you whether it had already been "
-                + "included in a published export or benchmark. If it had, copies that "
-                + "have already been distributed cannot be recalled."
+            return words.resultUnknown
+        case .notDistributed?: return words.resultNotDistributed
+        case .commonsNotDistributed?: return words.resultCommonsNotDistributed
+        case .commonsDistributed?: return words.resultCommonsDistributed
         }
-        return "Withdrawn. " + canonicalBody(reach)
     }
 
     // MARK: - When it does not happen
 
-    /// Withdrawal is authenticated by an account session, which this build
-    /// has no way to obtain. Leads with the fact that nothing happened: a
-    /// contributor must not walk away from a failed withdrawal believing
-    /// their trace was taken back.
-    static let accountSessionRequired =
-        "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level "
-        + "act, so it is authenticated by your Trace Commons account rather than by this "
-        + "device -- that is what lets you withdraw a trace after losing the machine that "
-        + "sent it. This build has no account sign-in yet, so it cannot make the request."
+    /// The account session was refused. Leads with nothing having happened.
+    static var accountSessionRequired: String { words?.accountSessionRequired ?? "" }
 
-    /// The daemon's label for "the server has no record of this submission
-    /// for this account".
-    ///
-    /// The server answers identically whether the submission belongs to
-    /// somebody else or does not exist at all, so that accounts cannot be
-    /// enumerated, and this app must not undo that by guessing out loud --
-    /// see rule 4. `notFound` therefore says neither.
-    ///
-    /// Unreachable today: `daemon/withdraw.rs` collapses every
-    /// `WithdrawError` into the single label `withdraw-failed`, so the 404
-    /// the client crate carefully classifies never reaches this process.
-    /// Handled anyway, because the day that label is passed through is not
-    /// the day to be inventing this sentence.
-    static let notFoundLabels: Set<String> = ["not-found", "not_found", "submission-not-found"]
+    /// The daemon's labels for "the server has no record of this
+    /// submission for this account". The server answers identically whether
+    /// the submission belongs to somebody else or does not exist at all, so
+    /// that accounts cannot be enumerated, and `notFound` says neither.
+    static var notFoundLabels: Set<String> { Set(words?.notFoundLabels ?? []) }
 
-    static let notFound =
-        "Nothing was withdrawn and nothing was deleted. There is no trace with that id "
-        + "under your account."
+    static var notFound: String { words?.notFound ?? "" }
 
-    /// Any other failure. Same first clause, same reason.
+    /// Any other failure. Never echoes the daemon's label, which is for logs.
     static func failureSentence(label: String) -> String {
         if notFoundLabels.contains(label) { return notFound }
-        return "Nothing was withdrawn and nothing was deleted. The request did not go "
-            + "through (\(label)). You can try again."
+        return words?.failed ?? ""
     }
+
+    /// The retry control after a failure (#1146's "Try again").
+    static var tryAgain: String { words?.tryAgain ?? "" }
 
     // MARK: - Bulk
 
-    /// Why there is no "withdraw all of these" button.
-    ///
-    /// The contract's rule 5 permits bulk only if the confirmation can say
-    /// that the selected traces may fall into different tiers and that some
-    /// may already have been distributed. This app has a second problem on
-    /// top of that one, and it is the reason bulk is left out rather than
-    /// worded around: `withdraw_bulk` returns only `withdrawn` and `failed`
-    /// counts, so afterwards there is no per-trace tier to report and rule 1
-    /// -- never a generic "withdrawn" -- cannot be honoured at all.
-    static let noBulkAction =
-        "Withdraw sessions individually to see the result for each one."
+    /// Why there is no "withdraw all of these" button: `withdraw_bulk`
+    /// returns only counts, so afterwards there is no per-trace tier to
+    /// report, and rule 1 -- never a generic "withdrawn" -- cannot hold.
+    static var noBulkAction: String { words?.noBulkAction ?? "" }
+
+    /// The defect notice's title when `WithdrawalCopyCheck` fails; the
+    /// core's unavailable word when the table did not decode (the likeliest
+    /// defect), never "".
+    static var wordingDefect: String? { ShellWords.defectTitle(words?.wordingDefect) }
 }
 
 /// Assertions that belong on the copy, not on the plumbing.
 ///
-/// The Swift package has no test target, so these are evaluated by the
-/// History screen itself and rendered as a visible defect banner when they
-/// fail, rather than sitting in a test nobody runs. They are cheap string
-/// comparisons and they exist for one reason: this file is a second copy of
-/// wording whose canonical form lives in a document, and an edit that
-/// shortens the cannot-be-recalled clause, or that hands an `accepted` trace
-/// only the gentler body, is exactly the change nobody would notice in
-/// review.
+/// Evaluated by the History screen itself and rendered as a visible defect
+/// banner when they fail. The core's table carries the same properties as
+/// Rust tests (`shell_words_copy`); this is the check on what this build
+/// actually decoded, so a table that did not arrive, or arrived altered,
+/// is visible rather than silently confirmable.
 enum WithdrawalCopyCheck {
     /// Returns the failures, empty when the copy still holds.
     static func failures() -> [String] {
         var problems: [String] = []
+        guard WithdrawalCopy.words != nil else {
+            return ["the withdrawal wording did not arrive from the core"]
+        }
 
         // The clause that must survive every future edit, in the canonical
         // body and everywhere that body is used.
@@ -317,28 +308,35 @@ enum WithdrawalCopyCheck {
             problems.append("an unknown trace is not warned about distributed copies and credit")
         }
 
-        // A failed withdrawal must lead with the fact that nothing happened,
-        // and a not-found must disclose neither existence nor ownership.
+        // A failed withdrawal must say nothing happened, as a sentence of
+        // its own (at the start, or right after a full stop), and a
+        // not-found must disclose neither existence nor ownership. That the
+        // signed-out line never claims an answer from the server is the
+        // core's test (`shell_words_copy`), which pins each sentence and each
+        // tier's result in full, so this check reports only what it checks.
+        let nothing = "Nothing was withdrawn"
         for sentence in [
             WithdrawalCopy.accountSessionRequired,
             WithdrawalCopy.notFound,
             WithdrawalCopy.failureSentence(label: "withdraw-failed"),
-        ] where !sentence.hasPrefix("Nothing was withdrawn") {
-            problems.append("a failure sentence does not open by saying nothing happened")
+        ] where !(sentence.hasPrefix(nothing) || sentence.contains(". " + nothing)) {
+            problems.append("a failure sentence does not say nothing happened")
         }
         let lowerNotFound = WithdrawalCopy.notFound.lowercased()
         if lowerNotFound.contains("belongs to") || lowerNotFound.contains("does not exist") {
             problems.append("the not-found sentence discloses existence or ownership")
         }
 
-        // No outcome may be reported as a bare "withdrawn", and the gravest
-        // one may not be reported more gently than it was confirmed.
-        for reach in [
-            WithdrawalReach.notDistributed, .commonsNotDistributed, .commonsDistributed,
-        ] where !WithdrawalCopy.resultSentence(reach)
-            .contains(WithdrawalCopy.canonicalBody(reach))
-        {
-            problems.append("an outcome does not carry its tier's canonical wording")
+        // No outcome may be reported as a bare "withdrawn": each tier reads
+        // differently, and the gravest one, and an unknown one, may not be
+        // reported more gently than it was confirmed.
+        let outcomes = [WithdrawalReach.notDistributed, .commonsNotDistributed, .commonsDistributed]
+            .map { WithdrawalCopy.resultSentence($0) }
+        if Set(outcomes).count != outcomes.count || outcomes.contains(where: \.isEmpty) {
+            problems.append("an outcome does not name its tier")
+        }
+        if !WithdrawalCopy.resultSentence(.commonsDistributed).contains("cannot be recalled") {
+            problems.append("a distributed trace is reported as though it could be recalled")
         }
         if !WithdrawalCopy.resultSentence(nil).contains("cannot be recalled") {
             problems.append("an unknown tier is reported as though nothing were distributed")

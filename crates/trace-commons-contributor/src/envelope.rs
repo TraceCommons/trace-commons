@@ -527,7 +527,7 @@ pub fn build_raw_contribution_with_verdict(
 /// - credential detection, which refuses the whole submission on a High or
 ///   Critical match rather than masking it (`detect_correction_credentials`),
 /// - `ConsentMetadata::correction_included`, which is derived from the
-///   outcome this builds and is what enrols the envelope for the PII
+///   outcome this builds and is what enrolls the envelope for the PII
 ///   backstop hold and floors its residual risk at Medium.
 ///
 /// Stamping a correction onto an already-redacted envelope would skip both.
@@ -1234,7 +1234,7 @@ mod tests {
     fn test_config() -> crate::config::ContributorConfig {
         crate::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

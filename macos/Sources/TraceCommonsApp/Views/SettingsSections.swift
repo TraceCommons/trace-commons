@@ -2,9 +2,11 @@ import TCBridge
 import TCShellCore
 
 /// The Settings window's sections (spec, "Settings navigation"; R11 of
-/// #1173), in the order #1146's settings modal lists them, plus Compute.
+/// #1173), in the order #1146's settings modal lists them, after General
+/// (the appearance choice, design exploration) and plus Compute.
 /// Each names the section `GlassSettingsContent` draws for it.
 enum SettingsSection: String, CaseIterable, Identifiable {
+    case general
     case connection
     case startup
     case notifications
@@ -29,72 +31,49 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// wait for first run, so no write surface exists outside it.
     var availableBeforeOnboarding: Bool {
         switch self {
-        case .connection, .startup, .notifications, .updates, .privateAI, .compute: true
+        case .general, .connection, .startup, .notifications, .updates, .privateAI, .compute: true
         case .watching, .consent, .publicProfile, .watchedFolders, .tools, .witness, .projects, .changes: false
         }
     }
 
-    /// The section's name in the list: the heading the section itself
-    /// shows, from the core's copy where the section takes it from there.
-    /// Nil while that copy has not loaded; the list then draws the row as a
-    /// disabled placeholder (`ListRow`) rather than inventing a name or
-    /// hiding the section.
-    func title(_ sources: TitleSources) -> String? {
+    /// Whether the list names this section (#1146's twelve,
+    /// `sections.ts`). Notifications and Updates are drawn in the body
+    /// under Startup's name, as #1146 draws them under "Startup &
+    /// notifications"; a request for either still scrolls to it.
+    var isListed: Bool { self != .notifications && self != .updates }
+
+    /// The sections the list names, in its order.
+    static let listed: [SettingsSection] = allCases.filter(\.isListed)
+
+    /// The name #1146 lists this section by, from the core's table: the
+    /// list's row and the rule that opens the section in the body. Nil for
+    /// a section drawn under the one before it, and while the table has not
+    /// loaded; the list then draws a disabled placeholder (`ListRow`)
+    /// rather than inventing a name or hiding the section.
+    func navName(_ nav: MonitorSettingsNavCopy?) -> String? {
+        guard let nav else { return nil }
         switch self {
-        case .connection: SettingsWords.connection
-        case .startup: SettingsWords.startup
-        case .notifications: sources.notifications
-        case .updates: SettingsWords.updates
-        case .watching: SettingsWords.watching
-        case .consent: SettingsContent.consentHeading
-        case .publicProfile: PublicProfileCopy.heading
-        case .watchedFolders: sources.watchedFolders
-        case .tools: sources.tools
-        case .privateAI: sources.privateAI
-        case .witness: sources.witness
-        case .projects: SettingsWords.projects
-        case .changes: SettingsContent.auditHeading
-        case .compute: sources.compute ?? SettingsWords.compute
+        // Not in the core's table yet: a single word, as the others below.
+        case .general: return SettingsWords.general
+        case .connection: return nav.connection
+        case .startup: return nav.startup
+        case .notifications, .updates: return nil
+        case .watching: return nav.watching
+        case .consent: return nav.uses
+        case .publicProfile: return nav.profile
+        case .watchedFolders: return nav.folders
+        case .tools: return nav.tools
+        case .privateAI: return nav.privateAI
+        case .witness: return nav.witness
+        case .projects: return nav.projects
+        case .changes: return nav.log
+        case .compute: return nav.compute
         }
     }
 
     /// The row the list draws for this section.
-    func listRow(_ sources: TitleSources) -> ListRow {
-        ListRow.row(title: title(sources))
-    }
-
-    /// The headings that come from loaded copy, each nil until its copy
-    /// has loaded. Held apart from `AppModel` so the list's rows can be
-    /// checked with any of them missing.
-    struct TitleSources {
-        var notifications: String?
-        var watchedFolders: String?
-        var tools: String?
-        var privateAI: String?
-        var witness: String?
-        var compute: String?
-
-        @MainActor
-        init(model: AppModel, compute: String?) {
-            notifications = Notifier.copy?.notificationHeading
-            watchedFolders = TCSourceChecks.settingsCopy()?.heading
-            tools = model.routingCopy?.toolsHeading
-            privateAI = model.privateInferenceCopy?.settingsTitle
-            witness = model.witnessCopy?.heading
-            self.compute = compute
-        }
-
-        init(
-            notifications: String? = nil, watchedFolders: String? = nil, tools: String? = nil,
-            privateAI: String? = nil, witness: String? = nil, compute: String? = nil
-        ) {
-            self.notifications = notifications
-            self.watchedFolders = watchedFolders
-            self.tools = tools
-            self.privateAI = privateAI
-            self.witness = witness
-            self.compute = compute
-        }
+    func listRow(_ nav: MonitorSettingsNavCopy?) -> ListRow {
+        ListRow.row(title: navName(nav))
     }
 
     /// What the list draws for a section: its title, or, while the copy
@@ -114,6 +93,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     /// An SF Symbol for the row.
     var symbol: String {
         switch self {
+        case .general: "gearshape"
         case .connection: "link"
         case .startup: "power"
         case .notifications: "bell"
@@ -135,10 +115,14 @@ enum SettingsSection: String, CaseIterable, Identifiable {
 /// The single words the section list shows for sections whose heading is
 /// a single word on the section itself too.
 enum SettingsWords {
+    static let general = "General"
+    static let appearance = "Appearance"
+    static let light = "Light"
+    static let dark = "Dark"
+    static let system = "System"
     static let connection = "Connection"
     static let startup = "Startup"
     static let updates = "Updates"
     static let watching = "Watching"
     static let projects = "Projects"
-    static let compute = "Compute"
 }

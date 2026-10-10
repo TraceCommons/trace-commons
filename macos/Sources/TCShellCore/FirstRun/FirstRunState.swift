@@ -25,15 +25,17 @@ public enum AccountAnswer: Codable, Equatable, Sendable {
     case watchOnly
     /// Sign in with near.ai after the daemon starts.
     case nearAI
-    /// Create passkey chosen on Join. The sheets that create it complete
-    /// with the daemon, so they open once Folders or Tools started it
-    /// (`FirstRunCall.openPasskeySheets`); until then the choice is undoable.
+    /// Create passkey chosen on Join for later. Join no longer records it:
+    /// Create passkey starts the daemon and opens the sheets over Join
+    /// (`CommitPoint.passkeyOnJoin`). A state that holds it still opens them
+    /// once Folders or Tools started the daemon
+    /// (`FirstRunCall.openPasskeySheets`), and the choice is undoable.
     case passkeyChosen
     /// A passkey whose account Verify bound, or joined this Mac to (another
     /// Mac had bound it), which enrolled this Mac (`account_bind`), with the
     /// name the person gave it (empty when an existing passkey signed in, or
     /// the bind answered `existing_account`).
-    /// A sign-in alone never records it: it holds no enrolment.
+    /// A sign-in alone never records it: it holds no enrollment.
     case passkey(name: String)
     /// The daemon was already enrolled when this first run began: an earlier
     /// first run joined and was quit before Start. An account it holds, so
@@ -65,9 +67,9 @@ public struct AddedFolder: Codable, Equatable, Sendable {
     public let kind: Kind
     public let path: String
     /// The person's answer on the folder's own row: nil until answered,
-    /// true for Watch, false for "I don't use it". A tool's folder starts
+    /// true for Watch, false for "Not used". A tool's folder starts
     /// unanswered (Ron's review of #1235, item 3). A folder of exported
-    /// traces reads Watch, and "I don't use it" removes it (`Fine as
+    /// traces reads Watch, and "Not used" removes it (`Fine as
     /// built`), so it starts at true.
     public var watched: Bool?
 
@@ -136,12 +138,13 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// `sessionRoots` for how it is declared.
     public var notFound: Set<SourceKind>
     /// The person signed out on Join (#1030 rule 6) while the daemon held an
-    /// enrolment: this run's invite, a passkey Verify bound, or an earlier
-    /// first run's. The daemon has no call that drops an enrolment, so it
-    /// may still hold one; this first run no longer treats it as an account
+    /// enrollment: this run's invite, a passkey Verify bound, or an earlier
+    /// first run's. Until the daemon confirms it unenrolled
+    /// (`FirstRunRunner.unenrollAfterSignOut`) it may still hold one; this
+    /// first run no longer treats it as an account
     /// (`holdsEnrolment` is false) and sends nothing that belongs to one --
-    /// no scopes, no grant, no enrolment marker -- and an enrolment the
-    /// daemon reports is not recorded again. A later enrolment (a new
+    /// no scopes, no grant, no enrollment marker -- and an enrollment the
+    /// daemon reports is not recorded again. A later enrollment (a new
     /// invite enrolled, a passkey bound) clears it.
     public var signedOutOfEnrolment: Bool
 
@@ -198,12 +201,24 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         notFound = Set(candidates.filter { !$0.exists }.map(\.source))
     }
 
-    /// Whether the daemon holds an enrolment for this first run, which is
-    /// what consent scopes, the Automatic grant and the enrolment's marker
-    /// need. An earlier first run's enrolment; a passkey Verify bound; or
+    /// The state with the required data use (`consent_options`' `always_on`
+    /// scope) among its scopes. That use is always included: Uses shows its
+    /// box ticked and locked (owner, 2026-10-08), and Start includes it in
+    /// what it sends, so what is sent matches what is shown. Nothing else
+    /// is ticked for the person. Unchanged when no required use is known.
+    public func includingRequiredScope(_ name: String?) -> FirstRunState {
+        guard let name, !scopes.contains(name) else { return self }
+        var included = self
+        included.scopes.insert(name)
+        return included
+    }
+
+    /// Whether the daemon holds an enrollment for this first run, which is
+    /// what consent scopes, the Automatic grant and the enrollment's marker
+    /// need. An earlier first run's enrollment; a passkey Verify bound; or
     /// near.ai once its invite enrolled, or once it enrolled this Mac with no
     /// invite. An account answer alone -- near.ai chosen, a passkey chosen --
-    /// is not one, and nor is an enrolment the person signed out of
+    /// is not one, and nor is an enrollment the person signed out of
     /// (`signedOutOfEnrolment`).
     public var holdsEnrolment: Bool {
         if signedOutOfEnrolment { return false }
@@ -211,6 +226,21 @@ public struct FirstRunState: Codable, Equatable, Sendable {
         case .enrolled, .passkey: return true
         case .nearAI: return enrolledInvite != nil || nearAIEnrolled
         case .none, .watchOnly, .passkeyChosen: return false
+        }
+    }
+
+    /// Whether the daemon may hold an enrollment, whatever this first run now
+    /// treats as the account: one this run enrolled (an invite, near.ai's),
+    /// one an earlier run left or a passkey Verify bound, and one the person
+    /// signed out of on Join that the daemon has not yet unenrolled. Watching
+    /// only is not offered while it does: its Start would act under that
+    /// enrollment, whose scopes nobody chose here, and its marker cannot
+    /// finish while the daemon is logged in.
+    public var daemonHoldsEnrolment: Bool {
+        if signedOutOfEnrolment || enrolledInvite != nil || nearAIEnrolled { return true }
+        switch account {
+        case .enrolled, .passkey: return true
+        case .none, .watchOnly, .nearAI, .passkeyChosen: return false
         }
     }
 
@@ -245,7 +275,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
 
     /// Tools that two rows both watch: the tool's own row and a folder
     /// added for it, or two added folders. The daemon watches one folder per
-    /// tool, so Continue is held until one of them says "I don't use it".
+    /// tool, so Continue is held until one of them says "Not used".
     public var watchedTwice: Set<SourceKind> {
         var counts: [SourceKind: Int] = [:]
         for (kind, choice) in toolAnswers {
@@ -273,7 +303,7 @@ public struct FirstRunState: Codable, Equatable, Sendable {
     /// The tool answers and added folders as one declaration. An added folder
     /// answered Watch is that tool's folder (while a tool is watched in two
     /// rows, `watchedTwice`, Continue is held, so this is never sent); one
-    /// unanswered or answered "I don't use it" declares nothing, and the
+    /// unanswered or answered "Not used" declares nothing, and the
     /// tool's own row stands.
     /// Both Continue on Folders/Tools and the daemon start read this, so they
     /// cannot disagree about what is answered.

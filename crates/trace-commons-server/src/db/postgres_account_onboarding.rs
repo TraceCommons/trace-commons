@@ -225,7 +225,7 @@ impl PgBackend {
     /// `trace_near_provisioning_ceremonies` is a ceremony handle and an opaque
     /// `payload`, so the row mechanics -- the GUC that the RLS policy reads,
     /// the expiry, the single-use delete on take -- are the same for every
-    /// ceremony and are written once here. Two enrolment ceremonies with two
+    /// ceremony and are written once here. Two enrollment ceremonies with two
     /// copies of the RLS handshake is a rule that eventually diverges, and the
     /// half that diverges silently is whichever has the thinner tests.
     async fn store_ceremony_payload<T: serde::Serialize>(
@@ -386,7 +386,7 @@ impl PgBackend {
     /// Bounded at one retry: a second failure to resolve means something other
     /// than a race.
     ///
-    /// Shared by both enrolment ceremonies (#836). The wallet and the login
+    /// Shared by both enrollment ceremonies (#836). The wallet and the login
     /// write different rows, but they race identically, and this is the subtle
     /// half -- a second copy would be the one to drift, and it would drift
     /// silently because a race is not what a test reaches for first.
@@ -790,7 +790,7 @@ impl PgBackend {
         )))
     }
 
-    /// Enrol a further device into the `bound` account `(tenant, account)`: a
+    /// Enroll a further device into the `bound` account `(tenant, account)`: a
     /// second Mac signed in with that account's passkey, proving the near.ai
     /// login the account is already bound to.
     ///

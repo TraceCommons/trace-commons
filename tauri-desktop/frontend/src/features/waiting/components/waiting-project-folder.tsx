@@ -39,7 +39,7 @@ export function WaitingProjectFolder({
         <span className="min-w-0 break-words">
           <strong>{label}</strong>
           {path && <small>{path}</small>}
-          <small>{count} waiting sessions</small>
+          <small>{count} waiting traces</small>
           {eligibility.data && (
             <small>
               {eligibility.data.eligible_count} eligible
@@ -50,7 +50,7 @@ export function WaitingProjectFolder({
           )}
           {eligibility.isPending && <small>Checking contribution eligibility…</small>}
           {eligibility.isError && (
-            <small>Eligibility unavailable. Review sessions individually.</small>
+            <small>Eligibility unavailable. Review traces individually.</small>
           )}
         </span>
       </button>

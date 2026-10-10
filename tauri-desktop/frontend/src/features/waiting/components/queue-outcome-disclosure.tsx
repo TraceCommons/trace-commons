@@ -22,7 +22,7 @@ export function QueueOutcomeDisclosure({
         onToggle={() => setOpen((current) => !current)}
         controls={contentId}
       >
-        Sessions no longer waiting ({total})
+        Traces no longer waiting ({total})
       </Expander>
       {open && (
         <div
@@ -37,7 +37,7 @@ export function QueueOutcomeDisclosure({
               </span>
             ))}
           <span className="pt-1 leading-[1.5]">
-            This covers sessions that reached the queue. Sessions never queued
+            This covers traces that reached the queue. Traces never queued
             are not counted here.
           </span>
         </div>

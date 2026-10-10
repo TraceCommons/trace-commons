@@ -220,6 +220,15 @@ enum Command {
     },
     /// Print local identity (no network)
     Whoami,
+    /// Dev-only: compare the local credit estimate with the credit this
+    /// machine's scored sessions were given. Reads local files only and
+    /// sends nothing; prints aggregate counts.
+    #[command(hide = true)]
+    EstimateCheck {
+        /// A local estimate table file to check instead of the built-in one
+        #[arg(long)]
+        table: Option<PathBuf>,
+    },
     /// Check for a newer release, verify it, and install it
     ///
     /// Refuses anything it cannot verify: the manifest signature, the
@@ -241,6 +250,21 @@ enum Command {
         /// counts as no.
         #[arg(long)]
         yes: bool,
+    },
+    /// Remove this Mac's enrollment: its config, device key and account
+    /// session. Local only: the account and submitted traces stay on the
+    /// server. Approved sessions not yet sent go back to waiting; history,
+    /// receipts, settings and folder rules stay. Asks first.
+    Unenroll {
+        /// Skip the confirmation. Nothing else suppresses it: a closed stdin
+        /// counts as no.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Choose how your traces may be used (consent scopes)
+    Consent {
+        #[command(subcommand)]
+        action: ConsentAction,
     },
     /// Sign in to your account (needed to withdraw traces), or check/end that session
     Account {
@@ -309,6 +333,21 @@ enum AccountAction {
     },
     /// Revoke the account session and forget it locally
     Logout,
+}
+
+/// Consent, after enrollment.
+#[derive(Subcommand)]
+enum ConsentAction {
+    /// Choose the consent scopes, from a menu or `--scopes`. The always-on
+    /// floor scope is always included. Recorded as your choice, which lets
+    /// an enrollment made with `login --default` or without a terminal
+    /// start contributing.
+    Scopes {
+        /// CSV of consent scopes (e.g. benchmark_only,model_training); omit
+        /// to choose from the menu. Required when not run in a terminal.
+        #[arg(long)]
+        scopes: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -601,8 +640,26 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Whoami => commands::whoami(&store, cli.json),
+        Command::EstimateCheck { table } => {
+            let table = crate::credit_estimate_check::table_from(table.as_deref())?;
+            let report = crate::credit_estimate_check::run(&store, &table)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for line in crate::credit_estimate_check::render(&report) {
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout { yes } => commands::logout(&store, yes),
+        Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),
+        Command::Consent { action } => match action {
+            ConsentAction::Scopes { scopes } => {
+                commands::consent_scopes(&store, scopes.as_deref(), cli.json)
+            }
+        },
         Command::Account { action } => match action {
             AccountAction::Login { no_browser } => {
                 commands::account_login(&store, no_browser, cli.json).await
@@ -685,5 +742,45 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             device_key_id.as_deref(),
             ttl_seconds,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(
+            std::iter::once("trace-commons-contributor").chain(args.iter().copied()),
+        )
+        .unwrap_or_else(|e| panic!("{args:?}: {e}"))
+    }
+
+    #[test]
+    fn unenroll_parses_with_and_without_yes() {
+        assert!(matches!(
+            parse(&["unenroll"]).command,
+            Command::Unenroll { yes: false }
+        ));
+        assert!(matches!(
+            parse(&["unenroll", "--yes"]).command,
+            Command::Unenroll { yes: true }
+        ));
+    }
+
+    #[test]
+    fn consent_scopes_parses_with_and_without_a_list() {
+        match parse(&["consent", "scopes"]).command {
+            Command::Consent {
+                action: ConsentAction::Scopes { scopes: None },
+            } => {}
+            _ => panic!("consent scopes"),
+        }
+        match parse(&["consent", "scopes", "--scopes", "model_training"]).command {
+            Command::Consent {
+                action: ConsentAction::Scopes { scopes: Some(s) },
+            } => assert_eq!(s, "model_training"),
+            _ => panic!("consent scopes --scopes"),
+        }
     }
 }

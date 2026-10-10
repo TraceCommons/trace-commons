@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -172,7 +173,7 @@ final class JoinScreenTests: XCTestCase {
     /// Folders and the person is back on Join with near.ai chosen and no
     /// other invite. Clearing the field and looking up withdraws the invite,
     /// with no error, and the near.ai that waited for it: the daemon's
-    /// sign-in needs an enrolment, so signing in with no invite would stop
+    /// sign-in needs an enrollment, so signing in with no invite would stop
     /// at Folders. Skip then reaches watch only, joining nothing.
     func test_aRefusedInviteCanBeWithdrawnAndSetupGoesOn() throws {
         let copy = try coreCopy()
@@ -230,7 +231,7 @@ final class JoinScreenTests: XCTestCase {
             .hidden)
 
         // near.ai needs no invite, so it stays chosen and goes on without
-        // one: no lookup, no invite enrolment, the near.ai enrolment instead.
+        // one: no lookup, no invite enrollment, the near.ai enrollment instead.
         XCTAssertEqual(withdrawn.state.account, .nearAI)
         let forward = JoinScreenLayout.forward(withdrawn.state)
         XCTAssertEqual(forward.account, .nearAI)
@@ -328,14 +329,14 @@ final class JoinScreenTests: XCTestCase {
     }
 
     /// near.ai signs in to the account an invite enrolls: the daemon's
-    /// `account_sign_in` refuses without an enrolment
+    /// `account_sign_in` refuses without an enrollment
     /// (`account-enrollment-required`). So near.ai waits for an invite and
     /// says so, and withdrawing the invite takes a chosen near.ai back.
     /// The owner's reversal in Ron's review of #1235: signing in with
     /// near.ai does not need an invite. Without one, leaving Folders or
     /// Tools signs in to near.ai and enrolls this Mac through it
     /// (`near_ai_account_enroll`), never `account_sign_in`, which needs an
-    /// enrolment; with one, the invite is joined and signed in to as before.
+    /// enrollment; with one, the invite is joined and signed in to as before.
     func test_nearAIDoesNotNeedAnInvite() throws {
         let copy = try coreCopy()
         let bare = FirstRunState(toolAnswers: [.claudeCode: .off, .codex: .off])
@@ -366,7 +367,7 @@ final class JoinScreenTests: XCTestCase {
     }
 
     /// A new passkey creates an account of its own, and the daemon refuses
-    /// to create one over an enrolment (`account-already-enrolled`). So a
+    /// to create one over an enrollment (`account-already-enrolled`). So a
     /// held invite holds back Create passkey and says why, an invite looked
     /// up replaces a passkey only chosen, and a held passkey keeps the
     /// invite field closed.
@@ -416,6 +417,20 @@ final class JoinScreenTests: XCTestCase {
 
     /// One held account leaves the other card with neither its inviting line
     /// nor its action, which could never be taken over that account.
+    /// #1030's `ftux-row--between`: the account card's text takes the row
+    /// and its action keeps its own width. A text column with layout
+    /// priority over an action that is not fixed squeezed Create passkey
+    /// and Sign in to empty capsules and stretched the cards.
+    func test_anAccountCardsActionKeepsItsWidth() throws {
+        let source = try Self.source()
+        let card = try XCTUnwrap(source.range(of: "private func accountCard<Action: View>("))
+        let body = String(source[card.lowerBound...].prefix(1800))
+        XCTAssertFalse(body.contains(".layoutPriority("), "the text column outranks the action again")
+        XCTAssertTrue(body.contains("action()\n                        .fixedSize()"), "the action can be squeezed")
+        XCTAssertTrue(body.contains("GlassStatusLabel(done, status: .on)\n                        .fixedSize()"),
+                      "the done label can be squeezed")
+    }
+
     func test_aHeldAccountQuietsTheOtherCard() throws {
         let copy = try coreCopy()
         let start = FirstRunState(daemonStarted: true)
@@ -502,6 +517,42 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(source.contains("firstRunPasskeySheets("), "the first-run host mounts the sheets")
     }
 
+    /// The sheets open over Join, as in #1030: before the daemon runs,
+    /// Create passkey starts it (watching nothing) and opens them, rather
+    /// than recording a choice the Folders or Tools commit acts on. A start
+    /// that failed reads the core's own line under the card.
+    func test_createPasskeyBeforeTheDaemonRunsStartsItOnJoin() throws {
+        let copy = try coreCopy()
+        let fresh = FirstRunState()
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(fresh, hasPasskeyAccount: false))
+        XCTAssertFalse(JoinScreenLayout.passkeyOpensNow(fresh, hasPasskeyAccount: false))
+
+        let running = FirstRunState(daemonStarted: true)
+        XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: true), "it opens at once")
+        XCTAssertTrue(JoinScreenLayout.passkeyStartsDaemon(running, hasPasskeyAccount: false),
+            "the account follows the start; the request waits for it")
+
+        // Nothing to start where Join offers no passkey, nor for a choice
+        // an earlier build recorded, whose button undoes it.
+        var withInvite = FirstRunState()
+        withInvite.invite = "INVITE-1"
+        let signedIn = FirstRunState(account: .nearAI, signedIn: true)
+        for state in [
+            withInvite, signedIn, FirstRunState(account: .enrolled), FirstRunState(account: .passkey(name: "Mac")),
+            FirstRunState(account: .passkeyChosen),
+        ] {
+            XCTAssertFalse(JoinScreenLayout.passkeyStartsDaemon(state, hasPasskeyAccount: false), "\(state.account)")
+        }
+
+        XCTAssertEqual(JoinScreenLayout.passkeyFailureLine(.passkeyUnavailable, copy: copy.join), copy.join.passkeyUnavailable)
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(.startFailed, copy: copy.join))
+        XCTAssertNil(JoinScreenLayout.passkeyFailureLine(nil, copy: copy.join))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("runner.openPasskeyOnJoin()"))
+        XCTAssertTrue(source.contains("JoinScreenLayout.passkeyFailureLine(runner.failure"))
+    }
+
     /// The sheets' outcome lowers the request whatever it was, so a closed
     /// sheet is asked again only by the next commit or the button. The
     /// sheets open after Folders or Tools, so a sign-out can end them on a
@@ -577,6 +628,47 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertTrue(JoinScreenLayout.showsSignedIn(FirstRunState(account: .nearAI, signedIn: true)))
     }
 
+    /// While the daemon holds an enrollment, Join does not offer "Skip: watch
+    /// only": watching only would act under the enrollment and could never
+    /// finish. An invite this run enrolled, with no account answered again
+    /// (a near.ai sign-in that failed), is the account, as an earlier run's
+    /// enrollment is (`recordEnrolment`): Continue goes on as it. One signed
+    /// out of waits for an account to be chosen. The footer's words are the
+    /// core's either way.
+    func test_skipIsNotOfferedWhileTheDaemonHoldsAnEnrolment() throws {
+        let copy = try coreCopy()
+        var returned = FirstRunState(step: .folders, account: .nearAI, enrolledInvite: "invite:issuer.example")
+        returned = FirstRunNavigation.returnToJoin(afterNearAIFailure: returned)
+        XCTAssertEqual(returned.account, AccountAnswer.none)
+        XCTAssertEqual(JoinScreenLayout.footerTitle(returned, copy: copy), copy.frame.continueButton)
+        XCTAssertNil(JoinScreenLayout.footerNote(returned, copy: copy))
+        XCTAssertTrue(JoinScreenLayout.canForward(returned))
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(returned, failure: .signInFailed, copy: copy), copy.folders.signInFailed,
+            "the failure is still said")
+        let forwarded = JoinScreenLayout.forward(returned)
+        XCTAssertEqual(forwarded.account, .enrolled)
+        XCTAssertEqual(forwarded.step, .folders)
+        XCTAssertTrue(forwarded.holdsEnrolment)
+
+        let signedOut = FirstRunState(account: .none, signedOutOfEnrolment: true)
+        // Nothing signed into: "Skip", with no watch-only note, held back.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(signedOut, copy: copy), copy.join.skip)
+        XCTAssertNil(JoinScreenLayout.footerNote(signedOut, copy: copy))
+        XCTAssertFalse(JoinScreenLayout.canForward(signedOut))
+        XCTAssertEqual(JoinScreenLayout.forward(signedOut), signedOut, "nothing to go on as")
+        let chosen = JoinScreenLayout.toggleNearAI(signedOut)
+        XCTAssertTrue(JoinScreenLayout.canForward(chosen))
+        XCTAssertEqual(JoinScreenLayout.forward(chosen).account, .nearAI)
+
+        // With nothing held, Skip is offered as before.
+        XCTAssertTrue(JoinScreenLayout.canForward(FirstRunState()))
+        XCTAssertEqual(JoinScreenLayout.footerTitle(FirstRunState(), copy: copy), copy.join.skip)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state)"))
+    }
+
     /// The passkey sheets' outcomes as Join records them. A passkey known
     /// without a name never shows the ready line with a blank in it.
     func test_passkeyOutcomesBecomeTheAccount() throws {
@@ -625,9 +717,9 @@ final class JoinScreenTests: XCTestCase {
     }
 
     /// #1030 rule 6 (owner ruling, 2026-10-06): signing out clears the
-    /// invite and the enrolment it wrote, not only the cards. The daemon has
-    /// no call that drops an enrolment, so the state stops treating it as an
-    /// account: no joined line, no scopes, no grant, no enrolment marker, and
+    /// invite and the enrollment it wrote, not only the cards. The daemon has
+    /// no call that drops an enrollment, so the state stops treating it as an
+    /// account: no joined line, no scopes, no grant, no enrollment marker, and
     /// the daemon's report of it is not recorded again.
     func test_signingOutClearsTheInviteAndItsEnrolment() throws {
         let copy = try coreCopy()
@@ -654,19 +746,24 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertEqual(out.scopes, state.scopes)
         XCTAssertEqual(out.toolAnswers, state.toolAnswers)
 
-        // Fail closed: nothing that belongs to an enrolment is sent for it.
+        // Fail closed: nothing that belongs to an enrollment is sent for it.
+        // The daemon still holds it, so watch only is not offered: a
+        // watch-only Start would act under it and could never finish (the
+        // marker is refused while the daemon is logged in).
+        XCTAssertTrue(out.daemonHoldsEnrolment)
+        // No account is signed into, so the button reads "Skip" (owner
+        // ruling, 2026-10-08), but it cannot go on until one is chosen.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(out, copy: copy), copy.join.skip)
+        XCTAssertNil(JoinScreenLayout.footerNote(out, copy: copy))
+        XCTAssertFalse(JoinScreenLayout.canForward(out))
         var watching = out
         watching.account = .watchOnly
-        let calls = FirstRunPlan.calls(for: watching, at: .start)
-        XCTAssertFalse(calls.contains(.setConsentScopes(["research"])))
-        XCTAssertFalse(calls.contains(.markComplete))
-        XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
-        XCTAssertEqual(calls.last, .markWatchOnlyComplete)
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .start), [])
 
-        // The daemon still reports the enrolment; it is not the account again.
+        // The daemon still reports the enrollment; it is not the account again.
         XCTAssertEqual(OnboardingNavigation.recordEnrolment(out), out)
 
-        // An earlier first run's enrolment is signed out of the same way.
+        // An earlier first run's enrollment is signed out of the same way.
         let earlier = JoinScreenLayout.apply(
             .signedOut, to: OnboardingNavigation.recordEnrolment(FirstRunState()), copy: copy
         ).state
@@ -674,7 +771,7 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(earlier.holdsEnrolment)
         XCTAssertNil(earlier.enrolledInvite)
 
-        // near.ai's invite-free enrolment is signed out of the same way.
+        // near.ai's invite-free enrollment is signed out of the same way.
         var viaNearAI = FirstRunState(account: .nearAI, daemonStarted: true, signedIn: true)
         viaNearAI.nearAIEnrolled = true
         XCTAssertTrue(viaNearAI.holdsEnrolment)
@@ -687,7 +784,7 @@ final class JoinScreenTests: XCTestCase {
         let chosen = JoinScreenLayout.apply(.signedOut, to: FirstRunState(account: .passkeyChosen), copy: copy).state
         XCTAssertFalse(chosen.signedOutOfEnrolment)
 
-        // A later bound passkey is an enrolment again.
+        // A later bound passkey is an enrollment again.
         let bound = JoinScreenLayout.apply(.created(name: "Mac"), to: out, copy: copy).state
         XCTAssertFalse(bound.signedOutOfEnrolment)
         XCTAssertTrue(bound.holdsEnrolment)
@@ -721,6 +818,138 @@ final class JoinScreenTests: XCTestCase {
         XCTAssertFalse(runner.state.signedOutOfEnrolment)
     }
 
+    /// Signing out on Join while the daemon holds an enrollment asks the
+    /// daemon to unenroll; once it has, nothing holds the person, and Skip:
+    /// watch only is offered again.
+    func test_aSignOutOnJoinUnenrollsAndOffersWatchOnlyAgain() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        let state = FirstRunState(
+            tier: .quick, step: .folders, invite: "invite:issuer.example", issuerHost: "issuer.example",
+            account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off])
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+        XCTAssertNotNil(runner.state.enrolledInvite)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        XCTAssertTrue(runner.state.signedOutOfEnrolment, "held until the daemon confirms")
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 1)
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+        XCTAssertFalse(runner.state.daemonHoldsEnrolment)
+        XCTAssertTrue(JoinScreenLayout.offersWatchOnly(runner.state))
+        XCTAssertEqual(JoinScreenLayout.footerTitle(runner.state, copy: copy), copy.join.skip)
+    }
+
+    /// The daemon refused or could not be asked: the sign-out stays held,
+    /// as it was before the daemon could unenroll, and watch only stays off.
+    func test_aSignOutWhoseUnenrollFailsStaysHeld() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        daemon.unenrollSucceeds = false
+        let state = FirstRunState(
+            tier: .quick, step: .folders, invite: "invite:issuer.example", issuerHost: "issuer.example",
+            account: .nearAI, toolAnswers: [.claudeCode: .off, .codex: .off])
+        let runner = FirstRunRunner(state: state, daemon: daemon)
+        await runner.commit(.leaveRoots)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 1)
+        XCTAssertTrue(runner.state.signedOutOfEnrolment)
+        XCTAssertFalse(JoinScreenLayout.offersWatchOnly(runner.state))
+    }
+
+    /// A sign-out that held no enrollment asks nothing of the daemon.
+    func test_aSignOutWithNoEnrollmentDoesNotUnenroll() async throws {
+        let copy = try coreCopy()
+        let daemon = RecordingFirstRunDaemon()
+        let runner = FirstRunRunner(state: FirstRunState(step: .join, account: .passkeyChosen), daemon: daemon)
+
+        runner.finishPasskey(.signedOut, copy: copy)
+        await runner.pendingUnenroll?.value
+
+        XCTAssertEqual(daemon.unenrollCalls, 0)
+        XCTAssertFalse(runner.state.signedOutOfEnrolment)
+    }
+
+    /// An enrollment recorded with no invite (an earlier run joined through
+    /// near.ai or a passkey, or the daemon was enrolled already: the demo's
+    /// pre-seeded config) once read "Joined Unknown · Unknown" on the invite
+    /// card. It joined no invite the shell knows of, so the card shows its
+    /// invite field, closed, and no joined line. A real joined invite still
+    /// reads Joined, with its field gone.
+    func test_anEnrolmentWithNoInviteShowsTheFieldAndNoJoinedLine() throws {
+        let copy = try coreCopy()
+        let resumed = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
+        XCTAssertEqual(resumed.enrolledInvite, "")
+        XCTAssertFalse(JoinScreenLayout.joinedInvite(resumed))
+        XCTAssertEqual(JoinScreenLayout.inviteLine(resumed, lookup: nil, failure: nil, copy: copy.join), .hidden)
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(resumed))
+        XCTAssertFalse(JoinScreenLayout.inviteIsEditable(resumed), "no second invite over the enrollment")
+
+        var joined = resumed
+        joined.enrolledInvite = "invite:issuer.example"
+        joined.issuerHost = "issuer.example"
+        XCTAssertTrue(JoinScreenLayout.joinedInvite(joined))
+        guard case .joined(let line) = JoinScreenLayout.inviteLine(joined, lookup: nil, failure: nil, copy: copy.join)
+        else { return XCTFail("a joined invite reads Joined") }
+        XCTAssertTrue(line.contains("issuer.example"))
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(joined))
+
+        // A fresh Join shows the open field; a held passkey shows none.
+        XCTAssertTrue(JoinScreenLayout.showsInviteField(FirstRunState()))
+        XCTAssertTrue(JoinScreenLayout.inviteIsEditable(FirstRunState()))
+        var passkey = FirstRunState()
+        passkey.account = .passkey(name: "Mine")
+        XCTAssertFalse(JoinScreenLayout.showsInviteField(passkey))
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("if JoinScreenLayout.showsInviteField(runner.state) {"))
+        XCTAssertTrue(source.contains(".disabled(!editable)"))
+        let lookUp = try XCTUnwrap(source.range(of: "private func lookUp() {"))
+        XCTAssertTrue(
+            String(source[lookUp.upperBound...].prefix(120))
+                .contains("guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }"))
+    }
+
+    /// Owner, 2026-10-08: the bold sentence is a paragraph of its own, an
+    /// extra gap sets the cards apart from the body, and the no-sharing line
+    /// is an action note: directly above the action bar through the frame's
+    /// slot, not in the cards (owner ruling, 2026-10-08).
+    func test_joinLaysOutItsBodyAndCardsAsRuled() throws {
+        let source = try Self.source()
+        // One paragraph, in the body's regular weight and ink (owner
+        // ruling, 2026-10-08).
+        XCTAssertEqual(source.components(separatedBy: "Text(copy.join.body").count - 1, 1)
+        let body = try XCTUnwrap(source.range(of: "Text(copy.join.body)\n"))
+        let bodyStyle = String(source[body.upperBound...].prefix(200))
+        XCTAssertTrue(bodyStyle.contains(".glassType(GlassTokens.TypeScale.body)\n"))
+        XCTAssertTrue(bodyStyle.contains(".foregroundStyle(GlassColor.textSecondary)"))
+
+        // The no-sharing line is the frame's action note, in no card and
+        // not in the scrolling content (owner ruling, 2026-10-08).
+        XCTAssertFalse(source.contains("GlassCard(quiet: true)"))
+        XCTAssertFalse(source.contains("Text(copy.join.noSharing)"), "drawn in the content")
+        XCTAssertEqual(source.components(separatedBy: "copy.join.noSharing").count - 1, 1)
+        XCTAssertTrue(source.contains("actionNote: copy.join.noSharing,"))
+        let frameCall = try XCTUnwrap(source.range(of: "FirstRunFrame("))
+        let content = try XCTUnwrap(source.range(of: "} content: {", range: frameCall.upperBound..<source.endIndex))
+        let note = try XCTUnwrap(source.range(of: "actionNote: copy.join.noSharing"))
+        XCTAssertLessThan(frameCall.lowerBound, note.lowerBound)
+        XCTAssertLessThan(note.lowerBound, content.lowerBound, "an argument of the frame, not content")
+
+        // The extra gap, a spacing token, above the invite card, and
+        // nowhere else.
+        XCTAssertEqual(JoinScreenLayout.extraGap, GlassTokens.Space.s4)
+        XCTAssertEqual(source.components(separatedBy: ".padding(.top, JoinScreenLayout.extraGap)").count - 1, 1)
+        let invite = try XCTUnwrap(source.range(of: "inviteCard\n                .padding(.top, JoinScreenLayout.extraGap)"))
+        let passkey = try XCTUnwrap(source.range(of: "passkeyCard\n            nearAICard"))
+        XCTAssertLessThan(invite.lowerBound, passkey.lowerBound)
+    }
+
     /// Every word on Join is the core's: the file holds no literal of two or
     /// more words, and reads each card's words from `copy.join`.
     func test_joinAuthorsNoSentence() throws {
@@ -741,7 +970,7 @@ final class JoinScreenTests: XCTestCase {
             XCTAssertLessThan(words.count, 2, "authored: \(text)")
         }
         for field in [
-            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body", "copy.join.bodyEmphasis",
+            "copy.join.titleLight", "copy.join.titleBold", "copy.join.body",
             "copy.join.inviteEyebrow", "copy.join.invitePlaceholder", "copy.join.lookUp",
             "copy.join.passkeyEyebrow", "copy.join.passkeyCreate", "copy.join.passkeyDone",
             "copy.passkeyChosen", "copy.frame.undo",
@@ -758,6 +987,34 @@ final class JoinScreenTests: XCTestCase {
         // external-link glyph.
         XCTAssertFalse(source.contains("arrow.up.right.square"))
     }
+
+    /// Kristi's review of #1261: a near.ai sign-in or enrollment that did not
+    /// succeed returns the person here with the choice cleared, and Join
+    /// says why in the core's line the step said it in before. The line
+    /// goes once an account is answered again; no other failure shows it.
+    func test_joinSaysWhyNearAIWasCleared() throws {
+        let copy = try coreCopy()
+        let returned = FirstRunState()
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(returned, failure: .signInFailed, copy: copy), copy.folders.signInFailed)
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(
+                returned, failure: .nearAIEnrollFailed(label: "near_ai_enroll_commons_unreachable"), copy: copy),
+            TCNearAiEnroll.line(label: "near_ai_enroll_commons_unreachable"))
+        XCTAssertEqual(
+            JoinScreenLayout.nearAINotice(
+                returned, failure: .nearAIEnrollFailed(label: "a_label_with_no_line"), copy: copy),
+            TCNearAiEnroll.line(label: "a_label_with_no_line") ?? copy.folders.enrollRefused)
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: .inviteDead(label: "x"), copy: copy))
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: .startFailed, copy: copy))
+        XCTAssertNil(JoinScreenLayout.nearAINotice(returned, failure: nil, copy: copy))
+        for account in [AccountAnswer.nearAI, .watchOnly, .passkeyChosen] {
+            var chosen = returned
+            chosen.account = account
+            XCTAssertNil(JoinScreenLayout.nearAINotice(chosen, failure: .signInFailed, copy: copy), "\(account)")
+        }
+        XCTAssertTrue(try Self.source().contains("JoinScreenLayout.nearAINotice("))
+    }
 }
 
 /// A daemon that confirms nothing; Join's tests never commit.
@@ -769,6 +1026,7 @@ private final class NoDaemon: FirstRunDaemon {
     func enrollInvite(_ invite: String) async -> Bool { false }
     func signInNearAI() async -> Bool { false }
     func nearAILogin() async -> Bool { false }
+    func cancelNearAILogin() async -> Bool { false }
     func enrollNearAI() async -> FirstRunNearAIEnrolment { .refused(label: "near_ai_enroll_unavailable") }
     func saveConsentScopes(_ scopes: [String]) async -> Bool { false }
     func setProjectMode(projectID: String, mode: ProjectMode) async -> Bool { false }
@@ -777,5 +1035,6 @@ private final class NoDaemon: FirstRunDaemon {
     func grantAutomatic(witness: String?) async -> FirstRunGrantAnswer { .refused(label: "none") }
     func markComplete() async -> Bool { false }
     func markWatchOnlyComplete() async -> Bool { false }
+    func unenroll() async -> Bool { false }
     func firstRunFinished(notice: String?) {}
 }

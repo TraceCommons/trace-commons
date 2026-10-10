@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCDesign
+import TCShellCore
 import TCUpdates
 import UserNotifications
 
@@ -15,7 +16,13 @@ struct StartupSection: View {
     @State private var loginItemState: LoginItemManager.State = LoginItemManager.currentState
 
     var body: some View {
-        GlassEyebrowCard(SettingsWords.startup) {
+        // #1146's `DESKTOP / System integrations`, with Refresh re-reading
+        // the login item from the system.
+        GlassEyebrowCard(SettingsLegacyWords.desktopEyebrow, title: SettingsLegacyWords.desktopTitle) {
+            Button(SettingsLegacyWords.refresh) { loginItemState = LoginItemManager.currentState }
+                .buttonStyle(GlassButtonStyle(.link))
+                .fixedSize()
+        } content: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 switch loginItemState {
                 case .enabled:
@@ -31,8 +38,9 @@ struct StartupSection: View {
                     Text(SettingsLegacyWords.turnOnInSystemSettings)
                         .glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
                 }
+                // A refused switch, under it, unboxed (Ron, 2026-10-09).
                 if let loginItemActionError = model.loginItemActionError {
-                    GlassNotice(tone: .outside) { Text(loginItemActionError) }
+                    GlassAlert(loginItemActionError)
                 }
             }
         }
@@ -110,6 +118,8 @@ struct NotificationsSection: View {
             } else {
                 unknown
             }
+            GlassHairline()
+            NudgeSettingsSection()
         }
     }
 

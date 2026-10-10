@@ -174,6 +174,38 @@ pub fn title_of(transcript: &crate::source::SessionTranscript) -> Option<String>
     crate::daemon::preview::title_of(&redacted)
 }
 
+/// The session's local-estimate features (`lef1`), from the transcript the
+/// watcher already loaded to mint the entry: no extra read.
+///
+/// Every event is fed, delegated transcripts included, because the envelope
+/// is built from all of them (`session_hash` covers the same set). Each
+/// event kind maps to the role its envelope event type has: an opaque record
+/// becomes a content-free tool result in the envelope, so it is fed with its
+/// tool name and no text, and both sides count the same bytes.
+pub fn estimate_features_of(
+    transcript: &crate::source::SessionTranscript,
+) -> trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures {
+    use crate::source::SessionEventKind;
+    use trace_commons_protocol::local_credit_estimate::{EstimateRole, LocalEstimateAccumulator};
+    let mut acc = LocalEstimateAccumulator::new();
+    for event in &transcript.events {
+        let (role, text) = match event.kind {
+            SessionEventKind::User => (EstimateRole::User, event.content.as_deref()),
+            SessionEventKind::Assistant => (EstimateRole::Assistant, event.content.as_deref()),
+            SessionEventKind::ToolResult => (EstimateRole::ToolResult, event.content.as_deref()),
+            // Reasoning counts as other, as the gate's attribution does.
+            SessionEventKind::Reasoning | SessionEventKind::ToolCall => {
+                (EstimateRole::Other, event.content.as_deref())
+            }
+            // `envelope::raw_event_for` maps it to a tool result with no
+            // content.
+            SessionEventKind::Opaque => (EstimateRole::ToolResult, None),
+        };
+        acc.accumulate(role, text, event.tool_name.as_deref());
+    }
+    acc.finish()
+}
+
 /// One session offered to the contributor.
 ///
 /// `Default` supports focused test fixtures, which spell
@@ -446,6 +478,17 @@ pub struct QueueEntry {
     /// survives an exclusion the way it does today.
     #[serde(default)]
     pub approved_unattended: bool,
+    /// A person approved this session from the first-run past-session
+    /// picker (`include_past_sessions`). Such an entry does not count
+    /// against the watcher's queue cap ([`counts_against_the_cap`]): a
+    /// person's choice of their own past sessions must not stop the watcher
+    /// offering new ones (owner decision, 2026-10-05). Their own total is
+    /// bounded instead, by `past_sessions::MAX_LIVE_INCLUDED_SESSIONS`.
+    ///
+    /// `#[serde(default)]`, and left out of the file when `false`, so a queue
+    /// written before this field existed loads, and reads as the watcher's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub person_included: bool,
     /// How many delegated subagent transcripts this entry's session hash
     /// covers, and how many were left out because the conversation exceeded
     /// the source's raw byte budget.
@@ -470,6 +513,25 @@ pub struct QueueEntry {
     /// word of what was said. `None` on an entry written before this existed.
     #[serde(default)]
     pub shape: Option<SessionShape>,
+    /// Content-free numbers about the session (`lef1`: byte counts by role,
+    /// prompt and tool counts, a sampled byte entropy), from which
+    /// `list_pending` and `status` render a local credit estimate against the
+    /// calibration table in force. Minted with `shape`, from the same
+    /// transcript, at the same moment; see [`estimate_features_of`].
+    ///
+    /// Local-only, exactly like `shape`: it never reaches a log line, an
+    /// audit row, a history record or a notification, and only the estimate
+    /// derived from it reaches the wire. Not carried across a content
+    /// change: `reoffered_from` clears it, and a session that grew is minted
+    /// afresh by the watcher.
+    ///
+    /// `None` on every entry written before this field existed, which reads
+    /// as unknown -- no estimate -- never as 0. `#[serde(default)]` so an
+    /// older `daemon-queue.jsonl` still loads, and left out of the file when
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate_features:
+        Option<trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures>,
     /// The session's title (K9): the first non-empty line of the redacted
     /// opening prompt, cut and truncated exactly as the K1 preview title is.
     /// See [`title_of`] for what "redacted" means on this path.
@@ -512,6 +574,39 @@ pub struct QueueEntry {
     /// exactly as they did before: the fast path fails open.
     #[serde(default)]
     pub observed_modified_at: Option<DateTime<Utc>>,
+    /// When the session was last written to, as far as the daemon knows:
+    /// the `modified_at` of the observation this offer was minted from (the
+    /// group's newest write for a claude-code session), or, after a
+    /// `Queue::supersede`, of the observation that found the new content.
+    ///
+    /// It answers "how long has this session been idle", which
+    /// `discovered_at` cannot. `discovered_at` is re-dated by re-offers that
+    /// never touch the file (`undo_keep`, `revive_expired`,
+    /// `return_to_waiting` and the rest, because expiry counts from it),
+    /// and a past session included at first run gets today's date though it
+    /// was last written months ago.
+    ///
+    /// Not `observed_modified_at` above, though both start as the same
+    /// instant. That one is a match key for the poll's fast path and is
+    /// cleared on every re-offer, because a re-offer's content was never
+    /// observed. This one is provenance: `reoffered_from` carries it, and
+    /// every in-place re-offer leaves it alone. Only `supersede` replaces
+    /// it, because a superseded session was written to.
+    ///
+    /// `None` on every entry written before this field existed, and on a
+    /// supersede whose stat failed. A reader falls back to `discovered_at`,
+    /// which is never earlier than the true last write, so the session can
+    /// only look less idle than it is -- the safe direction.
+    ///
+    /// Local-only, exactly like `path`: it never reaches the wire, a log
+    /// line, an audit row, a history record or a notification. Only a count
+    /// derived from it may.
+    ///
+    /// `#[serde(default)]` because `daemon-queue.jsonl` written before this
+    /// field existed must still load; a required field here would make the
+    /// daemon refuse its own queue after an upgrade.
+    #[serde(default)]
+    pub last_modified_at: Option<DateTime<Utc>>,
     /// Whether this session can be contributed on evidence, and why not when
     /// it cannot: one of `contribution_eligibility`'s `STATE_*` labels and
     /// one of its `REASON_*` labels.
@@ -592,7 +687,7 @@ pub struct QueueEntry {
     /// card, an unenrolled build, or any build that pins nothing. Read back
     /// only while `previewed_envelope_digest` names the same digest
     /// ([`QueueEntry::scrub`]), so a released, replaced or revoked pin --
-    /// after an enrolment, a filter change, a revoked approval -- reads as
+    /// after an enrollment, a filter change, a revoked approval -- reads as
     /// not yet scrubbed with nothing to clear by hand.
     ///
     /// Counts and a digest, never content.
@@ -740,6 +835,14 @@ impl QueueEntry {
 /// A stable id for a queue entry, derived from the session hash so the same
 /// session keeps the same id across daemon restarts and across a queue file
 /// rewritten from scratch.
+/// Whether `e` takes one of the watcher's `max_queue_entries` places: a
+/// live (`Pending` or `Approved`) entry the watcher offered. A session a
+/// person included from the past-session picker does not
+/// ([`QueueEntry::person_included`]).
+pub fn counts_against_the_cap(e: &QueueEntry) -> bool {
+    matches!(e.state, QueueState::Pending | QueueState::Approved) && !e.person_included
+}
+
 pub fn entry_id_for(session_hash: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, session_hash.as_bytes())
 }
@@ -889,6 +992,9 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         // `None` sends the next poll down the load path, which is the
         // fail-open direction.
         observed_modified_at: None,
+        // `last_modified_at` is deliberately NOT cleared: it is provenance,
+        // when the session was last written, and re-offering an entry does
+        // not write to it. `supersede`, whose content did move, sets it.
         // Cleared rather than carried. This re-offer exists because the
         // content moved, and the old answer was about the old bytes; a
         // stale `eligible` riding across a content change is the very
@@ -899,6 +1005,10 @@ fn reoffered_from(old: QueueEntry) -> QueueEntry {
         eligibility_reason: None,
         attestation: None,
         attestation_reason: None,
+        // Cleared for the same reason: the features describe the old bytes,
+        // and an estimate of content nobody measured is unknown, not the old
+        // figure. Absent renders as no estimate until a load mints features.
+        estimate_features: None,
         ..old
     }
 }
@@ -1201,7 +1311,7 @@ impl Queue {
         let live = self
             .entries
             .iter()
-            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .filter(|e| counts_against_the_cap(e))
             .count();
         let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
             bail!("unknown-entry-id");
@@ -1263,6 +1373,14 @@ impl Queue {
         true
     }
 
+    /// Mark `entry_id` as a session a person included from the past-session
+    /// picker. See [`QueueEntry::person_included`].
+    pub fn mark_person_included(&mut self, entry_id: Uuid) {
+        if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
+            e.person_included = true;
+        }
+    }
+
     pub fn pending(&self) -> Vec<&QueueEntry> {
         self.entries
             .iter()
@@ -1288,7 +1406,7 @@ impl Queue {
         let live = self
             .entries
             .iter()
-            .filter(|e| matches!(e.state, QueueState::Pending | QueueState::Approved))
+            .filter(|e| counts_against_the_cap(e))
             .count();
         if live >= max_entries {
             bail!("queue-full");
@@ -2014,6 +2132,42 @@ impl Queue {
         }
     }
 
+    /// Record backfilled local-estimate features (OWNER DECISION E13) on a
+    /// waiting entry that has none, only while its content is still the
+    /// bytes `session_hash` names. Returns whether anything was recorded.
+    ///
+    /// The hash check is what keeps features of new bytes off an entry
+    /// minted for old ones: a session that moved is the watcher's to
+    /// supersede, and its replacement is minted with its own.
+    pub fn backfill_estimate_features(
+        &mut self,
+        entry_id: Uuid,
+        session_hash: &str,
+        features: trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures,
+    ) -> bool {
+        let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) else {
+            return false;
+        };
+        if e.state != QueueState::Pending
+            || e.submission_id.is_some()
+            || e.estimate_features.is_some()
+            || e.session_hash != session_hash
+        {
+            return false;
+        }
+        e.estimate_features = Some(features);
+        true
+    }
+
+    /// Strip every entry's features, as on a queue written before the
+    /// field existed.
+    #[cfg(test)]
+    pub fn clear_estimate_features_for_test(&mut self) {
+        for e in &mut self.entries {
+            e.estimate_features = None;
+        }
+    }
+
     pub fn set_submission_id(&mut self, entry_id: Uuid, submission_id: Uuid) {
         if let Some(e) = self.entries.iter_mut().find(|e| e.entry_id == entry_id) {
             e.submission_id = Some(submission_id);
@@ -2062,11 +2216,17 @@ impl Queue {
     /// being approved. The contributor approved a description; if the content
     /// no longer matches it, the approval does not carry over to the new
     /// content, so a new offer is made instead.
+    ///
+    /// `new_modified_at` is when the new content was last written, as the
+    /// watcher would observe it (the group's newest write for a grouped
+    /// source), or `None` if it could not be read. It becomes the fresh
+    /// entry's `last_modified_at`.
     pub fn supersede(
         &mut self,
         entry_id: Uuid,
         new_hash: &str,
         new_size: u64,
+        new_modified_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> Option<QueueEntry> {
         let old = self
@@ -2084,6 +2244,11 @@ impl Queue {
             session_hash: new_hash.to_string(),
             size_bytes: new_size,
             discovered_at: now,
+            // The session was written to; that is why it is superseded. The
+            // old entry's last write is known stale, so it is replaced, and
+            // with `None` when the caller could not stat the new content --
+            // which reads as just discovered, never as idle.
+            last_modified_at: new_modified_at,
             ..reoffered_from(old)
         })
     }
@@ -2178,7 +2343,13 @@ impl Queue {
     /// drains below the cap will do anyway.
     pub fn load_can_land(&self, path: &Path, max_entries: usize) -> bool {
         let live = |e: &QueueEntry| matches!(e.state, QueueState::Pending | QueueState::Approved);
-        if self.entries.iter().filter(|e| live(e)).count() < max_entries {
+        if self
+            .entries
+            .iter()
+            .filter(|e| counts_against_the_cap(e))
+            .count()
+            < max_entries
+        {
             return true;
         }
         self.at_path(path).any(live)
@@ -2237,10 +2408,7 @@ impl Queue {
             let live = self
                 .entries
                 .iter()
-                .filter(|e| {
-                    matches!(e.state, QueueState::Pending | QueueState::Approved)
-                        && !stale.contains(&e.entry_id)
-                })
+                .filter(|e| counts_against_the_cap(e) && !stale.contains(&e.entry_id))
                 .count();
             if live >= max_entries {
                 bail!("queue-full");
@@ -2410,6 +2578,9 @@ impl Queue {
 ///   decision, not unattended approval. Kept entries themselves are excluded.
 /// - [`ProjectPolicy::waits_for_a_person_at_send`] -- backlog held back by
 ///   the automatic grant or an arming from now.
+/// - A trajectory export (`entry.source == SOURCE_TRAJECTORY`): the
+///   watcher never approves one unattended, so uncounted it would sit
+///   unseen until it expired.
 ///
 /// A folder in `NotifyOnly` ("Ask me") always counts every `Pending` entry:
 /// that is the ordinary Ask-me case the badge exists for.
@@ -2436,6 +2607,187 @@ pub fn decisions_owed(queue: &Queue, policy: &ProjectPolicy, scrub_check: ScrubC
         .count()
 }
 
+/// K7's suggestion count, "unpurposed traces": `Pending` entries in a folder
+/// whose mode resolves to `NotifyOnly` ("Ask me") that have been previewed
+/// at least once. One function so `status` and `list_projects` can never
+/// report two different numbers. Three conditions, all required:
+///
+/// - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
+///   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded` entry
+///   has already been decided, one way or another.
+/// - The project's mode resolves to `NotifyOnly`, never `AutoUpload`
+///   ("armed") or `Ignore` ("Never"). Armed is excluded on the project's
+///   resolved mode rather than the entry's own `approved_unattended` flag,
+///   because a gate-held armed session is `Pending` with nothing decided
+///   about it yet either; counting those would tell a contributor to go
+///   decide about a folder they already armed.
+/// - Previewed at least once (`previewed_envelope_digest.is_some()`) --
+///   "scrubbed", in the design's word. An entry nobody has opened a preview
+///   for has not been through the redaction pass this count is about.
+///
+/// This is not [`decisions_owed`]: the badge also counts unpreviewed and
+/// armed-but-human-held sessions. Every entry counted here is also a
+/// decision owed, so this is never larger than the badge. Keep the two
+/// contracts distinct.
+pub fn unpurposed_traces(queue: &Queue, policy: &ProjectPolicy) -> usize {
+    unpurposed_entries(queue, policy).len()
+}
+
+/// The entries [`unpurposed_traces`] counts: nudge U1's subjects, for
+/// `status.nudge.mission_fit` while the backlog leads. One rule, so the
+/// count and its subjects cannot drift.
+pub fn unpurposed_entries<'q>(queue: &'q Queue, policy: &ProjectPolicy) -> Vec<&'q QueueEntry> {
+    queue
+        .pending()
+        .into_iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| e.previewed_envelope_digest.is_some())
+        .collect()
+}
+
+// ---- list_pending {order: "suggested"} (nudge value addendum, 2.2) ----
+
+/// Step 1 of the suggested order: an entry that fits at least one live
+/// contribution mission comes first. The step is skipped entirely while the
+/// daemon holds no live catalogue.
+///
+/// OWNER DECISION V6.
+pub const SUGGESTED_ORDER_MISSION_FIRST: bool = true;
+
+/// Where, inside step 1, an entry with no known fit sorts while a catalogue
+/// is live (an entry minted after the fit was counted): between the entries
+/// that fit and the ones that fit nothing, so an unknown is never ranked as
+/// "fits nothing". Ranks: 0 fits, 1 this, 2 fits nothing.
+///
+/// OWNER DECISION V6 (unknown is not "no fit").
+pub const SUGGESTED_ORDER_UNKNOWN_FIT_RANK: u8 = 1;
+
+/// Step 2: the tier an entry with no estimate sorts with. Neither promoted
+/// nor demoted, and never compared as 0. The step is skipped entirely for a
+/// one-tier table (the built-in default), which carries no ordering
+/// information.
+///
+/// OWNER DECISION E7.
+pub const SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER:
+    trace_commons_protocol::local_credit_estimate::EstimateTier =
+    trace_commons_protocol::local_credit_estimate::EstimateTier::Middle;
+
+/// Step 3: a session with at least this many prompts the person typed
+/// (`SessionShape::user_turns`) is substantive. Buckets, first to last:
+/// `>= SUBSTANTIVE_TURNS`, `1..SUBSTANTIVE_TURNS`, `0`, and no recorded
+/// shape.
+///
+/// OWNER DECISION V7.
+pub const SUBSTANTIVE_TURNS: u32 = 3;
+
+/// The suggested order's inputs that live outside the entry, each `None`
+/// when its step is skipped.
+pub struct SuggestedOrderInputs<'a> {
+    /// Step 1: mission fit by entry id. `None` while no catalogue is live.
+    pub mission_fit: Option<&'a std::collections::BTreeMap<Uuid, usize>>,
+    /// Step 2: an entry's estimate tier. `None` for a one-tier table.
+    pub estimate_tier: Option<
+        &'a dyn Fn(
+            &QueueEntry,
+        ) -> Option<trace_commons_protocol::local_credit_estimate::EstimateTier>,
+    >,
+}
+
+/// Sorts `entries`, given in queue insertion order, into the suggested
+/// order (nudge value addendum, 2.2), keyed in turn by:
+///
+/// 1. mission fit ([`SUGGESTED_ORDER_MISSION_FIRST`]);
+/// 2. estimate tier, higher first ([`SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER`]);
+/// 3. the `user_turns` bucket ([`SUBSTANTIVE_TURNS`]);
+/// 4. most recently written first, by
+///    `last_modified_at.unwrap_or(discovered_at)`;
+/// 5. queue insertion order, the final tie-break, which makes the order
+///    total and stable.
+pub fn sort_suggested(entries: &mut Vec<&QueueEntry>, inputs: &SuggestedOrderInputs<'_>) {
+    use trace_commons_protocol::local_credit_estimate::EstimateTier;
+    // Every key is an integer or a timestamp, so the comparison is total;
+    // the insertion index makes it strict.
+    let mut keyed: Vec<(
+        (u8, u8, u8, std::cmp::Reverse<DateTime<Utc>>, usize),
+        &QueueEntry,
+    )> = entries
+        .drain(..)
+        .enumerate()
+        .map(|(inserted, e)| {
+            // A skipped step is the same value for every entry.
+            let fit = match inputs.mission_fit {
+                Some(fits) if SUGGESTED_ORDER_MISSION_FIRST => match fits.get(&e.entry_id) {
+                    Some(&n) if n > 0 => 0,
+                    Some(_) => 2,
+                    None => SUGGESTED_ORDER_UNKNOWN_FIT_RANK,
+                },
+                _ => 0,
+            };
+            let tier = match inputs.estimate_tier {
+                Some(tier_of) => {
+                    match tier_of(e).unwrap_or(SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER) {
+                        EstimateTier::Higher => 0,
+                        EstimateTier::Middle => 1,
+                        EstimateTier::Lower => 2,
+                    }
+                }
+                None => 0,
+            };
+            let substance = match &e.shape {
+                Some(shape) if shape.user_turns >= SUBSTANTIVE_TURNS => 0,
+                Some(shape) if shape.user_turns >= 1 => 1,
+                Some(_) => 2,
+                None => 3,
+            };
+            let written = std::cmp::Reverse(e.last_modified_at.unwrap_or(e.discovered_at));
+            ((fit, tier, substance, written, inserted), e)
+        })
+        .collect();
+    keyed.sort_by_key(|(key, _)| *key);
+    entries.extend(keyed.into_iter().map(|(_, e)| e));
+}
+
+/// Nudge U4: the waiting sessions nobody has written to for
+/// `idle_days_eff` days, which the idle-session suggestion, its status
+/// field, the Traces card's idle filter and (later) its announcement all
+/// read, so the four cannot drift. An entry is a candidate when:
+///
+/// - it is `Pending`. Kept and dismissed sessions are `Refused`, and every
+///   other state has been decided already;
+/// - its project's mode resolves to `NotifyOnly` (Ask me). Never folders
+///   are out, and so are armed ones, which send on their own;
+/// - it is not [`QueueEntry::returned_from_keep`]: the person kept it once,
+///   read conservatively as kept;
+/// - it is not [`QueueEntry::held_for_review`]: that hold needs a different
+///   conversation;
+/// - `now - idle_since >= idle_days_eff`, where `idle_since` is
+///   `last_modified_at`, or `discovered_at` for a line written before that
+///   field existed (never earlier than the true last write, so it can only
+///   look less idle). A last write after `now` is not idle: a clock that went
+///   backwards can only suppress.
+///
+/// Unlike [`unpurposed_traces`], previewing is not required. The shared
+/// gates (paused, consent hold, enrollment, health) are not checked here;
+/// `nudge::lead` checks them. Pure: callers pass the guards they hold.
+pub fn idle_candidates<'q>(
+    queue: &'q Queue,
+    policy: &ProjectPolicy,
+    now: DateTime<Utc>,
+    idle_days_eff: i64,
+) -> Vec<&'q QueueEntry> {
+    let threshold = chrono::Duration::days(idle_days_eff);
+    queue
+        .pending()
+        .into_iter()
+        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
+        .filter(|e| !e.returned_from_keep() && !e.held_for_review())
+        .filter(|e| {
+            let idle_since = e.last_modified_at.unwrap_or(e.discovered_at);
+            now.signed_duration_since(idle_since) >= threshold
+        })
+        .collect()
+}
+
 /// Whether one `Pending` entry is a decision owed to a person. See
 /// [`decisions_owed`] for each rule and why.
 fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: ScrubCheck) -> bool {
@@ -2446,6 +2798,10 @@ fn needs_a_person(entry: &QueueEntry, policy: &ProjectPolicy, scrub_check: Scrub
         ProjectMode::NotifyOnly => true,
         ProjectMode::AutoUpload => {
             scrub_check == ScrubCheck::Manual
+                // A trajectory export is never approved unattended
+                // (`watcher::visit_session`'s `from_trajectory`), so in an
+                // armed folder it waits for a person like any Ask-me offer.
+                || entry.source == crate::source::SOURCE_TRAJECTORY
                 || policy
                     .waits_for_a_person_at_send(&entry.project_key, &entry.path.to_string_lossy())
         }
@@ -2987,10 +3343,158 @@ mod tests {
                 entry_id_for("sha256:aa"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z"),
             )
             .unwrap();
         assert_eq!(fresh.observed_modified_at, None);
+    }
+
+    /// `entry`, last written at `written`.
+    fn written_entry(hash: &str, discovered: &str, written: &str) -> QueueEntry {
+        QueueEntry {
+            last_modified_at: Some(at(written)),
+            ..entry(hash, discovered)
+        }
+    }
+
+    /// A queue line written before `last_modified_at` existed must still
+    /// load: `Queue::load` drops a line it cannot parse, so a required
+    /// field here would silently empty a contributor's queue on upgrade.
+    /// It loads as `None`, which the idle rule reads as `discovered_at` --
+    /// never earlier than the true last write, so the safe direction.
+    #[test]
+    fn a_queue_line_from_before_last_modified_at_loads_with_none() {
+        let (_d, store) = temp_store();
+        let mut q = Queue::new();
+        q.upsert(
+            written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z"),
+            500,
+        )
+        .unwrap();
+        q.save(&store).unwrap();
+        assert_eq!(
+            Queue::load(&store).unwrap().all()[0].last_modified_at,
+            Some(at("2026-08-01T09:00:00Z")),
+            "the field round-trips through the queue file"
+        );
+
+        let mut old = serde_json::to_value(entry("sha256:aa", "2026-08-08T12:00:00Z")).unwrap();
+        old.as_object_mut().unwrap().remove("last_modified_at");
+        let loaded: QueueEntry = serde_json::from_value(old).unwrap();
+        assert_eq!(loaded.last_modified_at, None);
+    }
+
+    /// A superseded session was written to: that is why it is superseded.
+    /// The fresh offer takes the new observation's mtime, never the old
+    /// entry's, or a session still being worked on would read as idle.
+    #[test]
+    fn supersede_takes_the_new_last_write_not_the_old_one() {
+        let mut q = queue_of(vec![written_entry(
+            "sha256:aa",
+            "2026-08-08T12:00:00Z",
+            "2026-08-01T09:00:00Z",
+        )]);
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                Some(at("2026-08-08T15:30:00Z")),
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.last_modified_at, Some(at("2026-08-08T15:30:00Z")));
+
+        // Unknown (the stat failed) is `None`, which reads as just
+        // discovered -- not the old entry's write, which is known stale.
+        let mut q = queue_of(vec![written_entry(
+            "sha256:aa",
+            "2026-08-08T12:00:00Z",
+            "2026-08-01T09:00:00Z",
+        )]);
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                None,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.last_modified_at, None);
+    }
+
+    /// `reoffered_from` clears the watcher's observation, which is a match
+    /// key for the poll's fast path, but carries the last write, which is
+    /// provenance: re-offering an entry does not touch its file.
+    #[test]
+    fn a_reoffer_keeps_the_last_write_and_drops_the_observation() {
+        let e = QueueEntry {
+            observed_modified_at: Some(at("2026-08-01T09:00:00Z")),
+            ..written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z")
+        };
+        let re = reoffered_from(e);
+        assert_eq!(re.observed_modified_at, None);
+        assert_eq!(re.last_modified_at, Some(at("2026-08-01T09:00:00Z")));
+    }
+
+    /// Every re-offer that re-dates `discovered_at` without touching the
+    /// file keeps `last_modified_at`. `discovered_at` is re-dated so expiry
+    /// counts afresh; the session was not written to, so how long it has
+    /// been idle must not reset with it.
+    #[test]
+    fn re_offers_that_redate_discovery_keep_the_last_write() {
+        let written = at("2026-08-01T09:00:00Z");
+        let now = at("2026-08-20T12:00:00Z");
+        let id = entry_id_for("sha256:aa");
+        let fresh = || written_entry("sha256:aa", "2026-08-08T12:00:00Z", "2026-08-01T09:00:00Z");
+        let check = |q: &Queue, how: &str| {
+            let e = q.get(id).unwrap();
+            assert_eq!(e.state, QueueState::Pending, "{how} did not re-offer");
+            assert_eq!(e.discovered_at, now, "{how} did not re-date discovery");
+            assert_eq!(
+                e.last_modified_at,
+                Some(written),
+                "{how} lost the last write"
+            );
+        };
+
+        let mut q = queue_of(vec![fresh()]);
+        q.keep(id).unwrap();
+        q.undo_keep(id, now, 500).unwrap();
+        check(&q, "undo_keep");
+
+        let mut q = queue_of(vec![fresh()]);
+        q.set_state(id, QueueState::Expired, Some(REASON_EXPIRED.into()));
+        assert!(q.revive_expired(id, now));
+        check(&q, "revive_expired");
+
+        let mut q = queue_of(vec![QueueEntry {
+            reason_label: Some("some-hold".into()),
+            ..fresh()
+        }]);
+        assert_eq!(q.release_holds_for_reason("some-hold", now), 1);
+        check(&q, "release_holds_for_reason");
+
+        let mut q = queue_of(vec![QueueEntry {
+            state: QueueState::Refused,
+            reason_label: Some("some-gate".into()),
+            ..fresh()
+        }]);
+        assert!(q.reoffer_refused_for_reason("some-gate", now).changed());
+        check(&q, "reoffer_refused_for_reason");
+
+        let mut q = queue_of(vec![QueueEntry {
+            state: QueueState::Approved,
+            approved_unattended: true,
+            ..fresh()
+        }]);
+        assert_eq!(
+            q.return_unattended_to_waiting_for_project("/Users/z/code/proj", now),
+            1
+        );
+        check(&q, "return_unattended_to_waiting_for_project");
     }
 
     #[test]
@@ -3195,6 +3699,7 @@ mod tests {
                 entry_id_for("sha256:aa"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z"),
             )
             .unwrap();
@@ -3220,6 +3725,7 @@ mod tests {
                 entry_id_for("sha256:missing"),
                 "sha256:bb",
                 900,
+                None,
                 at("2026-08-08T16:00:00Z")
             )
             .is_none()
@@ -3344,6 +3850,101 @@ mod tests {
         let loaded = Queue::load(&store).unwrap();
         assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
         assert_eq!(loaded.all()[0].shape, None);
+    }
+
+    /// A line queued before `estimate_features` existed still loads, with
+    /// none: the estimate is unknown for it, never 0.
+    #[test]
+    fn a_queue_line_written_before_estimate_features_still_loads() {
+        let (_d, store) = temp_store();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.estimate_features = Some(estimate_features_of(&crate::source::SessionTranscript {
+            events: vec![event(
+                crate::source::SessionEventKind::User,
+                None,
+                Some("hello"),
+            )],
+            ..Default::default()
+        }));
+        let mut value = serde_json::to_value(e).unwrap();
+        assert!(value.get("estimate_features").is_some(), "{value}");
+        value.as_object_mut().unwrap().remove("estimate_features");
+        store
+            .write_daemon_file(DAEMON_QUEUE_FILE, format!("{value}\n").as_bytes())
+            .unwrap();
+
+        let loaded = Queue::load(&store).unwrap();
+        assert_eq!(loaded.all().len(), 1, "the entry must survive the upgrade");
+        assert_eq!(loaded.all()[0].estimate_features, None);
+        // And `None` is left out of the file rather than written as null.
+        let line = serde_json::to_value(&loaded.all()[0]).unwrap();
+        assert!(line.get("estimate_features").is_none(), "{line}");
+    }
+
+    /// Every event kind is fed with the role its envelope event type has,
+    /// delegated transcripts included; an opaque record counts its tool
+    /// name and none of its text, as the envelope carries none.
+    #[test]
+    fn estimate_features_map_every_event_kind_as_the_envelope_does() {
+        use crate::source::SessionEventKind::{
+            Assistant, Opaque, Reasoning, ToolCall, ToolResult, User,
+        };
+        let tool = |kind, content: &str, name: &str| crate::source::SessionEvent {
+            kind,
+            content: Some(content.to_string()),
+            tool_name: Some(name.to_string()),
+            ..Default::default()
+        };
+        let transcript = crate::source::SessionTranscript {
+            events: vec![
+                event(User, None, Some("hello")),
+                event(User, None, Some("   ")),
+                event(Assistant, None, Some("answer")),
+                event(Reasoning, None, Some("think")),
+                tool(ToolCall, "ls", "Bash"),
+                tool(ToolResult, "output!", "Bash"),
+                tool(Opaque, "not-in-the-envelope", "Odd"),
+                marker("subagent_transcript"),
+                event(User, None, Some("sub")),
+            ],
+            ..Default::default()
+        };
+        let f = estimate_features_of(&transcript);
+        assert_eq!(f.version, "lef1");
+        // 5 + 3 + 6 + 5 + 2 + 7 + 3: the opaque record's text is not counted.
+        assert_eq!(f.content_bytes, 31);
+        assert_eq!(f.tool_result_bytes, 7);
+        assert_eq!(f.agent_prose_bytes, 6);
+        assert_eq!(f.user_messages, 2, "blank text is not a message");
+        assert_eq!(f.distinct_tools, 2);
+        assert!(f.byte_entropy_milli.is_some_and(|m| m > 0));
+    }
+
+    /// `supersede` re-offers content the watcher never observed, so the
+    /// old features describe old bytes: cleared, never carried.
+    #[test]
+    fn supersede_clears_the_estimate_features() {
+        let mut q = Queue::new();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.estimate_features = Some(estimate_features_of(&crate::source::SessionTranscript {
+            events: vec![event(
+                crate::source::SessionEventKind::User,
+                None,
+                Some("hello"),
+            )],
+            ..Default::default()
+        }));
+        q.upsert(e, 500).unwrap();
+        let fresh = q
+            .supersede(
+                entry_id_for("sha256:aa"),
+                "sha256:bb",
+                900,
+                None,
+                at("2026-08-08T16:00:00Z"),
+            )
+            .unwrap();
+        assert_eq!(fresh.estimate_features, None);
     }
 
     /// K9: a line queued before `title` existed still loads, with no title.
@@ -3784,7 +4385,7 @@ mod tests {
         assert!(q.record_scrub(id, "sha256:envelope", counts));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::Scrubbed(counts));
 
-        // Re-pinned to a new build (a filter change, a re-enrolment): the
+        // Re-pinned to a new build (a filter change, a re-enrollment): the
         // old count no longer describes what would be sent.
         assert!(q.record_previewed_envelope(id, "sha256:rebuilt", None, None));
         assert_eq!(q.get(id).unwrap().scrub(), Scrub::NotYetScrubbed);
@@ -4581,6 +5182,160 @@ mod tests {
         assert_eq!(q.expire(at("2026-10-02T00:00:00Z"), 30, false), 0);
     }
 
+    // -- `idle_candidates` (nudge U4) ----------------------------------
+
+    /// An Ask-me entry last written `days` days before `idle_now()`.
+    fn idle_entry(project_key: &str, days: i64) -> QueueEntry {
+        let mut e = entry_in(project_key, QueueState::Pending);
+        // `upsert` keys on the hash, so every fixture needs its own.
+        e.session_hash = format!("sha256:{}", e.entry_id);
+        e.discovered_at = at("2026-10-01T00:00:00Z");
+        e.last_modified_at = Some(idle_now() - chrono::Duration::days(days));
+        e
+    }
+
+    fn idle_now() -> DateTime<Utc> {
+        at("2026-10-08T12:00:00Z")
+    }
+
+    fn idle_ids(q: &Queue, policy: &ProjectPolicy, idle_days: i64) -> Vec<Uuid> {
+        idle_candidates(q, policy, idle_now(), idle_days)
+            .into_iter()
+            .map(|e| e.entry_id)
+            .collect()
+    }
+
+    /// The threshold is inclusive, measured from the last write, and a
+    /// session written to since is not a candidate.
+    #[test]
+    fn idle_candidates_are_ask_me_pending_entries_quiet_for_the_threshold() {
+        let policy = ProjectPolicy::new();
+        let quiet = idle_entry("/w/a", 3);
+        let fresh = idle_entry("/w/b", 2);
+        let q = queue_of(vec![quiet.clone(), fresh]);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![quiet.entry_id]);
+        assert_eq!(idle_ids(&q, &policy, 2).len(), 2);
+    }
+
+    /// An old queue line has no last write: `discovered_at` stands in, which
+    /// is never earlier than the true write, so it can only look less idle.
+    #[test]
+    fn idle_candidates_fall_back_to_discovery_for_old_lines() {
+        let policy = ProjectPolicy::new();
+        let mut old = idle_entry("/w/a", 30);
+        old.last_modified_at = None;
+        old.discovered_at = idle_now() - chrono::Duration::days(1);
+        let q = queue_of(vec![old.clone()]);
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+        let mut q = q;
+        q.entries[0].discovered_at = idle_now() - chrono::Duration::days(3);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![old.entry_id]);
+    }
+
+    /// A last write stamped after now (the clock went backwards) is not
+    /// idle: a backwards clock can only suppress.
+    #[test]
+    fn idle_candidates_ignore_a_write_from_the_future() {
+        let policy = ProjectPolicy::new();
+        let q = queue_of(vec![idle_entry("/w/a", -5)]);
+        assert!(idle_ids(&q, &policy, 1).is_empty());
+    }
+
+    /// Never folders, armed folders, kept and dismissed sessions, sessions
+    /// returned from Keep and sessions held for review are never
+    /// candidates, however long they have been quiet.
+    #[test]
+    fn idle_candidates_exclude_never_armed_kept_dismissed_returned_and_held() {
+        let now = at("2026-10-01T00:00:00Z");
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode("/w/never", ProjectMode::Ignore, now)
+            .unwrap();
+        policy
+            .set_mode("/w/armed", ProjectMode::AutoUpload, now)
+            .unwrap();
+
+        let never = idle_entry("/w/never", 10);
+        let armed = idle_entry("/w/armed", 10);
+        let kept = idle_entry("/w/kept", 10);
+        let dismissed = idle_entry("/w/dismissed", 10);
+        let returned = idle_entry("/w/returned", 10);
+        let mut held = idle_entry("/w/held", 10);
+        held.reason_label = Some(REASON_TOKEN_DISTRIBUTION_REVIEW_REQUIRED.to_string());
+        assert!(held.held_for_review());
+        let candidate = idle_entry("/w/ask", 10);
+
+        let mut q = queue_of(vec![
+            never,
+            armed,
+            kept.clone(),
+            dismissed.clone(),
+            returned.clone(),
+            held,
+            candidate.clone(),
+        ]);
+        q.keep(kept.entry_id).unwrap();
+        q.set_state(
+            dismissed.entry_id,
+            QueueState::Refused,
+            Some(REASON_DISMISSED.to_string()),
+        );
+        q.keep(returned.entry_id).unwrap();
+        q.undo_keep(returned.entry_id, now, 5000).unwrap();
+        assert!(q.get(returned.entry_id).unwrap().returned_from_keep());
+
+        assert_eq!(idle_ids(&q, &policy, 3), vec![candidate.entry_id]);
+
+        // A Never override covers every folder.
+        policy
+            .set_contribution_override(ProjectMode::Ignore, now, None)
+            .unwrap();
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+    }
+
+    /// A superseded session was written to, so its idle clock restarts:
+    /// the old entry leaves the set and the fresh one is not idle until it
+    /// has been quiet for the full threshold.
+    #[test]
+    fn a_superseded_session_restarts_its_idle_clock() {
+        let policy = ProjectPolicy::new();
+        let mut old = written_entry("sha256:aa", "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z");
+        old.project_key = "/w/ask".into();
+        let mut q = queue_of(vec![old.clone()]);
+        assert_eq!(idle_ids(&q, &policy, 3), vec![old.entry_id]);
+
+        let written_again = idle_now() - chrono::Duration::hours(1);
+        let fresh = q
+            .supersede(
+                old.entry_id,
+                "sha256:bb",
+                900,
+                Some(written_again),
+                idle_now(),
+            )
+            .unwrap();
+        // The watcher upserts what `supersede` mints (`mod.rs`).
+        q.upsert(fresh.clone(), 5000).unwrap();
+        assert!(idle_ids(&q, &policy, 3).is_empty());
+        let later = idle_now() + chrono::Duration::days(3);
+        let ids: Vec<Uuid> = idle_candidates(&q, &policy, later, 3)
+            .into_iter()
+            .map(|e| e.entry_id)
+            .collect();
+        assert_eq!(ids, vec![fresh.entry_id]);
+    }
+
+    /// Idle candidates are not U1's: previewing is not required.
+    #[test]
+    fn idle_candidates_do_not_need_a_preview() {
+        let policy = ProjectPolicy::new();
+        let e = idle_entry("/w/a", 4);
+        assert!(e.previewed_envelope_digest.is_none());
+        let q = queue_of(vec![e]);
+        assert_eq!(unpurposed_traces(&q, &policy), 0);
+        assert_eq!(idle_ids(&q, &policy, 3).len(), 1);
+    }
+
     // -- `decisions_owed` (K6): the badge's exact count -----------------
 
     /// An Ask-me folder is the ordinary case the badge exists for: every
@@ -4670,6 +5425,37 @@ mod tests {
         let q = queue_of(vec![settling, left_by_manual]);
         assert_eq!(q.pending().len(), 2);
         assert_eq!(decisions_owed(&q, &policy, ScrubCheck::Automatic), 0);
+    }
+
+    /// A trajectory export always waits for a person, even in an armed
+    /// folder: the watcher never approves one unattended
+    /// (`watcher::visit_session`'s `from_trajectory`). So it is a decision
+    /// owed, and the badge says so -- otherwise it sits uncounted until it
+    /// expires.
+    #[test]
+    fn decisions_owed_counts_a_trajectory_export_in_an_armed_folder() {
+        let mut policy = ProjectPolicy::new();
+        policy
+            .set_mode(
+                "/w/armed",
+                ProjectMode::AutoUpload,
+                at("2026-08-08T12:00:00Z"),
+            )
+            .unwrap();
+        let mut export = entry_in("/w/armed", QueueState::Pending);
+        export.source = crate::source::SOURCE_TRAJECTORY.to_string();
+        let native = {
+            let mut e = entry_in("/w/armed", QueueState::Pending);
+            e.session_hash = "sha256:native".into();
+            e.path = PathBuf::from("/w/armed/native.jsonl");
+            e
+        };
+        let q = queue_of(vec![export, native]);
+        assert_eq!(
+            decisions_owed(&q, &policy, ScrubCheck::Automatic),
+            1,
+            "the export is owed a decision; the native session goes unattended"
+        );
     }
 
     /// An Automatic Scrub check hold needs a person even in an armed folder.
@@ -4853,5 +5639,205 @@ mod tests {
             1,
             "decisions_owed excludes the gate-held armed one"
         );
+    }
+
+    // ---- suggested order (nudge value addendum, 2.2) ----
+
+    mod suggested_order {
+        use super::super::*;
+        use crate::daemon::test_support::at;
+        use std::collections::BTreeMap;
+        use trace_commons_protocol::local_credit_estimate::EstimateTier;
+
+        /// An entry with every suggested-order key held equal: no shape, the
+        /// same write time. Each test varies one key.
+        fn plain(n: u8) -> QueueEntry {
+            QueueEntry {
+                entry_id: Uuid::from_bytes([n; 16]),
+                session_hash: format!("sha256:{n}"),
+                discovered_at: at("2026-10-01T00:00:00Z"),
+                ..Default::default()
+            }
+        }
+
+        fn turns(n: u8, user_turns: u32) -> QueueEntry {
+            QueueEntry {
+                shape: Some(SessionShape {
+                    user_turns,
+                    ..Default::default()
+                }),
+                ..plain(n)
+            }
+        }
+
+        fn ids(entries: &[&QueueEntry]) -> Vec<u8> {
+            entries.iter().map(|e| e.entry_id.as_bytes()[0]).collect()
+        }
+
+        fn sorted(entries: &[QueueEntry], inputs: &SuggestedOrderInputs<'_>) -> Vec<u8> {
+            let mut refs: Vec<&QueueEntry> = entries.iter().collect();
+            sort_suggested(&mut refs, inputs);
+            ids(&refs)
+        }
+
+        const SKIPPED: SuggestedOrderInputs<'static> = SuggestedOrderInputs {
+            mission_fit: None,
+            estimate_tier: None,
+        };
+
+        #[test]
+        fn the_owner_decisions_are_as_ruled() {
+            const { assert!(SUGGESTED_ORDER_MISSION_FIRST) };
+            assert_eq!(SUGGESTED_ORDER_UNKNOWN_FIT_RANK, 1);
+            assert_eq!(SUGGESTED_ORDER_UNKNOWN_ESTIMATE_TIER, EstimateTier::Middle);
+            assert_eq!(SUBSTANTIVE_TURNS, 3);
+        }
+
+        /// Step 1 alone: fits first, an unknown fit next, "fits nothing" last.
+        #[test]
+        fn mission_fit_orders_fits_then_unknown_then_none() {
+            let entries = [plain(1), plain(2), plain(3), plain(4)];
+            let fit = BTreeMap::from([
+                (entries[0].entry_id, 0),
+                (entries[2].entry_id, 2),
+                (entries[3].entry_id, 1),
+            ]);
+            let inputs = SuggestedOrderInputs {
+                mission_fit: Some(&fit),
+                estimate_tier: None,
+            };
+            // 3 and 4 fit (insertion order between them), 2 is unknown, 1
+            // fits nothing.
+            assert_eq!(sorted(&entries, &inputs), vec![3, 4, 2, 1]);
+        }
+
+        /// With no live catalogue step 1 is skipped: every entry ties on it.
+        #[test]
+        fn mission_fit_is_skipped_with_no_catalogue() {
+            let entries = [plain(1), plain(2), plain(3)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![1, 2, 3]);
+        }
+
+        /// Step 2 alone: higher first; an unknown sorts with the middle tier,
+        /// so it is never ranked below a lower tier.
+        #[test]
+        fn estimate_tier_orders_higher_first_and_unknown_with_middle() {
+            let entries = [plain(1), plain(2), plain(3), plain(4)];
+            let tier_of = |e: &QueueEntry| match e.entry_id.as_bytes()[0] {
+                1 => Some(EstimateTier::Lower),
+                2 => None,
+                3 => Some(EstimateTier::Higher),
+                _ => Some(EstimateTier::Middle),
+            };
+            let inputs = SuggestedOrderInputs {
+                mission_fit: None,
+                estimate_tier: Some(&tier_of),
+            };
+            // 3 higher; 2 (unknown) and 4 (middle) tie, insertion order; 1
+            // lower last.
+            assert_eq!(sorted(&entries, &inputs), vec![3, 2, 4, 1]);
+        }
+
+        /// A one-tier table skips step 2 even if tiers were somehow known.
+        #[test]
+        fn estimate_tier_is_skipped_for_a_one_tier_table() {
+            let entries = [turns(1, 0), turns(2, 5)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![2, 1]);
+        }
+
+        /// Step 3 alone: `>= 3` turns, then 1..3, then 0, then no shape.
+        #[test]
+        fn user_turns_buckets_with_no_shape_last() {
+            let entries = [
+                plain(1),
+                turns(2, 0),
+                turns(3, 1),
+                turns(4, 2),
+                turns(5, 3),
+                turns(6, 40),
+            ];
+            // 5 and 6 share the top bucket, 3 and 4 the second: insertion
+            // order inside a bucket, never the raw count.
+            assert_eq!(sorted(&entries, &SKIPPED), vec![5, 6, 3, 4, 2, 1]);
+        }
+
+        /// Step 4 alone: newest write first, by `last_modified_at`, falling
+        /// back to `discovered_at`.
+        #[test]
+        fn recency_orders_newest_write_first() {
+            let old = QueueEntry {
+                discovered_at: at("2026-09-01T00:00:00Z"),
+                ..plain(1)
+            };
+            let written_late = QueueEntry {
+                discovered_at: at("2026-09-01T00:00:00Z"),
+                last_modified_at: Some(at("2026-10-05T00:00:00Z")),
+                ..plain(2)
+            };
+            let discovered_mid = QueueEntry {
+                discovered_at: at("2026-10-03T00:00:00Z"),
+                ..plain(3)
+            };
+            let entries = [old, written_late, discovered_mid];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![2, 3, 1]);
+        }
+
+        /// Each step outranks every later one.
+        #[test]
+        fn earlier_steps_outrank_later_ones() {
+            let newest_no_fit = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 9)
+            };
+            let fits_but_thin = turns(2, 0);
+            let entries = [newest_no_fit, fits_but_thin];
+            let fit = BTreeMap::from([(entries[0].entry_id, 0), (entries[1].entry_id, 1)]);
+            let lower = |_: &QueueEntry| Some(EstimateTier::Lower);
+            let inputs = SuggestedOrderInputs {
+                mission_fit: Some(&fit),
+                estimate_tier: Some(&lower),
+            };
+            assert_eq!(sorted(&entries, &inputs), vec![2, 1]);
+
+            // Tier outranks turns and recency.
+            let a = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 9)
+            };
+            let b = turns(2, 0);
+            let tier_of = |e: &QueueEntry| {
+                Some(if e.entry_id.as_bytes()[0] == 2 {
+                    EstimateTier::Higher
+                } else {
+                    EstimateTier::Lower
+                })
+            };
+            let inputs = SuggestedOrderInputs {
+                mission_fit: None,
+                estimate_tier: Some(&tier_of),
+            };
+            assert_eq!(sorted(&[a, b], &inputs), vec![2, 1]);
+
+            // Turns outrank recency.
+            let a = QueueEntry {
+                discovered_at: at("2026-10-07T00:00:00Z"),
+                ..turns(1, 0)
+            };
+            let b = turns(2, 3);
+            assert_eq!(sorted(&[a, b], &SKIPPED), vec![2, 1]);
+        }
+
+        /// Equal keys keep queue insertion order, whatever order the ids
+        /// would sort in, and sorting twice changes nothing.
+        #[test]
+        fn the_order_is_total_and_stable() {
+            let entries = [plain(9), plain(1), plain(5), plain(3)];
+            assert_eq!(sorted(&entries, &SKIPPED), vec![9, 1, 5, 3]);
+            let mut refs: Vec<&QueueEntry> = entries.iter().collect();
+            sort_suggested(&mut refs, &SKIPPED);
+            let once = ids(&refs);
+            sort_suggested(&mut refs, &SKIPPED);
+            assert_eq!(ids(&refs), once);
+        }
     }
 }

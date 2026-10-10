@@ -109,8 +109,9 @@ final class SettingsParityTests: XCTestCase {
                               "PublicProfileCopy.goPublicHandleLabel", "PublicProfileCopy.goPublicBioLabel",
                               "PublicProfileCopy.publishedHeading", "PublicProfileCopy.neverHeading",
                               "PublicProfileCopy.goPublicAcknowledgement", "PublicProfileCopyCheck.failures()",
-                              "SettingsLegacyWords.publishedLines", "SettingsLegacyWords.neverLines",
-                              "SettingsLegacyWords.doNotTrustProfileWording"],
+                              "PublicProfileCopy.publishedLines", "PublicProfileCopy.neverLines",
+                              "PublicProfileCopy.wordingDefect", "PublicProfileCopy.goPublicDescription",
+                              "PublicProfileCopy.goingPublic"],
                 confirmations: ["GlassModal(", ".glassModal(isPresented: $showingGoPublic)"],
                 accessibility: [".accessibilityLabel(", "GlassCheckboxStyle()"]),
         Section(glass: "Views/Settings/WatchedFoldersSection.swift",
@@ -202,6 +203,26 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(SettingsLegacyWords.stateLabel("X", false), "X: no")
     }
 
+    /// #1146 parity (2026-10-07): the Settings and public-profile words are
+    /// the core's (`shell_words_copy`), in Ron's words where #1146 has them.
+    func test_settingsAndProfileWordsAreTheCoresInRonsWords() {
+        XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
+        XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
+        XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
+        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
+        XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
+                       "Automatic contributing turned on for demo")
+        XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")
+        XCTAssertEqual(PublicProfileCopy.heading, "Public profile")
+        XCTAssertEqual(PublicProfileCopy.saveProfile, "Update profile")
+        XCTAssertEqual(PublicProfileCopy.leaveRoster, "Withdraw")
+        XCTAssertEqual(PublicProfileCopy.onRosterSince("May 1"), "On the roster since May 1")
+        XCTAssertEqual(PublicProfileCopy.failureSentence("handle-too-short"),
+                       "Handle must be at least 3 characters. Profile was not published.")
+        XCTAssertTrue(PublicProfileCopy.leaveFailureSentence("not-logged-in").hasPrefix("This device isn't connected"))
+        XCTAssertEqual(PublicProfileCopyCheck.failures(), [])
+    }
+
     /// The notification refresh must hang on a node that exists while the
     /// status is still nil, never on a container whose only child is the
     /// conditional card (an empty container may never run its modifiers).
@@ -249,13 +270,13 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".glassModal(isPresented:").count - 1, 4)
         XCTAssertFalse(source.contains(".confirmationDialog("))
-        // A save failure keeps the core's refusal glyph and tone, as legacy
-        // `NativeFlowNotice` did; a missing wallet copy is still a refusal.
+        // A save failure is the failed request's red line, unboxed, under
+        // the Enable and Disable it is about (Ron, 2026-10-09).
         XCTAssertFalse(source.contains("GlassNotice(tone: .outside)"), "the save failure's tone is chosen in Swift")
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.inferenceEvidenceSaveFailed {\n                    GlassAlert(copy.inferenceSaveFailed)"))
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.tokenSaveFailed ?? \"\", glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.tokenContributionSaveFailed {\n                    GlassAlert(copy.tokenSaveFailed ?? \"\")"))
         XCTAssertEqual(GlassFlowNotice.status(forTone: "refused"), .outside)
         XCTAssertEqual(GlassFlowNotice.status(forTone: "neutral"), .off)
         XCTAssertEqual(GlassFlowNotice.status(forTone: ""), .off)
@@ -346,9 +367,11 @@ final class SettingsParityTests: XCTestCase {
         }
     }
 
-    /// Sections that read nothing from the daemon: the login item, the
-    /// system's notification permission and the update feed are all local.
-    static let localOnlySections: Set<SettingsSection> = [.startup, .notifications, .updates]
+    /// Sections that read nothing from the daemon: the appearance, the
+    /// login item and the update feed are all local. Notifications is not:
+    /// beside the system's permission it draws the nudge switches, which
+    /// read `get_settings`.
+    static let localOnlySections: Set<SettingsSection> = [.general, .startup, .updates]
 
     /// Each daemon-reading section's branch for "the daemon has not answered",
     /// and what that branch draws. Every branch is the absent case written
@@ -359,6 +382,7 @@ final class SettingsParityTests: XCTestCase {
             ("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead"),
         ]),
         .watching: ("WatchingSection", [("if model.daemonSettings == nil {", "SettingsReadNotice(model.settingsRead")]),
+        .notifications: ("NudgeSettingsSection", [("if store.settings == nil {", "SettingsReadNotice(settingsRead")]),
         .consent: ("ConsentSection", [("if model.statusRead != .answered {", "SettingsReadNotice(model.statusRead")]),
         .publicProfile: ("PublicProfileSection", [
             ("} else if model.publicProfileRead != .answered {", "SettingsReadNotice(model.publicProfileRead"),

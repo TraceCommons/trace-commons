@@ -9,6 +9,8 @@ mod account_trust_growth_routes;
 mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/credit_estimate.rs"]
+mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
@@ -62,15 +64,15 @@ use tokio::net::TcpListener;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use trace_commons_gate_api::pipeline::{ReasonCode, ReviewRecommendation};
 use trace_commons_protocol::trace_contribution::{
-    ConsentMetadata, ConsentScope, EmbeddingAnalysisMetadata, PiiClassifyPolicy,
-    PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels, ResidualPiiRisk,
-    ResidualRiskCondition, SourceSessionIdentity, TRACE_CONTRIBUTION_SCHEMA_VERSION,
-    TraceAllowedUse, TraceContributionEnvelope, TraceInstrumentStatusUpdate,
-    TracePipelineStatusUpdate, TraceSubmissionReceipt, TraceSubmissionStatusRequest,
-    TraceSubmissionStatusUpdate, TraceValueScorecard, apply_credit_estimate_to_envelope,
-    canonical_summary_for_embedding, privacy_filter_backend_from_env,
-    rescrub_envelope_prose_pii_with, rescrub_trace_envelope, retention_policy_for_allowed_use,
-    retention_policy_for_trace, run_privacy_filter_canary,
+    ConsentMetadata, ConsentScope, DecimalAtomicUnits, EmbeddingAnalysisMetadata, InstrumentAmount,
+    PiiClassifyPolicy, PrivacyFilterBackendTag, ProcessEvalRating, ProcessEvaluationLabels,
+    ResidualPiiRisk, ResidualRiskCondition, SourceSessionIdentity,
+    TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceAllowedUse, TraceContributionEnvelope,
+    TraceInstrumentStatusUpdate, TracePipelineStatusUpdate, TraceSubmissionReceipt,
+    TraceSubmissionStatusRequest, TraceSubmissionStatusUpdate, TraceValueScorecard,
+    apply_credit_estimate_to_envelope, canonical_summary_for_embedding,
+    privacy_filter_backend_from_env, rescrub_envelope_prose_pii_with, rescrub_trace_envelope,
+    retention_policy_for_allowed_use, retention_policy_for_trace, run_privacy_filter_canary,
 };
 use trace_commons_server::account_native_auth::{
     IssuedNativeCode, NATIVE_AUTH_CODE_TTL, NATIVE_AUTH_REQUEST_TTL, NATIVE_CODE_CHALLENGE_METHOD,
@@ -92,7 +94,12 @@ use trace_commons_server::redaction_witness::request::witness_headers;
 use trace_commons_server::redaction_witness::verification::{
     VerifiedWitnessCertificate, WitnessPin, verify_witness_certificate,
 };
+use trace_commons_server::trace_authority::parse_storage_policy_values;
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
+// The gate variables the production pipeline assembly shares with the
+// legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
+// scorer and fastembed embedder (PR #1295 review round 2, Major 1).
+use trace_commons_server::versioned_pipeline_production::gate_env::*;
 // `AccountPrincipalSet` is used by the account visibility predicate below; the
 // binary can no longer mint one (only the lib's `expand_account_principals`
 // does), it only borrows the set carried by an `AccountCtx`.
@@ -111,6 +118,7 @@ use trace_commons_server::driver_liveness::{
     DriverFailureClass, DriverLivenessRegistry, DriverTickOutcome, LogAction,
 };
 use trace_commons_server::error::DatabaseError;
+use trace_commons_server::invite_lookup::lookup_client_key;
 use trace_commons_server::near_account_identity::{
     NearAccountIdentity, TRACE_COMMONS_NEAR_ACCOUNT_INDEX_PEPPER,
 };
@@ -298,6 +306,15 @@ const DEFAULT_BIND: &str = "127.0.0.1:3907";
 /// contributor was willing to build; see `MAX_TRACE_ENVELOPE_BYTES`.
 const MAX_INGEST_BODY_BYTES: usize =
     trace_commons_protocol::trace_contribution::MAX_TRACE_ENVELOPE_BYTES + 4 * 1024 * 1024;
+/// Bundle `begin` (a manifest) and `put` (one attachment, envelope included)
+/// refuse anything over the attachment cap in their handlers, so a larger body
+/// is never useful there and must not be buffered first. `finalize` carries a
+/// whole envelope and keeps `MAX_INGEST_BODY_BYTES`.
+const MAX_TOKEN_BUNDLE_BODY_BYTES: usize =
+    trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+/// Ordinary API requests do not need envelope-sized buffering. Large bodies
+/// are enabled only on the authenticated upload method routers below.
+const DEFAULT_API_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// Ingest must accept every envelope the contributor is willing to build.
 /// These were independent constants once and they drifted -- the client
 /// refused at 1.5 MB while ingest capped the body at 2 MiB -- so raising the
@@ -330,7 +347,6 @@ const TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING: &str =
     "TRACE_COMMONS_OBJECT_STORE_REQUIRE_VERSIONING";
 const TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY: &str =
     "TRACE_COMMONS_KEK_REQUIRE_PRODUCTION_TRUST_BOUNDARY";
-const TRACE_COMMONS_GATE_SERVICE: &str = "TRACE_COMMONS_GATE_SERVICE";
 const TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT: &str =
     "TRACE_COMMONS_GATE_SERVICE_ENCLAVE_ENDPOINT";
 const TRACE_COMMONS_GATE_SERVICE_ATTESTATION_VERIFIER_LABEL: &str =
@@ -522,27 +538,14 @@ const TRACE_COMMONS_PERPLEXITY_MAX_TOKENS: &str = "TRACE_COMMONS_PERPLEXITY_MAX_
 #[cfg(feature = "local-gpu-models")]
 const TRACE_COMMONS_PERPLEXITY_MODEL_ARCH: &str = "TRACE_COMMONS_PERPLEXITY_MODEL_ARCH";
 #[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF: &str =
-    "TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF";
-#[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MODEL_ID: &str = "meta-llama/Llama-3.1-8B-Instruct";
 #[allow(dead_code)]
 const TRACE_COMMONS_PERPLEXITY_DEFAULT_MAX_TOKENS: usize = 16_384;
-#[allow(dead_code)]
-const TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF: f32 = -8.0;
 
-// NEAR AI Cloud-backed perplexity scorer (pilot deployment path). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_near_ai` AND the `near-ai-scorer` cargo
-// feature is compiled in. API key intentionally only read from env (never CLI)
-// so it never appears in process listings.
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_BASE_URL: &str = "TRACE_COMMONS_NEAR_AI_BASE_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_MODEL: &str = "TRACE_COMMONS_NEAR_AI_MODEL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_API_KEY: &str = "TRACE_COMMONS_NEAR_AI_API_KEY";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS: &str = "TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS";
+// The NEAR AI scorer, fastembed embedder and vector index variables the
+// legacy `enclave_near_ai` gate shares with the production pipeline assembly
+// are defined in `trace_commons_server::versioned_pipeline_production::gate_env`
+// and imported above.
 // Where the per-model attestation registry is fetched from. OPTIONAL, and
 // deliberately a separate variable from TRACE_COMMONS_NEAR_AI_BASE_URL: that
 // one is the *direct-completions* endpoint (see `AppState::from_env`), e.g.
@@ -562,41 +565,6 @@ const TRACE_COMMONS_NEAR_AI_ATTESTATION_BASE_URL: &str =
 // fetch. Defaults to Intel's own service: the collateral is what a quote is
 // verified against, so the shorter the trust path to Intel the better.
 const TRACE_COMMONS_NEAR_AI_PCCS_URL: &str = "TRACE_COMMONS_NEAR_AI_PCCS_URL";
-#[allow(dead_code)]
-const TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS: u64 = 60;
-#[allow(dead_code)]
-// Chunked scoring sends one bounded request per chunk; perplexity needs
-// only the realized token's logprob, so k=1 cuts TEE backend memory and
-// response size ~5x vs the OpenAI-canonical 5 (large-trace OOM root cause).
-const TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K: u32 = 1;
-// fastembed embedder (Phase A3). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MODEL_ID: &str = "TRACE_COMMONS_EMBEDDER_MODEL_ID";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_CACHE_DIR: &str = "TRACE_COMMONS_EMBEDDER_CACHE_DIR";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MAX_TOKENS: &str = "TRACE_COMMONS_EMBEDDER_MAX_TOKENS";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM: &str = "TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID: &str = "BAAI/bge-large-en-v1.5";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR: &str = "/var/cache/trace-commons-embedder";
-#[allow(dead_code)]
-const TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS: usize = 512;
-// usearch-backed vector index (Phase A4). Read only when
-// `TRACE_COMMONS_GATE_SERVICE=enclave_local_gpu` AND the `local-gpu-models`
-// feature is compiled in.
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_VECTOR_INDEX_ROOT";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DIM: &str = "TRACE_COMMONS_VECTOR_INDEX_DIM";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN: &str = "TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY: &str = "TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY";
 /// How long to let in-flight requests drain after SIGTERM before the shutdown
 /// flush runs anyway. Kept well under systemd's default `TimeoutStopSec=90s`
 /// so the flush always gets its turn before SIGKILL.
@@ -609,38 +577,9 @@ const TRACE_COMMONS_DEFAULT_SHUTDOWN_GRACE_SECONDS: usize = 20;
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS: &str =
     "TRACE_COMMONS_VECTOR_INDEX_FLUSH_INTERVAL_SECONDS";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_HNSW_M: &str = "TRACE_COMMONS_VECTOR_INDEX_HNSW_M";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION: &str =
-    "TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH: &str = "TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT: &str = "/var/lib/trace-commons-vector-index";
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM: usize = 1024;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN: usize = 32;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY: usize = 32;
 /// Matches the A4 design spec's "or on a periodic timer (every 60 s)".
 #[allow(dead_code)]
 const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_INTERVAL_SECONDS: u64 = 60;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M: usize = 16;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION: usize = 200;
-#[allow(dead_code)]
-const TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH: usize = 50;
-// Cross-trace dedup (shadow-only): a SEPARATE `UsearchVectorIndex` instance
-// from the novelty index above, so dedup lookups never pollute novelty's
-// nearest-neighbor results. Same dim/hnsw/ef params as the novelty index
-// (`TRACE_COMMONS_VECTOR_INDEX_*`); only the root path is independently
-// configurable. Read only under the `local-gpu-models`/`near-ai-scorer`
-// features (usearch is not compiled in otherwise).
-#[allow(dead_code)]
-const TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT: &str = "TRACE_COMMONS_DEDUP_VECTOR_INDEX_ROOT";
 const TRACE_GATE_WORKER_AUTH_MISSING_OBJECT_REF: &str =
     "trace gate worker requires an active contribution envelope object ref";
 const TRACE_COMMONS_KEK_PROVIDER: &str = "TRACE_COMMONS_KEK_PROVIDER";
@@ -1317,7 +1256,14 @@ SUBCOMMANDS:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run_ingest(None).await
+    // A subcommand (help, version, keypair, TLS self-check) reads no
+    // configuration, so it never sees the pipeline runtime selection.
+    let selection = if std::env::args().nth(1).is_some() {
+        PipelineRuntimeSelection::None
+    } else {
+        production_assembly::pipeline_runtime_selection_from_env()?
+    };
+    run_ingest(selection.assembler()).await
 }
 
 /// Starts ingest with an optional production pipeline assembly.
@@ -1419,9 +1365,95 @@ pub async fn run_ingest(
         policy = PiiClassifyPolicy::from_env().as_label(),
         "Trace Commons PII classify policy"
     );
-    let state = Arc::new(
-        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?,
+    let (state, pipeline_gate_components) =
+        AppState::from_env_with_pipeline_runtime_assembler(pipeline_runtime_assembler).await?;
+    let state = Arc::new(state);
+    let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
+    let listener = finish_ingest_startup(
+        &state,
+        pipeline_gate_components.as_deref(),
+        &bind,
+        production_assembly::pipeline_check_vars_from_env(),
+        DEPLOYED_CODE_REVISION_HASH,
+    )
+    .await?;
+    spawn_managed_eddsa_keyset_refresh_task(&state);
+    // Say it out loud at boot. Publishing aggregates without a mechanism is
+    // a deliberate choice, and an operator reading the log should not have to
+    // infer it from the absence of something.
+    if state.community_analytics_publication_basis
+        == CommunityAnalyticsPublicationBasis::SuppressionOnly
+    {
+        tracing::warn!(
+            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
+            "community analytics publish under cell suppression alone; no noise \
+             mechanism is applied and totals are not suppressed"
+        );
+    }
+    spawn_community_snapshot_recompute_task(&state);
+    spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
+    spawn_trace_near_credit_outbox_scheduler_task(
+        &state,
+        state.near_credit_outbox_scheduler.clone(),
     );
+    spawn_trace_retention_maintenance_scheduler_task(
+        &state,
+        state.retention_maintenance_scheduler.clone(),
+    );
+    spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
+    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
+    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
+    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
+    spawn_trace_benchmark_registry_scheduler_task(
+        &state,
+        state.benchmark_registry_scheduler.clone(),
+    );
+    spawn_trace_benchmark_pipeline_scheduler_task(
+        &state,
+        state.benchmark_pipeline_scheduler.clone(),
+    );
+    spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
+    spawn_trace_credit_settlement_scheduler_task(&state, state.credit_settlement_scheduler.clone());
+    spawn_trace_process_evaluation_scheduler_task(
+        &state,
+        state.process_evaluation_scheduler.clone(),
+    );
+    spawn_trace_revocation_propagation_scheduler_task(
+        &state,
+        state.revocation_propagation_scheduler.clone(),
+    );
+    spawn_community_snapshot_invalidation_scheduler_task(
+        &state,
+        state.community_snapshot_invalidation_scheduler.clone(),
+    );
+    tracing::info!(
+        addr = %listener.local_addr()?,
+        "Trace Commons ingestion service listening"
+    );
+    let shutdown_state = Arc::clone(&state);
+    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
+    // Runs on the way out of BOTH a clean drain and an aborted one: the
+    // novelty corpus is the gate's memory of what "duplicate" means, and a
+    // restart that drops it silently re-scores every subsequent trace against
+    // an emptier corpus.
+    flush_vector_indexes_on_shutdown(&shutdown_state);
+    result
+}
+
+/// Everything that can refuse a start after `AppState` is built: the
+/// scheduler validations, the bind address and the bind. Only once all of
+/// them have passed is `pipeline_production_adapters` emitted (spec A-D11),
+/// when the operator set the `TRACE_COMMONS_PIPELINE_CHECK_*` variables, so
+/// a refused boot never leaves a result that the corrected boot would keep
+/// as `pipeline_production_adapters_already_emitted` (PR #1295 review,
+/// Minor 3). Returns the bound listener.
+async fn finish_ingest_startup(
+    state: &Arc<AppState>,
+    pipeline_gate_components: Option<&production_assembly::PipelineGateComponents>,
+    bind: &str,
+    check_vars: production_assembly::PipelineCheckVars,
+    deployed_code_revision: Option<&str>,
+) -> anyhow::Result<TcpListener> {
     validate_trace_export_job_scheduler_config(state.as_ref(), state.export_job_scheduler.as_ref())
         .await?;
     validate_trace_near_credit_outbox_scheduler_config(
@@ -1473,71 +1505,25 @@ pub async fn run_ingest(
         state.as_ref(),
         state.community_snapshot_invalidation_scheduler.as_ref(),
     )?;
-    spawn_managed_eddsa_keyset_refresh_task(&state);
-    // Say it out loud at boot. Publishing aggregates without a mechanism is
-    // a deliberate choice, and an operator reading the log should not have to
-    // infer it from the absence of something.
-    if state.community_analytics_publication_basis
-        == CommunityAnalyticsPublicationBasis::SuppressionOnly
-    {
-        tracing::warn!(
-            basis = CommunityAnalyticsPublicationBasis::SuppressionOnly.as_str(),
-            "community analytics publish under cell suppression alone; no noise \
-             mechanism is applied and totals are not suppressed"
-        );
-    }
-    spawn_community_snapshot_recompute_task(&state);
-    spawn_trace_export_job_scheduler_task(&state, state.export_job_scheduler.clone());
-    spawn_trace_near_credit_outbox_scheduler_task(
-        &state,
-        state.near_credit_outbox_scheduler.clone(),
-    );
-    spawn_trace_retention_maintenance_scheduler_task(
-        &state,
-        state.retention_maintenance_scheduler.clone(),
-    );
-    spawn_trace_vector_index_scheduler_task(&state, state.vector_index_scheduler.clone());
-    spawn_perplexity_score_driver_task(&state, state.perplexity_score_driver.clone());
-    spawn_pii_backstop_driver_task(&state, state.pii_backstop_driver.clone());
-    spawn_unbound_account_reaper_task(&state, state.unbound_account_reaper.clone());
-    spawn_trace_benchmark_registry_scheduler_task(
-        &state,
-        state.benchmark_registry_scheduler.clone(),
-    );
-    spawn_trace_benchmark_pipeline_scheduler_task(
-        &state,
-        state.benchmark_pipeline_scheduler.clone(),
-    );
-    spawn_trace_credit_cycle_scheduler_task(&state, state.credit_cycle_scheduler.clone());
-    spawn_trace_credit_settlement_scheduler_task(&state, state.credit_settlement_scheduler.clone());
-    spawn_trace_process_evaluation_scheduler_task(
-        &state,
-        state.process_evaluation_scheduler.clone(),
-    );
-    spawn_trace_revocation_propagation_scheduler_task(
-        &state,
-        state.revocation_propagation_scheduler.clone(),
-    );
-    spawn_community_snapshot_invalidation_scheduler_task(
-        &state,
-        state.community_snapshot_invalidation_scheduler.clone(),
-    );
-    let bind = std::env::var("TRACE_COMMONS_BIND").unwrap_or_else(|_| DEFAULT_BIND.to_string());
     let addr = bind
         .parse::<SocketAddr>()
         .with_context(|| format!("invalid TRACE_COMMONS_BIND address: {bind}"))?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind trace commons ingestion service at {addr}"))?;
-    tracing::info!(%addr, "Trace Commons ingestion service listening");
-    let shutdown_state = Arc::clone(&state);
-    let result = run_pipeline_app(state, listener, wait_for_shutdown_signal()).await;
-    // Runs on the way out of BOTH a clean drain and an aborted one: the
-    // novelty corpus is the gate's memory of what "duplicate" means, and a
-    // restart that drops it silently re-scores every subsequent trace against
-    // an emptier corpus.
-    flush_vector_indexes_on_shutdown(&shutdown_state);
-    result
+    if let (Some(service), Some(components)) =
+        (state.pipeline_service.as_deref(), pipeline_gate_components)
+    {
+        production_assembly::emit_production_adapters_check(
+            check_vars,
+            deployed_code_revision,
+            service,
+            components,
+            pipeline_activation::infrastructure_profile_from_state(state),
+            state.near_settlement_mode.as_label(),
+        )?;
+    }
+    Ok(listener)
 }
 
 /// Wait for SIGTERM (systemd's stop signal) or Ctrl-C.
@@ -1652,6 +1638,10 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 struct AppState {
     activity_missions_policy:
         Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
+    /// The local credit estimate table `GET /v1/credit-estimate/table`
+    /// serves: the operator-installed one, validated at boot, else the
+    /// protocol's built-in table. Never empty.
+    credit_estimate_table: Arc<trace_commons_protocol::local_credit_estimate::LocalEstimateTable>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -1740,6 +1730,9 @@ struct AppState {
     /// that does not), because its receipt transaction checks the routing
     /// again.
     pipeline_unqualified_routing: bool,
+    /// Which pipeline runtime this process started
+    /// (`TRACE_COMMONS_PIPELINE_RUNTIME`), reported by config-status.
+    pipeline_runtime_selection: PipelineRuntimeSelection,
     /// Fails startup closed (`pipeline_receipts_configured_without_runtime`
     /// / `pipeline_runtime_required_but_not_injected`) instead of silently
     /// running ingest without a pipeline runtime. See
@@ -2686,6 +2679,30 @@ impl ConfiguredTraceArtifactStore {
     #[cfg(test)]
     fn legacy(store: Arc<LocalEncryptedTraceArtifactStore>) -> Self {
         Self::new(TRACE_COMMONS_LEGACY_ENCRYPTED_OBJECT_STORE, store)
+    }
+
+    /// A service-owned remote store as `remote_gcs` configures one (no
+    /// plaintext compatibility, the provider's label, the key wrapper's
+    /// status), over a store the caller built: the remote restore drill's
+    /// seed and resume build theirs over a bucket prefix
+    /// (`pipeline_restore_pg_tests`). Versioning is not claimed: the drill
+    /// reads the bucket's own policy instead.
+    #[cfg(test)]
+    fn service_remote_for_test(
+        store: Arc<dyn TraceArtifactStore>,
+        provider_label: &'static str,
+        kek_status: KekWrapperStatus,
+    ) -> Self {
+        Self {
+            object_store_name: TRACE_COMMONS_SERVICE_REMOTE_OBJECT_STORE.to_string(),
+            store,
+            object_io_enabled: true,
+            plaintext_compatibility_allowed: false,
+            object_versioning_supported: false,
+            restore_after_delete_supported: false,
+            provider_label: Some(provider_label),
+            kek_status: Some(kek_status),
+        }
     }
 
     fn remote_disabled(config: TraceRemoteObjectStoreConfig) -> Self {
@@ -3771,9 +3788,14 @@ impl AppState {
         )
     }
 
+    /// The state, and the gate components the production pipeline runtime
+    /// was assembled over (`None` unless that runtime was selected).
     async fn from_env_with_pipeline_runtime_assembler(
         pipeline_runtime_assembler: Option<&dyn IngestPipelineRuntimeAssembler>,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<(
+        Self,
+        Option<Arc<production_assembly::PipelineGateComponents>>,
+    )> {
         let root = std::env::var("TRACE_COMMONS_DATA_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| default_data_dir());
@@ -4019,7 +4041,47 @@ impl AppState {
             pipeline_runtime_assembler.is_some(),
             novelty_utility_credit_points_delta,
         )?;
-        let pipeline_service = assemble_ingest_pipeline_runtime(
+        // Spec A-D2, A-D3: under the production selection, the legacy
+        // `enclave_near_ai` gate is built here, before the pipeline, from the
+        // same scorer, embedder and settings the pipeline then holds, so the
+        // embedder is loaded once. Otherwise the gate is built where it
+        // always was, below.
+        let pipeline_runtime_selection = if pipeline_runtime_assembler
+            .is_some_and(|assembler| assembler.needs_gate_components())
+        {
+            PipelineRuntimeSelection::Production
+        } else {
+            PipelineRuntimeSelection::None
+        };
+        let (prebuilt_gate_service, pipeline_gate_components) =
+            if pipeline_runtime_selection == PipelineRuntimeSelection::Production {
+                let rollout = tenant_rollout_gates.clone();
+                let (gate_service, components) =
+                    production_assembly::build_near_ai_gate_service_with_pipeline_components(
+                        production_assembly::PipelineComponentInputs {
+                            tenant_policies: production_assembly::tenant_policy_allowlists(
+                                &tenant_policies,
+                            ),
+                            require_tenant_submission_policy,
+                            db_policy_reads: Arc::new(move |tenant_id: &str| {
+                                rollout.enabled_for(
+                                    TraceTenantRolloutFeature::DbTenantPolicyReads,
+                                    db_tenant_policy_reads,
+                                    tenant_id,
+                                )
+                            }),
+                            db_policies: db_mirror.clone().map(|db| {
+                                Arc::new(production_assembly::DatabaseTenantPolicies(db))
+                                    as Arc<dyn production_assembly::TenantPolicyStore>
+                            }),
+                        },
+                    )
+                    .await?;
+                (Some(gate_service), Some(components))
+            } else {
+                (None, None)
+            };
+        let pipeline_service = assemble_ingest_pipeline_runtime_with_components(
             pipeline_runtime_assembler,
             db_connections.as_ref(),
             artifact_store.as_ref(),
@@ -4036,6 +4098,7 @@ impl AppState {
             },
             &pipeline_novelty_utility_checks,
             pipeline_main_gate,
+            pipeline_gate_components.clone(),
         )?;
         validate_pipeline_receipt_rollout(&tenant_rollout_gates, pipeline_service.is_some())?;
         if let Some(service) = pipeline_service.as_ref() {
@@ -4582,7 +4645,7 @@ impl AppState {
         let near_attestation_key_report_client =
             near_attestation_endpoint.map(|client| client as Arc<dyn AttestedKeyReportClient>);
 
-        Ok(Self {
+        let state = Self {
             root,
             near_attestation_client,
             near_attestation_key_report_client,
@@ -4617,6 +4680,7 @@ impl AppState {
             #[cfg(test)]
             pipeline_infrastructure_override: None,
             pipeline_unqualified_routing: pipeline_allow_test_dependencies,
+            pipeline_runtime_selection,
             pipeline_runtime_required,
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
@@ -4733,7 +4797,10 @@ impl AppState {
             ranking_min_pairwise_accuracy_micros,
             ranking_max_labeler_issue_rate_micros,
             ranking_min_labeler_reliability_label_count,
-            gate_service: build_trace_gate_service_from_env().await?,
+            gate_service: match prebuilt_gate_service {
+                Some(gate_service) => gate_service,
+                None => build_trace_gate_service_from_env().await?,
+            },
             revocation_propagation_max_attempts:
                 parse_revocation_propagation_max_attempts_from_env()?,
             novelty_utility_credit_points_delta,
@@ -4754,6 +4821,7 @@ impl AppState {
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
+            credit_estimate_table: credit_estimate::table_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -4766,7 +4834,10 @@ impl AppState {
             dedup_vector_index_counter: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             #[cfg(test)]
             near_access_key_checker_override: None,
-        })
+        };
+        // `run_ingest` emits `pipeline_production_adapters` over these once
+        // the start has passed every refusal (spec A-D11).
+        Ok((state, pipeline_gate_components))
     }
 }
 
@@ -6217,16 +6288,45 @@ async fn build_enclave_local_gpu_gate_service_from_env() -> anyhow::Result<Arc<d
 #[cfg(feature = "near-ai-scorer")]
 async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn TraceGateService>>
 {
-    use std::time::Duration as StdDuration;
-    use trace_commons_gate_enclave::embedder_fastembed::FastEmbedTextEmbedder;
-    use trace_commons_gate_enclave::vector_index_usearch::{
-        UsearchVectorIndex, UsearchVectorIndexConfig,
-    };
-    use trace_commons_gate_enclave::{
-        EnclaveGateOrchestrator, EnclaveGateOrchestratorConfig, NearAiPerplexityScorer,
-        NearAiScorerConfig,
-    };
+    let wrapper = near_ai_gate_key_wrapper_from_env().await?;
+    let shared = NearAiGateSharedComponents::from_env().await?;
+    Ok(near_ai_gate_service_from_parts(near_ai_gate_parts(
+        wrapper, shared,
+    )?))
+}
 
+/// What `build_enclave_near_ai_gate_service_from_env` builds before the
+/// orchestrator: the NEAR AI scorer and the fastembed embedder (built once,
+/// by the library's `NearAiGateSharedComponents::from_env`, and held as
+/// shared trait objects, so the production pipeline assembly holds the same
+/// two (spec A-D3) instead of loading a second embedder), the novelty
+/// index, the key wrapper and the orchestrator configuration.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) struct NearAiGateParts {
+    pub(crate) scorer: Arc<dyn trace_commons_gate_api::PerplexityScorer>,
+    pub(crate) embedder: Arc<dyn trace_commons_gate_api::Embedder>,
+    pub(crate) vector_index: Arc<dyn trace_commons_gate_api::VectorIndex>,
+    pub(crate) wrapper: Arc<dyn KmsKeyWrapper>,
+    pub(crate) cfg: trace_commons_gate_enclave::EnclaveGateOrchestratorConfig,
+}
+
+/// The legacy `enclave_near_ai` gate over `parts`: the orchestrator holds
+/// the shared scorer, embedder and index through their `Arc` forwarding
+/// impls, which forward every method, so scoring is unchanged.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) fn near_ai_gate_service_from_parts(parts: NearAiGateParts) -> Arc<dyn TraceGateService> {
+    use trace_commons_gate_enclave::EnclaveGateOrchestrator;
+    let orchestrator =
+        EnclaveGateOrchestrator::new(parts.scorer, parts.embedder, parts.vector_index, parts.cfg);
+    Arc::new(EnclaveGateService::new(
+        orchestrator,
+        parts.wrapper,
+        "enclave_near_ai",
+    ))
+}
+
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) async fn near_ai_gate_key_wrapper_from_env() -> anyhow::Result<Arc<dyn KmsKeyWrapper>> {
     let master_key = std::env::var(TRACE_COMMONS_GATE_SERVICE_MASTER_KEY).with_context(|| {
         format!(
             "{TRACE_COMMONS_GATE_SERVICE_MASTER_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
@@ -6241,162 +6341,40 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
     // "local_master_key"), keyed by the gate-service master key as before.
     let wrapper: Arc<dyn KmsKeyWrapper + Send + Sync> =
         Arc::from(build_selected_kek_wrapper_async(SecretString::from(master_key)).await?);
-    let wrapper: Arc<dyn KmsKeyWrapper> = wrapper;
+    Ok(wrapper)
+}
 
-    let base_url = std::env::var(TRACE_COMMONS_NEAR_AI_BASE_URL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_BASE_URL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let model = std::env::var(TRACE_COMMONS_NEAR_AI_MODEL).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_MODEL} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let api_key = std::env::var(TRACE_COMMONS_NEAR_AI_API_KEY).with_context(|| {
-        format!(
-            "{TRACE_COMMONS_NEAR_AI_API_KEY} must be set when {TRACE_COMMONS_GATE_SERVICE}=\"enclave_near_ai\""
-        )
-    })?;
-    let timeout_seconds = match std::env::var(TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS
-            } else {
-                trimmed.parse::<u64>().with_context(|| {
-                    format!("{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be a positive integer")
-                })?
-            }
-        }
-        Err(_) => TRACE_COMMONS_NEAR_AI_DEFAULT_TIMEOUT_SECONDS,
-    };
-    anyhow::ensure!(
-        timeout_seconds > 0,
-        "{TRACE_COMMONS_NEAR_AI_TIMEOUT_SECONDS} must be greater than zero"
-    );
-    let tail_cutoff = match std::env::var(TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF) {
-        Ok(raw) => raw.trim().parse::<f32>().with_context(|| {
-            format!(
-                "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be a floating-point number"
-            )
-        })?,
-        Err(_) => TRACE_COMMONS_PERPLEXITY_DEFAULT_TAIL_LOGPROB_CUTOFF,
-    };
-    anyhow::ensure!(
-        tail_cutoff.is_finite(),
-        "{TRACE_COMMONS_PERPLEXITY_TAIL_LOGPROB_CUTOFF} must be finite"
-    );
+/// The rest of the legacy gate over the shared scorer and embedder: the
+/// novelty index, the floors, the policy version and the chunking knobs.
+#[cfg(feature = "near-ai-scorer")]
+pub(crate) fn near_ai_gate_parts(
+    wrapper: Arc<dyn KmsKeyWrapper>,
+    shared: NearAiGateSharedComponents,
+) -> anyhow::Result<NearAiGateParts> {
+    use trace_commons_gate_enclave::EnclaveGateOrchestratorConfig;
+    use trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndex;
 
-    let scorer_cfg = NearAiScorerConfig {
-        base_url,
-        model: model.clone(),
-        api_key,
-        tail_logprob_cutoff: tail_cutoff,
-        logprobs_top_k: TRACE_COMMONS_NEAR_AI_DEFAULT_LOGPROBS_TOP_K,
-        timeout: StdDuration::from_secs(timeout_seconds),
-    };
-    // reqwest's blocking client owns an internal Tokio runtime and must not be
-    // constructed from this async startup task. Build it on the blocking pool,
-    // which is also where synchronous gate evaluation runs below.
-    let scorer = tokio::task::spawn_blocking(move || NearAiPerplexityScorer::try_new(scorer_cfg))
-        .await
-        .context("NearAiPerplexityScorerInitJoinFailed")?
-        .context("NearAiPerplexityScorerInitFailed")?;
-
-    // fastembed-rs embedder — same configuration surface as the local-GPU
-    // path. Runs locally on CPU; no GPU required.
-    let embedder_model_id = std::env::var(TRACE_COMMONS_EMBEDDER_MODEL_ID)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_MODEL_ID.to_string());
-    let embedder_cache_dir = std::env::var(TRACE_COMMONS_EMBEDDER_CACHE_DIR)
-        .unwrap_or_else(|_| TRACE_COMMONS_EMBEDDER_DEFAULT_CACHE_DIR.to_string());
-    let embedder_max_tokens = match std::env::var(TRACE_COMMONS_EMBEDDER_MAX_TOKENS) {
-        Ok(raw) => raw.trim().parse::<usize>().with_context(|| {
-            format!("{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be a positive integer")
-        })?,
-        Err(_) => TRACE_COMMONS_EMBEDDER_DEFAULT_MAX_TOKENS,
-    };
-    anyhow::ensure!(
-        embedder_max_tokens > 0,
-        "{TRACE_COMMONS_EMBEDDER_MAX_TOKENS} must be greater than zero"
-    );
-    let embedder_matryoshka_dim = match std::env::var(TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.parse::<usize>().with_context(|| {
-                    format!("{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be a positive integer")
-                })?)
-            }
-        }
-        Err(_) => None,
-    };
-    if let Some(d) = embedder_matryoshka_dim {
-        anyhow::ensure!(
-            d > 0,
-            "{TRACE_COMMONS_EMBEDDER_MATRYOSHKA_DIM} must be greater than zero"
-        );
-    }
-    let embedder = FastEmbedTextEmbedder::try_new(
-        embedder_model_id.clone(),
-        &embedder_cache_dir,
-        embedder_matryoshka_dim,
-        embedder_max_tokens,
-    )
-    .await
-    .context("FastEmbedTextEmbedderInitFailed")?;
-
+    let NearAiGateSharedComponents {
+        scorer,
+        embedder,
+        pins,
+    } = shared;
     let vector_index_root = std::env::var(TRACE_COMMONS_VECTOR_INDEX_ROOT)
         .unwrap_or_else(|_| TRACE_COMMONS_VECTOR_INDEX_DEFAULT_ROOT.to_string());
-    let vector_index_dim = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_DIM,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_DIM,
-    )?;
-    let vector_index_max_open = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_MAX_OPEN,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_MAX_OPEN,
-    )?;
-    let vector_index_flush_every = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_FLUSH_EVERY,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_FLUSH_EVERY,
-    )?;
-    let vector_index_hnsw_m = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_HNSW_M,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_HNSW_M,
-    )?;
-    let vector_index_ef_construction = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_CONSTRUCTION,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_CONSTRUCTION,
-    )?;
-    let vector_index_ef_search = parse_usize_env(
-        TRACE_COMMONS_VECTOR_INDEX_EF_SEARCH,
-        TRACE_COMMONS_VECTOR_INDEX_DEFAULT_EF_SEARCH,
-    )?;
-    let vector_index_flush_interval = vector_index_flush_interval_from_env()?;
-    let vector_index = UsearchVectorIndex::try_new(
-        &vector_index_root,
-        UsearchVectorIndexConfig {
-            dim: vector_index_dim,
-            hnsw_m: vector_index_hnsw_m,
-            ef_construction: vector_index_ef_construction,
-            ef_search: vector_index_ef_search,
-            max_open: vector_index_max_open,
-            flush_every: vector_index_flush_every,
-            flush_interval: vector_index_flush_interval,
-        },
-    )
-    .with_context(|| {
-        format!(
-            "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
-        )
-    })?;
+    let mut vector_index_config = usearch_index_config_from_env()?;
+    vector_index_config.flush_interval = vector_index_flush_interval_from_env()?;
+    let vector_index_dim = vector_index_config.dim;
+    let vector_index = UsearchVectorIndex::try_new(&vector_index_root, vector_index_config)
+        .with_context(|| {
+            format!(
+                "failed to initialize UsearchVectorIndex (root={vector_index_root}, dim={vector_index_dim})"
+            )
+        })?;
 
     anyhow::ensure!(
-        embedder.output_dim() == vector_index_dim,
+        pins.embedder_output_dim == vector_index_dim,
         "embedder output_dim ({}) must equal {} ({})",
-        embedder.output_dim(),
+        pins.embedder_output_dim,
         TRACE_COMMONS_VECTOR_INDEX_DIM,
         vector_index_dim,
     );
@@ -6439,12 +6417,12 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
         tail_fraction_floor_micros,
         novelty_floor_micros,
         top_k,
-        &model,
+        &pins.model,
         0,
-        tail_cutoff,
-        &embedder_model_id,
-        embedder_max_tokens,
-        embedder_matryoshka_dim,
+        pins.tail_logprob_cutoff,
+        &pins.embedder_model_id,
+        pins.embedder_max_tokens,
+        pins.embedder_matryoshka_dim,
         vector_index_dim,
         chunking.chunk_target_tokens,
         chunking.chunk_max_tokens,
@@ -6469,12 +6447,13 @@ async fn build_enclave_near_ai_gate_service_from_env() -> anyhow::Result<Arc<dyn
             .qualifying_chunk_floor_micros
             .unwrap_or(perplexity_floor_micros),
     };
-    let orchestrator = EnclaveGateOrchestrator::new(scorer, embedder, vector_index, cfg);
-    Ok(Arc::new(EnclaveGateService::new(
-        orchestrator,
+    Ok(NearAiGateParts {
+        scorer,
+        embedder,
+        vector_index: Arc::new(vector_index),
         wrapper,
-        "enclave_near_ai",
-    )))
+        cfg,
+    })
 }
 
 /// Build the cross-trace dedup vector index (shadow-only). A SEPARATE
@@ -6778,29 +6757,6 @@ fn vector_index_flush_interval_from_env() -> anyhow::Result<Option<std::time::Du
     } else {
         Some(std::time::Duration::from_secs(seconds))
     })
-}
-
-/// Parse `T = usize` from an env var with a default fallback. Trim + strict
-/// integer parse; empty / unset → default; malformed → fail-closed.
-///
-/// Not feature-gated (unlike its sibling gate-config parsers): the chunk-knob
-/// parser that reuses this reads env unconditionally so its defaults are
-/// exercised by the plain `cargo test` CI path regardless of which optional
-/// gate-service feature (if any) is compiled in.
-fn parse_usize_env(var: &'static str, default: usize) -> anyhow::Result<usize> {
-    match std::env::var(var) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Ok(default)
-            } else {
-                trimmed
-                    .parse::<usize>()
-                    .with_context(|| format!("{var} must be a non-negative integer"))
-            }
-        }
-        Err(_) => Ok(default),
-    }
 }
 
 /// The NEAR credit outbox scheduler's tick interval: how often `main`
@@ -8383,6 +8339,8 @@ fn community_cors_origins() -> Vec<HeaderValue> {
 }
 
 fn app(state: Arc<AppState>) -> Router {
+    let large_body_auth =
+        axum::middleware::from_fn_with_state(state.clone(), authenticate_large_body_request);
     Router::new()
         .route("/v1/reward-offers/{program_id}", get(rewards::offer))
         .route("/v1/missions", get(rewards::mission_catalog))
@@ -8402,15 +8360,27 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/v1/token-bundles",
-            post(token_bundles::begin).get(token_bundles::capabilities),
+            get(token_bundles::capabilities).merge(
+                post(token_bundles::begin)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}",
-            get(token_bundles::status).post(token_bundles::finalize),
+            get(token_bundles::status).merge(
+                post(token_bundles::finalize)
+                    .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route(
             "/v1/token-bundles/{submission}/{revision}/{artifact}",
-            axum::routing::put(token_bundles::put).get(token_bundles::read),
+            get(token_bundles::read).merge(
+                axum::routing::put(token_bundles::put)
+                    .layer(DefaultBodyLimit::max(MAX_TOKEN_BUNDLE_BODY_BYTES))
+                    .layer(large_body_auth.clone()),
+            ),
         )
         .route("/health", get(health_handler))
         .route("/v1/pipeline/readiness", get(pipeline_readiness_handler))
@@ -8418,11 +8388,22 @@ fn app(state: Arc<AppState>) -> Router {
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
         .route("/v1/public/register-stats", get(register_stats_handler))
+        // Unauthenticated and outside tenant context for the same reason: the
+        // estimate table is public, non-personal data a client fetches before
+        // it has an account.
+        .route(
+            "/v1/credit-estimate/table",
+            get(credit_estimate::table_handler),
+        )
         .route(
             "/v1/traces",
             get(list_traces_handler)
-                .post(submit_trace_handler)
-                .delete(revoke_trace_body_handler),
+                .delete(revoke_trace_body_handler)
+                .merge(
+                    post(submit_trace_handler)
+                        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+                        .layer(large_body_auth),
+                ),
         )
         .route(
             "/v1/admission/challenge",
@@ -8901,6 +8882,10 @@ fn app(state: Arc<AppState>) -> Router {
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route("/v1/admin/rederive-dedup", post(rederive_dedup_handler))
         .route(
+            "/v1/admin/credit-estimate-eval",
+            post(credit_estimate::eval_handler),
+        )
+        .route(
             "/v1/admin/pii-backstop-requeue-quarantined",
             post(pii_backstop_requeue_quarantined_handler),
         )
@@ -9160,7 +9145,74 @@ fn app(state: Arc<AppState>) -> Router {
         // trust anything, so it cannot sit behind enrollment.
         .merge(attestation_collateral_routes())
         .with_state(state)
-        .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(DEFAULT_API_BODY_BYTES))
+}
+
+/// Reject a missing or invalid bearer before a large upload extractor is
+/// allowed to poll the body, then bound how many upload bodies that principal,
+/// and the deployment, may be buffering at once. Both slots are held until the
+/// handler returns, which is after the body has been read and dropped.
+/// Handlers authenticate again on purpose: their existing rate-limit,
+/// tenant-access-grant, and admission ordering remains the authoritative
+/// authorization path, while this middleware is only the cheap pre-body gate.
+///
+/// Concurrency only, no per-minute rate: a token bundle may carry up to
+/// `MAX_ATTACHMENTS` attachments, uploaded one `put` at a time, so any rate a
+/// legitimate bundle fits under bounds nothing. Memory is what an in-flight
+/// cap bounds.
+async fn authenticate_large_body_request(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> axum::response::Response {
+    let tenant = match authenticate_ctx(state.as_ref(), request.headers()) {
+        Ok(tenant) => tenant,
+        Err(error) => return error.into_response(),
+    };
+    let principal_key = large_body_principal_key(
+        tenant.tenant_id(),
+        tenant.safe_auth_method(),
+        tenant.principal_ref(),
+    );
+    let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
+        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    };
+    next.run(request).await
+}
+
+/// Most upload bodies one principal may have in flight at once, across every
+/// large-body route. Above the submit handler's own concurrency of 2, so a
+/// contributor submitting while a bundle uploads is never refused here first.
+const LARGE_BODY_PER_PRINCIPAL_CONCURRENCY: u32 = 4;
+/// Most upload bodies in flight across the deployment. Bounds what uploads can
+/// make ingest buffer to about this many times `MAX_INGEST_BODY_BYTES`
+/// (~650 MB), whatever the number of valid tokens.
+const LARGE_BODY_GLOBAL_CONCURRENCY: u32 = 32;
+const LARGE_BODY_GLOBAL_KEY: &str = "large-body-global";
+
+fn large_body_principal_key(
+    tenant_id: &str,
+    auth_method: TraceAuthMethod,
+    principal_ref: &str,
+) -> String {
+    format!(
+        "large-body:{}",
+        submit_principal_rate_limit_key(tenant_id, auth_method, principal_ref)
+    )
+}
+
+/// Take the principal's slot first, so a principal at its own cap never
+/// spends a deployment-wide slot.
+fn large_body_slots_for<'a>(
+    limiter: &'a AccountRateLimiter,
+    principal_key: &str,
+) -> Option<[ConcurrencyGuard<'a>; 2]> {
+    let principal = limiter.acquire(
+        principal_key,
+        large_body_principal_concurrency(principal_key),
+    )?;
+    let global = limiter.acquire(LARGE_BODY_GLOBAL_KEY, LARGE_BODY_GLOBAL_CONCURRENCY)?;
+    Some([principal, global])
 }
 
 fn default_data_dir() -> PathBuf {
@@ -12821,6 +12873,8 @@ struct TraceCommonsConfigStatusResponse {
     schema_version: &'static str,
     db_mirror_configured: bool,
     pipeline_runtime_configured: bool,
+    /// `none` or `production` (`TRACE_COMMONS_PIPELINE_RUNTIME`).
+    pipeline_runtime_selection: &'static str,
     pipeline_runtime_required: bool,
     pipeline_runtime_production_qualified: bool,
     /// Whether this process routes a listed tenant that has no routing row
@@ -13100,6 +13154,7 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
         pipeline_runtime_configured: state.pipeline_service.is_some(),
+        pipeline_runtime_selection: state.pipeline_runtime_selection.label(),
         pipeline_runtime_required: state.pipeline_runtime_required,
         pipeline_runtime_production_qualified: state
             .pipeline_service
@@ -14450,6 +14505,11 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
 /// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
 const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
 
+/// The 409 label of a `main` route that refuses a submission a pipeline run
+/// owns: the gate evaluate route (Zaki review 1, M-f), and the legacy review
+/// decision and lease routes (Zaki review 3, Z3-L8).
+const PIPELINE_RUN_OWNS_SUBMISSION: &str = "pipeline_run_owns_submission";
+
 /// Zaki review 1, round 2, N-3: an upload of a submission id that a
 /// pipeline run owns never reaches `main`'s legacy upsert, whatever path it
 /// took (with or without account admission, static-token tenants
@@ -14779,6 +14839,33 @@ async fn decide_upload_route<'a>(
     }
 }
 
+/// The answer to a pipeline receipt that failed. Two refusals store nothing
+/// and are answered with their label as a 503, as the containment refusal
+/// is, so a contributor's client sees a blocked reason to retry later rather
+/// than an internal error:
+/// - an operator suspended the Admission policy of the tenant's bundle
+///   (`intervene_policy`, STA-002);
+/// - the tenant has no authority source (`authority_control_missing`): the
+///   production authority answers none for a tenant whose policy `main`
+///   reads from the database (PR #1295 review, Minor 5). The production
+///   start refuses a routed tenant in that state; this covers the rest.
+///
+/// The text is compared whole: only the label itself, never an error that
+/// carries it.
+fn pipeline_receipt_error(error: anyhow::Error) -> (StatusCode, Json<ApiError>) {
+    let text = error.to_string();
+    for label in [
+        PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_CONTROL_MISSING_LABEL,
+        trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL,
+    ] {
+        if text == label {
+            return api_error(StatusCode::SERVICE_UNAVAILABLE, label);
+        }
+    }
+    internal_error(error)
+}
+
 /// Acts on the route `decide_upload_route` chose for a new upload: the legacy
 /// path (after its claim of the submission id, when it has one) or a receipt
 /// to the versioned pipeline instead of the legacy corpus path.
@@ -14840,22 +14927,7 @@ async fn route_pipeline_receipt(
             },
         })
         .await
-        .map_err(|error| {
-            // An operator suspended the Admission policy of the tenant's
-            // bundle (`intervene_policy`): the receipt stored nothing and is
-            // refused with its label, as the containment refusal is, so a
-            // contributor's client sees a blocked reason to retry later
-            // rather than an internal error (STA-002). The text is compared
-            // whole: only the label itself, never an error that carries it.
-            if error.to_string() == PIPELINE_POLICY_NOT_RUNNABLE_LABEL {
-                api_error(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
-                )
-            } else {
-                internal_error(error)
-            }
-        })?;
+        .map_err(pipeline_receipt_error)?;
     match result {
         PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
@@ -14996,7 +15068,7 @@ async fn submit_trace_handler(
         authenticated_tenant.principal_ref(),
     );
     let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
-    if !ACCOUNT_RATE_LIMITER.check(&submit_key, submit_rate_limit) {
+    if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
     let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
@@ -15333,8 +15405,8 @@ async fn submit_trace_handler(
         // ran against the risk-derived status, so a held-but-otherwise-Accepted trace
         // keeps its pending credit intact for the eventual release to Accepted; the
         // consumer/Accepted gates enforce the hold purely off the stored status.
-        // No enrol row is written: the `awaiting_pii_backstop` status is the
-        // enrolment (the driver enumeration tolerates an absent bookkeeping row).
+        // No enroll row is written: the `awaiting_pii_backstop` status is the
+        // enrollment (the driver enumeration tolerates an absent bookkeeping row).
         let held_without_a_witness = corpus_status_with_pii_backstop_hold(
             corpus_status,
             &envelope.consent,
@@ -17174,7 +17246,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
             .iter()
             .map(|instrument| TraceInstrumentStatusUpdate {
                 instrument_id: instrument.instrument_id.clone(),
-                atomic_units: instrument.atomic_units.to_string(),
+                atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(
+                    instrument.atomic_units.get(),
+                )),
                 operation_state: instrument.operation_state.clone(),
                 internal_settlement_state: instrument.internal_settlement_state.clone(),
                 payout_rail: instrument.payout_rail.clone(),
@@ -18867,7 +18941,7 @@ async fn account_credit_summary_handler(
     // often this new route can trigger it is not. Collapses to a generic 429,
     // like every other account surface: no enumeration, no size signal.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("credit-summary-account:{account_key}"),
         CREDIT_SUMMARY_PER_ACCOUNT_LIMIT,
     ) {
@@ -19165,7 +19239,7 @@ async fn account_trace_content_handler(
     // `_content_slot` drops at function return, on every path including the
     // fail-closed error returns below.
     let account_key = ctx.account_id.as_uuid().to_string();
-    if !ACCOUNT_RATE_LIMITER.check(
+    if !ACCOUNT_RATE_LIMITER.check_principal(
         &format!("content-account:{account_key}"),
         CONTENT_PER_ACCOUNT_LIMIT,
     ) {
@@ -20299,7 +20373,8 @@ async fn native_authorize_start_handler(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-authorize-global", NATIVE_AUTHORIZE_GLOBAL_LIMIT)
+    {
         return native_generic_deny();
     }
 
@@ -20359,11 +20434,17 @@ use near_provisioning::{
 
 #[path = "trace_commons_ingest_internal/pipeline_runtime.rs"]
 mod pipeline_runtime;
+#[cfg(test)]
+use pipeline_runtime::assemble_ingest_pipeline_runtime;
 use pipeline_runtime::{
-    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime,
+    IngestPipelineRuntimeAssembler, assemble_ingest_pipeline_runtime_with_components,
     pipeline_index_rebuild_handler, pipeline_readiness_handler,
     pipeline_runtime_is_production_qualified, run_pipeline_app,
 };
+
+#[path = "trace_commons_ingest_internal/production_assembly.rs"]
+mod production_assembly;
+use production_assembly::PipelineRuntimeSelection;
 
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
@@ -20442,7 +20523,7 @@ async fn native_token_inner(
     ) {
         return native_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("native-token-global", NATIVE_TOKEN_GLOBAL_LIMIT) {
         return native_generic_deny();
     }
 
@@ -20672,6 +20753,20 @@ const ACCOUNT_RATE_WINDOW: StdDuration = StdDuration::from_secs(60);
 
 /// Per-IP cap on `GET /account/login` interstitial renders per window.
 const INTERSTITIAL_PER_IP_LIMIT: u32 = 120;
+/// Header-independent blast-radius ceiling on interstitial renders. A botnet
+/// can rotate real source addresses, so the per-client bucket alone is not a
+/// deployment-wide bound. The render is stateless and in memory (no database,
+/// no code consumption), so the ceiling only has to bound CPU; set low, it is
+/// a cheap switch that turns every emailed login link into a 429. 12,000 takes
+/// 100 addresses at the per-IP cap to exhaust. Confirm's 600 global
+/// (`CONFIRM_GLOBAL_LIMIT`) is the budget-bearing gate for login itself.
+const INTERSTITIAL_GLOBAL_LIMIT: u32 = 12_000;
+// Compile-time, so a later edit cannot quietly turn the interstitial back into
+// a cheap kill switch, or size it past what the anonymous table holds without
+// folding the per-IP keys that exhaust it.
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT / INTERSTITIAL_PER_IP_LIMIT >= 100);
+const _: () = assert!(INTERSTITIAL_GLOBAL_LIMIT >= 10 * CONFIRM_GLOBAL_LIMIT);
+const _: () = assert!((INTERSTITIAL_GLOBAL_LIMIT as usize) < MAX_ACCOUNT_RATE_WINDOWS);
 /// Per-IP cap on `POST /account/login/confirm` attempts per window.
 const CONFIRM_PER_IP_LIMIT: u32 = 30;
 /// Coarse global cap on confirm attempts per window across ALL callers — a
@@ -20755,15 +20850,26 @@ static SUBMIT_RATE_LIMIT_TEST_LIMITS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<String, (u32, u32)>>,
 > = std::sync::OnceLock::new();
 
-fn submit_rate_limits(key: &str) -> (u32, u32) {
-    let configured = SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
+fn configured_rate_limits(key: &str) -> Option<(u32, u32)> {
+    SUBMIT_RATE_LIMIT_TEST_LIMITS.get().and_then(|limits| {
         limits
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .copied()
-    });
-    configured.unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+    })
+}
+
+fn submit_rate_limits(key: &str) -> (u32, u32) {
+    configured_rate_limits(key)
+        .unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+}
+
+/// The principal's in-flight upload cap. Shared fixture principals get the
+/// same explicit test override as their submit key; see
+/// `SUBMIT_RATE_LIMIT_TEST_LIMITS`.
+fn large_body_principal_concurrency(key: &str) -> u32 {
+    configured_rate_limits(key).map_or(LARGE_BODY_PER_PRINCIPAL_CONCURRENCY, |(_, c)| c)
 }
 
 #[cfg(test)]
@@ -20788,36 +20894,166 @@ struct RateWindow {
     window_start: std::time::Instant,
 }
 
+/// Most independent fixed-window keys retained at once. Excess keys share one
+/// stricter overflow bucket, so rotating addresses or public identifiers
+/// cannot turn the limiter itself into an unbounded memory sink.
+const MAX_ACCOUNT_RATE_WINDOWS: usize = 16_384;
+const ACCOUNT_RATE_OVERFLOW_KEY: &str = "rate-limit-overflow";
+/// The shared overflow bucket deliberately uses the smallest normal
+/// credential-guessing allowance. Under a key-cardinality flood, unfamiliar
+/// callers fail closed rather than inheriting a high-volume public-read cap.
+const ACCOUNT_RATE_OVERFLOW_LIMIT: u32 = 5;
+/// A full-table stale-entry scan is O(N), so it may run at most once per second
+/// even while every request presents a fresh key.
+const ACCOUNT_RATE_PRUNE_INTERVAL: StdDuration = StdDuration::from_secs(1);
+
+struct AccountRateWindows {
+    entries: std::collections::HashMap<String, RateWindow>,
+    last_prune: Option<std::time::Instant>,
+    #[cfg(test)]
+    prune_runs: u64,
+}
+
+impl AccountRateWindows {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            last_prune: None,
+            #[cfg(test)]
+            prune_runs: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.last_prune = None;
+        self.prune_runs = 0;
+    }
+}
+
 /// In-process fixed-window rate limiter keyed by an opaque string (IP / account
 /// id / code_hash / a fixed global key). Single-instance only (see the module
 /// note above). The map keys hold NO cleartext secrets: IPs, account ids, and
 /// `code_hash` (already a sha256) are all non-secret or pre-hashed.
+///
+/// Two independently bounded tables: `windows` holds keys an anonymous caller
+/// can mint (per-IP, per-code-hash, per-credential) plus the fixed global
+/// ceilings; `principal_windows` holds keys derived from an authenticated
+/// principal or account. A key-cardinality flood on the public surfaces fills
+/// only the first, so it cannot fold a contributor into the anonymous overflow
+/// bucket.
 struct AccountRateLimiter {
-    windows: std::sync::Mutex<std::collections::HashMap<String, RateWindow>>,
+    windows: std::sync::Mutex<AccountRateWindows>,
+    principal_windows: std::sync::Mutex<AccountRateWindows>,
     concurrency: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    max_windows: usize,
 }
 
 impl AccountRateLimiter {
     fn new() -> Self {
+        Self::with_max_windows(MAX_ACCOUNT_RATE_WINDOWS)
+    }
+
+    fn with_max_windows(max_windows: usize) -> Self {
         Self {
-            windows: std::sync::Mutex::new(std::collections::HashMap::new()),
+            windows: std::sync::Mutex::new(AccountRateWindows::new()),
+            principal_windows: std::sync::Mutex::new(AccountRateWindows::new()),
             concurrency: std::sync::Mutex::new(std::collections::HashMap::new()),
+            max_windows,
         }
+    }
+
+    #[cfg(test)]
+    fn with_max_windows_for_test(max_windows: usize) -> Self {
+        Self::with_max_windows(max_windows)
     }
 
     /// Record one hit against `key` and report whether it is WITHIN `limit` for
     /// the current `ACCOUNT_RATE_WINDOW`. Returns `true` when allowed, `false`
     /// when the limit is exceeded. A poisoned lock fails CLOSED (denies).
     fn check(&self, key: &str, limit: u32) -> bool {
-        let now = std::time::Instant::now();
-        let mut windows = match self.windows.lock() {
+        self.check_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a fixed, code-built deployment-wide key
+    /// (`"confirm-global"`, `"reward-{resource}-global"`). Such a key never
+    /// falls into the shared overflow bucket when the table is full: a
+    /// global ceiling must keep its own limit during an address-rotation
+    /// flood, which is when it matters. The set of these keys is fixed by
+    /// the code, so they can push the table past `max_windows` only by that
+    /// small constant. Never pass a key that carries caller input.
+    fn check_global(&self, key: &str, limit: u32) -> bool {
+        self.check_global_at(key, limit, std::time::Instant::now())
+    }
+
+    /// Like [`Self::check`], for a key derived from an AUTHENTICATED principal
+    /// or account (`submit-principal:…`, `content-account:{uuid}`). Such keys
+    /// live in their own bounded table, so an anonymous key flood cannot push
+    /// a contributor into the anonymous overflow bucket. Never pass a key an
+    /// unauthenticated caller can choose.
+    fn check_principal(&self, key: &str, limit: u32) -> bool {
+        self.check_principal_at(key, limit, std::time::Instant::now())
+    }
+
+    fn check_principal_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(
+            &self.principal_windows,
+            self.max_windows,
+            key,
+            limit,
+            now,
+            false,
+        )
+    }
+
+    fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, false)
+    }
+
+    fn check_global_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
+        Self::record_at(&self.windows, self.max_windows, key, limit, now, true)
+    }
+
+    fn record_at(
+        windows: &std::sync::Mutex<AccountRateWindows>,
+        max_windows: usize,
+        key: &str,
+        limit: u32,
+        now: std::time::Instant,
+        global: bool,
+    ) -> bool {
+        let mut table = match windows.lock() {
             Ok(guard) => guard,
             Err(_) => return false,
         };
-        // Opportunistic GC: drop entries whose window has fully elapsed so the
-        // map cannot grow unbounded across many distinct keys.
-        windows.retain(|_, w| now.duration_since(w.window_start) < ACCOUNT_RATE_WINDOW);
-        let entry = windows
+        let new_key_at_capacity =
+            !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows;
+        if new_key_at_capacity
+            && table.last_prune.is_none_or(|last| {
+                now.saturating_duration_since(last) >= ACCOUNT_RATE_PRUNE_INTERVAL
+            })
+        {
+            table.last_prune = Some(now);
+            #[cfg(test)]
+            {
+                table.prune_runs = table.prune_runs.saturating_add(1);
+            }
+            table.entries.retain(|_, window| {
+                now.saturating_duration_since(window.window_start) < ACCOUNT_RATE_WINDOW
+            });
+        }
+        let (key, limit) =
+            if !global && !table.entries.contains_key(key) && table.entries.len() >= max_windows {
+                (
+                    ACCOUNT_RATE_OVERFLOW_KEY,
+                    limit.min(ACCOUNT_RATE_OVERFLOW_LIMIT),
+                )
+            } else {
+                (key, limit)
+            };
+        let entry = table
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| RateWindow {
                 count: 0,
@@ -20868,9 +21104,11 @@ impl AccountRateLimiter {
     /// into a fresh map so a panic in one test cannot wedge the limiter for the rest.
     #[cfg(test)]
     pub fn reset_for_test(&self) {
-        match self.windows.lock() {
-            Ok(mut windows) => windows.clear(),
-            Err(poisoned) => poisoned.into_inner().clear(),
+        for table in [&self.windows, &self.principal_windows] {
+            table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         match self.concurrency.lock() {
             Ok(mut concurrency) => concurrency.clear(),
@@ -20887,13 +21125,44 @@ impl AccountRateLimiter {
 
     #[cfg(test)]
     fn count_for_test(&self, key: &str) -> u32 {
-        match self.windows.lock() {
-            Ok(windows) => windows.get(key).map_or(0, |window| window.count),
-            Err(poisoned) => poisoned
-                .into_inner()
-                .get(key)
-                .map_or(0, |window| window.count),
-        }
+        [&self.windows, &self.principal_windows]
+            .into_iter()
+            .map(|table| {
+                table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .entries
+                    .get(key)
+                    .map_or(0, |window| window.count)
+            })
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn in_flight_for_test(&self, key: &str) -> u32 {
+        self.concurrency
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn tracked_windows_for_test(&self) -> usize {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .len()
+    }
+
+    #[cfg(test)]
+    fn prune_runs_for_test(&self) -> u64 {
+        self.windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prune_runs
     }
 }
 
@@ -20971,26 +21240,30 @@ impl Drop for ConcurrencyGuard<'_> {
 static ACCOUNT_RATE_LIMITER: std::sync::LazyLock<AccountRateLimiter> =
     std::sync::LazyLock::new(AccountRateLimiter::new);
 
-/// Extract the client IP for rate-limit keying from the first `X-Forwarded-For`
-/// hop.
+/// Extract the canonical client IP rate-limit key from `X-Forwarded-For`.
 ///
 /// TRUST ASSUMPTION: the single-host pilot sits behind a trusted reverse proxy /
-/// load balancer (GCP) that sets `X-Forwarded-For`. The leftmost hop is the
-/// client; we do NOT trust it for any authorization decision — it keys a
-/// best-effort rate-limit bucket ONLY. When the header is absent (no proxy, or a
-/// direct caller) every such request shares the single `"xff-absent"` bucket,
-/// which is conservative (stricter), not permissive. `axum::serve` is not wired
-/// with `ConnectInfo`, so the connection peer addr is intentionally not used
-/// here; wiring it would require a broad make-service change out of Task 11
-/// scope.
+/// load balancer whose Caddy edge OVERWRITES `X-Forwarded-For` with the peer it
+/// observed. The rightmost hop of the last header line is therefore the trusted
+/// value; caller-supplied hops to its left never allocate a bucket. IPv6 keys
+/// are coarsened to /64 so cheap interface-id rotation does not evade the cap.
+/// Missing or malformed values share the conservative `"unattributed"` bucket.
+///
+/// This is not safe for a directly public application listener. Ingest binds
+/// loopback in the pilot, and the Caddy overwrite is load-bearing. The key is
+/// never used for authorization.
 fn client_ip_for_rate_limit(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|raw| raw.split(',').next())
-        .map(|hop| hop.trim().to_string())
-        .filter(|hop| !hop.is_empty())
-        .unwrap_or_else(|| "xff-absent".to_string())
+    lookup_client_key(
+        headers,
+        &axum::http::HeaderName::from_static("x-forwarded-for"),
+    )
+}
+
+fn interstitial_rate_limit_allows(limiter: &AccountRateLimiter, client_ip: &str) -> bool {
+    limiter.check(
+        &format!("interstitial-ip:{client_ip}"),
+        INTERSTITIAL_PER_IP_LIMIT,
+    ) && limiter.check_global("interstitial-global", INTERSTITIAL_GLOBAL_LIMIT)
 }
 
 /// Sleep until at least `REDEEM_MIN_LATENCY` has elapsed since `start`. A no-op
@@ -21146,10 +21419,7 @@ async fn login_interstitial_handler(
     // per-cause detail, no enumeration). This GET does NOT consume the code, so a
     // 429 here only throttles interstitial renders; the deny is generic.
     let client_ip = client_ip_for_rate_limit(&headers);
-    if !ACCOUNT_RATE_LIMITER.check(
-        &format!("interstitial-ip:{client_ip}"),
-        INTERSTITIAL_PER_IP_LIMIT,
-    ) {
+    if !interstitial_rate_limit_allows(&ACCOUNT_RATE_LIMITER, &client_ip) {
         let mut response = StatusCode::TOO_MANY_REQUESTS.into_response();
         response.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -21293,7 +21563,7 @@ async fn confirm_login_inner(
     if !ACCOUNT_RATE_LIMITER.check(&format!("confirm-ip:{client_ip}"), CONFIRM_PER_IP_LIMIT) {
         return redeem_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("confirm-global", CONFIRM_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("confirm-global", CONFIRM_GLOBAL_LIMIT) {
         return redeem_generic_deny();
     }
 
@@ -22676,6 +22946,13 @@ async fn reconcile_source_session_withdrawals(
             // tombstone and before the bytes, and is idempotent, so a retried
             // completion repeats nothing (Zaki review 1, round 2: #1155's
             // consumer sweep).
+            //
+            // poldsam P-3: the order is deliberate. A follow-up that fails
+            // returns here, before `complete_trace_withdrawal`, so `main`'s
+            // content deletion of this version waits for the reconciler's
+            // next pass. The other order would lose the follow-up: the
+            // reconciler retries only versions that are still incomplete,
+            // and a version whose bytes were deleted is complete.
             if let Some(pipeline) = state.pipeline_service.as_ref() {
                 pipeline
                     .follow_up_withdrawal(
@@ -22932,7 +23209,7 @@ async fn account_passkey_login_start_handler(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23115,7 +23392,7 @@ async fn account_passkey_login_finish_inner(
     ) {
         return passkey_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("passkey-login-global", PASSKEY_LOGIN_GLOBAL_LIMIT) {
         return passkey_login_generic_deny();
     }
 
@@ -23357,7 +23634,7 @@ async fn account_near_login_start_handler(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -23449,7 +23726,7 @@ async fn account_near_login_finish_inner(
     ) {
         return near_login_generic_deny();
     }
-    if !ACCOUNT_RATE_LIMITER.check("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("near-login-global", NEAR_LOGIN_GLOBAL_LIMIT) {
         return near_login_generic_deny();
     }
 
@@ -23908,7 +24185,7 @@ async fn review_quarantine_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -24028,7 +24305,7 @@ async fn review_quarantine_rescrub_batch_handler(
         .as_deref()
         .unwrap_or("operator_quarantine_rescrub_batch");
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let requested: Option<BTreeSet<Uuid>> =
@@ -24279,7 +24556,7 @@ async fn review_routing_summary_handler(
     let tenant = authenticate_ctx_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(tenant.auth())?;
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state.as_ref(), tenant.auth())
+        read_mains_reviewer_metadata_view(state.as_ref(), tenant.auth())
             .await
             .map_err(internal_error)?;
     let now = Utc::now();
@@ -42610,6 +42887,7 @@ async fn apply_review_decision(
     body: &TraceReviewDecisionRequest,
     reason: &str,
 ) -> ApiResult<TraceSubmissionReceipt> {
+    refuse_a_pipeline_submission(state, &tenant.tenant_id, submission_id).await?;
     let ReviewDecisionRecord {
         mut record,
         mut canonical_summary_hash,
@@ -42845,6 +43123,7 @@ async fn claim_review_lease_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let db = require_db_reviewer_lease_store(state.as_ref(), &tenant)?;
+    refuse_a_pipeline_submission(state.as_ref(), &tenant.tenant_id, submission_id).await?;
     let ttl_seconds = validate_review_lease_ttl_seconds(body.lease_ttl_seconds)?;
     let now = Utc::now();
     let lease_expires_at = now + Duration::seconds(ttl_seconds);
@@ -43245,28 +43524,37 @@ async fn pipeline_review_claim_handler(
     };
     // Zaki review 1, minor item M-a: the audit row `main`'s review lease
     // claim appends, hash-only and label-only.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_lease(
+    //
+    // poldsam P-7: the claim is committed by now. A failed append must not
+    // answer 500 and keep the lease token from the reviewer who holds the
+    // claim: it is logged hash-only and the committed claim is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            StorageTraceReviewLeaseAuditAction::Claim,
-            Some(claim.lease_expires_at),
-            None,
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewLease {
-            action: StorageTraceReviewLeaseAuditAction::Claim,
-            lease_expires_at: Some(claim.lease_expires_at),
-            review_due_at: None,
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_lease(
+                &tenant,
+                submission_id,
+                StorageTraceReviewLeaseAuditAction::Claim,
+                Some(claim.lease_expires_at),
+                None,
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewLease {
+                action: StorageTraceReviewLeaseAuditAction::Claim,
+                lease_expires_at: Some(claim.lease_expires_at),
+                review_due_at: None,
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "claim", &error);
+    }
     Ok(Json(PipelineReviewClaimResponse {
         lease_token: claim.lease_token,
         lease_expires_at: claim.lease_expires_at,
@@ -43306,6 +43594,27 @@ async fn pipeline_run_submission_record(
         .ok_or_else(not_found)?
         .map_err(internal_error)?;
     Ok(Some(record))
+}
+
+/// poldsam P-7: a pipeline review route's audit append failed after its
+/// claim or assessment committed. Hash-only: the tenant's storage
+/// reference, a hash of the run id, the route's label and the error's hash.
+/// An operator finds the decision in `pipeline_review_assessments` (or the
+/// claim in `pipeline_review_claims`); the audit trail has no row for it.
+fn log_pipeline_review_audit_append_failure(
+    tenant_id: &str,
+    run_id: Uuid,
+    route: &'static str,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(
+        error_class = "pipeline_review_audit_append_failed",
+        tenant_storage_ref = %tenant_storage_ref(tenant_id),
+        run_ref_hash = %sha256_prefixed(&run_id.to_string()),
+        route,
+        error_hash = %safe_runtime_error_hash(error),
+        "pipeline review audit append failed; the committed result was answered"
+    );
 }
 
 /// The submission a pipeline run belongs to, for the review routes' audit
@@ -43402,6 +43711,10 @@ async fn pipeline_review_assessment_handler(
             "review decision",
         )?;
     }
+    // The audit row's labels, formed before the commit, so nothing that can
+    // fail without an append stands between the commit and the answer.
+    let review_status = storage_corpus_status(resulting_status);
+    let decision_label = serde_storage_string(&review_status).map_err(internal_error)?;
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -43410,28 +43723,37 @@ async fn pipeline_review_assessment_handler(
     // Zaki review 1, minor item M-a: the audit row `main`'s review decision
     // appends: the reason as a hash, and labels only in the metadata. The
     // status is the one the recommendation leads to once Review runs.
-    let submission_id = pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id)
-        .await
-        .map_err(internal_error)?;
-    let review_status = storage_corpus_status(resulting_status);
-    append_audit_event_with_db_mirror(
-        state.as_ref(),
-        &tenant,
-        TraceCommonsAuditEvent::review_decision(
+    //
+    // poldsam P-7: the assessment is committed by now. A failed append must
+    // not answer 500: a retry would get 409 (the run already has its
+    // assessment) and the reviewer would never see the committed result. It
+    // is logged hash-only and the committed assessment is answered, as
+    // `main`'s withdrawal treats its own audit append.
+    let appended: anyhow::Result<()> = async {
+        let submission_id =
+            pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
+        append_audit_event_with_db_mirror(
+            state.as_ref(),
             &tenant,
-            submission_id,
-            resulting_status,
-            Some(&trace_free_text_audit_reason(&reason_label)),
-        ),
-        StorageTraceAuditAction::Review,
-        StorageTraceAuditSafeMetadata::ReviewDecision {
-            decision: serde_storage_string(&review_status).map_err(internal_error)?,
-            resulting_status: review_status,
-            reason_code: Some(reason_label),
-        },
-    )
-    .await
-    .map_err(internal_error)?;
+            TraceCommonsAuditEvent::review_decision(
+                &tenant,
+                submission_id,
+                resulting_status,
+                Some(&trace_free_text_audit_reason(&reason_label)),
+            ),
+            StorageTraceAuditAction::Review,
+            StorageTraceAuditSafeMetadata::ReviewDecision {
+                decision: decision_label,
+                resulting_status: review_status,
+                reason_code: Some(reason_label.clone()),
+            },
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = appended {
+        log_pipeline_review_audit_append_failure(&tenant.tenant_id, run_id, "assessment", &error);
+    }
     Ok(Json(PipelineReviewAssessmentResponse {
         assessment_id: assessment.assessment_id,
     }))
@@ -43466,7 +43788,7 @@ async fn prioritized_available_review_lease_candidates(
     now: DateTime<Utc>,
 ) -> anyhow::Result<Vec<Uuid>> {
     let TraceCommonsMetadataView { records, .. } =
-        read_reviewer_metadata_view(state, tenant).await?;
+        read_mains_reviewer_metadata_view(state, tenant).await?;
     let mut records = records
         .into_iter()
         .filter(|record| record.status == TraceCorpusStatus::Quarantined)
@@ -54947,7 +55269,7 @@ async fn active_learning_review_queue_handler(
     let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
     require_reviewer(&tenant)?;
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state.as_ref(), &tenant)
+        read_mains_reviewer_metadata_view(state.as_ref(), &tenant)
             .await
             .map_err(internal_error)?;
     let derived_by_submission = derived
@@ -55276,10 +55598,10 @@ async fn revocation_propagation_worker_handler(
 
 /// Per-IP cap on `GET /v1/public/register-stats` per window.
 ///
-/// NOT a defence. `client_ip_for_rate_limit` reads the first `X-Forwarded-For`
-/// hop, which any caller can set, so this bucket is trivially escaped by
-/// anyone who wants to. It keeps one ordinary misbehaving client from being
-/// the whole load; the global cap below is what actually bounds the endpoint.
+/// The pilot's loopback-only Caddy edge overwrites `X-Forwarded-For`, and
+/// `client_ip_for_rate_limit` validates and canonicalizes that observation.
+/// It keeps one ordinary misbehaving client from being the whole load; the
+/// global cap below remains the bound against distributed callers.
 const REGISTER_STATS_PER_IP_LIMIT: u32 = 60;
 /// The real bound: a cap no per-request header can escape, so a distributed
 /// flood is limited too.
@@ -55426,7 +55748,7 @@ async fn register_stats_handler(
     ) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
-    if !ACCOUNT_RATE_LIMITER.check("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
+    if !ACCOUNT_RATE_LIMITER.check_global("register-stats-global", REGISTER_STATS_GLOBAL_LIMIT) {
         return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
     }
 
@@ -56455,6 +56777,11 @@ struct RescorePerplexitySummary {
     /// backfill either -- a pass that reports only this has a scorer that
     /// supplies no usable token lengths.
     author_unattributed: usize,
+    /// Submissions whose writer touched no row: the pipeline's Settle wrote
+    /// a row for the submission after the pass enumerated it (spec
+    /// 2026-10-08, Slice C, O-C3), so the row is left as Settle wrote it.
+    /// Not a failure and not a re-score.
+    pipeline_row_skipped: usize,
     /// Dry-run mode only: every score the pass computed, held in memory for
     /// the length of the pass and summarized into aggregates when it ends.
     /// Never persisted and never logged row by row.
@@ -56572,6 +56899,9 @@ enum RescoreOneOutcome {
     DryRunScored(trace_commons_server::trace_gate_service::PerplexityOnlyGateOutcome),
     /// Author-only mode, and the scorer attributed nothing: nothing written.
     AuthorUnattributed,
+    /// A writer touched no row: the submission has a pipeline row, which a
+    /// re-score never rewrites.
+    PipelineRowSkipped,
 }
 
 async fn rescore_perplexity_one(
@@ -56614,27 +56944,47 @@ async fn rescore_perplexity_one(
     if author_only && outcome.author_perplexity.is_none() {
         return Ok(RescoreOneOutcome::AuthorUnattributed);
     }
+    // A writer that touches no row met the pipeline-row guard: Settle wrote
+    // a row for the submission after the pass enumerated it. That is a skip,
+    // logged and counted as one, never a re-score.
+    let pipeline_row_skipped = || {
+        tracing::info!(
+            tenant_hash = %sha256_prefixed(&item.tenant_id),
+            submission_hash = %sha256_prefixed(&item.submission_id.to_string()),
+            author_only,
+            "perplexity re-score skipped one submission with a pipeline row"
+        );
+        Ok(RescoreOneOutcome::PipelineRowSkipped)
+    };
     if !author_only {
-        db.update_trace_gate_decision_perplexity(
-            &item.tenant_id,
-            item.submission_id,
-            perplexity_micros,
-            peak_perplexity_micros,
-            outcome.perplexity_passed,
-        )
-        .await?;
+        let updated = db
+            .update_trace_gate_decision_perplexity(
+                &item.tenant_id,
+                item.submission_id,
+                perplexity_micros,
+                peak_perplexity_micros,
+                outcome.perplexity_passed,
+            )
+            .await?;
+        if updated == 0 {
+            return pipeline_row_skipped();
+        }
     }
     // Both modes write the per-author columns: a full re-score is a superset
     // of the author-only backfill. In full mode an absent value is written
     // as NULL on purpose: the row's perplexity was just rewritten under the
     // current scorer, so per-author values from an older scoring no longer
     // describe the row and must not be left to disagree with it.
-    db.update_trace_gate_decision_author_perplexity(
-        &item.tenant_id,
-        item.submission_id,
-        author_cols,
-    )
-    .await?;
+    let updated = db
+        .update_trace_gate_decision_author_perplexity(
+            &item.tenant_id,
+            item.submission_id,
+            author_cols,
+        )
+        .await?;
+    if updated == 0 {
+        return pipeline_row_skipped();
+    }
     // Hash-only: identify the submission by hash, never the perplexity value.
     tracing::info!(
         tenant_hash = %sha256_prefixed(&item.tenant_id),
@@ -56672,6 +57022,7 @@ async fn run_rescore_perplexity_pass(
         match rescore_perplexity_one(state.as_ref(), item, mode).await {
             Ok(RescoreOneOutcome::Updated) => summary.rescored += 1,
             Ok(RescoreOneOutcome::AuthorUnattributed) => summary.author_unattributed += 1,
+            Ok(RescoreOneOutcome::PipelineRowSkipped) => summary.pipeline_row_skipped += 1,
             Ok(RescoreOneOutcome::DryRunScored(outcome)) => summary
                 .dry_run
                 .get_or_insert_with(DryRunScores::default)
@@ -56729,6 +57080,7 @@ async fn rescore_perplexity_handler(
                     rescored = summary.rescored,
                     failed = summary.failed,
                     author_unattributed = summary.author_unattributed,
+                    pipeline_row_skipped = summary.pipeline_row_skipped,
                     // Aggregates only, and none at all for a small pass; see
                     // `DryRunReport`. Empty outside dry-run mode.
                     dry_run_report = %summary
@@ -58492,20 +58844,10 @@ async fn gate_evaluate_worker_handler(
     require_vector_operator(&tenant)?;
     // Zaki review 1, minor item M-f: a submission the versioned pipeline
     // scores and credits is not evaluated here, so this path cannot award it
-    // a second `NoveltyUtility` credit under another idempotency key. Without
-    // a pipeline runtime there are no pipeline runs to find.
-    if let Some(pipeline) = state.pipeline_service.as_ref()
-        && pipeline
-            .store()
-            .submission_has_pipeline_run(&tenant.tenant_id, body.submission_id)
-            .await
-            .map_err(internal_error)?
-    {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "pipeline_run_owns_submission",
-        ));
-    }
+    // a second `NoveltyUtility` credit under another idempotency key. The
+    // check reads the database, so a process with no pipeline runtime
+    // refuses a pipeline submission too.
+    refuse_a_pipeline_submission(state.as_ref(), &tenant.tenant_id, body.submission_id).await?;
 
     let outcome = evaluate_and_record_gate(state.as_ref(), &tenant.tenant_id, body.submission_id)
         .await
@@ -59836,29 +60178,19 @@ async fn tenant_submission_policy_for_request(
     Ok(state.tenant_policies.get(&tenant.tenant_id).cloned())
 }
 
+/// A `trace_tenant_policies` row as `main`'s policy, through the decoding
+/// the pipeline's authority also uses
+/// (`trace_authority::submission_allowlists_from_storage`), so the two can
+/// never read one row differently.
 fn tenant_submission_policy_from_storage(
     policy: StorageTraceTenantPolicyRecord,
 ) -> anyhow::Result<TenantSubmissionPolicy> {
+    let allowlists =
+        trace_commons_server::trace_authority::submission_allowlists_from_storage(&policy)?;
     Ok(TenantSubmissionPolicy {
-        allowed_consent_scopes: parse_storage_policy_values(
-            &policy.allowed_consent_scopes,
-            "allowed_consent_scopes",
-        )?,
-        allowed_uses: parse_storage_policy_values(&policy.allowed_uses, "allowed_uses")?,
+        allowed_consent_scopes: allowlists.allowed_consent_scopes,
+        allowed_uses: allowlists.allowed_uses,
     })
-}
-
-fn parse_storage_policy_values<T>(values: &[String], label: &str) -> anyhow::Result<BTreeSet<T>>
-where
-    T: for<'de> Deserialize<'de> + Ord,
-{
-    values
-        .iter()
-        .map(|value| {
-            serde_json::from_value::<T>(serde_json::Value::String(value.clone()))
-                .with_context(|| format!("failed to parse trace tenant policy {label} value"))
-        })
-        .collect()
 }
 
 fn enforce_signed_claim_submission_restrictions(
@@ -61528,27 +61860,76 @@ async fn read_reviewer_metadata_view(
     })
 }
 
+/// `view` without the submissions of `tenant` that have a pipeline run
+/// (Zaki review 1, round 2, finding 18, and Zaki review 3, Z3-L8). The
+/// pipeline reviews, exports and pays them itself, and their stored body is
+/// a pipeline artifact `main`'s envelope reads do not decode, so `main`'s
+/// replay export and its legacy review queues and leases leave them out. A
+/// no-op with no pipeline store.
+async fn without_pipeline_submissions(
+    state: &AppState,
+    tenant: &TenantAuth,
+    mut view: TraceCommonsMetadataView,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    if let Some(store) = state.pipeline_store.as_ref() {
+        let pipeline_submission_ids = store
+            .pipeline_submission_ids(&tenant.tenant_id)
+            .await
+            .context("failed to list pipeline submissions")?;
+        view.records
+            .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+        view.derived
+            .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+    }
+    Ok(view)
+}
+
+/// `main`'s reviewer view without the submissions that have a pipeline run
+/// (`without_pipeline_submissions`). Only a view read from the database is
+/// filtered, as in the replay export: the pipeline writes no file record,
+/// so a view read from files holds none of its submissions and needs no
+/// read of the pipeline's tables.
+async fn read_mains_reviewer_metadata_view(
+    state: &AppState,
+    tenant: &TenantAuth,
+) -> anyhow::Result<TraceCommonsMetadataView> {
+    let view = read_reviewer_metadata_view(state, tenant).await?;
+    if !state.db_reviewer_reads_for_tenant(&tenant.tenant_id) {
+        return Ok(view);
+    }
+    without_pipeline_submissions(state, tenant, view).await
+}
+
+/// Refuses, with `409 pipeline_run_owns_submission`, a `main` route's action
+/// on a submission a pipeline run owns, whose review or decision is the
+/// pipeline's (Zaki review 3, Z3-L8). Nothing to refuse with no pipeline
+/// store.
+async fn refuse_a_pipeline_submission(
+    state: &AppState,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> ApiResult<()> {
+    if let Some(store) = state.pipeline_store.as_ref()
+        && store
+            .submission_has_pipeline_run(tenant_id, submission_id)
+            .await
+            .map_err(internal_error)?
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            PIPELINE_RUN_OWNS_SUBMISSION,
+        ));
+    }
+    Ok(())
+}
+
 async fn read_replay_export_metadata_view(
     state: &AppState,
     tenant: &TenantAuth,
 ) -> anyhow::Result<TraceCommonsMetadataView> {
     if state.db_replay_export_reads_for_tenant(&tenant.tenant_id) {
-        // Zaki review 1, round 2, finding 18: a submission with a pipeline
-        // run is exported through pipeline snapshots, and its stored body is
-        // a pipeline artifact `main`'s replay export does not read, so it is
-        // not a replay export source.
-        let mut view = read_reviewer_metadata_view_from_db(state, tenant).await?;
-        if let Some(store) = state.pipeline_store.as_ref() {
-            let pipeline_submission_ids = store
-                .pipeline_submission_ids(&tenant.tenant_id)
-                .await
-                .context("failed to list pipeline submissions for replay export")?;
-            view.records
-                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
-            view.derived
-                .retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
-        }
-        return Ok(view);
+        let view = read_reviewer_metadata_view_from_db(state, tenant).await?;
+        return without_pipeline_submissions(state, tenant, view).await;
     }
 
     Ok(TraceCommonsMetadataView {
@@ -63057,7 +63438,7 @@ fn status_for_risk(
 /// The driver was never the gap: `rescrub_envelope_prose_pii_with` already
 /// classifies every string leaf and object key of each `structured_payload`,
 /// and fails closed to High via `coverage_incomplete` when it cannot finish.
-/// Only enrolment ignored payloads.
+/// Only enrollment ignored payloads.
 ///
 /// Two things this deliberately does NOT do. It does not make tool payloads
 /// safe to turn on: a held trace is released by the driver to whatever
@@ -63078,10 +63459,10 @@ fn status_for_risk(
 /// carry -- so the backstop classifier is the only pass that reads it for PII
 /// at all. Nothing sets that flag yet, so this changes no behaviour today.
 ///
-/// The `awaiting_pii_backstop` status IS the enrolment: the driver's
+/// The `awaiting_pii_backstop` status IS the enrollment: the driver's
 /// enumeration LEFT JOINs `trace_pii_backstop` and tolerates an absent row via
 /// `COALESCE(attempts, 0)`, and `bump_pii_backstop_attempt` upserts the
-/// bookkeeping row on first failure. No explicit enrol write is required here.
+/// bookkeeping row on first failure. No explicit enroll write is required here.
 ///
 /// Callers must pass consent that has already been through
 /// `reconcile_consent_declarations` (both call sites run

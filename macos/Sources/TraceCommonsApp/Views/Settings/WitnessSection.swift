@@ -93,9 +93,10 @@ struct WitnessSection: View {
                 GlassStatusLabel(line, status: stateTone)
                     .accessibilityElement(children: .combine)
             }
-            // The ABI's fixed operator label, verbatim.
+            // The ABI's fixed operator label, verbatim, under the core's
+            // lead-in (#1146's "Operator label: ...").
             if let label = model.witnessStatus?.refusal ?? model.witnessLabel {
-                GlassTag(label, tone: Self.tagTone(stateTone))
+                GlassTag(Self.operatorLabel(label, copy: model.witnessCopy), tone: Self.tagTone(stateTone))
             }
         }
     }
@@ -110,7 +111,7 @@ struct WitnessSection: View {
                     next.url = value
                     model.witnessDraft = next
                 }
-            ))
+            ), prompt: copy.urlPlaceholder)
             .accessibilityLabel(copy.urlTitle)
 
             GlassTextField(copy.signingAddressTitle, text: Binding(
@@ -120,7 +121,7 @@ struct WitnessSection: View {
                     next.signingAddress = value
                     model.witnessDraft = next
                 }
-            ))
+            ), prompt: copy.signingAddressPlaceholder)
             .accessibilityLabel(copy.signingAddressTitle)
 
             VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -141,7 +142,7 @@ struct WitnessSection: View {
                         next.measurements = value
                         model.witnessDraft = next
                     }
-                ), showsLabel: false)
+                ), prompt: copy.measurementsPlaceholder, showsLabel: false)
                 note(copy.measurementsNote)
             }
 
@@ -174,21 +175,26 @@ struct WitnessSection: View {
                     Button(copy.inferenceEnable) { showingInferenceDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
+                    // Disable, the decline, is a link after Enable (Ron,
+                    // 2026-10-09).
                     Button(copy.inferenceDisable) {
                         Task { await model.setInferenceEvidence(false) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(model.inferenceEvidenceBusy || model.daemonSettings?.ironwireAttestedBodies == nil)
                 }
+                // A failed save, directly under the buttons it is about.
                 if model.inferenceEvidenceSaveFailed {
-                    GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
+                    GlassAlert(copy.inferenceSaveFailed)
                 }
             }
         }
         .glassModal(isPresented: $showingInferenceDisclosure) {
             GlassConfirmation(
-                title: copy.inferenceHeading,
-                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote, copy.inferenceScopeNote].joined(separator: "\n\n"),
+                title: copy.privacyConfirmTitle ?? copy.inferenceHeading,
+                subtitle: copy.privacyConfirmDescription,
+                message: [copy.inferenceDisclosure, copy.inferenceCaptureNote,
+                          copy.inferenceScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.inferenceCancel) { showingInferenceDisclosure = false },
                     GlassModalAction(copy.inferenceConfirm, isDefault: true) {
@@ -218,17 +224,20 @@ struct WitnessSection: View {
                     Button(copy.tokenEnable ?? "") { showingTokenDisclosure = true }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
+                    // Disable, the decline, is a link after Enable (Ron,
+                    // 2026-10-09).
                     Button(copy.tokenDisable ?? "") {
                         Task { await model.setTokenContribution(false) }
                     }
-                    .buttonStyle(GlassButtonStyle(.glass))
+                    .buttonStyle(GlassButtonStyle(.link))
                     .disabled(model.tokenContributionBusy || model.daemonSettings?.tokenDistributionsContribution == nil)
+                }
+                // A failed save, directly under the buttons it is about.
+                if model.tokenContributionSaveFailed {
+                    GlassAlert(copy.tokenSaveFailed ?? "")
                 }
                 if let storage = model.daemonSettings?.tokenStorage {
                     storageBlock(storage)
-                }
-                if model.tokenContributionSaveFailed {
-                    GlassFlowNotice(message: copy.tokenSaveFailed ?? "", glyph: copy.wallet?.refusedGlyph ?? "", tone: copy.wallet?.refusedTone)
                 }
             }
         }
@@ -237,8 +246,10 @@ struct WitnessSection: View {
         .accessibilityHidden(copy.tokenHeading == nil)
         .glassModal(isPresented: $showingTokenDisclosure) {
             GlassConfirmation(
-                title: copy.tokenHeading ?? "",
-                message: [(copy.tokenDisclosure ?? ""), (copy.tokenCaptureNote ?? ""), (copy.tokenScopeNote ?? "")].joined(separator: "\n\n"),
+                title: copy.privacyConfirmTitle ?? copy.tokenHeading ?? "",
+                subtitle: copy.privacyConfirmDescription,
+                message: [copy.tokenDisclosure, copy.tokenCaptureNote,
+                          copy.tokenScopeNote].compactMap { $0 }.joined(separator: "\n\n"),
                 actions: [
                     .cancel(copy.tokenCancel ?? "") { showingTokenDisclosure = false },
                     GlassModalAction(copy.tokenConfirm ?? "", isDefault: true) {
@@ -253,6 +264,10 @@ struct WitnessSection: View {
     @ViewBuilder
     private func storageBlock(_ storage: TokenStorageView) -> some View {
         if let label = storage.captureLabel {
+            // #1146 names the row "Local token capture".
+            if let name = model.witnessCopy?.localCapture {
+                heading(name)
+            }
             note(storage.captureNotice ?? "")
             Button(label) {
                 if storage.captureEnabled == true { Task { await model.setLocalTokenCapture(false) } }
@@ -273,6 +288,10 @@ struct WitnessSection: View {
                     onCancel: { showingTokenCapture = false })
             }
         }
+        // #1146 heads the block "Local token-review storage".
+        if let name = model.witnessCopy?.localStorage {
+            heading(name)
+        }
         prose(storage.stateLine)
         prose(storage.scopeNote)
         HStack(spacing: GlassTokens.Space.s3) {
@@ -285,7 +304,7 @@ struct WitnessSection: View {
         // Discard is destructive: right-most, never on Return.
         .glassModal(isPresented: $showingTokenDiscard) {
             GlassConfirmation(
-                title: storage.discardLabel, message: storage.discardConfirmation,
+                title: storage.discardTitle ?? storage.discardLabel, message: storage.discardConfirmation,
                 actions: [
                     .cancel(storage.cancelLabel) { showingTokenDiscard = false },
                     .destructive(storage.confirmLabel) {
@@ -295,7 +314,8 @@ struct WitnessSection: View {
                 ],
                 onCancel: { showingTokenDiscard = false })
         }
-        if !model.tokenStorageNotice.isEmpty { note(model.tokenStorageNotice) }
+        // Set only by a failed capture or storage action: a failure line.
+        if !model.tokenStorageNotice.isEmpty { GlassAlert(model.tokenStorageNotice) }
     }
 
     private func prose(_ text: String) -> some View {
@@ -310,6 +330,19 @@ struct WitnessSection: View {
             .glassType(GlassTokens.TypeScale.caption)
             .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func heading(_ text: String) -> some View {
+        Text(text)
+            .glassType(GlassTokens.TypeScale.bodyStrong)
+            .foregroundStyle(GlassColor.textPrimary)
+    }
+
+    /// The operator label under the core's lead-in, or bare when the core
+    /// sent none: the label is a fixed wire value, never reworded here.
+    static func operatorLabel(_ label: String, copy: WitnessCopy?) -> String {
+        guard let template = copy?.operatorLabel else { return label }
+        return template.replacingOccurrences(of: "{label}", with: label)
     }
 
     /// `WitnessTone` -> the glass status. A refusal is `.outside` and never

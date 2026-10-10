@@ -1,4 +1,5 @@
 import TCBridge
+import TCDesign
 import TCShellCore
 import XCTest
 
@@ -158,6 +159,14 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(
             PasskeyBindResult(try bindResult(#"{"outcome":"existing_account","binding_state":"bound"}"#)),
             .existingAccount)
+        // An enrolled Mac's bind for the enrolled account's own session
+        // (`already_enrolled`) is the join Verify would have made.
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"already_enrolled","binding_state":"bound"}"#)),
+            .enrolled)
+        XCTAssertEqual(
+            PasskeyBindResult(try bindResult(#"{"outcome":"already_enrolled","binding_state":"unbound"}"#)),
+            .failed(.refused(label: "account-bind-invalid")))
         // Anything else fails closed: no outcome claims a binding.
         XCTAssertEqual(
             PasskeyBindResult(try bindResult(#"{"outcome":"bound","binding_state":"legacy"}"#)),
@@ -489,8 +498,8 @@ final class PasskeySheetsTests: XCTestCase {
     }
 
     /// Kristi's #1235 B1, decision (a): "Use existing passkey" signs in, and
-    /// a sign-in alone holds no enrolment. An account no Mac has bound goes
-    /// through Verify, whose bind enrols this Mac; only then is the outcome
+    /// a sign-in alone holds no enrollment. An account no Mac has bound goes
+    /// through Verify, whose bind enrolls this Mac; only then is the outcome
     /// `.signedIn`, which Join records as a held passkey. Cancelling that
     /// Verify signs out, as it does after Create.
     func test_anUnboundExistingPasskeyIsBoundThroughVerify() async throws {
@@ -593,18 +602,74 @@ final class PasskeySheetsTests: XCTestCase {
         let source = try Self.source()
         XCTAssertTrue(source.contains("GlassRoundButton(backLabel"))
         XCTAssertTrue(source.contains("GlassRoundButton(closeLabel"))
-        XCTAssertFalse(source.contains("Button(copy.passkey.back)"))
+        // The round Back reads the frame's one Back word.
+        XCTAssertTrue(source.contains("backLabel: copy.frame.back,"))
+        XCTAssertFalse(source.contains("Button(copy.frame.back)"))
         XCTAssertFalse(source.contains("Button(copy.passkey.close)"))
         XCTAssertTrue(source.contains(".multilineTextAlignment(.center)"))
         XCTAssertTrue(source.contains("GlassTokens.TypeScale.display"))
         XCTAssertTrue(source.contains(".passkeyOutlined()"))
     }
 
+    /// #1030's popup size (`ftux.css`): about 380 wide, its buttons full
+    /// width and 40 tall, stacked one under the other, and the round icon in
+    /// the purple at 35% on the card edge.
+    func test_thePopupsTakeRonsSizeAndBlockButtons() throws {
+        XCTAssertEqual(PasskeyPopupLayout.width, 380)
+        XCTAssertEqual(PasskeyPopupLayout.blockButtonHeight, 40)
+        XCTAssertEqual(PasskeyPopupLayout.padding, 22)
+        XCTAssertEqual(PasskeyPopupLayout.bottomPadding, 20)
+        XCTAssertEqual(PasskeyPopupLayout.cornerInset, 14)
+        XCTAssertEqual(PasskeyPopupLayout.iconTint.dark, GlassTokens.Color.purple.opacity(0.35).dark)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains(".frame(width: PasskeyPopupLayout.width)"))
+        XCTAssertFalse(source.contains(".frame(width: 360)"))
+        // Every action on P-1, P-2, P-5 and P-7 is a block button but
+        // Verify, which is the outlined one, and P-7's link.
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.useExisting, .primary)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.createNew, .glass)"))
+        // P-2's submit is its own word, not the popup's title.
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.nameSubmit, .primary)"))
+        XCTAssertFalse(source.contains("blockButton(copy.passkey.nameTitle"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.cancel, .glass)"))
+        XCTAssertTrue(source.contains("blockButton(copy.passkey.welcomeSignIn, .primary)"))
+        XCTAssertTrue(source.contains(".glassEdge(GlassTokens.Shadow.cardEdge, in: Circle())"))
+    }
+
+    /// V7: P-2's clear button sits inside the field's well at its right, as
+    /// #1030's `.ftux-name-field`, not beside the field. It shows while the
+    /// field holds anything, is named by the core, and clearing counts as an
+    /// edit, so the empty-name line shows.
+    func test_theClearNameButtonSitsInsideTheWell() throws {
+        XCTAssertTrue(PasskeyNameField.showsClear("My trace passkey"))
+        XCTAssertFalse(PasskeyNameField.showsClear(""))
+        XCTAssertEqual(PasskeyPopupLayout.nameFieldHeight, 44)
+        XCTAssertEqual(PasskeyPopupLayout.clearSize, 18)
+
+        let source = try Self.source()
+        XCTAssertTrue(source.contains("PasskeyNameField("))
+        XCTAssertTrue(source.contains("clearLabel: copy.passkey.clearName"))
+        XCTAssertTrue(source.contains("invalid: model.nameError != nil"))
+        XCTAssertFalse(source.contains("xmark.circle.fill"), "no clear glyph outside the well")
+        // The button and the field share the one well.
+        let field = try XCTUnwrap(source.range(of: "struct PasskeyNameField"))
+        let body = source[field.lowerBound...]
+        XCTAssertTrue(body.contains(".glassFieldWell(invalid: invalid)"))
+
+        let copy = try coreCopy()
+        let model = PasskeySheetModel(start: .name, copy: copy.passkey, account: RecordingAccount())
+        XCTAssertNil(model.nameError)
+        model.name = ""
+        model.nameTouched = true
+        XCTAssertEqual(model.nameError, copy.passkey.nameEmpty)
+    }
+
     /// Option 1 (2026-10-06): a second Mac signs in with the passkey of an
     /// account another Mac bound. Verify runs the daemon's bind, which the
     /// commons answers `enrolled` only when this Mac's near.ai sign-in is the
     /// account's own; only then is the outcome `.signedIn`, which Join records
-    /// as a held passkey and an enrolment.
+    /// as a held passkey and an enrollment.
     func test_aSecondMacJoinsItsPasskeysBoundAccountThroughVerify() async throws {
         let copy = try coreCopy()
         let account = RecordingAccount()
@@ -620,7 +685,7 @@ final class PasskeySheetsTests: XCTestCase {
         XCTAssertEqual(model.outcome, .signedIn(name: nil))
         XCTAssertEqual(account.calls, ["signIn", "bind", "passkeyState"])
 
-        // A bound account's Verify accepts nothing but an enrolment: a bind or
+        // A bound account's Verify accepts nothing but an enrollment: a bind or
         // a switch would not be this account, so it fails closed.
         for answer in [PasskeyBindResult.bound, .existingAccount] {
             let odd = PasskeySheetModel(copy: copy.passkey, account: account)

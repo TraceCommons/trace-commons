@@ -83,14 +83,18 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
                     .glassType(GlassTokens.TypeScale.label.weight(selected ? .semibold : .medium))
                     .foregroundStyle(Self.ink(selected: selected, hovering: hovered == segment.value, floating: floating))
                     .padding(.horizontal, floating ? 12 : 8)
+                    // The floating item is its label and 5pt above and
+                    // below (#1146 `.tc-segmented--floating` item).
+                    .padding(.vertical, floating ? 5 : 0)
                     .frame(maxWidth: floating ? nil : .infinity)
-                    .frame(minHeight: floating ? 24 : GlassTokens.Size.tab)
+                    .frame(minHeight: floating ? nil : GlassTokens.Size.tab)
                     .background {
                         // The press darkens the selected fill, or a wash
                         // behind an unselected label; never the label.
                         if selected {
                             if floating {
-                                Capsule().fill(GlassTokens.Color.controlSelected.color).glassPressedFill()
+                                // #1146's floating selection: a brighter fill, no edge.
+                                Capsule().fill(GlassTokens.Color.controlSelectedFloating.color).glassPressedFill()
                             } else {
                                 Capsule().fill(GlassTokens.Color.controlSelected.color)
                                     .glassPressedFill()
@@ -124,7 +128,8 @@ public struct GlassSegmentedTabs<Value: Hashable>: View {
     /// (#1146 `.tc-segmented__item:hover`), otherwise secondary on the
     /// floating variant and tertiary in the well.
     static func ink(selected: Bool, hovering: Bool, floating: Bool) -> Color {
-        if selected || hovering { return GlassColor.textPrimary }
+        if selected { return GlassTokens.Color.textOnSelected.color }
+        if hovering { return GlassColor.textPrimary }
         return floating ? GlassColor.textSecondary : GlassColor.textTertiary
     }
 }
@@ -141,12 +146,14 @@ public struct GlassCrumb: Identifiable {
     }
 }
 
-/// A round back button, then crumbs: secondary › tertiary › current.
+/// A back chevron, then crumbs: secondary › tertiary › current.
 public struct GlassBreadcrumb: View {
     private let trail: [GlassCrumb]
     private let backLabel: String
     private let onBack: (() -> Void)?
     @State private var hovered: Int?
+    /// `hovered` for the back chevron, which is not a crumb.
+    private static var backIndex: Int { -1 }
 
     /// `backLabel` names the back button (it is icon-only), from the core's
     /// copy.
@@ -159,7 +166,30 @@ public struct GlassBreadcrumb: View {
     public var body: some View {
         HStack(spacing: GlassTokens.Space.s4) {
             if let onBack {
-                GlassRoundButton(backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel, systemImage: "chevron.left", small: true, action: onBack)
+                // The chevron alone, no round container (owner,
+                // 2026-10-08); it reads primary under the pointer, as the
+                // crumbs do, and keeps a control-sized target.
+                let label = backLabel.isEmpty ? (trail.first?.title ?? "") : backLabel
+                Button(action: onBack) {
+                    Image(systemName: "chevron.left")
+                        .glassGlyph(12, weight: .semibold)
+                        .frame(width: GlassTokens.Size.control, height: GlassTokens.Size.control)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(GlassPressStyle())
+                .foregroundStyle(hovered == Self.backIndex ? GlassColor.textPrimary : GlassColor.textSecondary)
+                .onHover { inside in
+                    if inside {
+                        hovered = Self.backIndex
+                    } else if hovered == Self.backIndex {
+                        hovered = nil
+                    }
+                }
+                .accessibilityLabel(label)
+                .help(label)
+                // The chevron's own inset stands in for the container's
+                // edge, so the first crumb keeps its place.
+                .padding(.trailing, -GlassTokens.Space.s4)
             }
             ForEach(Array(trail.enumerated()), id: \.element.id) { index, crumb in
                 if index > 0 {
@@ -245,7 +275,8 @@ public struct GlassStepProgress: View {
                             }
                         }
                     Text(label)
-                        .glassType(GlassTokens.TypeScale.eyebrow)
+                        // #1146's step label tracks 0.06em, tighter than an eyebrow.
+                        .glassType(GlassTokens.TypeScale.eyebrow.tracking(GlassTokens.TypeScale.eyebrow.size * 0.06))
                         .foregroundStyle(index == current ? GlassColor.textPrimary : GlassColor.textTertiary)
                 }
                 .fixedSize()

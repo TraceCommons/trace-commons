@@ -1201,7 +1201,7 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         Err(DatabaseError::Pool("near_ai_bind_unconfigured".into()))
     }
 
-    /// Enrol a further device into the `bound` account `(tenant_id,
+    /// Enroll a further device into the `bound` account `(tenant_id,
     /// account_id)` from a verified NEAR AI login: a second Mac signed in with
     /// the account's passkey. Attaches the device only if the login's anchor
     /// is that account's own, decided in the same transaction that would
@@ -1372,6 +1372,23 @@ pub trait Database: TraceCorpusStore + Send + Sync {
     ) -> Result<Option<WebauthnCredentialRow>, DatabaseError> {
         Err(DatabaseError::Pool(
             "load_webauthn_credential_for_login not implemented".to_string(),
+        ))
+    }
+
+    /// The label `account_id` gave its ACTIVE credential `credential_id`, for
+    /// the native sign-in answer (`passkey_label`). `None` for no label, and
+    /// for an unknown, revoked, other-account or other-tenant credential: the
+    /// row must match the tenant, the account AND the credential, so a caller
+    /// can only ever read the label of a credential its own account holds.
+    /// Tenant-scoped under forced RLS.
+    async fn credential_label_for_account(
+        &self,
+        _tenant_id: &str,
+        _account_id: uuid::Uuid,
+        _credential_id: &str,
+    ) -> Result<Option<String>, DatabaseError> {
+        Err(DatabaseError::Pool(
+            "credential_label_for_account not implemented".to_string(),
         ))
     }
 
@@ -1916,6 +1933,21 @@ pub trait Database: TraceCorpusStore + Send + Sync {
         &self,
         _limit: i64,
     ) -> Result<Vec<crate::trace_corpus_storage::DedupRederiveRow>, DatabaseError> {
+        Ok(Vec::new())
+    }
+
+    /// Enumerate decision identifiers and times, cross-tenant, NEWEST first
+    /// (`decided_at DESC, decision_id DESC`), capped at `limit`: the credit
+    /// estimate eval's enumeration. Newest first so a capped run reads the
+    /// most recent decisions, and so every submission it reaches has its
+    /// latest decision among the rows -- the decision its label comes from.
+    /// Reads through the gate-driver reader pool with NO tenant GUC; every
+    /// column is granted to `trace_gate_driver` by V45. Default: empty (test
+    /// doubles / backends without a gate-driver pool).
+    async fn list_recent_gate_decision_keys(
+        &self,
+        _limit: i64,
+    ) -> Result<Vec<crate::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError> {
         Ok(Vec::new())
     }
 

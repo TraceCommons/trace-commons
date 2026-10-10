@@ -23,19 +23,22 @@ import TCShellCore
 ///
 /// The daemon is not running on a fresh install: the core refuses to start
 /// it until the session roots are declared, and Folders or Tools is where
-/// they are. So the invite pasted on Join is looked up and joined, and the
-/// account chosen there signed in or created, only once that commit has
-/// started the daemon (`CommitPoint.leaveRoots`).
+/// they are. So the invite pasted on Join is looked up and joined, and a
+/// near.ai chosen there signed in, only once that commit has started the
+/// daemon (`CommitPoint.leaveRoots`). Create passkey is the exception: its
+/// sheets open over Join (#1030), so it starts the daemon there with both
+/// roots declared `off`, which reads nothing until Folders or Tools answers
+/// (`CommitPoint.passkeyOnJoin`).
 ///
 /// ## Resuming
 ///
 /// A host starts the first run at `startAt` (Join, unless it names another
 /// step). What an earlier first run left on the daemon is recorded
 /// (`OnboardingNavigation.initialState`): a running daemon is not started
-/// again, and an enrolment is the account (`recordEnrolment`), so its
+/// again, and an enrollment is the account (`recordEnrolment`), so its
 /// invite is not joined again, Join reads Continue, and Automatic is
 /// offered. The daemon's first status can arrive after this view is up, so
-/// the enrolment is recorded then too. Start's marker (the tenant's, or
+/// the enrollment is recorded then too. Start's marker (the tenant's, or
 /// watching only's) is what tells "enrolled" from "set up".
 struct OnboardingCoordinatorView: View {
     @EnvironmentObject private var model: AppModel
@@ -101,7 +104,7 @@ private struct FirstRunSteps: View {
 
     @ObservedObject private var pendingInvite = PendingInvite.shared
     /// The account the passkey sheets complete with: the running daemon's.
-    /// Nil until it runs, which Join reads as "record the choice for later".
+    /// Nil until it runs, which Join reads as "start it, then open them".
     @State private var passkeyAccount: LivePasskeyAccount?
     @State private var passkeyClient: DaemonClient?
 
@@ -155,8 +158,8 @@ private struct FirstRunSteps: View {
         }
     }
 
-    /// An enrolment the daemon reported after the runner was made. Not
-    /// during a commit: an enrol that commit runs records itself.
+    /// An enrollment the daemon reported after the runner was made. Not
+    /// during a commit: an enroll that commit runs records itself.
     private func recordEnrolment() {
         guard model.status.loggedIn, !runner.isCommitting else { return }
         let recorded = OnboardingNavigation.recordEnrolment(runner.state)

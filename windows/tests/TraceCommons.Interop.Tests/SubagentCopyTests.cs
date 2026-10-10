@@ -63,11 +63,11 @@ public class SubagentCopyTests
     {
         Assert.Equal(
             "Includes 42 delegated subagent transcripts. The largest was left out to keep this "
-                + "session within its size limit; the conversation itself is complete.",
+                + "trace within its size limit; the conversation itself is complete.",
             SubagentCopy.Line(42, 1));
         Assert.Equal(
             "Includes 42 delegated subagent transcripts. The 3 largest were left out to keep "
-                + "this session within its size limit; the conversation itself is complete.",
+                + "this trace within its size limit; the conversation itself is complete.",
             SubagentCopy.Line(42, 3));
     }
 
@@ -80,11 +80,11 @@ public class SubagentCopyTests
     public void EverythingDroppedStartsFromWhatWasLeftOut()
     {
         Assert.Equal(
-            "1 delegated subagent transcript was left out to keep this session within its size "
+            "1 delegated subagent transcript was left out to keep this trace within its size "
                 + "limit; the conversation itself is complete.",
             SubagentCopy.Line(0, 1));
         Assert.Equal(
-            "2 delegated subagent transcripts were left out to keep this session within its "
+            "2 delegated subagent transcripts were left out to keep this trace within its "
                 + "size limit; the conversation itself is complete.",
             SubagentCopy.Line(0, 2));
     }

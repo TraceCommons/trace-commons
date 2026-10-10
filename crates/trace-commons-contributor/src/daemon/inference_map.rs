@@ -181,6 +181,20 @@ fn vendor(source: &str) -> &'static str {
         .unwrap_or(UNKNOWN)
 }
 
+/// The display name this table gives a source id (`"claude-code"` reads
+/// "Claude Code"), or `None` for a source it has no row for, such as
+/// `trajectory`. Pass a queue entry's `displayed_source()`, so a declared
+/// source is named before the adapter that stored it. Nudge U4 names the
+/// tools idle sessions came from with it; an unknown source is left
+/// unnamed rather than shown as its raw id.
+#[must_use]
+pub fn tool_display_name(source: &str) -> Option<&'static str> {
+    TOOLS
+        .iter()
+        .find(|spec| spec.source == source)
+        .map(|spec| spec.name)
+}
+
 /// The source id a harness row is the same tool as, or `None`.
 fn source_for_harness(harness_id: &str) -> Option<&'static str> {
     TOOLS
@@ -940,6 +954,25 @@ mod tests {
     const REQUEST_DIGEST: &str = "aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11";
     const RESPONSE_DIGEST: &str =
         "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+
+    /// Nudge U4 names tools from this table: a known source by its
+    /// display name, an unknown one not at all.
+    #[test]
+    fn tool_display_names_come_from_the_table() {
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_CLAUDE_CODE),
+            Some("Claude Code")
+        );
+        assert_eq!(
+            tool_display_name(crate::source::SOURCE_CODEX),
+            Some("Codex")
+        );
+        assert_eq!(tool_display_name(crate::source::SOURCE_TRAJECTORY), None);
+        assert_eq!(tool_display_name("antigravity"), None);
+        for spec in TOOLS {
+            assert_eq!(tool_display_name(spec.source), Some(spec.name));
+        }
+    }
 
     fn row(id: i64, offset: i64, proof: Option<ProofStatus>) -> RoutedExchange {
         RoutedExchange {

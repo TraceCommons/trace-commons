@@ -103,6 +103,23 @@ cp "$BIN_DIR/TraceCommonsApp" "$APP/Contents/MacOS/TraceCommonsApp"
 cp "$STAGING_DIR/$DYLIB_NAME" "$APP/Contents/Frameworks/$DYLIB_NAME"
 cp "$STAGING_DIR/near-ai" "$APP/Contents/MacOS/near-ai"
 
+# SwiftPM resource bundles (TCShellCore's sample data, for one). SwiftPM
+# builds them beside the executable but, as with Sparkle, does not embed
+# them; the generated `Bundle.module` looks in Bundle.main.resourceURL,
+# which is Contents/Resources, and calls fatalError when the bundle is not
+# there. Without this copy a bundled app run with TRACE_COMMONS_SAMPLE
+# crashed at the first `Bundle.module` read. ditto keeps the bundle intact.
+SHELL_CORE_BUNDLE="TraceCommons_TCShellCore.bundle"
+if [ ! -d "$BIN_DIR/$SHELL_CORE_BUNDLE" ]; then
+  echo "FATAL: no $SHELL_CORE_BUNDLE in $BIN_DIR" >&2
+  echo "The app reads Bundle.module from it and stops without it." >&2
+  exit 1
+fi
+for resource_bundle in "$BIN_DIR"/*.bundle; do
+  [ -d "$resource_bundle" ] || continue
+  ditto "$resource_bundle" "$APP/Contents/Resources/$(basename "$resource_bundle")"
+done
+
 # The app icon. Contents/Resources was created empty by every build before
 # the icon slice -- an LSUIElement app never shows an icon, so nobody noticed
 # there was none to show.

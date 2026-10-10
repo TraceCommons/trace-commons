@@ -52,8 +52,15 @@ struct PublicProfileSection: View {
             } else {
                 optInCard
             }
+            // A refusal is the failed request's red line: under the
+            // panel's buttons when the panel is drawn, else here (Ron,
+            // 2026-10-09). What went through stays a notice.
             if let sentence = profileOutcomeSentence {
-                GlassNotice(tone: outcomeTone) { Text(sentence) }
+                if outcomeTone == .outside {
+                    if !panelShown { GlassAlert(sentence) }
+                } else {
+                    GlassNotice(tone: outcomeTone) { Text(sentence) }
+                }
             }
             Text(PublicProfileCopy.footnote)
                 .glassType(GlassTokens.TypeScale.caption)
@@ -117,9 +124,15 @@ struct PublicProfileSection: View {
                     .disabled(model.profileBusy || handleDraft.trimmingCharacters(
                         in: .whitespacesAndNewlines
                     ).isEmpty)
+                    // Leaving is the secondary action: a link after Save
+                    // (Ron, 2026-10-09).
                     Button(PublicProfileCopy.leaveRoster) { model.leaveRoster() }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                        .buttonStyle(GlassButtonStyle(.link))
                         .disabled(model.profileBusy)
+                }
+                // A refused save or leave, under the buttons it is about.
+                if outcomeTone == .outside, let sentence = profileOutcomeSentence {
+                    GlassAlert(sentence)
                 }
             }
         }
@@ -136,7 +149,7 @@ struct PublicProfileSection: View {
     private var profileCopyDefects: some View {
         let problems = PublicProfileCopyCheck.failures()
         if !problems.isEmpty {
-            GlassNotice(tone: .outside, title: SettingsLegacyWords.doNotTrustProfileWording) {
+            GlassNotice(tone: .outside, title: PublicProfileCopy.wordingDefect) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     ForEach(problems, id: \.self) { problem in
                         Text(problem)
@@ -165,6 +178,11 @@ struct PublicProfileSection: View {
         }
     }
 
+    /// The roster panel is drawn, so a refusal is said under its buttons.
+    private var panelShown: Bool {
+        model.publicProfile?.handle != nil
+    }
+
     private var outcomeTone: GlassStatus {
         switch model.profileOutcome {
         case .refused, .leaveRefused: return .outside
@@ -189,15 +207,17 @@ struct GoPublicSheet: View {
     /// is never the default: consent is a click, never a stray Return.
     var body: some View {
         GlassModal(
-            title: PublicProfileCopy.goPublicHeadline, width: .regular,
+            title: PublicProfileCopy.goPublicHeadline, subtitle: PublicProfileCopy.goPublicDescription,
+            width: .regular,
             actions: [
                 .cancel(PublicProfileCopy.notNow, action: onDismiss),
                 GlassModalAction(
-                    PublicProfileCopy.goPublicConfirm,
+                    model.profileBusy ? PublicProfileCopy.goingPublic : PublicProfileCopy.goPublicConfirm,
                     isEnabled: GoPublicGate.canGoPublic(acknowledged: acknowledged, handle: handle, busy: model.profileBusy),
                     isProminent: true
                 ) { model.claimHandle(handle, bio: bio) },
             ],
+            busy: model.profileBusy,
             onCancel: onDismiss
         ) {
             GlassModalBody { consent }
@@ -216,8 +236,8 @@ struct GoPublicSheet: View {
     @ViewBuilder
     private var consent: some View {
         HStack(alignment: .top, spacing: GlassTokens.Space.cardGap) {
-            column(PublicProfileCopy.publishedHeading, SettingsLegacyWords.publishedLines)
-            column(PublicProfileCopy.neverHeading, SettingsLegacyWords.neverLines)
+            column(PublicProfileCopy.publishedHeading, PublicProfileCopy.publishedLines)
+            column(PublicProfileCopy.neverHeading, PublicProfileCopy.neverLines)
         }
         // The handle is inside the consent dialog rather than behind it:
         // the thing consented to is this exact string becoming public.

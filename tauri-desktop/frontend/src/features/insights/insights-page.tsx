@@ -78,7 +78,7 @@ export function InsightsPage() {
               aria-invalid={Boolean(sourceForm.formState.errors.source)}
             >
               <option value="codex">Codex rollout</option>
-              <option value="claude_code">Claude Code session</option>
+              <option value="claude_code">Claude Code trace</option>
               <option value="trajectory">Trajectory</option>
             </Select>
           </label>

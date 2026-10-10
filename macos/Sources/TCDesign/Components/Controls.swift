@@ -19,29 +19,109 @@ public enum GlassButtonKind: Sendable, Equatable {
     case destructive
 }
 
+/// Where a button sits, which sets its size (owner ruling, 2026-10-08).
+///
+/// In a window's action bar -- the footer row that holds the primary CTA,
+/// in a window, a sheet or a modal -- every button is the primary CTA's
+/// size. Only inline buttons, inside cards, rows, fields, popovers and
+/// toolbars, take the smaller size. Text about taking the bar's action sits
+/// directly above the bar (`GlassActionBar`).
+public enum GlassButtonSize: Sendable, Equatable {
+    /// Everywhere but an action bar: each kind's own compact size (the glass
+    /// and destructive pills are `size.controlLarge`, the label type, 12pt
+    /// of padding). The default.
+    case inline
+    /// A window's action bar, beside the primary CTA: the CTA's height
+    /// (`size.cta`), its type size and its horizontal padding, so Back,
+    /// Cancel or Customize stand as tall as Continue. Each kind keeps its
+    /// own fill, edge, ink, weight, hover, pressed and disabled look.
+    /// `.primary` is bar-sized already and reads the same either way.
+    case bar
+}
+
+/// The box a button kind draws its label in: minimum height, horizontal
+/// padding and type. `nil` is none (the link has no container).
+struct GlassButtonMetrics: Equatable {
+    let minHeight: CGFloat?
+    let horizontalPadding: CGFloat?
+    let type: GlassTypeStyle
+}
+
 /// `Button("Start watching") {}.buttonStyle(GlassButtonStyle(.primary))`.
+///
+/// Size: `.primary` is the action bar's CTA. Any other button in the same
+/// action bar takes `size: .bar` (`GlassButtonStyle(.glass, size: .bar)`);
+/// every button anywhere else stays `.inline`, the default. `small` is the
+/// compact CTA (a card's or a modal's): a `.bar` button with `small` matches
+/// the small CTA, never the full one.
 public struct GlassButtonStyle: ButtonStyle {
     private let kind: GlassButtonKind
+    private let size: GlassButtonSize
     private let small: Bool
     private let selected: Bool
 
     /// `selected` is a glass button that is the chosen one of a set (#1146's
     /// `aria-pressed`): it reads purple, the CTA fill and white label, and
     /// says selected to assistive tech. Other kinds ignore it.
-    public init(_ kind: GlassButtonKind, small: Bool = false, selected: Bool = false) {
+    public init(_ kind: GlassButtonKind, size: GlassButtonSize = .inline, small: Bool = false, selected: Bool = false) {
         self.kind = kind
+        self.size = size
         self.small = small
         self.selected = selected
     }
 
-    public func makeBody(configuration: Configuration) -> some View {
-        GlassButtonBody(kind: kind, small: small, selected: selected, configuration: configuration)
+    /// The small CTA's height and padding (#1146 `.tc-btn--sm`).
+    static let smallCTAHeight: CGFloat = 30
+    static let smallCTAPadding: CGFloat = 14
+    /// The full CTA's horizontal padding (#1146 `.tc-btn--primary`).
+    static let ctaPadding: CGFloat = 16
+    /// An inline pill's horizontal padding (#1146 `.tc-btn--glass`).
+    static let inlinePadding: CGFloat = 12
+    /// The submit pill's horizontal padding.
+    static let submitPadding: CGFloat = 10
+
+    /// The CTA's box, full or small: what `.primary` draws and what every
+    /// `.bar` button matches.
+    static func ctaMetrics(small: Bool, weight: GlassWeight = .bold) -> GlassButtonMetrics {
+        small
+            ? GlassButtonMetrics(minHeight: smallCTAHeight, horizontalPadding: smallCTAPadding,
+                                 type: GlassTokens.TypeScale.label.weight(weight))
+            : GlassButtonMetrics(minHeight: GlassTokens.Size.cta, horizontalPadding: ctaPadding,
+                                 type: GlassTokens.TypeScale.bodyStrong.weight(weight))
     }
 
-    /// The fill a kind gets under the pointer, drawn over its own fill: the
-    /// glass pill's control hover. The CTAs, the submit pill and the link
-    /// have none (the link underlines instead); a selected glass button
-    /// keeps its purple.
+    /// A kind's box at a size. A `.bar` button takes the CTA's box in its
+    /// own weight; an `.inline` one keeps the kind's own.
+    static func metrics(_ kind: GlassButtonKind, size: GlassButtonSize, small: Bool = false) -> GlassButtonMetrics {
+        switch (kind, size) {
+        case (.primary, _), (.secondary, .bar):
+            return ctaMetrics(small: small)
+        case (.secondary, .inline):
+            let cta = ctaMetrics(small: small)
+            return GlassButtonMetrics(minHeight: cta.minHeight, horizontalPadding: smallCTAPadding, type: cta.type)
+        case (.glass, .bar), (.destructive, .bar), (.link, .bar):
+            return ctaMetrics(small: small, weight: .semibold)
+        case (.glass, .inline), (.destructive, .inline):
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.controlLarge, horizontalPadding: inlinePadding,
+                                      type: GlassTokens.TypeScale.label.weight(.semibold))
+        case (.link, .inline):
+            return GlassButtonMetrics(minHeight: nil, horizontalPadding: nil,
+                                      type: GlassTokens.TypeScale.label.weight(.semibold))
+        case (.submit, _):
+            // The tree row's pill; never in an action bar.
+            return GlassButtonMetrics(minHeight: GlassTokens.Size.submitPill, horizontalPadding: submitPadding,
+                                      type: GlassTokens.TypeScale.caption.weight(.bold))
+        }
+    }
+
+    public func makeBody(configuration: Configuration) -> some View {
+        GlassButtonBody(kind: kind, metrics: Self.metrics(kind, size: size, small: small), selected: selected, configuration: configuration)
+    }
+
+    /// The fill a kind gets under the pointer, in place of its own fill
+    /// (#1146 `.tc-btn--glass:hover`): the glass pill's control hover. The
+    /// CTAs, the submit pill and the link have none (the link underlines
+    /// instead); a selected glass button keeps its purple.
     static func hoverFill(_ kind: GlassButtonKind, selected: Bool = false) -> GlassRGBA? {
         switch kind {
         case .glass where !selected, .destructive: GlassTokens.Color.controlHover
@@ -60,15 +140,18 @@ public struct GlassButtonStyle: ButtonStyle {
         return enabled ? GlassTokens.Color.textPrimary : GlassTokens.Color.statusOff
     }
 
-    /// Every kind dims by the one shared disabled opacity.
+    /// Every kind dims by the one shared disabled opacity, except the submit
+    /// pill, which #1146 dims less (`.tc-btn--submit:disabled`, 0.55): its
+    /// `statusOff` ink already says it cannot be used.
     static func disabledOpacity(_ kind: GlassButtonKind) -> Double {
-        GlassTokens.Opacity.disabled
+        if case .submit = kind { return GlassTokens.Opacity.disabledSubmit }
+        return GlassTokens.Opacity.disabled
     }
 }
 
 private struct GlassButtonBody: View {
     let kind: GlassButtonKind
-    let small: Bool
+    let metrics: GlassButtonMetrics
     let selected: Bool
     let configuration: ButtonStyleConfiguration
     @Environment(\.isEnabled) private var isEnabled
@@ -86,85 +169,95 @@ private struct GlassButtonBody: View {
             .accessibilityAddTraits(kind == .glass && selected ? .isSelected : [])
     }
 
-    private var hoverFill: Color {
-        guard hovering, isEnabled, let fill = GlassButtonStyle.hoverFill(kind, selected: selected) else { return .clear }
-        return fill.color
-    }
-
     @ViewBuilder
     private var label: some View {
         switch kind {
         case .primary:
-            configuration.label
-                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, small ? 14 : 16)
-                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
                 .glassEdge(isEnabled ? GlassTokens.Shadow.ctaEdge : Array(GlassTokens.Shadow.ctaEdge.prefix(2)), in: Capsule())
         case .secondary:
-            configuration.label
-                .glassType(small ? GlassTokens.TypeScale.label.weight(.bold) : GlassTokens.TypeScale.bodyStrong.weight(.bold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, 14)
-                .frame(minHeight: small ? 30 : GlassTokens.Size.cta)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaSecondaryFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaSecondaryEdge, in: Capsule())
         case .glass where selected:
             // One of a set, chosen: the CTA's purple (#1146 glass.css,
             // `.tc-btn--glass[aria-pressed="true"]`).
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassTokens.Color.textOnAccent.color)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
                 .background(Capsule().fill(GlassTokens.Gradient.ctaFill.linear).glassPressedFill())
                 .glassEdge(GlassTokens.Shadow.ctaEdge, in: Capsule())
         case .glass:
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassColor.textPrimary)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
-                .background(Capsule().fill(hoverFill))
-                .glassSurface(.control)
+                .glassSurface(.control, hover: GlassButtonStyle.hoverFill(kind, selected: selected))
         case let .submit(done):
-            configuration.label
-                .glassType(GlassTokens.TypeScale.caption.weight(.bold))
+            box
                 .foregroundStyle(GlassButtonStyle.submitInk(done: done, enabled: isEnabled).color)
-                .padding(.horizontal, 10)
-                .frame(minHeight: GlassTokens.Size.submitPill)
                 .glassSurface(.control)
         case .destructive:
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassButtonStyle.destructiveInk.color)
-                .padding(.horizontal, 12)
-                .frame(minHeight: GlassTokens.Size.controlLarge)
-                .background(Capsule().fill(hoverFill))
-                .glassSurface(.control)
+                .glassSurface(.control, hover: GlassButtonStyle.hoverFill(kind, selected: selected))
         case .link:
             // No fill to darken: the text takes the press instead, and the
             // pointer underlines it.
-            configuration.label
-                .glassType(GlassTokens.TypeScale.label.weight(.semibold))
+            box
                 .foregroundStyle(GlassColor.accentText)
                 .underline(hovering && isEnabled)
                 .glassPressedFill()
         }
     }
+
+    /// The label in its kind's box at its size (`GlassButtonStyle.metrics`).
+    private var box: some View {
+        configuration.label
+            .glassType(metrics.type)
+            .padding(.horizontal, metrics.horizontalPadding ?? 0)
+            .frame(minHeight: metrics.minHeight)
+    }
 }
 
-/// A round glass button with an SF Symbol. Icon-only, so `label` names it.
+/// What an icon-only control draws: an SF Symbol, or one of #1146's own
+/// glyphs at its own size.
+public enum GlassIcon: Sendable, Equatable {
+    case symbol(String)
+    case glyph(GlassGlyph)
+}
+
+/// The icon inside an icon-only control: an SF Symbol at `symbolSize`, or a
+/// glyph at #1146's size.
+private struct GlassIconView: View {
+    let icon: GlassIcon
+    let symbolSize: CGFloat
+    var weight: GlassWeight = .regular
+
+    var body: some View {
+        switch icon {
+        case let .symbol(name): Image(systemName: name).glassGlyph(symbolSize, weight: weight)
+        case let .glyph(glyph): GlassGlyphView(glyph)
+        }
+    }
+}
+
+/// A round glass button with an icon. Icon-only, so `label` names it.
+/// Under the pointer the control hover replaces its fill (#1146
+/// `.tc-btn--round:hover`).
 public struct GlassRoundButton: View {
     private let label: String
-    private let systemImage: String
+    private let icon: GlassIcon
     private let small: Bool
     private let action: () -> Void
 
     public init(_ label: String, systemImage: String, small: Bool = false, action: @escaping () -> Void) {
+        self.init(label, icon: .symbol(systemImage), small: small, action: action)
+    }
+
+    public init(_ label: String, icon: GlassIcon, small: Bool = false, action: @escaping () -> Void) {
         self.label = label
-        self.systemImage = systemImage
+        self.icon = icon
         self.small = small
         self.action = action
     }
@@ -172,12 +265,10 @@ public struct GlassRoundButton: View {
     public var body: some View {
         let side = small ? GlassTokens.Size.control : GlassTokens.Size.controlLarge
         Button(action: action) {
-            Image(systemName: systemImage)
-                .glassGlyph(small ? 11 : 13, weight: .medium)
+            GlassIconView(icon: icon, symbolSize: small ? 11 : 13, weight: .medium)
                 .foregroundStyle(GlassColor.textPrimary)
                 .frame(width: side, height: side)
-                .glassHover(GlassTokens.Color.controlHover, in: Circle())
-                .glassSurface(.control, radius: side / 2)
+                .glassSurface(.control, radius: side / 2, hover: GlassTokens.Color.controlHover)
         }
         .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
@@ -185,26 +276,48 @@ public struct GlassRoundButton: View {
     }
 }
 
-/// A 30×26 pill with an icon (the graph's period controls).
+/// A 30×26 pill with an icon (the graph's period controls). Under the
+/// pointer the control hover replaces its fill (#1146 `.tc-btn--pill-icon`).
 public struct GlassPillIconButton: View {
     private let label: String
-    private let systemImage: String
+    private let systemImage: String?
+    private let glyph: String?
+    private let ink: GlassRGBA?
     private let action: () -> Void
 
-    public init(_ label: String, systemImage: String, action: @escaping () -> Void) {
+    public init(_ label: String, systemImage: String, ink: GlassRGBA? = nil, action: @escaping () -> Void) {
         self.label = label
         self.systemImage = systemImage
+        self.glyph = nil
+        self.ink = ink
         self.action = action
+    }
+
+    /// A pill whose icon is a text glyph (#1146's graph controls: ‹ − + › ›|).
+    /// `label` names it; the glyph is never read.
+    public init(_ label: String, glyph: String, ink: GlassRGBA? = nil, action: @escaping () -> Void) {
+        self.label = label
+        self.systemImage = nil
+        self.glyph = glyph
+        self.ink = ink
+        self.action = action
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if let systemImage {
+            Image(systemName: systemImage).glassGlyph(11, weight: .semibold)
+        } else {
+            Text(glyph ?? "").glassGlyph(14, weight: .medium)
+        }
     }
 
     public var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .glassGlyph(11, weight: .semibold)
-                .foregroundStyle(GlassColor.textPrimary)
+            icon
+                .foregroundStyle(ink?.color ?? GlassColor.textPrimary)
                 .frame(width: 30, height: GlassTokens.Size.control)
-                .glassHover(GlassTokens.Color.controlHover, in: Capsule())
-                .glassSurface(.control)
+                .glassSurface(.control, hover: GlassTokens.Color.controlHover)
         }
         .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
@@ -217,7 +330,7 @@ public struct GlassPillIconButton: View {
 /// button whose menu is open (the View menu), drawn on a solid fill.
 public struct GlassToolbarButton: View {
     private let label: String
-    private let systemImage: String
+    private let icon: GlassIcon
     private let pressed: Bool?
     private let expanded: Bool?
     private let action: () -> Void
@@ -226,8 +339,17 @@ public struct GlassToolbarButton: View {
         _ label: String, systemImage: String, pressed: Bool? = nil, expanded: Bool? = nil,
         action: @escaping () -> Void
     ) {
+        self.init(label, icon: .symbol(systemImage), pressed: pressed, expanded: expanded, action: action)
+    }
+
+    /// `icon` is one of #1146's toolbar glyphs (`.glyph(.viewMenu)`), or a
+    /// symbol.
+    public init(
+        _ label: String, icon: GlassIcon, pressed: Bool? = nil, expanded: Bool? = nil,
+        action: @escaping () -> Void
+    ) {
         self.label = label
-        self.systemImage = systemImage
+        self.icon = icon
         self.pressed = pressed
         self.expanded = expanded
         self.action = action
@@ -235,14 +357,15 @@ public struct GlassToolbarButton: View {
 
     public var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
-                .glassGlyph(13)
+            GlassIconView(icon: icon, symbolSize: 13)
                 .foregroundStyle(Self.glyph(pressed: pressed).color)
                 .frame(width: 28, height: 24)
                 // A glyph has no fill: the press darkens a wash behind it,
                 // never the glyph, which keeps its contrast.
                 .glassPressedWash(Capsule())
                 .background(Capsule().fill(Self.fill(expanded: expanded)?.color ?? .clear))
+                // No fill of its own, so the hover is the whole fill
+                // (#1146 `.tc-btn--icon:hover`).
                 .glassHover(GlassTokens.Color.controlHover, in: Capsule())
                 .contentShape(Capsule())
         }
@@ -252,11 +375,12 @@ public struct GlassToolbarButton: View {
         .help(label)
     }
 
-    /// The glyph's ink. Dimmed (its panel hidden) is `statusOff`, a glyph
-    /// colour that clears 3:1 on the control fill; the literal grey it
-    /// replaced was about 2.8:1.
+    /// The glyph's ink, as #1146 draws it: `toolbarGlyph`, dimmed to
+    /// `toolbarGlyphHidden` while its pane is hidden (owner ruling,
+    /// 2026-10-07: #1146 wins for theming). Dimmed, it still clears the
+    /// 3:1 glyph floor on the control fill (ToolbarGlyphContrastTests).
     static func glyph(pressed: Bool?) -> GlassRGBA {
-        pressed == false ? GlassTokens.Color.statusOff : GlassTokens.Color.textPrimary
+        pressed == false ? GlassTokens.Color.toolbarGlyphHidden : GlassTokens.Color.toolbarGlyph
     }
 
     /// The fill behind the glyph: `toolbarExpanded` while its menu is open
@@ -281,8 +405,9 @@ public struct GlassToolbarGroup<Content: View>: View {
     }
 }
 
-/// The folder chooser: a folder icon and "…"; the help text carries the
-/// full label.
+/// The folder chooser (#1146 `FolderButton`): #1146's 13pt folder outline
+/// and "…" on a control pill, 10pt sides, bold; the help text carries the
+/// full label. Under the pointer the control hover replaces its fill.
 public struct GlassFolderButton: View {
     private let label: String
     private let action: () -> Void
@@ -292,14 +417,23 @@ public struct GlassFolderButton: View {
         self.action = action
     }
 
+    /// The pill's sides and the label's type (#1146 `.tc-btn--folder`).
+    static let horizontalPadding: CGFloat = 10
+    static let type = GlassTokens.TypeScale.label.weight(.bold)
+
     public var body: some View {
         Button(action: action) {
             HStack(spacing: GlassTokens.Space.s2) {
-                Image(systemName: "folder")
-                Text("…")
+                GlassGlyphView(.folder)
+                Text("…").accessibilityHidden(true)
             }
+            .glassType(Self.type)
+            .foregroundStyle(GlassColor.textPrimary)
+            .padding(.horizontal, Self.horizontalPadding)
+            .frame(minHeight: GlassTokens.Size.controlLarge)
+            .glassSurface(.control, hover: GlassTokens.Color.controlHover)
         }
-        .buttonStyle(GlassButtonStyle(.glass))
+        .buttonStyle(GlassPressStyle())
         .accessibilityLabel(label)
         .help(label)
     }
@@ -331,9 +465,8 @@ public struct GlassKebab: View {
     public var body: some View {
         let lit = Self.lit(open: open, hovering: hovering && isEnabled)
         Button(action: action) {
-            Image(systemName: "ellipsis")
-                .rotationEffect(.degrees(90))
-                .glassGlyph(12, weight: .bold)
+            // #1146's three 1.6pt dots in a 4×14 box.
+            GlassGlyphView(.kebab)
                 .foregroundStyle(lit ? GlassColor.textPrimary : GlassTokens.Color.statusOff.color)
                 .frame(width: 22, height: 24)
                 .background(
@@ -360,6 +493,9 @@ public struct GlassExpander: View {
         self._isOpen = isOpen
     }
 
+    /// #1146's `.tc-expander` padding: 6 above, 2 on the other sides.
+    static let padding = EdgeInsets(top: 6, leading: 2, bottom: 2, trailing: 2)
+
     public var body: some View {
         Button {
             withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { isOpen.toggle() }
@@ -376,6 +512,7 @@ public struct GlassExpander: View {
                     .foregroundStyle(GlassColor.textPrimary)
                 Spacer(minLength: 0)
             }
+            .padding(Self.padding)
             .contentShape(Rectangle())
         }
         .buttonStyle(GlassPressStyle())
@@ -443,12 +580,16 @@ public struct GlassPicker<Value: Hashable>: View {
     }
 }
 
-/// The picker's pill: dot, label, chevron, on the control tier, with the
-/// control hover. `invalid` adds the outside-red ring (`GlassSelect`).
+/// The picker's pill: dot, label, #1146's 10pt chevron, on the control
+/// tier, with the control hover in place of its fill. `invalid` adds the
+/// outside-red ring (`GlassSelect`). `trailing` is the inset after the
+/// chevron: 8 on the picker (#1146 `.tc-picker`), 10 on the select, whose
+/// chevron #1146 pins 10 from the pill's end (`.tc-select`).
 struct GlassPickerPill: View {
     let title: String
     let dot: GlassStatus?
     var invalid = false
+    var trailing: CGFloat = 8
 
     var body: some View {
         HStack(spacing: GlassTokens.Space.inlineGap) {
@@ -456,22 +597,20 @@ struct GlassPickerPill: View {
                 GlassStatusDot(dot, size: GlassTokens.Size.dot)
             }
             Text(title)
-            Image(systemName: "chevron.down")
-                .glassGlyph(8, weight: .bold)
+            GlassGlyphView(.chevronDown)
                 .foregroundStyle(GlassColor.textTertiary)
         }
         .glassType(GlassTokens.TypeScale.label.weight(.semibold))
         .foregroundStyle(GlassColor.textPrimary)
         .padding(.leading, 10)
-        .padding(.trailing, 8)
+        .padding(.trailing, trailing)
         .frame(minHeight: GlassTokens.Size.controlLarge)
-        .glassHover(GlassTokens.Color.controlHover, in: Capsule())
         .overlay {
             if let ring = GlassTextField.ring(invalid: invalid) {
                 Capsule().strokeBorder(ring.color, lineWidth: 1)
             }
         }
-        .glassSurface(.control)
+        .glassSurface(.control, hover: GlassTokens.Color.controlHover)
     }
 }
 
@@ -496,26 +635,27 @@ public struct GlassToggleStyle: ToggleStyle {
         self.showsLabel = showsLabel
     }
 
-    /// The track colour when on.
+    /// The track colour when on. The watch switch takes the Settings
+    /// purple, as every switch matches (owner, 2026-10-08): its knob lost
+    /// the dark ring that let a white knob read on the bright watch green,
+    /// and white on that green is about 1.8:1, under the 3:1 floor.
     static func onColor(_ kind: GlassSwitchKind) -> GlassRGBA {
         switch kind {
         case .standard: GlassTokens.Color.toggleOn
-        case .settings: GlassTokens.Color.toggleOnSettings
-        case .watch: GlassTokens.Color.watchOn
+        case .settings, .watch: GlassTokens.Color.toggleOnSettings
         }
     }
 
-    /// The knob: white on every track, as #1146 draws it.
+    /// The knob: plain white on every track, with no ring (owner,
+    /// 2026-10-08), as #1146 draws it.
     static func knob(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA {
         GlassTokens.Color.textOnAccent
     }
 
-    /// A hairline ring around the knob. On the bright watch green white is
-    /// about 1.8:1, so the knob is told apart from its track by this ring
-    /// instead, which clears the 3:1 glyph floor against the track
-    /// (SwitchContrastTests). Every other knob clears it by itself.
-    static func knobEdge(_ kind: GlassSwitchKind, isOn: Bool) -> GlassRGBA? {
-        kind == .watch && isOn ? GlassTokens.Color.switchKnobEdge : nil
+    /// How long the knob takes to slide: #1146's `--tc-dur` (220ms) for a
+    /// toggle, 150ms for the watch switch (`glass.css` .tc-watch).
+    static func duration(_ kind: GlassSwitchKind) -> Double {
+        kind == .watch ? GlassTokens.Motion.fast : GlassTokens.Motion.standard
     }
 
     public func makeBody(configuration: Configuration) -> some View {
@@ -527,11 +667,18 @@ public struct GlassToggleStyle: ToggleStyle {
         return HStack(spacing: showsLabel ? GlassTokens.Space.s6 : 0) {
             // Hidden or not, the native toggle below carries the label to
             // VoiceOver.
+            // A Settings switch sits on the section's trailing edge, so a
+            // column of them lines up whatever their labels' lengths, and a
+            // long label wraps on the left (Ron, 2026-10-09).
             if showsLabel {
                 configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: kind == .settings ? .infinity : nil, alignment: .leading)
             }
             Button {
-                withAnimation(GlassMotion.fast(GlassMotion.systemReducesMotion)) { configuration.isOn.toggle() }
+                withAnimation(GlassMotion.systemReducesMotion ? nil : .easeOut(duration: Self.duration(kind))) {
+                    configuration.isOn.toggle()
+                }
             } label: {
                 ZStack(alignment: configuration.isOn ? .trailing : .leading) {
                     Capsule()
@@ -539,11 +686,6 @@ public struct GlassToggleStyle: ToggleStyle {
                         .glassPressedFill()
                     Circle()
                         .fill(Self.knob(kind, isOn: configuration.isOn).color)
-                        .overlay {
-                            if let edge = Self.knobEdge(kind, isOn: configuration.isOn) {
-                                Circle().strokeBorder(edge.color, lineWidth: 1)
-                            }
-                        }
                         .frame(width: 18, height: 18)
                         .padding(inset)
                 }
@@ -582,7 +724,7 @@ public struct GlassCheckboxStyle: ToggleStyle {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(GlassPressStyle())
+        .buttonStyle(GlassPressStyle(disabledOpacity: GlassTokens.Opacity.disabledCheck))
         .accessibilityRepresentation {
             // A native toggle, so the system states the value -- checked,
             // unchecked or mixed -- in the person's language. A mixed box is
@@ -636,7 +778,7 @@ public struct GlassCheckMark: View {
 
 /// A labelled field: eyebrow label over a dark inset field (#1146
 /// `.tc-input`): the field fill with the well's inner edge, the prompt in
-/// tertiary text, and the shared disabled dimming. Focus is the system's
+/// the placeholder ink, and the shared disabled dimming. Focus is the system's
 /// ring.
 ///
 /// `secure` hides what is typed (a passphrase). `invalid` draws a 1pt ring
@@ -673,9 +815,10 @@ public struct GlassTextField: View {
         invalid ? GlassTokens.Color.statusOutside : nil
     }
 
-    /// The prompt's ink: tertiary text, which clears 4.5:1 where #1146's
-    /// 30% white did not.
-    static let promptInk = GlassTokens.Color.textTertiary
+    /// The prompt's ink: #1146's white placeholder, raised from 30% so it
+    /// clears 4.5:1 on the field fill (owner ruling, 2026-10-07: hold the
+    /// WCAG floors; FormControlTests).
+    static let promptInk = GlassTokens.Color.placeholder
 
     public var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
@@ -705,7 +848,7 @@ public struct GlassTextField: View {
 
     @ViewBuilder
     private var field: some View {
-        let shownPrompt = prompt.map { Text($0).foregroundStyle(GlassColor.textTertiary) }
+        let shownPrompt = prompt.map { Text($0).foregroundStyle(Self.promptInk.color) }
         if secure {
             SecureField(label, text: $text, prompt: shownPrompt)
         } else {

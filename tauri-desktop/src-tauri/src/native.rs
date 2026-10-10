@@ -474,7 +474,7 @@ fn linux_desktop_entry_text(executable: &Path) -> Result<String, String> {
          Type=Application\n\
          Version=1.0\n\
          Name=Trace Commons\n\
-         Comment=Review and contribute coding sessions\n\
+         Comment=Review and contribute coding traces\n\
          Exec=\"{escaped_executable}\"\n\
          Terminal=false\n\
          X-GNOME-Autostart-enabled=true\n\

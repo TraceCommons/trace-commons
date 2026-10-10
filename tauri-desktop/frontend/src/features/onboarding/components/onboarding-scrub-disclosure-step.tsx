@@ -21,7 +21,7 @@ export function OnboardingScrubDisclosureStep({
       <span className="mb-1.5 block tc-eyebrow">
         WHAT IS REMOVED
       </span>
-      <h2>Before a session is sent</h2>
+      <h2>Before a trace is sent</h2>
       {copy ? (
         <div className="grid gap-3">
           {scrubDisclosureLines(copy).map((line) => (

@@ -110,7 +110,7 @@ impl Harness {
         store
             .save_config(&ContributorConfig {
                 inference_receipt_endpoint: None,
-                consent_scopes_chosen: false,
+                consent_scopes_chosen: Some(true),
                 witness_origin: None,
                 inference_receipt_check_attestation: false,
                 schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -447,7 +447,7 @@ async fn cancelling_mid_upload_is_refused_rather_than_falsely_acknowledged() {
     store
         .save_config(&ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),

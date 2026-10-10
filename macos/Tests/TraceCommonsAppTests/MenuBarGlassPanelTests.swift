@@ -8,6 +8,15 @@ import XCTest
 /// R13 of #1173: the menu-bar popover from the handoff, under its rules.
 @MainActor
 final class MenuBarGlassPanelTests: XCTestCase {
+    /// C19: the panel's corner is #1146's popover radius
+    /// (`--tc-radius-card`, 14), not a larger one of its own.
+    func test_thePanelHasThePopoverRadius() throws {
+        XCTAssertEqual(GlassTokens.Radius.menuPanel, GlassTokens.Radius.card)
+        XCTAssertEqual(GlassTokens.Radius.menuPanel, 14)
+        let panel = try GlassSurfaceRulesTests.text("Views/Monitor/MenuBarGlassPanel.swift")
+        XCTAssertTrue(panel.contains("radius: GlassTokens.Radius.menuPanel"))
+    }
+
     // MARK: Mode roll-up
 
     /// One mode for every folder reads as that mode; any difference is
@@ -367,11 +376,86 @@ final class MenuBarGlassPanelTests: XCTestCase {
         let never = ProjectRow(projectId: "n", projectLabel: "n", mode: .ignore, folderMode: .ignore)
         let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
         let unknown = ProjectRow(projectId: "x", projectLabel: "x", mode: .ignore)
-        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([]))
-        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown]))
-        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([], override: "ignore"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, never], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, unknown], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation(nil, override: "ignore"))
+    }
+
+    /// Under an Automatic override, clearing starts no new unattended
+    /// sending (a folder set to Automatic already sends under its own
+    /// arming, and Ask me folders go back to asking), so Mixed clears at
+    /// once; under Ask me or Never it is still confirmed (#1256 review).
+    func test_mixedClearsAnAutomaticOverrideAtOnce() async throws {
+        let ask = ProjectRow(projectId: "a", projectLabel: "a", mode: .ignore, folderMode: .ask)
+        let auto = ProjectRow(projectId: "u", projectLabel: "u", mode: .ignore, folderMode: .autoUpload)
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "auto_upload"))
+        XCTAssertFalse(MenuPanelData.clearNeedsConfirmation(nil, override: "auto_upload"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "ignore"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: "notify_only"))
+        XCTAssertTrue(MenuPanelData.clearNeedsConfirmation([ask, auto], override: nil))
+
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("auto_upload")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "auto_upload")
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls.last, "clear_contribution_override")
+        XCTAssertNil(store.status?.contributionOverride)
+    }
+
+    /// A stale store sends nothing from Mixed, even with an override in
+    /// force and an Automatic folder.
+    func test_mixedDoesNothingWhileStale() async throws {
+        let (store, client) = await loadedStore(.armedFolder)
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        let sent = client.overrideCalls
+        store.attach(client)
+        XCTAssertFalse(store.canChooseOverride)
+        await store.chooseMixed()
+        XCTAssertNil(store.confirming)
+        XCTAssertEqual(client.overrideCalls, sent)
+    }
+
+    /// With no override in force, the checked row is the roll-up itself:
+    /// pressing it only closes the list and sets no override. While an
+    /// override is in force, or before the status is read, every row is a
+    /// real choice (#1255 review).
+    func test_pressingTheRollupsOwnRowOnlyClosesTheList() async throws {
+        let (store, _) = await loadedStore(.normalDay)
+        let rollup = try XCTUnwrap(store.status?.contributionMode)
+        XCTAssertEqual(rollup, "notify_only")
+        XCTAssertTrue(MenuPanelData.pressOnlyCloses(rollup, status: store.status, stale: false))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses("ignore", status: store.status, stale: false))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses(rollup, status: store.status, stale: true))
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses(rollup, status: nil, stale: false))
+        store.choose("ignore")
+        await store.resolveConfirmation(confirmed: true)
+        XCTAssertEqual(store.status?.contributionOverride?.mode, "ignore")
+        XCTAssertFalse(MenuPanelData.pressOnlyCloses("ignore", status: store.status, stale: false),
+                       "under an override the checked row is the override, not a no-op")
+
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("MenuPanelData.pressOnlyCloses(choice.mode, status: store.status, stale: store.stale)"))
+        // The override line is drawn only from a current status.
+        XCTAssertTrue(source.contains("if !store.stale, store.status?.contributionOverride != nil {"))
+    }
+
+    /// The Mixed row goes through `chooseMixed`, which confirms; the panel
+    /// never calls the unconfirmed `clearOverride` (#1256 review).
+    func test_theMixedRowGoesThroughChooseMixed() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TraceCommonsApp/Views/Monitor/MenuBarGlassPanel.swift")
+        let source = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(source.contains("Task { await store.chooseMixed() }"))
+        XCTAssertFalse(source.contains("clearOverride()"))
     }
 
     /// Automatic's confirmation carries the arming disclosure, and its

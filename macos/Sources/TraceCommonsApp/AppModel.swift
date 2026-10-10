@@ -163,9 +163,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var isStartingDaemon = false
     private let daemonStartup: DaemonStartup
+    /// The opt-in events to declare now (`Notifier.acceptedEvents`).
+    /// Replaced only by tests.
+    private let reengageAccepts: () async -> [String]
 
-    init(daemonStartup: DaemonStartup? = nil) {
+    init(
+        daemonStartup: DaemonStartup? = nil,
+        reengageAccepts: @escaping () async -> [String] = { await Notifier.shared.acceptedEvents() }
+    ) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
+        self.reengageAccepts = reengageAccepts
         // `@Published` emits in `willSet`, so the emitted value is read,
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
@@ -443,13 +450,18 @@ final class AppModel: ObservableObject {
     /// only then works out the change -- which is still shown before it is
     /// made.
     func answerHarnessExposure(accepted: Bool) {
-        guard let request = harnessExposureRequest else { return }
-        harnessExposureRequest = nil
+        guard let request = harnessExposureRequest, !harnessBusy else { return }
         guard accepted else {
+            harnessExposureRequest = nil
             answerPrivateInferenceOffer(accepted: false)
             return
         }
-        guard let client, !harnessBusy else { return }
+        guard let client else {
+            harnessExposureRequest = nil
+            return
+        }
+        // The sheet stays up, busy, until the write answers: a scrim click
+        // or Escape meanwhile cannot abandon it (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { () -> (DaemonSettingsView, HarnessPlan?) in
@@ -458,6 +470,7 @@ final class AppModel: ObservableObject {
             }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessExposureRequest = nil
                 switch outcome {
                 case .success(let (settings, plan)):
                     self.publishIfChanged(\.daemonSettings, settings)
@@ -504,6 +517,7 @@ final class AppModel: ObservableObject {
     /// The contributor said no to the change. The file keeps every value it
     /// has, and the plan is simply dropped -- it expires on the far side.
     func cancelHarnessPreview() {
+        guard !harnessBusy else { return }
         harnessPreview = nil
     }
 
@@ -521,12 +535,13 @@ final class AppModel: ObservableObject {
             let planID = plan.planID,
             let client, !harnessBusy
         else { return }
-        harnessPreview = nil
+        // The preview stays up, busy, until the commit answers (#1280 review).
         harnessBusy = true
         Task.detached(priority: .userInitiated) {
             let outcome = Result { try client.harnessCommit(planID: planID) }
             await MainActor.run {
                 self.harnessBusy = false
+                self.harnessPreview = nil
                 if case .failure = outcome { self.reportHarnessFailure() }
                 self.refreshHarnesses()
             }
@@ -611,6 +626,10 @@ final class AppModel: ObservableObject {
     /// also only ever handed over here. Dropped when the ceremony leaves the
     /// state that has something to cancel.
     @Published private(set) var credentialAttempt: CredentialAttempt?
+
+    /// The attempt the first run's near.ai login is waiting on, kept apart
+    /// from Settings' `credentialAttempt` so its Cancel names its own.
+    private var firstRunLoginAttemptID: String?
 
     @Published private(set) var credentialBusy = false
 
@@ -891,7 +910,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var certificateDetails: [String: CertificateDetail] = [:]
 
     /// Re-read what leaves this machine. Called wherever a fact it states
-    /// can change: the witness, enrolment, and any settings write (through
+    /// can change: the witness, enrollment, and any settings write (through
     /// `daemonSettings`), as well as when a disclosure surface appears.
     func refreshRouteDisclosure() {
         routeDisclosureGeneration &+= 1
@@ -954,7 +973,12 @@ final class AppModel: ObservableObject {
     /// The client the first run's passkey sheets complete their ceremony
     /// with (`LivePasskeyAccount`). Nil while no daemon is running.
     var passkeyClient: DaemonClient? { client }
-    private var subscription: TCSubscription?
+    /// The one subscription and what it declares (`ReengageDeclaration`):
+    /// `reengage_due` only while a notification can be posted.
+    private var reengage: ReengageDeclaration<TCSubscription>?
+    private var subscription: TCSubscription? { reengage?.token }
+    /// Whether the daemon currently counts this app as a renderer.
+    var declaresReengagement: Bool { reengage?.isDeclared ?? false }
     /// The C1 data contract's live client (K1 of #1173), for screens that
     /// read through `DaemonDataClient`. Created with the daemon and fed by
     /// the same `tc_subscribe` callback as `handle(event:)`, so there is
@@ -1039,7 +1063,10 @@ final class AppModel: ObservableObject {
                 waiting,
                 projectID: \.projectID,
                 projectLabel: \.projectLabel,
-                sizeBytes: \.sizeBytes
+                // Every decoded queue entry carries its size; only a
+                // carried-over preview entry can lack one, and none is
+                // ever in `pending`.
+                sizeBytes: { $0.sizeBytes ?? 0 }
             )
         )
         recomputeNothingMatched()
@@ -1217,7 +1244,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        subscription = daemon.subscribe { [weak self] json in
+        // Declares nothing yet: `reengage_due` is declared on this same
+        // subscription once the system's answer is known, and only while a
+        // notification can be posted (`refreshReengageDeclaration`).
+        let subscription = daemon.subscribe { [weak self] json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1226,12 +1256,30 @@ final class AppModel: ObservableObject {
                 self?.handle(event: event)
             }
         }
+        // This app renders the re-engagement notifications itself
+        // (`Notifier.postReengage`), so the daemon may send them and count
+        // it as a renderer -- but only while the system lets it post.
+        reengage = subscription.map { token in
+            ReengageDeclaration(token: token) { [weak daemon] token, accepts in
+                daemon?.redeclare(token, accepts: accepts)
+            }
+        }
+        Task { await refreshReengageDeclaration() }
         // No `subscribe` call follows: the contract's `snapshot`-on-subscribe
         // is a property of the SOCKET connection loop, which sends it to the
         // client that just connected. `tc_subscribe` attaches to the event
         // bus directly and gets no such courtesy frame, so the first paint
         // comes from the explicit `list_pending` + `status` in refreshAll()
         // rather than from waiting on a snapshot that will never arrive.
+    }
+
+    /// Declares `reengage_due` when a notification can be posted now, and
+    /// withdraws it when one cannot. Called at start, when the permission
+    /// prompt is answered, and when the app comes forward (the contributor
+    /// may have changed it in System Settings).
+    func refreshReengageDeclaration() async {
+        let accepts = await reengageAccepts()
+        reengage?.update(accepts: accepts)
     }
 
     private func handle(event: DaemonEvent) {
@@ -1274,7 +1322,9 @@ final class AppModel: ObservableObject {
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()
-        case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
+        case .reengageDue(let due):
+            Notifier.shared.postReengage(due)
+        case .digestDue(let count, let contributed, let contributedProjects, let credit, let text):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
             // waiting at all -- so this also refreshes history, which is the
@@ -1284,6 +1334,7 @@ final class AppModel: ObservableObject {
                 refreshHistory()
             }
             Notifier.shared.postDigest(
+                text: text,
                 pendingCount: count,
                 projects: waitingByProject.map(\.label),
                 contributedCount: contributed,
@@ -1326,7 +1377,7 @@ final class AppModel: ObservableObject {
         // Dropped first so no new work can be started from this side while
         // teardown runs; `perform`, `enroll` and the rest all guard on
         // `client`.
-        self.subscription = nil
+        reengage = nil
         self.daemon = nil
         self.client = nil
         // Screens' `for await` loops end here rather than waiting on a
@@ -1562,7 +1613,15 @@ final class AppModel: ObservableObject {
     /// answer, which `set_settings` returns in full, and an undecided
     /// choice is never sent. A failed confirmation requests fresh settings.
     func setSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async -> Bool {
-        guard let params = choice.settingsParams(for: kind), let client else { return false }
+        guard let params = choice.settingsParams(for: kind) else { return false }
+        return await setSettingsDeclaration(params)
+    }
+
+    /// Write `params` through `set_settings` and keep what the daemon
+    /// answers. A lost response does not prove the write failed, so the
+    /// modes are read back; a requested path is never retained.
+    func setSettingsDeclaration(_ params: [String: Any]) async -> Bool {
+        guard let client else { return false }
         let result = await Task.detached(priority: .userInitiated) {
             Result { try client.setSettings(params) }
         }.value
@@ -1731,7 +1790,7 @@ final class AppModel: ObservableObject {
             do {
                 return .joined(try client.nearAiAccountEnroll(commons: commons))
             } catch let failure as DaemonClient.Failure {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL. Empty
                 // falls back to the generic label rather than to a blank.
@@ -1945,10 +2004,22 @@ final class AppModel: ObservableObject {
     @Published private(set) var sourceRootSaveFailed = false
 
     func saveSourceRoot(_ kind: SourceKind, _ choice: SourceChoice) async {
+        guard let params = choice.settingsParams(for: kind) else {
+            // Nothing to write is a refusal, as it always was.
+            if !sourceRootBusy { sourceRootSaveFailed = true }
+            return
+        }
+        await saveSettings(params)
+    }
+
+    /// One Watched folders declaration, written through `set_settings` with
+    /// the section's in-flight flag and refusal: a source row's, or the
+    /// exported-traces row's off switch.
+    func saveSettings(_ params: [String: Any]) async {
         guard !sourceRootBusy else { return }
         sourceRootBusy = true
         sourceRootSaveFailed = false
-        sourceRootSaveFailed = !(await setSourceRoot(kind, choice))
+        sourceRootSaveFailed = !(await setSettingsDeclaration(params))
         sourceRootBusy = false
     }
 
@@ -2080,9 +2151,9 @@ final class AppModel: ObservableObject {
     /// coordinator's atomicity note.
     ///
     /// Watching only finishes too (Review Focus 5 of #1030's port): with no
-    /// enrolment there is no tenant, so its marker is
+    /// enrollment there is no tenant, so its marker is
     /// `isWatchOnlyComplete`. It counts only while the daemon holds no
-    /// enrolment; an enrolled person confirms on Start whatever an earlier
+    /// enrollment; an enrolled person confirms on Start whatever an earlier
     /// watch-only run wrote. Before the first status arrives `loggedIn`
     /// reads false, so that marker alone decides until then: the main
     /// window may show its content, then switch back into the first run.
@@ -2126,7 +2197,7 @@ final class AppModel: ObservableObject {
     /// Test seam: `status` is `private(set)` and otherwise only ever set
     /// from a live daemon reply, so there is no other way to exercise the
     /// tenant-keyed onboarding marker without a running daemon and a real
-    /// enrolment. Debug-only, and deliberately routed through
+    /// enrollment. Debug-only, and deliberately routed through
     /// `publishIfChanged` so a test observes exactly what the app does.
     func setClientForTesting(_ client: DaemonClient) {
         self.client = client
@@ -3319,12 +3390,24 @@ extension AppModel: FirstRunDaemon {
         guard let client else { return false }
         let first = await Task.detached { try? client.nearAiCredentialStatus(attemptID: nil) }.value
         if NearAILoginPoll.verdict(first) == .signedIn { return true }
+        // A Cancel before the browser opens: no attempt is begun, and none
+        // that began meanwhile opens the browser.
+        if Task.isCancelled { return false }
         let started = await Task.detached { try? client.nearAiCredentialStart() }.value
         guard let attempt = started, let url = URL(string: attempt.browserURL) else { return false }
+        if Task.isCancelled {
+            _ = await Task.detached { try? client.nearAiCredentialCancel(attemptID: attempt.attemptID) }.value
+            return false
+        }
+        firstRunLoginAttemptID = attempt.attemptID
+        defer { if firstRunLoginAttemptID == attempt.attemptID { firstRunLoginAttemptID = nil } }
         NSWorkspace.shared.open(url)
         let deadline = Date().addingTimeInterval(NearAILoginPoll.limit)
         while Date() < deadline, !Task.isCancelled {
             try? await Task.sleep(for: .seconds(1))
+            // Cancelled (the first run's Cancel): stop at once, without
+            // another poll that could report a sign-in.
+            if Task.isCancelled { return false }
             guard self.client === client else { return false }
             let status = await Task.detached { try? client.nearAiCredentialStatus(attemptID: attempt.attemptID) }.value
             switch NearAILoginPoll.verdict(status) {
@@ -3339,6 +3422,19 @@ extension AppModel: FirstRunDaemon {
             }
         }
         return false
+    }
+
+    /// Cancel on Folders or Tools: end the browser sign-in `nearAILogin`
+    /// started, named by its attempt when one began, else whatever sign-in
+    /// the daemon runs. Called directly rather than through
+    /// `cancelNearAiCredential`, which writes the Settings notice and shares
+    /// its busy flag; the first run says its own line.
+    func cancelNearAILogin() async -> Bool {
+        let attemptID = firstRunLoginAttemptID
+        guard case .success = await firstRunCall({ try $0.nearAiCredentialCancel(attemptID: attemptID) })
+        else { return false }
+        refreshNearAiCredential()
+        return true
     }
 
     /// Enroll through the near.ai login with no invite. The daemon's label
@@ -3429,7 +3525,7 @@ extension AppModel: FirstRunDaemon {
     }
 
     /// An invite link (`PendingInvite`) takes back a finished watch-only
-    /// run while the daemon holds no enrolment: the marker is cleared, so
+    /// run while the daemon holds no enrollment: the marker is cleared, so
     /// `requiresOnboarding` turns true, a window hosts the first run again,
     /// and the coordinator applies the parked link to Join. Without this a
     /// finished watcher could never join, since the first run is the only
@@ -3472,6 +3568,16 @@ extension AppModel: FirstRunDaemon {
         objectWillChange.send()
         UserDefaults.standard.set(true, forKey: key)
         return isWatchOnlyComplete
+    }
+
+    /// The daemon drops this Mac's enrollment (`unenroll`). Status is read
+    /// again, so `status.loggedIn` is false before watch only is marked.
+    func unenroll() async -> Bool {
+        guard case .success = await firstRunCall({ try $0.unenroll() }) else { return false }
+        if case .success(let fresh) = await firstRunCall({ try $0.status() }) {
+            publishIfChanged(\.status, fresh)
+        }
+        return true
     }
 
     /// One blocking client call off the main actor. Nil without a daemon.

@@ -17,6 +17,9 @@ import TCShellCore
 /// title over the refusal's sentence.
 struct InferenceTabView: View {
     let store: InferenceStore
+    /// For the prompts (offers, undos, the first-contribution note), which
+    /// head this page now that the inspector stays closed on it.
+    let traces: TracesStore
     @EnvironmentObject private var model: AppModel
 
     var body: some View {
@@ -47,19 +50,24 @@ struct InferenceTabView: View {
     private var ledger: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                // Saved model accounts and managed sessions lead the tab
-                // (#1146's private-AI page): accounts, then sessions, then
-                // their error notice.
-                ManagedSessionsSection()
-                // The standard tool settings below are global; managed
-                // launches never edit them.
-                ManagedGlobalSettingsHeader()
-                // Sign-in with balance and funding, the tools with their
-                // connect action, and the Private AI switch, in the main pane
-                // above the ledger as #1146's Private AI page has them (owner
-                // ruling on #1241). Drawn only while the daemon runs, which
-                // every one of them needs: the ledger is.
+                // The owner's order (2026-10-09), with the inspector closed on
+                // this tab: the prompts, then the Private AI summary the
+                // inspector used to hold, then the calls, then the managed
+                // cards, the tools, the switch, sign-in, balance and funding.
+                InspectorPrompts(store: traces)
+                PrivateAIInspectorView(
+                    store: store, destinationLabel: model.privateInferenceCopy?.destination)
+                ledgerSections
                 InferenceAccountSection(store: store)
+            }
+        }
+        .scrollIndicators(.never)
+    }
+
+    /// The window's totals, the models and the calls, as the core read them.
+    @ViewBuilder
+    private var ledgerSections: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
                 // The stack-wide rule (ScreenState): a core that is down or a
                 // failed read is said in the core's words over the last page,
                 // never as the error's fixed label and never as current.
@@ -79,9 +87,7 @@ struct InferenceTabView: View {
                 } else if store.failures["inference_calls"] == nil {
                     GlassSpinner(standalone: true).frame(maxWidth: .infinity)
                 }
-            }
         }
-        .scrollIndicators(.never)
     }
 
     // MARK: Totals
@@ -297,58 +303,152 @@ struct InferenceTabView: View {
     }
 }
 
-/// The inspector on the Inference tab: the Private AI summary, as #1146's
-/// `inference-inspector.tsx` draws it. How many tools point at it, the
-/// listener's state in the core's sentence (never the switch: what was asked
-/// for is not what happened), the credential's state, and which tools are
-/// connected. Its controls are in the main pane (`InferenceAccountSection`).
+/// The Private AI summary at the top of the Inference tab's main pane
+/// (owner, 2026-10-09; it was the tab's inspector, as #1146's
+/// `inference-inspector.tsx` draws it, and the inspector now stays closed
+/// there). A 17pt bold title with "N of M tools connected" under it, the
+/// connected / not connected legend pair, and three rows -- the listener's
+/// state in the core's sentence (never the switch: what was asked for is
+/// not what happened), the credential's state, and which tools are
+/// connected. The balance card is the main pane's, further down.
 struct PrivateAIInspectorView: View {
     let store: InferenceStore
     let destinationLabel: String?
     @EnvironmentObject private var model: AppModel
 
+    /// The tools, from the one list the Local tools card and the Private AI
+    /// map read too (`AppModel.harnesses`, as #1146 reads one
+    /// `useHarnesses()`), so the pane, the inspector and the map never
+    /// disagree. `.none` is a list not read: nil, never "no tools".
+    static func rows(_ list: HarnessList) -> [HarnessRow]? {
+        list == .none ? nil : list.harnesses
+    }
+
+    /// The one list, while it is current: this window's client has read
+    /// the tools (`read`, which `InferenceStore.attach` forgets on a new
+    /// client) and its last read did not fail. Otherwise `.none`, so a new
+    /// client or a core that stopped answering is unknown, never the last
+    /// list. Only whether `read` is there is asked, never its rows.
+    static func liveHarnesses(_ list: HarnessList, read: HarnessList?, failure: DaemonDataError?) -> HarnessList {
+        read == nil || failure != nil ? .none : list
+    }
+
+    /// `model.harnesses`, while this inspector's store says it is current.
+    private var harnesses: HarnessList {
+        Self.liveHarnesses(model.harnesses, read: store.harnesses, failure: store.failures["harness_list"])
+    }
+
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+        let copy = runningCopy
+        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(destinationLabel ?? MonitorWindowView.Tab.inference.title)
-                    .glassType(GlassTokens.TypeScale.title)
+                    .glassType(GlassTokens.TypeScale.heading.weight(.bold))
                     .foregroundStyle(GlassColor.textPrimary)
-                if case .running = model.startup, let copy = model.privateInferenceCopy {
-                    summary(copy)
+                    .accessibilityAddTraits(.isHeader)
+                if let copy, let sub = Self.subLine(Self.rows(harnesses), copy: copy) {
+                    Text(sub)
+                        .glassType(GlassTokens.TypeScale.label.weight(.regular))
+                        .foregroundStyle(GlassColor.textSecondary)
                 }
             }
+            if let copy {
+                summary(copy)
+            }
         }
-        .scrollIndicators(.never)
+    }
+
+    /// The core's words, only while the daemon runs: every row reads it.
+    private var runningCopy: PrivateInferenceCopy? {
+        guard case .running = model.startup else { return nil }
+        return model.privateInferenceCopy
     }
 
     private func summary(_ copy: PrivateInferenceCopy) -> some View {
-        let rows = store.harnesses?.harnesses
-        let connected = rows?.filter(\.connected) ?? []
+        let rows = Self.rows(harnesses)
+        let counts = Self.counts(rows)
         let state = PrivateAISwitchCard.stateLabel(
             state: InferenceAccountSection.surfaceState(store.privateAI?.state), copy: copy,
             calls: model.privateInferenceCalls)
         return VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            // A list nobody could read is a dash, never zero connected.
-            GlassLegendCell(MonitorWords.connected, value: Self.connectedCount(rows), status: .on)
-            GlassStatusLabel(state.line, status: state.status)
-                .fixedSize(horizontal: false, vertical: true)
-            GlassKeyValueList([
-                .init(copy.credentialTitle,
-                      CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls)),
-                .init(copy.harnessesTitle, rows == nil ? "—" : Self.names(connected)),
-            ])
+            // A list nobody could read is a dash in both cells, never zero.
+            // Always side by side, two equal columns, as #1146's
+            // `.tc-legend` grid is.
+            HStack(spacing: GlassTokens.Space.s3) {
+                GlassLegendCell(copy.inspectorConnected, value: counts.connected, status: .on)
+                GlassLegendCell(copy.inspectorNotConnected, value: counts.notConnected, status: .off)
+            }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                // #1146: the Status dot is on while working, outside otherwise.
+                InspectorFactRow(label: copy.inspectorStatus, value: state.line,
+                                 status: Self.statusDot(store.privateAI?.state, calls: model.privateInferenceCalls))
+                InspectorFactRow(
+                    label: copy.inspectorCredential,
+                    value: CredentialSurface.stateLine(model.credentialStatus, copy: copy, calls: model.credentialCalls))
+                InspectorFactRow(label: copy.inspectorConnectedTools, value: Self.names(rows, copy: copy))
+            }
+            .padding(.horizontal, GlassTokens.Space.s2)
         }
     }
 
-    /// Connected over listed, or a dash when the list was not read.
-    static func connectedCount(_ rows: [HarnessRow]?) -> String {
-        guard let rows else { return "—" }
-        return "\(rows.filter(\.connected).count)/\(rows.count)"
+    /// "N of M tools connected", or nil when the list was not read.
+    static func subLine(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String? {
+        guard let rows else { return nil }
+        return copy.inspectorToolsConnected
+            .replacingOccurrences(of: "{connected}", with: String(rows.filter(\.connected).count))
+            .replacingOccurrences(of: "{total}", with: String(rows.count))
     }
 
-    /// The connected tools' names as the core reports them; a dash for none.
-    static func names(_ rows: [HarnessRow]) -> String {
-        rows.isEmpty ? "—" : rows.map(\.name).joined(separator: ", ")
+    /// Connected and not connected, or a dash for each when the list was
+    /// not read.
+    static func counts(_ rows: [HarnessRow]?) -> (connected: String, notConnected: String) {
+        guard let rows else { return ("—", "—") }
+        let connected = rows.filter(\.connected).count
+        return (String(connected), String(rows.count - connected))
+    }
+
+    /// The connected tools' names as the core reports them; the core's
+    /// "None" for a list read with none connected, and a dash for a list
+    /// nobody could read.
+    static func names(_ rows: [HarnessRow]?, copy: PrivateInferenceCopy) -> String {
+        guard let rows else { return "—" }
+        let connected = rows.filter(\.connected)
+        return connected.isEmpty ? copy.inspectorNone : connected.map(\.name).joined(separator: ", ")
+    }
+
+    /// The Status row's dot (#1146 `inference-inspector.tsx`): on while the
+    /// listener is working, outside otherwise.
+    static func statusDot(_ state: DaemonData.PrivateInferenceState?, calls: PrivateInferenceCalls) -> GlassStatus {
+        PrivateInferenceIndicator.dotStatus(
+            PrivateInferenceSurface.tone(InferenceAccountSection.surfaceState(state), calls: calls))
+    }
+}
+
+/// One inspector fact as #1146 draws it: the label on the left, the value
+/// right-aligned and semibold, with the state's dot before it when it has one.
+private struct InspectorFactRow: View {
+    let label: String
+    let value: String
+    var status: GlassStatus?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
+            Text(label)
+                .foregroundStyle(GlassColor.textPrimary)
+                .fixedSize()
+            Spacer(minLength: GlassTokens.Space.s4)
+            HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
+                // The dot sits beside the sentence it stands for.
+                if let status { GlassStatusDot(status).padding(.top, 5) }
+                Text(value)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(GlassColor.textPrimary)
+                    .multilineTextAlignment(.trailing)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .glassType(GlassTokens.TypeScale.body)
+        .accessibilityElement(children: .combine)
     }
 }
 

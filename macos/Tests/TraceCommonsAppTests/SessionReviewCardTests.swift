@@ -166,6 +166,32 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertEqual(store.lastContributed?.entryId, "e1")
     }
 
+    /// A card left up over a core that stopped answering (its banner says
+    /// so) is not armed: Contribute is drawn disabled and a press sends
+    /// nothing, whichever tab the card is on.
+    func test_aCoreThatStoppedAnsweringDisarmsContribute() throws {
+        XCTAssertFalse(SessionReviewCard.coreAnswering(.failed(.unreachable)))
+        XCTAssertFalse(SessionReviewCard.coreAnswering(.failed(.undecodable(method: "list_pending"))))
+        XCTAssertTrue(SessionReviewCard.coreAnswering(.loaded))
+        let card = try Self.text(Self.card)
+        let armed = try XCTUnwrap(card.range(of: "private func armed(_ entry: DaemonData.QueueEntry) -> Bool {"))
+        let end = try XCTUnwrap(card.range(of: "\n    }\n", range: armed.upperBound..<card.endIndex))
+        XCTAssertTrue(card[armed.upperBound..<end.lowerBound].contains("Self.coreAnswering(store.phase)"),
+                      "Contribute is armed over a core that is down")
+    }
+
+    /// zmanian's follow-up on #1273: with the core down, Contribute's
+    /// tooltip gives the core-down reason (the banner's title), not the
+    /// consent gate's not-ready one.
+    func test_aCoreThatStoppedAnsweringExplainsContribute() throws {
+        let down = try XCTUnwrap(TracesHealth.coreDownLine?.title)
+        XCTAssertEqual(SessionReviewCard.coreDownHelp, down)
+        XCTAssertNotEqual(SessionReviewCard.coreDownHelp, TCConsentCopy.gateHelp(pinned: false))
+        let card = try Self.text(Self.card)
+        XCTAssertTrue(card.contains(".help(Self.coreAnswering(store.phase)\n"), "the tooltip does not check the core first")
+        XCTAssertTrue(card.contains(": Self.coreDownHelp)"))
+    }
+
     /// Native's Keep stays on the card, and its Undo stays in the prompts.
     func test_keepAndUndoKeepRemain() async throws {
         let store = TracesStore(client: SampleDaemonClient(.normalDay))
@@ -179,11 +205,91 @@ final class SessionReviewCardTests: XCTestCase {
 
         let card = try Self.text(Self.card)
         for needle in ["Button(words.keep) { act(.keep, entry) }", "Button(words.dismissAction) { act(.dismiss, entry) }",
-                       "Button(review.lookInside) { previewing = legacy }"] {
+                       "Button(review.lookInside) {"] {
             XCTAssertTrue(card.contains(needle), "the card lacks \(needle)")
         }
         let prompts = try Self.text("Views/Monitor/InspectorPrompts.swift")
         XCTAssertTrue(prompts.contains("store.perform(.undoKeep, on: kept)"))
+    }
+
+    /// V2 and P16 of the #1146 delta: Ron's `InspectorHeader` (the session
+    /// tile, the folder, "Session · tool") heads the card, and Look inside,
+    /// Dismiss and Contribute end the review card on one line, Keep a link
+    /// under them. Look inside is always offered, on this session's entry.
+    func test_theCardIsRonsShape() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        let words = try XCTUnwrap(store.words)
+        let entry = try XCTUnwrap(store.tree.allSessions.first)
+        let sub = SessionReviewCard.headerSub(entry, words: words)
+        XCTAssertTrue(sub.hasPrefix(FirstRunCopy.fill(words.inspector.sessionOf, ["tool": ""])), sub)
+        XCTAssertFalse(sub.contains("{"), sub)
+
+        // Look inside with the legacy queue empty: the same session.
+        let carried = QueueEntryBridge.previewEntry(entry, in: [])
+        XCTAssertEqual(carried.entryID, entry.entryId)
+        XCTAssertEqual(carried.projectID, entry.projectId)
+        XCTAssertEqual(carried.projectLabel, entry.projectLabel)
+        XCTAssertEqual(carried.source, entry.source)
+        XCTAssertEqual(carried.sizeBytes, entry.sizeBytes)
+        XCTAssertEqual(carried.discoveredAt, entry.discoveredAt ?? entry.startedAt)
+        // The legacy queue's own entry wins when it holds the session.
+        let held = QueueEntryBridge.previewEntry(entry, in: [carried])
+        XCTAssertEqual(held, carried)
+        // #1273 review: a size or a time the daemon did not report is never
+        // fabricated as zero bytes or the epoch.
+        let source = try Self.text(Self.card)
+        XCTAssertFalse(source.contains("entry.sizeBytes ?? 0"))
+        XCTAssertFalse(source.contains("Date(timeIntervalSince1970: 0)"))
+        XCTAssertTrue(source.contains("sizeBytes: entry.sizeBytes,\n            discoveredAt: entry.discoveredAt ?? entry.startedAt,"))
+
+        let card = try Self.text(Self.card)
+        for needle in [
+            "InspectorHeader(\n                            tile: .session, title: entry.projectLabel,",
+            "previewing = QueueEntryBridge.previewEntry(entry, in: model.awaitingDecision)",
+            ".buttonStyle(GlassButtonStyle(.primary, small: true))",
+        ] {
+            XCTAssertTrue(card.contains(needle), "the card lacks \(needle)")
+        }
+        // The buttons are inside the review card, after the preview.
+        let preview = try XCTUnwrap(card.range(of: "preview(entry, review)\n                                    actions(entry)"))
+        let kept = try XCTUnwrap(card.range(of: "keptLines(entry)\n"))
+        XCTAssertLessThan(preview.lowerBound, kept.lowerBound)
+        XCTAssertFalse(card.contains("Text(summary?.title ?? TracesTreeView.when(entry))"), "the old title heads the card")
+        // One line, left-aligned: Contribute first, then Dismiss and Look
+        // inside as links (Ron, 2026-10-09), none wrapping or shortened;
+        // only when Contribute's label is too long for the line does Look
+        // inside move down a line. Keep sits under.
+        let actions = try XCTUnwrap(card.range(of: "private func actions("))
+        let body = String(card[actions.lowerBound...])
+        let flat = body.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        XCTAssertTrue(flat.contains(
+            "ViewThatFits(in: .horizontal) { HStack(spacing: GlassTokens.Space.s4) {"
+                + " contribute(entry, words) dismiss(entry, words) lookInside(entry, review) }"),
+            "the one-line row comes first, Contribute leading")
+        XCTAssertTrue(flat.contains(
+            "HStack(spacing: GlassTokens.Space.s4) { contribute(entry, words) dismiss(entry, words) }"
+                + " lookInside(entry, review) }"),
+            "the two-line form keeps Contribute first and moves Look inside down")
+        XCTAssertTrue(flat.contains(
+            "Button(words.dismissAction) { act(.dismiss, entry) } .buttonStyle(GlassButtonStyle(.link))"),
+            "Dismiss is a link after the action")
+        XCTAssertTrue(flat.contains(".frame(maxWidth: .infinity, alignment: .leading) .disabled(busy)"),
+                      "the buttons are left-aligned")
+        let oneLine = try XCTUnwrap(body.range(of: "HStack(spacing: GlassTokens.Space.s4) {\n                        contribute"))
+        let twoLines = try XCTUnwrap(body.range(of: "VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {\n                        HStack"))
+        XCTAssertLessThan(oneLine.lowerBound, twoLines.lowerBound, "ViewThatFits tries the one line first")
+        let fits = try XCTUnwrap(body.range(of: "ViewThatFits("))
+        let keep = try XCTUnwrap(body.range(of: "Button(words.keep)"))
+        XCTAssertLessThan(fits.lowerBound, keep.lowerBound, "Keep sits under the row")
+        // A refusal is said under the buttons, never above them.
+        let refusal = try XCTUnwrap(body.range(of: "TracesRefusal(store: store, entryId: entry.entryId)"))
+        XCTAssertLessThan(keep.lowerBound, refusal.lowerBound, "the refusal sits above the buttons")
+        for button in ["Button(review.lookInside)", "Button(words.dismissAction)", "Button(Self.contributeLabel("] {
+            let start = try XCTUnwrap(body.range(of: button))
+            let tail = body[start.upperBound...].prefix(600)
+            XCTAssertTrue(tail.contains(".lineLimit(1)") && tail.contains(".fixedSize()"), "\(button) can wrap or clip")
+        }
     }
 
     /// The token distribution line, which the deleted What's-in-it tab drew,
@@ -199,6 +305,21 @@ final class SessionReviewCardTests: XCTestCase {
         XCTAssertTrue(body.contains("caption(line)"), "the token distribution line is not drawn as a caption")
         let sheet = try Self.text("Views/PreviewSheet.swift")
         XCTAssertFalse(sheet.contains("tokenDistributionSummary"), "Look inside still draws the token distribution")
+    }
+
+    /// #1146's answers and chip: Worked / Partly / Failed are standard glass
+    /// buttons and the chosen one is the selected (purple) glass button;
+    /// the question is 12/600; Enrolled is the glass chip with no dot, and
+    /// Not enrolled the muted one.
+    func test_theVerdictAndChipAreRons() throws {
+        let card = try Self.text(Self.card)
+        XCTAssertTrue(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"))
+        XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
+        XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is the purple button, not a mark")
+        XCTAssertTrue(card.contains(".glassType(GlassTokens.TypeScale.label.weight(.semibold))"))
+        XCTAssertTrue(card.contains("GlassChip(glass: summary.enrolled == true ? review.enrolled : review.notEnrolled,"))
+        XCTAssertTrue(card.contains("muted: summary.enrolled != true)"), "unknown enrolment reads as not enrolled")
+        XCTAssertFalse(card.contains("status: summary.enrolled == true ? .on : .ask"), "the green-dot status chip is back")
     }
 
     /// Contribute on the card is the one approve control in the Monitor:

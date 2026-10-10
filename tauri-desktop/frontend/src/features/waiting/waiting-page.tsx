@@ -327,9 +327,9 @@ function ToolInspector({ tool }: { tool: ToolNode }) {
           ]}
         />
       </Section>
-      {statusLine ? <Section title="Sessions folder">{statusLine}</Section> : null}
+      {statusLine ? <Section title="Traces folder">{statusLine}</Section> : null}
       <Section title="Decisions">
-        {plural(tool.waiting, "session")} waiting · {tool.contributed} contributed
+        {plural(tool.waiting, "trace")} waiting · {tool.contributed} contributed
       </Section>
     </>
   );
@@ -411,7 +411,7 @@ function SessionInspector() {
       <InspectorHeader
         tile={<ToolTile kind="session" large />}
         title={selected.folder.label}
-        sub={`Session · ${selected.tool.label}`}
+        sub={`Trace · ${selected.tool.label}`}
       />
       <WaitingReview
         preview={review.preview}

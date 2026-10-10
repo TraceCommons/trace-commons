@@ -1,5 +1,6 @@
 import SwiftUI
 import TCDesign
+import TCShellCore
 
 /// How the limits of automatic scrubbing are told to a contributor.
 ///
@@ -44,6 +45,8 @@ import TCDesign
 ///
 /// ## Copy provenance
 ///
+/// The words are the core's (`shell_words_copy::scrubbing_words`, through
+/// `ShellWords`) since #1146 parity (2026-10-07); this file holds none.
 /// `canonical` is the shared design spec's sentence, unchanged, and must
 /// stay that way. The `rowLine` sentences are new: they were written for
 /// this pass because the row needed something session-specific to say. They
@@ -59,15 +62,17 @@ import TCDesign
 /// merely present in all three. Recorded here so the divergence is a
 /// decision on the record rather than an oversight.
 enum ScrubbingCaveat {
+    private static var words: ShellWordsCopy.Scrubbing? { ShellWords.table?.scrubbing }
+
     /// The spec's sentence. Verbatim, load-bearing, not to be reworded.
-    static let canonical =
-        "Scrubbing is pattern-based. It misses things it hasn't seen before."
+    static var canonical: String { words?.canonical ?? "" }
+
+    /// Leads the canonical sentence's accessible name at Contribute.
+    static var beforeYouContribute: String { words?.beforeYouContribute ?? "" }
 
     /// What to say on one card, given what scrubbing actually did to it.
     static func rowLine(redactionCount: Int) -> String {
-        redactionCount == 0
-            ? "Nothing matched a pattern. That is not the same as nothing being there -- search it for anything you need to be sure isn't in it."
-            : "Removed by pattern matching. Anything the patterns don't know is still in there."
+        redactionCount == 0 ? words?.nothingMatched ?? "" : words?.removed ?? ""
     }
 
     /// A card where scrubbing found nothing is the one worth slowing down
@@ -103,6 +108,6 @@ struct ScrubbingCaveatAtCommit: View {
         GlassStatusLabel(ScrubbingCaveat.canonical, status: .ask)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Before you contribute. \(ScrubbingCaveat.canonical)")
+            .accessibilityLabel(ScrubbingCaveat.beforeYouContribute + " " + ScrubbingCaveat.canonical)
     }
 }

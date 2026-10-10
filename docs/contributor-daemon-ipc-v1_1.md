@@ -101,8 +101,11 @@ old behaviour, because no application has shipped against `v1` yet. See
     back" tile. A row withdrawn here or `revoked` by a withdrawal on the web
     counts there, once, and never in `other`.
   - `list_projects` now carries a top-level `unpurposed_traces`: scrubbed
-    (previewed), undecided, Ask-me sessions, for the design's upsell
+    (previewed), undecided, Ask-me sessions, for the design's suggestion
     sentence. See ["`list_projects`"](#list_projects).
+  - `status` now carries `unpurposed_traces` too, computed by the same
+    function as `list_projects`', so the two always agree. See
+    ["`status.unpurposed_traces`"](#statusunpurposed_traces).
   - `commons_credit_summary` is new: the commons' own settlement posture,
     read from the device route `GET /v1/contributors/me/settlement-posture`,
     and this contributor's points on its ledger, read from
@@ -143,6 +146,82 @@ old behaviour, because no application has shipped against `v1` yet. See
   K9's `title` (#1191) and K10's `would_send_bytes` and `uploaded_bytes`
   (#1196) have already landed. See ["View menu: Group by and Sort by
   (K15)"](#view-menu-group-by-and-sort-by-k15).
+- **Nudge S3 (in-app suggestions).** `status` now carries `nudge`: which
+  in-app suggestion leads, if any, as labels, a count and a time. Three new
+  methods: `nudge_decline` (the in-app "Not now"), `nudge_opened` (the
+  suggestion's own action) and `set_suggestions_enabled` (the switch, which
+  `set_settings` also accepts as `suggestions_enabled`). Each publishes
+  `status_changed`. See ["`status.nudge`"](#statusnudge).
+- **Nudge S4 (verdict news).** `status.nudge` gains a second kind,
+  `verdicts_landed` (U2), with `accepted`, `held`, `final` and `since`, and
+  can read `unknown` while the history poll is stale. A new event,
+  `history_changed` (counts only), is published when the daemon's own
+  history poll finds verdicts that are new against its high-water mark.
+  `nudge_opened {kind: "verdicts_landed"}` acknowledges them;
+  `nudge_decline` refuses that kind with `nudge-kind-not-declinable`. See
+  ["`status.nudge`"](#statusnudge) and ["Events"](#events).
+- **Nudge U4b (idle sessions).** `status` now carries `idle_sessions`
+  (`{count, tools, threshold_days}`, counts and tool display names only),
+  and `status.nudge` gains a third kind, `idle_sessions`, ahead of the other
+  two. `idle_sessions` and `review_backlog` share one "Not now". `list_pending`
+  takes an optional `filter: "idle_sessions"` that lists exactly the set
+  `status.idle_sessions.count` counts. No new event. See
+  ["`status.idle_sessions`"](#statusidle_sessions) and
+  ["`status.nudge`"](#statusnudge).
+- **Nudge A2 (notification settings).** Settings gain
+  `notifications_enabled` (the master switch), `menu_bar_mark_enabled`,
+  `notify` (one switch per notification kind: `digest`, `idle_sessions`,
+  `verdicts_landed`, `weekly_recap`, `insights_tip`) and the one-time offer
+  markers `verdicts_offer_pending` and `idle_offer_pending`. Three new
+  methods write them: `set_menu_bar_mark_enabled`,
+  `set_notifications_enabled` and `set_notify_kind`; `set_settings` accepts
+  the same keys. Each publishes `status_changed` when a value changes. They
+  are stored and reported now; the digest, the news mark and the
+  re-engagement arbiter read them in later slices, so today no behaviour
+  changes. See ["Notification settings"](#notification-settings).
+- **Nudge A3 (the news mark and the halo).** `status.nudge` gains `mark`
+  (`news`, `ready`, `none` or `unknown`) and `mark_kinds` (the kind labels
+  that lit it), both always present: the menu-bar icon state. `news` is a
+  hollow ring below paused, only while `decisions_owed` is 0, for verdict
+  news that is unacknowledged and younger than 72 hours; `ready` is a halo
+  around the badge, only while `decisions_owed` is above 0, for idle-session
+  candidates. No new method and no new event: the mark reads
+  `menu_bar_mark_enabled` and `notify.idle_sessions`, and clears the news
+  only through `nudge_opened {kind: "verdicts_landed"}` or by ageing out. See
+  ["The menu-bar mark"](#the-menu-bar-mark-statusnudgemark).
+- **Mission fit (nudge value addendum, section 1).** Three additive counts:
+  `list_pending`'s entries gain `mission_fit`, `status.idle_sessions` gains
+  `mission_fit`, and `status.nudge` gains `mission_fit` while `idle_sessions`
+  or `review_backlog` leads. Each is how many of the daemon's live
+  contribution-mission catalogue's matched missions a session fits (per
+  entry), or how many sessions fit at least one (on `status`). **Absent,
+  never 0, while the daemon holds no live catalogue** -- which today is
+  always, since nothing writes it until Z7/Z8's server catalogue exists.
+  Counts only: no mission id, title or criterion. No new method and no new
+  event; `nudge::lead` reads none of it. See
+  ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
+- **Local credit estimate (nudge value addendum, section 4).** Three additive
+  objects: `list_pending`'s entries gain `credit_estimate {low, high, tier?,
+  calibration, basis}`, and `status.idle_sessions` and `status.nudge` (while
+  `idle_sessions` or `review_backlog` leads) gain `credit_estimate {low, high,
+  known, calibration}`. A band of displayed credit, made on this device from
+  content-free numbers about the session and a calibration table; never a
+  single number and **never 0: absent means unknown**. Never on a sent entry,
+  never in history. No new method and no new event; `nudge::lead` reads none
+  of it. See
+  ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status).
+- **Suggested order (nudge value addendum, section 2).** One additive request
+  parameter: `list_pending {order}`. Absent, `null` or `"queue"` is queue
+  insertion order, byte for byte as before. `"suggested"` sorts the entries
+  the other parameters selected by, in turn: mission fit (entries that fit
+  first, an entry with no known fit next, then the rest; skipped while no
+  catalogue is live), estimate tier (higher first; an entry with no estimate
+  sorts with the middle tier; skipped for a one-tier table, which the
+  built-in table is), the `user_turns` bucket (`>= 3`, `1..3`, `0`, then no
+  recorded shape), the newest write first, then queue insertion order. With
+  the built-in table the order is mission fit, then turns, then recency.
+  Any other string is refused with `order-unrecognized`, a non-string with
+  `order-invalid`. No response field changes and no new method or event.
 
 `crates/trace-commons-contributor/tests/daemon_ipc_contract.rs` is the
 executable half of this document. `hello` reports its own method list and a
@@ -524,7 +603,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 |---|---|---|---|
 | `hello` | — | `schema_version`, `supported_versions[]`, `methods[]`, `events[]`, `max_line_bytes` | |
 | `status` | — | see below | |
-| `list_pending` | `project_id` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10) |
+| `list_pending` | `project_id` (optional); `filter` (optional); `order` (optional) | `pending[]` of queue entries | `project_id` narrows the list to that project's `pending` entries, for Customize's past-session picker; refused with `project-id-unrecognized` if the daemon does not know that project, or `project_id-invalid` if it is not a string. Absent is every project, as before. `filter: "idle_sessions"` (nudge U4) narrows it to exactly the entries `status.idle_sessions.count` counts, from the same function, so the Traces card's Review shows the set it named; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`; absent or `null` is every pending entry, as before. `order: "suggested"` (nudge value addendum, section 2) sorts the selected entries by mission fit, then estimate tier (skipped for a one-tier table), then the `user_turns` bucket, then newest write, then insertion order; absent, `null` or `"queue"` is queue insertion order, as before. Any other `order` string is refused with `order-unrecognized`, a non-string with `order-invalid`. The parameters combine: filters select first, `order` sorts second. Each entry carries `scrub`, `marks` / `content_marks` / `unsure_spans` (only once its pinned bytes are counted) and `second_look[]`; see "The scrub state and `second_look`" below. Each entry also carries `would_send_bytes`, the pinned preview's measured size (K10); see ["Sizes in history, and the would-send size (K10)"](#sizes-in-history-and-the-would-send-size-k10). While a mission catalogue is live each entry carries `mission_fit`, a count; absent otherwise; see ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status). An entry with recorded features carries `credit_estimate`, a band; absent otherwise; see ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status) |
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
@@ -546,19 +625,19 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `preview_request` | `entry_id` | `entry_id`, `state`, and the fields that state carries | enqueues and returns immediately; the result arrives as a `preview_ready` event. See "Scheduled previews" below |
 | `preview_visible` | `entry_ids[]` | `visible: <count>` | replaces the on-screen set wholesale; decides preview **order**, never membership |
 | `preview_cancel` | `entry_id` | `entry_id`, `dropped` | drops a queued preview, or discards a running one's result; `dropped: false` is a no-op, not an error |
-| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208); see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
+| `approve` | `entry_id`, `all: true`, or `project_id`; `outcome` (optional); `correction` (optional, `entry_id` + `partly`/`failed` only); `filter` (optional, `all` or `project_id` only) | `approved: <count>`, `hold_secs`, `hold_until`, `flagged`, `redactions`, `skipped[]` | `all: true` no longer requires a terminal; `project_id` approves that project's `Pending` entries and no others, matched by the id `entry_value` publishes (never `project_label`, which is display text and unstable), and is refused with `project-id-unrecognized` if the daemon does not know that project; the three are mutually exclusive and `all` wins over `project_id` wins over `entry_id` when more than one is sent; refused with `contribution-override-never` while a Never contribution override is in force (#1208), and with `consent-scopes-not-chosen` in every form while the enrollment's scopes were never chosen (see "Sending needs chosen consent scopes"); `filter: "idle_sessions"` narrows a group to exactly what `list_pending {filter: "idle_sessions"}` lists, from the same function, so a folder's Submit under the idle filter sends what that list shows and nothing it hid; empty while that kind is off. Any other string is refused with `filter-unrecognized`, a non-string with `filter-invalid`, and a filter with only `entry_id` with `filter-needs-group`; see "The approval hold", "What `approve` reports" and "The `outcome` verdict" below |
 | `dismiss` | `entry_id` | `ok: true` | declines the **session**, not just this entry: the daemon never offers that session file again, however much it grows afterwards. See "`dismiss` is permanent" below |
 | `keep` | `entry_id` | `kept: true` | "Keep on this Mac": the **reversible** decline. The entry must be `pending`, or `approved` unattended, which the keep revokes (`not-pending` otherwise, `unknown-entry-id` if there is none). See "`keep`: Keep on this Mac" below |
 | `undo_keep` | `entry_id` | `kept: false` | returns a kept entry to `pending`, waiting for a person; `not-kept` for anything that is not kept, a dismissed entry included; `queue-full` at the queue cap; `project-ignored` if its folder is now Never. See "`keep`: Keep on this Mac" below |
 | `list_kept` | — | `kept[]` of queue entries | every kept entry, in the `list_pending` shape, so a shell can show them and offer the undo |
-| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows, `total`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; nothing is read before the person chooses; `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
-| `include_past_sessions` | `project_id`, `session_ids[]` (1 to 500 distinct) | `approved`, `skipped[]` of `{session_id, label}` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`) or the Never override; writes `past-sessions-included` first. Async entry point only, as `approve`. See "`include_past_sessions`" below |
+| `list_past_sessions` | `project_id` (required) | `sessions[]` of past-session rows (the newest 500), `total`, `not_listed`, `project_mode` | the first-run past-session picker: one folder's past sessions, queued or never offered, each named by an opaque `session_id`, never a path; no session is loaded before the person chooses (only what each adapter's discovery already reads); `project_id-invalid` / `project-id-unrecognized`, never an empty list for an unknown folder. See "`list_past_sessions`" below |
+| `include_past_sessions` | `project_id`, `session_ids[]` (at most 500 ids, duplicates counted; at least one) | `approved`, `skipped[]` of `{session_id, label}`, `approved_entry_ids[]`, `hold_until` | the picker's Continue: a person's `approve` of exactly the sessions named, never `include_backlog`; the whole call is refused on one foreign id (`session-id-unrecognized`), a Never folder (`project-mode-never`), the Never override or the live-included limit (`included-sessions-limit`); writes `past-sessions-included` first. Async entry point only: the synchronous one answers `past-sessions-requires-async`. See "`include_past_sessions`" below |
 | `cancel` | `entry_id` **or** `project_id` | `ok: true` (`entry_id`) or `canceled: <count>` (`project_id`) | returns matching `approved` entries to `pending` and clears their pin, so the next `approve` rebuilds; guaranteed to succeed for the whole hold; `project_id` undoes that project's `approved` entries and no others -- `pending` entries are left alone, matched by the id `entry_value` publishes (never `project_label`) -- and is refused with `project-id-unrecognized` if the daemon does not know that project; the two selectors are mutually exclusive and `project_id` wins if both are sent; a known project with nothing `approved` succeeds with `canceled: 0`; the single-`entry_id` form errors if that entry is not currently `approved`; see "The approval hold" below |
 | `pause` | `until` (optional RFC 3339 timestamp) | `paused: true`, `paused_until` | see "Pause semantics" below |
 | `resume` | — | `paused: false` | |
 | `list_projects` | — | `projects[]` of `{project_id, project_label, mode, folder_mode, added_at, configured, is_unresolved_bucket}`, plus a top-level `unpurposed_traces` | configured **and** discovered projects; see "`list_projects`" below |
 | `set_project_mode` | `project_id` **or** `project_key`, `mode` (`label` accepted and ignored), `include_backlog` (optional boolean, `auto_upload` only) | `ok: true`, `purged: <count>`, `retracted: <count>`, `from_now`, `overridden_by` (`null` or the override's mode) | socket clients send `project_id`; `auto_upload` no longer requires a terminal; see "Naming a project" above, "`set_project_mode` and the ignore purge" and "Arming from now" below |
-| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208); see "The contribution override" below |
+| `set_contribution_override` | `mode` (`notify_only`, `auto_upload` or `ignore`), `confirm` (boolean; `true` required for `auto_upload`) | `changed`, `contribution_override: {mode, since}`, `returned: <count>` | the menu-bar pill's global override (#1173); per-folder modes are never written; `auto_upload` is a grant, refused with `arming-terms-unavailable` without terms (#1208) and with `consent-scopes-not-chosen` while the enrollment's scopes were never chosen; see "The contribution override" below |
 | `clear_contribution_override` | — | `cleared`, `returned: <count>` | every folder back on its own mode; see "The contribution override" below |
 | `mission_matches` | `catalogue` (a contribution mission catalogue; PROVISIONAL, shape owned by Z7/Z8) | `matches[]` of mission ids, `read: {tools, folders}` (counts) | K16 (#1173): which contribution missions this Mac's work fits, worked out on this Mac only; read-only; refused with `catalogue-required`, `catalogue-invalid` or `catalogue-schema-unsupported`; see "`mission_matches`" below |
 | `list_history` | `limit` (optional, default 50, max 1000) | `history[]`, each row now also carrying `approved_unattended`, `approved_verdict`, `uploaded_bytes`, and `revoked_at` | see "History provenance (K7)", "Sizes in history, and the would-send size (K10)" and "Withdrawal dates on revoked rows (K12)" below |
@@ -584,10 +663,11 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `harness_commit` | `plan_id` (required) | `id`, `action`, `committed: true`, `path`, `backup_path` | makes an edit that was already shown; takes a plan id and **nothing else**, so a shell cannot ask for a write it did not preview |
 | `quiesce` | `timeout_secs` (optional, default 60, max 300) | `quiesced: true`, `waited_ms` | parks uploads for an update swap; `busy` / `quiesce-timeout` if in-flight work does not finish in time |
 | `get_settings` | — | settings; credential presence as booleans, source declarations as `*_source_mode` (`unset`/`off`/`watch`), never local paths | |
-| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
+| `set_settings` | any of `quiescence_secs`, `digest_interval_secs`, `digest_schedule`, `approval_hold_secs`, `local_notifications`, `claude_root`, `codex_root`, `claude_source`, `codex_source`, `gemini_source`, `cline_source`, `opencode_source`, `trajectory_source`, `ironwire`, `ironwire_attested_bodies`, `token_distributions_contribution`, `token_capture_enabled`, `private_inference`, `private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`, `notifications_enabled`, `menu_bar_mark_enabled`, `notify`, `verdicts_offer_pending`, `idle_offer_pending`, `max_uploads_per_day`, `max_bytes_per_day` | updated settings | see "`set_settings`" below |
 | `consent_options` | — | `scopes[]` of `{name, title, description, always_on, grants_data_use}` | |
 | `set_consent_scopes` | `scopes[]` (wire-name strings; omitted means floor scope only) | `consent_scopes[]` | requires an existing enrollment |
 | `enroll` | `grant` xor `invite`, `scopes[]` (optional) | `enrolled: bool`, and on success `tenant_id`, `device_key_id`, `consent_scopes[]` | performs real network I/O |
+| `unenroll` | none | `unenrolled: true`, `removed: bool`, `approvals_returned` | removes this Mac's enrollment locally; no server call; see "`unenroll`" below |
 | `acknowledge_grant_voids` | `ids[]` (**required**) | `acknowledged: <count>` | records that the void notices with these ids were shown; see "Void notices" below |
 | `legacy_invite_migrate` | `invite` (optional: the invite link or code, sent only after `legacy_migration_invite_needed`) | `migrated: true`, `folders_kept`, `automatic_grant_kept`, `legacy_session_revoked` | async only; performs real network I/O; moves a legacy invite identity to the contributor's NEAR AI account at their request; refusals are `legacy_migration_*` labels; see "Moving a legacy invite identity" below |
 | `acknowledge_legacy_invite_migration` | — | `acknowledged: bool` | records that the move notice was shown |
@@ -597,7 +677,13 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `set_public_profile` | `handle` (required), `bio` (required, string **or** `null`) | the profile, plus `handle_persisted` | performs real network I/O; replaces the whole profile; see "The public profile" below |
 | `clear_public_profile` | — | the profile (now empty), plus `withdrawn: true` and `handle_persisted` | performs real network I/O; see "The public profile" below |
 | `get_public_profile` | — | `on_roster`, `handle`, `bio`, `public_since`, `public_url` | a LOCAL cache, not a server read-back; `public_url` is always `null` |
-| `subscribe` | — | `subscribed: true`, then a `snapshot` event | |
+| `nudge_decline` | `kind` (**required**: a suggestion kind label with a "Not now", today `idle_sessions` or `review_backlog`, which share one; `verdicts_landed` is refused with `nudge-kind-not-declinable`); `subject` (reserved: refused while no kind takes one) | `declined: true` | the in-app "Not now"; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `nudge_opened` | `kind` (**required**: `idle_sessions`, `review_backlog` or `verdicts_landed`); `subject` (reserved, as above) | `opened: true` | sent only from the suggestion's own action, never for being shown; for `verdicts_landed` it acknowledges the news; local only; publishes `status_changed`; see "`status.nudge`" below |
+| `set_suggestions_enabled` | `on` (**required**, boolean) | `suggestions_enabled` | the in-app suggestions switch; writes `suggestions_enabled` through `set_settings`; publishes `status_changed` |
+| `set_menu_bar_mark_enabled` | `on` (**required**, boolean) | `menu_bar_mark_enabled` | the menu-bar news mark and halo switch; writes `menu_bar_mark_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_notifications_enabled` | `on` (**required**, boolean) | `notifications_enabled` | "Notifications from Trace Commons", the master switch; writes `notifications_enabled` through `set_settings`; publishes `status_changed` when it changes; see "Notification settings" below |
+| `set_notify_kind` | `kind` (**required**: `digest`, `idle_sessions`, `verdicts_landed`, `weekly_recap` or `insights_tip`), `on` (**required**, boolean) | `kind`, `on` | one notification kind's switch; writes `notify.<kind>` through `set_settings`; answering `verdicts_landed` or `idle_sessions` ends that kind's one-time offer; publishes `status_changed` when it changes; see "Notification settings" below |
+| `subscribe` | `accepts[]` (optional: opt-in event names) | `subscribed: true`, plus `accepts[]` when the request carried `accepts`; then a `snapshot` event | see "Opt-in events" below |
 | `shutdown` | — | `stopping: true` | |
 | `withdraw` | `submission_id` | `withdrawn: true`, `distribution_reach` | performs real network I/O; see "Withdrawal" below |
 | `withdraw_bulk` | `status` (`submitted` \| `quarantined` \| `accepted`) | `withdrawn: <count>`, `failed: <count>` | performs real network I/O; see "Withdrawal" below |
@@ -615,9 +701,13 @@ pins. No account token, device key or PKCE verifier is returned to native views.
   "logged_in": false,
   "tenant_id": null,
   "consent_scopes": [],
+  "consent_hold": null,
   "paused": false,
   "queue_depth": 0,
   "decisions_owed": 0,
+  "unpurposed_traces": 0,
+  "nudge": { "state": "none", "lead": null, "mark": "none", "mark_kinds": [] },
+  "idle_sessions": { "count": 0, "tools": [], "threshold_days": 3 },
   "next_digest_at": null,
   "health": { "last_error_label": null, "since": null },
   "daily_budget": {
@@ -649,7 +739,9 @@ contribution override" below.
 
 `grant_voids` is additive; see "Void notices" below. `witness_capacity`,
 `arming_rewordings`, `automatic_contribution_held` and `decisions_owed` are
-additive; see their sections below.
+additive; see their sections below. `unpurposed_traces` is additive; see
+"`status.unpurposed_traces`" below. `nudge` is additive; see "`status.nudge`"
+below. `idle_sessions` is additive; see "`status.idle_sessions`" below.
 
 `legacy_invite_migration` is additive: `{"offered": bool, "notice": null |
 {"folders_kept": n, "automatic_grant_kept": bool}}`. See "Moving a legacy
@@ -901,12 +993,323 @@ field directly, never `queue_depth` or `list_pending` length. When connecting
 to an older daemon that omits it, they show an unavailable count rather than
 inventing a zero or reconstructing the daemon's policy locally.
 
+#### `status.unpurposed_traces`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (nudge U1). The
+same count `list_projects` carries at its top level -- previewed, `Pending`
+entries in folders whose mode resolves to `notify_only` -- defined in
+["`unpurposed_traces` (K7)"](#unpurposed_traces-k7). Both responses compute it
+with the one function `queue::unpurposed_traces(queue, policy)`, so for any
+queue `status.unpurposed_traces == list_projects.unpurposed_traces`. Folders
+set to `ignore` (Never) and armed (`auto_upload`) folders contribute 0, even
+for previewed entries.
+
+It is read under the same policy and queue guards as `decisions_owed`, so one
+`status` never pairs two different queues. Every entry it counts is also a
+decision owed, so it is never larger than `decisions_owed`, and it never
+changes that number: previewing an entry can raise this count but leaves the
+badge where it was. It is not a badge number and a shell never draws it on
+the menu-bar icon. A non-negative integer, always present on a daemon that
+has it; a shell connected to an older daemon that omits it treats the count
+as unknown (no suggestion row or card), never as 0.
+
 A policy change can move this count without changing the queue: arming a
 folder with entries waiting (`set_project_mode`), or the watcher arming a
 newly discovered project under the automatic grant. Switching Scrub check
 can also move it without changing an already-pending entry. When one does, the daemon
 publishes `status_changed`, so a shell that refreshes status only on
 `queue_changed` does not keep the old badge.
+
+#### `status.idle_sessions`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (nudge U4). How
+many waiting sessions nobody has written to for days, which tools they came
+from, and how many days counts as idle:
+
+```json
+"idle_sessions": { "count": 3, "tools": ["Claude Code", "Codex"], "threshold_days": 3 }
+```
+
+An entry is counted when all of these hold: it is `Pending` (kept and
+dismissed sessions are not); its folder's mode resolves to `notify_only` (Ask
+me; Never and armed folders are not counted); it is not waiting because the
+person undid a Keep (`returned-from-keep`); it is not held for review (a
+`REASONS_NEEDING_A_PERSON` hold); and it has not been written to for at least
+`threshold_days`. "Written to" is the session file's last modification time,
+recorded on the queue entry when it is offered and replaced when the session
+grows and is offered again, so a session written to again starts its clock
+over. A re-offer that does not touch the file keeps it. For an entry queued
+before the daemon recorded that time, the time it was queued stands in, which
+can only make a session look less idle. A last write stamped after the
+current time (the clock went backwards) is not idle. Unlike
+`unpurposed_traces`, a preview is not required.
+
+- `threshold_days` is `min(3, max(1, queue_ttl_days / 4))` (DRAFT, owner
+  decision 26): 3 at the default `queue_ttl_days` of 14.
+- `tools` is the display names of the tools the counted sessions came from,
+  distinct and in alphabetical order, naming a session by the source it
+  declares (`declared_source`) before the adapter that stored it. A source
+  the daemon has no display name for (for example `trajectory`) is counted
+  but not named, never shown as its raw id. Empty when `count` is 0. When
+  any counted session's source has no display name, the daemon's words
+  (`nudge.text`, the idle notification and the digest's idle sentence)
+  name no tool at all, rather than credit the named tools with its
+  sessions; `tools` still lists the names it has.
+- **Absent, never `null`, while the kind is off**: when `queue_ttl_days` is
+  below 4 there is no room to say anything before a session expires. A shell
+  draws nothing for it then, and nothing when a daemon predating the field
+  omits it.
+
+It is a fact, not a suggestion, and reported "invited or not" like
+`unpurposed_traces`: the gates (paused, consent hold, signed out, unhealthy,
+suggestions off) close `status.nudge`'s lead but leave this count as it is.
+Every entry it counts is also a decision owed, so it is never larger than
+`decisions_owed` and never moves it, and it is never drawn as a badge number.
+Counts and display names only: never an id, a path, a folder label, a title
+or a session's own age.
+
+`list_pending {filter: "idle_sessions"}` lists exactly the entries this
+counts, computed by the same function (`queue::idle_candidates`) under the
+same guards, so a card's Review shows the set its sentence named.
+
+The count can grow with nothing but time passing. When a session crosses the
+threshold, the next daemon tick (every `poll_interval_secs`) sees `status`
+change and publishes `status_changed`; a shell reads the count with the rest
+of `status`.
+
+`mission_fit` (additive, present only while a mission catalogue is live): how
+many of the counted sessions fit at least one matched contribution mission.
+See ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
+
+`credit_estimate` (additive, present only while at least one counted session
+has a local credit estimate): `{low, high, known, calibration}`, the band ends
+summed over the `known` sessions that have one. See
+["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status).
+
+#### `status.nudge`
+
+Added in `trace_commons.daemon.v1_1` as an additive field (nudge S3). Which
+in-app suggestion leads right now -- a card on Traces or History, a row in the
+menu-bar panel -- if any. Labels, one count and one time; never a path, a
+folder label, an id or a title.
+
+```json
+"nudge": { "state": "armed", "lead": "idle_sessions", "count": 2, "mark": "ready", "mark_kinds": ["idle_sessions"] }
+"nudge": { "state": "armed", "lead": "review_backlog", "count": 6, "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "armed", "lead": "verdicts_landed", "count": 3, "accepted": 2, "held": 1, "final": 1, "credit_final": 2.5, "since": "2026-10-07T09:30:00Z", "mark": "news", "mark_kinds": ["verdicts_landed"] }
+"nudge": { "state": "none", "lead": null, "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "none", "lead": null, "cooldown_until": "2026-10-14T12:00:00Z", "mark": "none", "mark_kinds": [] }
+"nudge": { "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": [] }
+```
+
+- `state` is `armed`, `none` or `unknown`, always present. **A shell draws
+  nothing for `none` or `unknown`**, and nothing when `nudge` is absent (a
+  daemon predating it). `unknown` is never read as "nothing to suggest", and
+  absent is never read as `none`.
+- `lead` is always present: a kind label when `state` is `armed`, `null`
+  otherwise. Today the kinds are, highest first, `idle_sessions` (U4),
+  `review_backlog` (U1) and `verdicts_landed` (U2). A later revision may add
+  kinds; a shell that meets a `lead` it does not know draws nothing.
+- `count` is present only with a lead: for `idle_sessions` it is
+  `status.idle_sessions.count`; for `review_backlog` it is
+  `unpurposed_traces`; for `verdicts_landed` it is `accepted + held +
+  final`. It is for the card's sentence, never a badge number, and it never
+  moves `decisions_owed`.
+- `mission_fit` (additive) is present only when `lead` is `idle_sessions` or
+  `review_backlog` **and** a mission catalogue is live: how many of that
+  kind's own subjects (the sessions `count` counts) fit at least one matched
+  contribution mission. Read after the lead is chosen, never an input to it
+  (OWNER DECISION V5). See
+  ["Mission fit"](#mission-fit-list_pendingmission_fit-and-status).
+- `credit_estimate` (additive) is present only when `lead` is `idle_sessions`
+  or `review_backlog` **and** at least one of that kind's subjects has a local
+  credit estimate: `{low, high, known, calibration}` over those subjects.
+  Never an input to the lead. See
+  ["Local credit estimate"](#local-credit-estimate-list_pendingcredit_estimate-and-status).
+- `accepted`, `held`, `final` and `since` are present exactly when `lead` is
+  `verdicts_landed`: how many submissions newly reached `accepted`, newly
+  reached `quarantined` (held for privacy review; reported beside accepted
+  ones, DRAFT, owner decision 2), and newly carry a final credit figure, and
+  when the first of that news was found. No label and no submission id.
+- `credit_final` is the credit that newly became final, summed, to one
+  decimal (half away from zero). It is present only beside the fields above
+  and only when it rounds to at least 0.1: absent, never 0. Credit becoming
+  final with nothing to say is not news at all: finals whose credit rounds
+  to zero add nothing to `count` and arm nothing on their own, and `final`
+  is then 0, so `count` is always `accepted + held + final`. A submission
+  whose own final credit is zero is never news and is not kept to be counted
+  later, when another final's credit makes the sum worth reporting. It is
+  never logged.
+- `text` is present exactly when there is a lead: `{title, body, actions:
+  [{id, label}], panel_row}`, the leading card's words and its menu-bar panel
+  row, composed by the daemon from the same counts as the fields above (with
+  the mission clause when some subjects fit a mission, and the estimate
+  clause only when the estimate is `drawn`). A shell draws these and
+  composes nothing. `body` is empty when the title says everything.
+- `mark_text` is present exactly while `mark` is `news` or `ready`:
+  `{accessibility, tooltip}`, the mark's accessibility sentence and its
+  tooltip clause.
+- `cooldown_until` is present only while an in-app "Not now" silences a kind
+  that would otherwise lead and nothing else leads, and says when that
+  lapses.
+
+**When `idle_sessions` leads.** `status.idle_sessions.count` is at least 1,
+every gate below is open, the arming offer is absent, and no "Not now" is in
+force. It leads ahead of `review_backlog` and `verdicts_landed` (arming offer
+> `idle_sessions` > `review_backlog` > `verdicts_landed`). It retires by fact,
+when nothing is idle any more: every counted session was decided, kept,
+dismissed, written to again, expired, or its folder was set to Never or armed.
+
+**When `review_backlog` leads.** `idle_sessions` does not lead (nothing is
+idle), `unpurposed_traces` is at least 5 (DRAFT, owner decision 10), every
+gate below is open, the arming offer is absent, and no "Not now" is in force.
+
+**When `verdicts_landed` leads.** Neither `idle_sessions` nor
+`review_backlog` leads (nothing qualifies, or a "Not now" silences them), every gate below is open, the arming
+offer is absent, the history poll is fresh, and verdict news is waiting
+unacknowledged. The news is found by the daemon's own history poll
+(`refresh_history`), which diffs the history cache against a high-water mark
+only the daemon writes, per submission: newly `accepted`, newly
+`quarantined`, newly carrying final credit. So a verdict the CLI's `history`
+command or an upload already wrote into the shared cache is still news, once.
+Withdrawn and revoked submissions are never counted, nor are submissions from
+a folder that now resolves to Never (or any folder while a Never override is
+in force); `rejected` is not news. That holds for news already waiting too:
+every poll re-checks each waiting submission against the cache it read, and
+one since withdrawn or revoked, in a folder now set to Never, or gone from
+the cache leaves the news, with `status_changed`; when nothing is left the
+news is gone and the news mark goes dark. The first poll after an upgrade, or
+after `unenroll`, records the mark silently, so history that already existed
+never reads as news. Unacknowledged news accumulates across polls. It has no
+"Not now": it is information, not an ask.
+
+**Stale history is `unknown`.** Once neither `idle_sessions` nor
+`review_backlog` leads, `state`
+is `unknown` (with no lead) when the last successful history poll is older
+than twice `history_poll_secs` (DRAFT, spec section 3), when no poll has
+succeeded yet, or when the last poll is stamped after the current time. A
+failed poll serves the cache as it was, so a stale cache is never news, and
+"no news" from it is not known either. `idle_sessions` and `review_backlog`
+do not depend on history and still lead while history is stale.
+
+**Gates, checked first.** `state` is `none`, with no lead and no count,
+whenever any of these holds: `paused`; `consent_hold` is non-null; not
+`logged_in` (no live enrollment); suggestions switched off
+(`suggestions_enabled`, see `set_settings`). It is `unknown` while the daemon
+is unhealthy -- `health.last_error_label` is set or `daily_budget.blocked` is
+true -- because its view may not be current. **Decisions owed come first:**
+while `arming_suggestion` would return an offer, `review_backlog` is hidden
+(`none`), because "decide on these" beside "arm this folder" is two asks at
+once. The arming offer hides `idle_sessions` too.
+
+**"Not now" (`nudge_decline {kind}`).** Silences that kind for 7 days (DRAFT,
+owner decision 10), capped at half of `queue_ttl_days`, so a declined
+suggestion always comes back while the sessions it is about are still queued.
+`idle_sessions` and `review_backlog` share one "Not now": both ask for
+decisions on the same waiting sessions, so a decline of either silences both
+(the later decline governs), and declining one never puts the other up in its
+place. `verdicts_landed`, which is not an ask, can still lead behind it.
+A "Not now" stamped after the current time (the clock went backwards) reads as
+still in force: it can only suppress. A notification's own "Not now" never
+calls this; it writes nothing.
+
+**`nudge_opened {kind}`.** Sent only from the suggestion's own action (the
+card's Review, the panel row's tap), never because a card or row was shown.
+It records when. For `idle_sessions` and `review_backlog` it does not retire
+the suggestion: each retires by fact, `idle_sessions` when nothing is idle and
+`review_backlog` when the count falls below the threshold.
+For `verdicts_landed` it acknowledges the news: the waiting news is cleared,
+and only a verdict a later poll finds is news again.
+`nudge_decline {kind: "verdicts_landed"}` is refused with `bad_params` /
+`nudge-kind-not-declinable` and writes and publishes nothing.
+
+Both requests refuse a missing or non-string `kind` with `bad_params` /
+`nudge-kind-required`, a kind this daemon does not know with `bad_params` /
+`nudge-kind-unrecognized`, and any non-null `subject` with `bad_params` /
+`nudge-subject-unrecognized` (no kind takes one yet). A refusal writes and
+publishes nothing. On success each persists its stamp in the daemon state
+file before answering (`unavailable` / `state-write-failed` if it cannot, and
+nothing is kept), then publishes `status_changed`.
+
+**The switch.** `set_suggestions_enabled {on}` and `set_settings
+{"suggestions_enabled": bool}` are the same setting by two routes; either
+publishes `status_changed` when it changes. Default `true` (DRAFT, owner
+decision 14), including for a settings file written before the key existed.
+It governs the in-app cards, the panel row and the menu-bar mark (owner
+decision, 2026-10-08).
+
+**What it is computed from, and when.** The suggestion ledger, the verdict
+news, the time of the last history poll, the switch, `queue_ttl_days` and
+`history_poll_secs` are snapshotted before the policy and queue section of
+`status`, each in its own short lock; `unpurposed_traces` and whether the
+arming offer is present are read inside that section, under the same guards
+as `decisions_owed`. Reading `status` never writes the ledger.
+
+**Lifetime.** The ledger (kind labels and times only), the verdict high-water
+mark (flags per submission id) and the verdict news (counts and times) live in
+the daemon state file. `unenroll` clears all of them, and returns the mark to
+unseeded so the next account's first poll records this Mac's cached history
+silently; a next account inherits none of this one's stamps or news.
+`suggestions_enabled` is a setting about this Mac and stays.
+
+#### The menu-bar mark (`status.nudge.mark`)
+
+Added in `trace_commons.daemon.v1_1` as two additive fields of `status.nudge`
+(nudge A3): `mark` and `mark_kinds`, both always present on a daemon that
+has them. `mark` is the menu-bar icon state the daemon computes; the shell
+decides where it draws, and it never replaces or hides a higher state.
+
+| `mark` | Means | Holds only while |
+|---|---|---|
+| `news` | Something new to look at, nothing to decide: a hollow ring in the badge's slot, below paused | `decisions_owed` is 0, every gate below is open, the history poll is fresh, and verdict news is waiting unacknowledged and its newest verdict is less than 72 hours old (DRAFT, owner decision 19) |
+| `ready` | Some of the decisions owed are idle sessions: a halo around the badge. The number is unchanged | `decisions_owed` is above 0, every gate below is open, `status.idle_sessions.count` is at least 1, `notify.idle_sessions` is on, and no in-app "Not now" for `idle_sessions` or `review_backlog` is in force |
+| `none` | Nothing is lit | otherwise, or a gate below is closed |
+| `unknown` | The daemon cannot say | the daemon is unhealthy (`health.last_error_label` set or `daily_budget.blocked`), or, with nothing owed, the history poll is stale (as for `state`) |
+
+- **Never both.** `news` needs `decisions_owed == 0` and `ready` needs it
+  above 0, so the two cannot hold together. When a decision becomes owed the
+  badge takes the slot and `news` goes dark; when the badge clears, the news
+  returns if it is still unacknowledged and inside its 72 hours.
+- **Gates.** `mark` is `none` while `paused`, while `consent_hold` is
+  non-null, while not `logged_in`, while `suggestions_enabled` is off, and
+  while `menu_bar_mark_enabled` is off; it is `unknown` while the daemon is
+  unhealthy. It is never `news` or `ready` under any of them. Turning
+  `suggestions_enabled` off hides the mark without acknowledging anything:
+  turned back on, unacknowledged news shows again. The arming offer governs
+  the cards and the panel row, not the mark.
+- **Which switch mutes what.** The news mark has its own switch,
+  `menu_bar_mark_enabled`, a finer control under `suggestions_enabled`. `notify.verdicts_landed` governs verdict
+  *notifications* only: turning it off leaves the news mark lit, so a person
+  can keep the calm mark and silence notifications. The halo is the
+  exception the spec names: muting `notify.idle_sessions` clears it as well.
+- `mark_kinds` lists the kind labels that lit the mark, highest precedence
+  first, for the accessibility clause and the panel: `["verdicts_landed"]`
+  with `news`, `["idle_sessions"]` with `ready`, and `[]` with `none` or
+  `unknown`. Later revisions add `weekly_recap` and `insights_tip` as mark
+  kinds; a shell that meets a kind it does not know ignores that kind.
+
+**What clears it, by fact.** The news mark clears when its own action
+acknowledges it -- `nudge_opened {kind: "verdicts_landed"}`, sent from the
+History card's See history, the panel row's tap, or a verdict notification's
+See history or body click -- or when its newest verdict is 72 hours old. A
+later verdict re-arms it. No other request clears it: opening the panel or
+the window, reading `status`, a "Not now" for another kind, and switching a
+notification kind off all leave it as it is. The halo clears when the idle
+candidates are gone (each decided, kept, dismissed, written to again,
+expired, or its folder set to Never or armed), or on a mute or a "Not now" as
+above.
+
+**No event of its own.** `mark` changes with `status_changed` like the rest
+of `status.nudge`. When it changes with nothing but time passing -- the news
+ages out, or a session crosses the idle threshold -- the next daemon tick
+publishes `status_changed` for it, as for every time-driven change to
+`status.nudge` (see the events table). A shell reads it with the rest of
+`status`.
+
+**Older daemons.** A daemon predating A3 sends no `mark`. A shell draws no
+ring and no halo for an absent `mark`, for `none` or for `unknown`: absent
+news is no news, and the badge, attention, unavailable and paused states keep
+their own fail-closed rules.
 
 #### `routing`
 
@@ -1151,7 +1554,7 @@ named.
 
 **`preview` does not require an enrollment.** It performs no network I/O and
 needs neither the daemon's file lock nor its running loop, so an app can
-show a contributor what would be sent *before* they decide to enrol -- which
+show a contributor what would be sent *before* they decide to enroll -- which
 is when the question matters most. Through `v1_1`'s first releases this
 refused with `unavailable` / `not-logged-in` unless a `contributor.json`
 existed, which forced app harnesses to fabricate an enrollment purely to
@@ -1227,7 +1630,7 @@ only the pinning build (`preview_body`, `preview_turns`,
 `preview_unsure_spans`, `approve`, a witnessed review) writes them. A card
 (`preview`, `preview_request`) pins nothing and so records nothing, and an
 unenrolled build is never pinned. When the pin is released, replaced or
-revoked -- a re-enrolment, a privacy-filter change, an approval revoked and
+revoked -- a re-enrollment, a privacy-filter change, an approval revoked and
 re-offered, a stale pin released after three days -- the entry reads as
 `not-yet-scrubbed` again, with nothing to clear by hand. Before then `marks`,
 `content_marks` and `unsure_spans` are **absent** -- never `0`, never `null`
@@ -1660,6 +2063,7 @@ visited is not in the queue at all. It uses `list_past_sessions` and
     }
   ],
   "total": 2,
+  "not_listed": 0,
   "project_mode": "notify_only"
 }
 ```
@@ -1669,7 +2073,10 @@ The listing walks every declared source's discovery itself rather than the
 watcher's cwd cache, so it is complete before the first discovery pass has
 run (a Rules step shown seconds after Folders started the daemon) and it
 includes sessions no pass has ever visited. It never loads a session: a row
-the queue has not offered is described by its date and size alone.
+the queue has not offered is described by its date and size alone. No
+session is loaded before the person chooses; the walk reads only what each
+adapter's discovery already reads (a file's head for its cwd, a staged
+trajectory's declaration).
 
 `project_id` is required. A missing or non-string one is `bad_params` /
 `project_id-invalid`; an id that resolves to no project the daemon knows --
@@ -1688,6 +2095,8 @@ Each row's `state`:
 | `not_queued` | true | on disk, never offered |
 | `never` | false | the folder's rule is Never; every row it would list is `never` |
 | `still_active` | false | still being written: modified within `quiescence_secs` |
+| `held_for_review` | false | queued, but held for a person's review of that one session, or held when it aged out; an include always skips it `held-for-review` |
+| `ineligible` | false | queued and recorded as one a group `approve` leaves out, for an evidence-admitted contributor (`contributable_in_a_group`); an include skips it `session-ineligible` |
 
 A queued row (`pending`, `approved`, `expired`) carries its queue entry's
 `entry_id`, `started_at`, `duration_secs`, `title`, `size_bytes` and `source`
@@ -1700,8 +2109,12 @@ on a queued entry that has none, as on `list_pending`.
 Kept and dismissed sessions are not listed. Outside a Never folder, neither
 is a session whose latest offer was decided some other way (uploading,
 uploaded, refused, failed): the picker is for sessions still open to a
-choice. A Never folder lists those too, as `never`. `total` is the number of rows
-returned.
+choice. A Never folder lists those too, as `never`. `sessions` holds the
+folder's newest 500 rows, so "Include every past session" of what is listed
+is one include that fits the per-call limit; `total` is the number of rows
+returned and `not_listed` how many older sessions the folder has beyond
+them (0 when none). A shell says how many with the core's
+`rules.not_listed` line.
 
 **No path crosses the socket.** `session_id` is `sess_` and the first 32 hex
 characters of sha256 over the session path's bytes: one-way, and
@@ -1726,7 +2139,9 @@ path; the folder is named only by `project_id`.
   "approved": 1,
   "skipped": [
     { "session_id": "sess_fedcba9876543210fedcba9876543210", "label": "session-still-active" }
-  ]
+  ],
+  "approved_entry_ids": ["5f0c...-uuid"],
+  "hold_until": "2026-10-06T12:00:10Z"
 }
 ```
 
@@ -1734,12 +2149,23 @@ The picker's Continue: approve exactly the sessions named, as a person's
 approval. Each one is pinned to a preview and held for the undo window
 exactly as a click on a card is (`approve` and this method share one
 implementation), and it is recorded as the person's own, so a later change
-of the folder's rule -- back to Ask me, say -- does not take it back.
+of the folder's rule -- back to Ask me, or to Never -- does not take it back.
 "Include every past session in {folder}" is a selection of every id the
-listing returned, never `include_backlog`.
+listing returned (at most 500, see `not_listed`), never `include_backlog`.
+
+`approved_entry_ids` and `hold_until` are `approve`'s: the queue entries
+approved, and when their undo window ends, `null` when nothing was approved
+or the hold is off. The window runs from when the approval lands, under the
+lock that approves, not from when the call began, so a slow include does
+not use it up; Undo is `cancel` on those ids.
+
+Sessions a person included do not count against the watcher's queue cap
+(`max_queue_entries`), so an include never stops the watcher offering new
+sessions. Their own total is bounded instead: at most 500 included sessions
+may be live (pending, approved or uploading) at once.
 
 Dispatched on the async entry point only, as `approve` is; the synchronous
-entry point answers `unknown_method`.
+entry point refuses it `unavailable` / `past-sessions-requires-async`.
 
 **The whole call is validated before anything changes.** Each of these
 refuses every session and records nothing:
@@ -1748,11 +2174,13 @@ refuses every session and records nothing:
 |---|---|
 | `bad_params` / `project_id-invalid` | `project_id` missing or not a string |
 | `bad_params` / `session_ids-invalid` | `session_ids` missing, not an array, holding a non-string, or empty once duplicates are dropped |
-| `bad_params` / `too-many-sessions` | more than 500 ids, checked before any id is read |
+| `bad_params` / `too-many-sessions` | more than 500 ids, duplicates counted, checked before any id is read |
 | `bad_params` / `project-id-unrecognized` | the project resolves as for `list_past_sessions` and does not |
 | `bad_params` / `contribution-override-never` | the global Never contribution override is on, as `approve` refuses it |
+| `bad_params` / `consent-scopes-not-chosen` | the enrollment's scopes were never chosen, as `approve` refuses it; nothing is revived, queued or recorded |
 | `bad_params` / `project-mode-never` | the folder's rule is Never |
 | `bad_params` / `session-id-unrecognized` | any one id is not one of this folder's sessions in the daemon's own walk -- another folder's id, a path, an empty string, a made-up id |
+| `bad_params` / `included-sessions-limit` | the live included sessions plus every id asked for would pass 500 |
 | `unavailable` / `audit-write-failed` | the `past-sessions-included` audit row could not be written |
 
 Duplicate ids are counted once, in the order first named. A session the
@@ -1764,8 +2192,9 @@ names what the person saw, and a vanished session refuses the selection.
 before anything is revived, queued or approved: `project_label` is the
 folder's derived label (from the key the daemon holds, never the caller's
 string) and `detail` the number of sessions chosen. No session id, path or
-title is in it. A log that refuses the write refuses the call, under the
-same rollback-cannot-record guarantee as `bulk-approved`.
+title is in it. It records the person's request, so it is written even when
+every session is then skipped. A log that refuses the write refuses the
+call, under the same rollback-cannot-record guarantee as `bulk-approved`.
 
 **One refusal comes after the audit row.** If the queue cannot be saved once
 the approvals are made, the call is `unavailable` / `queue-write-failed`:
@@ -1783,11 +2212,13 @@ approves them.
 |---|---|
 | `session-dismissed` | the session was dismissed; it is never revived |
 | `session-kept` | the session is kept on this Mac; `undo_keep` first |
-| `session-still-active` | still being written (judged at the walk, and again at the read); never queued half-written |
+| `session-still-active` | still being written (judged at the walk, and again at the read from a fresh walk); never queued half-written |
 | `held-for-review` | its offer is held for a person's review, or was when it aged out, as a group `approve` leaves it |
+| `session-ineligible` | for an evidence-admitted contributor, one a group `approve` leaves out (`contributable_in_a_group`), whether queued already or found so when read |
+| `session-duplicate` | its bytes are the same as a session already chosen in this call, so it is the same queue entry, answered once |
 | `not-pending` | already decided (approved, uploading, uploaded) by the time the include reached it |
 | `session-project-changed` | read now, the session resolves to another folder than the one named |
-| `project-mode-never` | the folder turned Never between the validation and the read |
+| `project-mode-never` | the folder (or the global override) turned Never after the validation: checked again at the revive, at the insert and under the lock that approves |
 | `session-unreadable` | the session file could not be read or parsed |
 | `session-file-vanished` | the session file was gone by the read |
 | `envelope-too-large` | over the size limit, at the read or at the pin |
@@ -1795,7 +2226,12 @@ approves them.
 | `not-enrolled`, and `approve`'s other per-entry labels | the approval itself was refused, as `approve` reports it |
 
 An `expired` session is revived to `pending` (its `discovered_at` set to
-now, as `undo_keep` dates a return) and approved. A `not_queued` session is
+now, as `undo_keep` dates a return) and approved; one whose session changed
+since it aged out (another size or modification time) is read again and
+offered fresh instead, so what is approved is what is on disk. A revive is
+the person's choice and stands even when the approval then does not land --
+watching only answers `not-enrolled` -- so the session waits again as an
+ordinary offer, and counts as a decision owed. A `not_queued` session is
 read and queued now, then approved; an explicit selection lands past the
 queue's entry cap, because it is a person's choice rather than the watcher's
 offer, but never past the quiescence check. A session queued by a discovery
@@ -1937,8 +2373,10 @@ status is unread or the daemon is down. `tc_contribution_override_confirm_json(m
 confirmation; for `auto_upload` it carries `arming`, the Flow 1 grant
 screens' disclosure table for the configuration in `config_dir`. For
 `mode` `"clear"` it returns the confirmation a shell shows before
-`clear_contribution_override` when any folder's own setting is Automatic, or
-when the folder list or a folder's own setting is unknown: its `mode` is
+`clear_contribution_override` when the override in force is Ask me or Never
+and any folder's own setting is Automatic, or the folder list or a folder's
+own setting is unknown (under an Automatic override clearing resumes nothing,
+so it is not confirmed): its `mode` is
 `"clear"` (never a `ProjectMode`, never sent to `set_contribution_override`)
 and it carries no `arming`. Every sentence was approved 2026-10-06
 (`project_copy.rs`).
@@ -2407,7 +2845,7 @@ file says `auto_upload`, because the daemon refuses to act on that.
 
 #### `unpurposed_traces` (K7)
 
-A top-level count beside `projects[]`, for the design's upsell: "27 scrubbed
+A top-level count beside `projects[]`, for the design's suggestion: "27 scrubbed
 sessions are sitting on this Mac under folders set to Ask me. None has been
 decided." It is the number of queue entries that are, all three:
 
@@ -2425,7 +2863,7 @@ decided." It is the number of queue entries that are, all three:
   entry) -- "scrubbed", in the design's word. An entry nobody has opened a
   preview for has not been through the redaction pass this count is about.
 
-This differs intentionally from K6's `status.decisions_owed`: the upsell
+This differs intentionally from K6's `status.decisions_owed`: the suggestion
 promises previewed Ask-me sessions only, while the badge includes unpreviewed
 sessions and armed sessions that require a person. Neither changes the
 other's number.
@@ -2435,6 +2873,124 @@ side effects, computed from the same queue and policy state a client already
 fetches `list_projects` to draw. It is always present (never absent, unlike
 `contributable_count`), because whether a session is undecided-and-Ask-me is
 a question every contributor's queue can answer, invited or not.
+
+### Mission fit (`list_pending.mission_fit` and `status`)
+
+Nudge value addendum, section 1. How many contribution missions a waiting
+session would count toward, so a card can say which sessions matter. Three
+additive fields, all counts:
+
+| Field | Present when | Value |
+|---|---|---|
+| `list_pending` entry `mission_fit` | a catalogue is live | how many matched missions this entry fits; `0` is a real answer |
+| `status.idle_sessions.mission_fit` | `idle_sessions` is present and a catalogue is live | how many idle candidates fit at least one matched mission |
+| `status.nudge.mission_fit` | `nudge.lead` is `idle_sessions` or `review_backlog` and a catalogue is live | the same count over the leading kind's subjects |
+
+**Absent means unknown, never zero.** A live catalogue with no missions gives
+`0`, a known zero. No other rendering of an entry (`list_kept`, history)
+carries the field.
+
+**The catalogue.** The daemon holds at most one, in memory only: never
+persisted, emptied by `unenroll` and by a restart. It is live for 24 hours
+after it arrives (OWNER DECISION V2), after which it reads as absent. A
+catalogue the daemon refuses empties the slot rather than leaving an older
+one in force. **Nothing writes it today**: its writer is the fetch of Z7/Z8's
+server catalogue. `mission_matches` neither reads nor writes it -- its
+catalogue stays a parameter and matching still changes nothing (M2).
+
+**What fits.** An entry is read through the same M1/M2 rule
+`mission_matches` applies: adapter on, folder not Never, session neither kept
+nor withdrawn; an entry that rule drops fits nothing. It fits a mission when
+it meets the mission's criteria **and** the mission is matched over the
+sessions the daemon has seen (so a mission whose `min_sessions` is unmet is
+fitted by nothing, OWNER DECISION V3).
+
+**Languages.** Folder roots are looked at only by `list_pending`, with no
+lock held, the first time it meets a folder while the catalogue asks about
+languages; the answer is cached with the catalogue and dropped when the
+catalogue is replaced. `status` reads only that cache: a folder not yet
+looked at fits no language criterion (OWNER DECISION V4).
+
+Counts only: no mission id, title or criterion reaches `status`,
+`list_pending`, a log line, an audit row or a notification.
+
+### Local credit estimate (`list_pending.credit_estimate` and `status`)
+
+Nudge value addendum, section 4. Roughly what credit a waiting session is
+likely to be shown once the commons scores it, worked out on this Mac before
+anything is sent. The daemon cannot compute the score itself -- that needs
+the scoring model and the commons' index -- so it reads a band from a
+calibration table, using content-free numbers it records about each session
+when the session is queued (byte counts by role, how many prompts, how many
+distinct tools, a sampled byte entropy and deflate ratio; version `lef1`). Those numbers stay
+in the local queue file and never reach the wire, a log line, an audit row,
+history or a notification.
+
+```json
+"credit_estimate": { "low": 1.0, "high": 3.0, "calibration": "lef1.t1/cq3", "basis": "built_in", "drawn": false }
+"credit_estimate": { "low": 2.0, "high": 4.5, "tier": "higher", "calibration": "lef1.t2/cq3", "basis": "published", "drawn": true }
+```
+
+| Field | Present when | Value |
+|---|---|---|
+| `list_pending` entry `credit_estimate` | the entry has recorded features, a table is in force, and the entry is neither uploading nor uploaded | the band for this entry |
+| `status.idle_sessions.credit_estimate` | `idle_sessions` is present and at least one candidate has an estimate | `{low, high, known, calibration, drawn}`: band ends summed over the `known` candidates that have one (OWNER DECISION E8) |
+| `status.nudge.credit_estimate` | `nudge.lead` is `idle_sessions` or `review_backlog` and at least one of its subjects has an estimate | the same, over the leading kind's subjects |
+
+- `low` / `high`: displayed-credit units, `low` floored and `high` ceiled to
+  steps of 0.5 (OWNER DECISION E3). Never a single number, never `0`.
+- `tier`: `"lower"`, `"middle"` or `"higher"`; omitted for a one-tier table,
+  which carries no ordering information.
+- `calibration`: the feature version, the table version and the credit
+  calibration the table was fit against, such as `lef1.t1/cq3`.
+- `basis`: `"built_in"` while the daemon's built-in table is in force
+  (OWNER DECISION E2: one tier, about 1 to 3), `"published"` once a fetched
+  table has been accepted.
+- `drawn`: whether a shell draws this estimate at all, and whether core copy
+  carries an estimate clause. `true` only under a published table with two or
+  more tiers (owner decision, 2026-10-08): the built-in band and a published
+  one-tier band are the same for every session, so they say nothing about the
+  one in front of the contributor. The estimate stays on the wire either way.
+- `known` (status only): how many subjects had an estimate. A shell compares
+  it with `count` to choose the full or the partial sentence. Subjects without
+  one are left out, never summed as 0; with none, the object is absent.
+
+**Absent means unknown.** An entry queued before the daemon recorded these
+numbers has none, and so no estimate; nor does a session with no content. An
+entry that is uploading or uploaded never carries one: its figure is
+history's, or nothing. The estimate is never shown as, beside or summed with
+scored credit, and no other rendering of an entry (`list_kept`, history,
+`commons_credit_summary`) carries it.
+
+**The table.** The daemon holds one table in memory, starting as the built-in
+one. It is public and not account-scoped, so `unenroll` leaves it.
+
+The daemon fetches the published table from `GET /v1/credit-estimate/table`
+on the configured ingest origin, unauthenticated, on a fixed schedule: every
+24 hours plus a random offset of up to 4 hours, the first a random offset
+after the daemon starts (OWNER DECISION E11). Nothing a shell does, and
+nothing the queue does, moves that schedule. No method or event is added for
+it. What a fetch changes:
+
+- An accepted table is in force from then on, and `basis` reads
+  `"published"`. `queue_changed` and `status_changed` are published when the
+  table in force changes.
+- A table the daemon refuses (a newer schema, out-of-range numbers, too
+  large) puts the built-in table back in force.
+- A 404, a network failure, or no config leaves the table in force as it is,
+  so a daemon works against a server that publishes none.
+- A fetched table not re-fetched for 7 days is no longer in force: rows and
+  `status` render with the built-in table until a fetch succeeds. The tick
+  that finds it lapsed publishes `queue_changed` and `status_changed`, with
+  no fetch, and a later fetch of the same table publishes them again as it
+  comes back into force.
+
+**Entries queued before the features existed** carry no estimate until the
+daemon re-reads them: at most 4 waiting entries per full watcher pass, oldest
+first, and none while a preview is building or queued (OWNER DECISION E13).
+Each gains its estimate on the `queue_changed` that pass publishes. An entry
+whose session has changed since it was queued is not given one; the watcher
+re-offers it, and the new entry carries its own.
 
 ### `mission_matches`
 
@@ -2702,7 +3258,10 @@ them.
 
 **One reply, one deadline.** A group `approve` does not fan out. It takes one
 approval instant for the whole call, so every entry it approves shares one
-hold and the single `hold_until` it reports is true of all of them. A client
+hold and the single `hold_until` it reports is true of all of them. The
+instant is taken under the lock that approves, after every preview the call
+builds, never when the call began: a slow build must not use up the undo
+window before the approval is even saved. A client
 must not fan a group submit out into per-entry calls and keep the first
 reply's hold: an undo bar has to outlast every entry it offers to undo, and
 the first reply's deadline retires Undo while something it covers is still
@@ -2760,6 +3319,8 @@ This is the whole signal a one-click submit needs: a client that never calls
   | `not-pinned` | The pin did not stick even though the build succeeded, and the entry is still `pending` (a concurrent write, or the entry vanished from the queue mid-call) | Transient -- retry is expected to work |
   | `correction-credential-detected` | The `correction` sent with this call contains something credential-shaped. Nothing was built, pinned or sent; the entry stays `pending` | Retry succeeds once the credential is out of the text. Surface this distinctly and tell the contributor to rotate it -- never echo the correction or the match |
   | `not-pending` | The entry was not `pending` when this call reached it -- already `approved` by an earlier `approve`, or dismissed, expired or superseded meanwhile | Refresh queue state rather than retry blindly; a retry alone can never succeed |
+  | `project-mode-never` | The entry's folder was set to Never while this call built its previews; checked again under the lock that approves | Will not succeed while the folder is Never |
+  | `contribution-override-never` | The Never contribution override was turned on while this call built its previews; checked again under the lock that approves | Will not succeed while the override is on |
 
   Only `envelope-too-large` changes the entry's state; every other label
   above leaves the entry exactly where it stood. A refusal that no retry
@@ -3741,8 +4302,10 @@ Takes a JSON object whose top-level keys must come from
 `codex_source`, `gemini_source`, `cline_source`, `opencode_source`,
 `trajectory_source`, `ironwire`,
 `ironwire_attested_bodies`, `private_inference`,
-`private_inference_offer_seen`, `scrub_check`, `max_uploads_per_day`,
-`max_bytes_per_day` --
+`private_inference_offer_seen`, `scrub_check`, `suggestions_enabled`,
+`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`verdicts_offer_pending`, `idle_offer_pending`,
+`max_uploads_per_day`, `max_bytes_per_day` --
 a key this method does
 not recognize is
 refused outright (`bad_params` / `settings-unknown-field`), not silently
@@ -3770,6 +4333,80 @@ below): a digest with nothing pending and nothing contributed since the
 last one never fires, on either schedule. This is open decision #5 on issue
 #1118; both schedules ship rather than picking one, so the choice is a
 setting rather than a release cliff.
+
+`suggestions_enabled` (boolean, default `true`) switches the in-app
+suggestions -- the suggestion cards on Traces and History, the menu-bar panel
+row and the menu-bar mark -- on or off. It is the same setting `set_suggestions_enabled` writes,
+and a change by either route publishes `status_changed`, because
+`status.nudge` reads it. See ["`status.nudge`"](#statusnudge).
+
+`notifications_enabled`, `menu_bar_mark_enabled`, `notify`,
+`verdicts_offer_pending` and `idle_offer_pending` are the notification
+settings; see ["Notification settings"](#notification-settings) for their
+defaults and refusals.
+
+#### Notification settings
+
+Additive (nudge A2). All of them are settings about this Mac: `unenroll`
+keeps them. `get_settings` reports them as stored.
+
+- `notifications_enabled` (boolean, default `true`): "Notifications from
+  Trace Commons", the master switch over the digest and every
+  re-engagement kind. The OS permission is a separate, outer switch. This is
+  not `local_notifications`, which only says whether the daemon itself
+  renders.
+- `menu_bar_mark_enabled` (boolean, default `true`, DRAFT, owner decision
+  19): the menu-bar news mark and the idle halo. Separate from every
+  notification switch.
+- `notify` (object): one boolean per kind -- `digest` (N0, default `true`),
+  `idle_sessions` (N1), `verdicts_landed` (N2), `weekly_recap` (N3, default
+  `false`, held for the gamification ruling) and `insights_tip` (N4, default
+  `false`, owner decision 25). One switch governs both the sentence folded
+  into a due digest and the standalone notification. Revision 2's
+  `digest_enabled` is `notify.digest`; there is no `digest_extras_enabled`.
+  A key this daemon does not know (a later kind written by a newer build)
+  is kept on load and save, so an older daemon does not drop it.
+- `verdicts_offer_pending`, `idle_offer_pending` (boolean, absent when
+  false): the one-time History-card and Traces-card offers for an install
+  that existed before the two kinds.
+
+**New installs and upgrades.** With no settings file, the install is new:
+`idle_sessions` and `verdicts_landed` are `true` (DRAFT, owner decisions 7
+and 3) and no offer is pending -- unless the project policy says the install
+is old (a policy written before the Scrub check default that holds a folder,
+in any mode). Such an install is upgraded as below, and daemon startup writes
+the settings file so the next start keeps the answer. A settings file that does not hold
+`notify.verdicts_landed` (or holds `null`) is an install that predates the
+kind: it loads with the kind `false` and `verdicts_offer_pending: true`, and
+likewise `idle_sessions` with `idle_offer_pending: true` -- decided per
+kind, so nothing is switched on silently (constraint 12). The answer is
+kept in memory and written by the next save; until then every load decides
+it the same way.
+
+**Writing.** `set_settings` takes `notify` as a partial object
+(`{"notify": {"verdicts_landed": true}}`); every key must be one of the five
+kinds (`bad_params` / `settings-unknown-notify-kind` otherwise) and every
+value a boolean (`bad_params` / `settings-invalid-value`), and a refused
+object changes nothing. Setting `verdicts_landed` or `idle_sessions`
+either way clears that kind's offer marker: the person has answered. The
+markers can also be cleared directly (`{"verdicts_offer_pending": false}`),
+for an offer dismissed without an answer, such as a denied OS permission.
+`set_menu_bar_mark_enabled {on}`, `set_notifications_enabled {on}` and
+`set_notify_kind {kind, on}` write through `set_settings`. They refuse a
+missing or non-boolean `on` with `bad_params` / `on-required`, and
+`set_notify_kind` refuses a missing or non-string `kind` with `bad_params` /
+`notify-kind-required` and a kind outside the five with `bad_params` /
+`notify-kind-unrecognized`. A refusal writes and publishes nothing. Any
+route publishes `status_changed` when one of these values changes, and
+nothing when the value written is the one already stored.
+
+**What reads them.** As of A2, nothing changes behaviour: the digest still
+posts as before. The digest (`notifications_enabled`, `notify.digest`), the
+news mark (`menu_bar_mark_enabled`) and the re-engagement arbiter (every
+kind) read them as those slices land. The daemon state file also gains an
+attention log (kind label, route and time per announcement, pruned to 8
+days) and a last-notified time, both cleared by `unenroll`; neither is on
+the wire.
 
 `opencode_source` takes `{"mode":"watch","path":"/chosen/export-directory"}`,
 `{"mode":"off"}`, or `null`; absent, null, and Off construct no adapter, including
@@ -4041,10 +4678,24 @@ tool's layout matches. `trajectory_source` declares it:
   written before this key existed load as absent, so an upgrade reads no new
   folder.
 - Any other value -- a bare path string, an unknown mode -- is `bad_params`
-  / `settings-invalid-value`, as for the other `*_source` keys.
+  / `settings-invalid-value`, as for the other `*_source` keys. So is a
+  `watch` path that names no particular folder: a relative or empty path,
+  the root, or the home directory itself.
+
+A file in the folder is read whole only up to the native adapters' 64 MB
+budget; a larger one is refused from its size alone and raises the
+`session-too-large` health label. Discovery follows no symlinked entry.
 
 `get_settings` reports `trajectory_source_mode` (`unset`, `off` or `watch`)
-and never the path; no response, log line or audit row carries it.
+and never the path; no response, log line or audit row carries it. A shell
+shows the folder as a Watched folders row of its own while the mode is
+`watch` or `off`, in the words of `tc_source_settings_copy`'s `trajectory`
+object -- its exports always wait for a person -- with an off switch that
+writes `{"mode":"off"}`.
+
+A session found there that is waiting in a folder on Automatic counts as a
+decision owed (`status.decisions_owed`), and it never arms a folder under
+the automatic grant.
 
 The declaration is not part of the claude/codex start gate: a daemon with
 only a trajectory folder declared has not declared its roots.
@@ -5023,8 +5674,37 @@ Appends a `consent-scopes-changed` audit entry.
 It also records that the contributor chose the scopes: the config field
 `consent_scopes_chosen` (default `false`) becomes `true` when `scopes` names at
 least one scope, and `false` when it is omitted or empty, since that saves the
-floor scope without naming anything. `grant_automatic` requires it. No
-enrollment path sets it, and a new enrollment writes a config without it.
+floor scope without naming anything. `grant_automatic` requires it, and
+every send path requires it (see "Sending needs chosen consent scopes"). The
+daemon's `enroll` and every app enrollment write it `false`; the CLI's `login`
+writes `true` when its own consent question was answered (an explicit
+`--scopes`, or the interactive menu) and `false` for default answers. A
+config with no such key predates the record and is not held; an omitted or
+empty `scopes` leaves such a config without the key.
+
+### Sending needs chosen consent scopes
+
+An enrollment saves the floor scope with nobody having picked it, so while
+the config's `consent_scopes_chosen` is `false` nothing is sent under it.
+One fixed label, `consent-scopes-not-chosen`, everywhere:
+
+| Path | What happens |
+|---|---|
+| `approve` (`entry_id`, `all`, `project_id`) | `bad_params` / `consent-scopes-not-chosen`, before anything is approved or audited |
+| `include_past_sessions` | the same, refused whole before anything is revived, queued or audited |
+| `set_project_mode` to `auto_upload` | the same, before the arming is audited; `notify_only` and `ignore` are allowed |
+| `set_contribution_override` `auto_upload` | the same; `notify_only` and `ignore` are allowed |
+| the watcher's unattended approvals | none are made; a session in an Automatic folder waits `pending`, and is approved on the first pass after the scopes are chosen |
+| the upload pass | every `approved` entry is held exactly as it is (no state change, no attempt, no label), as a Never override holds them; choosing the scopes releases them to the send path, whose scope and input pins still re-ask an entry whose terms moved |
+
+`status.consent_hold` is `consent-scopes-not-chosen` while this holds and
+`null` otherwise (no enrollment, a choice recorded, or a config that predates
+the record). No health label is raised.
+
+Migration: no released client wrote `consent_scopes_chosen`, so a config
+without the key belongs to a contributor who joined before the record
+existed. It is not held, and the key stays absent across later saves.
+`grant_automatic` still requires an explicit `true`.
 
 ### `enroll`
 
@@ -5037,6 +5717,67 @@ flag); a caller-supplied allowlist can degrade to permissive, and a socket
 caller is not trusted with that. On success, the underlying error is never
 echoed back over the socket -- it can carry an issuer response body or a URL
 -- so failures are reported only as `unavailable` / `enroll-failed`.
+
+### `unenroll`
+
+Removes this Mac's enrollment, locally only: no server call is made, so the
+device registration, the account and every submitted trace stay as they are
+on the server. Params: none. Async only: the synchronous entry point refuses
+it with `unavailable` / `unenroll-requires-async`. Not answered during a
+developer dry run (it deletes OS credential-store entries).
+
+What is removed:
+
+- the contributor config (`contributor.json`: tenant, endpoints, device
+  identity, consent scopes),
+- the device key, the account session, and a staged legacy-migration key,
+  from the OS credential store,
+- the files that belong to the enrollment: the inference-connection state,
+  a legacy identity-switch journal, the legacy invite link record, the
+  remembered invite subject hash, and every stored approved envelope.
+
+What stays: receipts, history and the audit log, settings, folder rules,
+the queue, the NEAR AI notice marker, and the remembered passkeys (a passkey
+is not an enrollment).
+
+Order: the credential references go first, with the credential generation
+advanced so an enrollment, sign-in or identity switch in flight cannot
+publish against an earlier snapshot; the config and the other files go next,
+under the same commit lock. `status.logged_in` needs both the config and the
+device key, so from the first removal the daemon reads as not enrolled and
+nothing can sign an upload claim. A crash between the two leaves a config
+with no device key: not enrolled, and refused by `enroll` until `unenroll`
+is called again, which finishes it (the method acts whenever any part of an
+enrollment is on disk).
+
+Queued entries: every `approved`, unsent entry returns to `pending` with
+`reason_label` `approval-inputs-changed`, and every preview pin is released.
+The sessions stay queued; no approval given under the old enrollment can be
+sent under a later one. A preview that finishes after `unenroll` pins
+nothing, because a pin now requires the envelope to name the enrollment in
+force. In-memory account-admission answers and passkey ceremonies are
+dropped.
+
+Audit: appended first, label only: action `unenrolled`, `detail`
+`approvals_returned=<n>`. No tenant, account, key id or path. When nothing
+was enrolled, nothing is written.
+
+Result: `{"unenrolled": true, "removed": <bool>, "approvals_returned": <n>}`.
+`removed` is `false` when there was nothing to remove; the call still
+succeeds. Pushes `queue_changed` and `status_changed` when something was
+removed.
+
+Refusals:
+
+| Code / label | When |
+|---|---|
+| `busy` / `upload-in-flight` | an upload is in flight; nothing is removed |
+| `unavailable` / `audit-write-failed` | the audit entry could not be written; nothing is removed |
+| `unavailable` / `unenroll-failed` | removing a credential or file failed; whatever was removed stays removed, and calling again finishes it |
+
+The CLI's `unenroll` (with `--yes` to skip its confirmation) calls this;
+`consent scopes` calls `set_consent_scopes` with the floor scope named, so an
+enrollment made with `login --default` leaves the consent hold.
 
 ### `acknowledge_near_ai_notice`
 
@@ -5507,7 +6248,7 @@ scope list**, and the daemon deliberately does not pre-check
 which the issuer resolves to the caller's full grant ceiling, so the local
 set can be *narrower* than what the credential actually carries -- refusing
 locally would refuse contributors the server would have allowed. If the
-server refuses, the contributor's remedy is to enrol again with
+server refuses, the contributor's remedy is to enroll again with
 `public_attribution` in `scopes`, not to change anything locally.
 
 **`bio` is required, and `null` is how you publish none.** The server
@@ -6184,13 +6925,31 @@ passkeys before authentication without telling anyone who asks whether the
 account exists, so the daemon keeps its own list (`remembered-passkeys.json`
 in the state directory, 0600): a record is written when a passkey is created,
 added, or used to sign in here, and holds the passkey's display name when this
-Mac learned one, the SHA-256 of the account id (for matching a later sign-in;
+Mac learned one (the name it was given when created or added here, or the
+label the server returned for it at sign-in; see below), the SHA-256 of the account id (for matching a later sign-in;
 never sent over IPC), and when it was last used. No credential material, no
 token, no credential id. At most four records are kept, most recent first.
 `passkey_count` is how many; `0` means none remembered here, not that the
 account has none. `remembered_name` is the most recent record's name, or null
-when it has none (a passkey first used here by signing in: the login answer
-carries no name). Both are null when the list cannot be read. Signing out
+when it has none (a passkey first used here by signing in whose login answer
+carried no label: it has none on the server, or the server predates
+`passkey_label`).
+
+A sign-in learns the passkey's name from the server. The commons'
+`POST /v1/account/native/passkey/login/finish` answer carries, beside the
+session, an optional `passkey_label`: the label the signed-in account gave the
+passkey that just authenticated, looked up by the tenant, account and
+credential id of the verified assertion (never from anything in the request),
+so it is only ever the authenticating account's own credential's label. It is
+absent, not null, when that passkey has no label or the label could not be
+read; an older server never sends it, and an older daemon ignores it. On a
+login the daemon records that label as the record's name, replacing any name
+it held; with no label (or one that fails the daemon's own name rules: blank,
+over 64 characters, or holding a control character) it keeps the name it
+already had. The label is not logged and is not forwarded over IPC except as
+`remembered_name`/`signed_in_name`. A login the daemon refuses (for example
+`account-enrollment-mismatch`, a session for another tenant or account than
+the one this Mac is enrolled under) records nothing, label included. Both are null when the list cannot be read. Signing out
 keeps the list, since a returning person after sign-out is who the first
 run's "Welcome back" greets; removing this Mac's contributor state (`wipe`,
 the CLI's `logout`) clears it. Added in v1.1 additively; older shells ignore
@@ -6202,7 +6961,7 @@ record is), never the most recent record's: after a sign-in, the most recent
 record may belong to another account, and its name is not this one's. It is
 null when no account session is held or the session cannot be read, when
 this Mac has no record for that account, when that record has no name (a
-passkey first used here by signing in), or when the list cannot be read. A
+passkey first used here by signing in whose login answer carried no label), or when the list cannot be read. A
 local fact like the other two, it is answered in every `state`, including
 `unknown`. The first run reads it once a passkey sign-in has finished, to
 name the passkey on Join's card; it never reads `remembered_name` for that,
@@ -6237,7 +6996,7 @@ result: `{"outcome":"bound","binding_state":"bound"}`. An
 unbound account; its passkey is not transferred (S6 fold is deferred).
 
 For a signed-in account whose `binding_state` is `bound` (another Mac bound
-it, and this Mac signed in with the same passkey), `account_bind` **enrols
+it, and this Mac signed in with the same passkey), `account_bind` **enrolls
 this Mac into that account** through the same routes: SAMPLE result
 `{"outcome":"enrolled","binding_state":"bound"}`. The commons compares the
 near.ai login this Mac proves with the account the passkey session is signed
@@ -6250,7 +7009,28 @@ session is left as it was, and the shell signs it out. A `bound` or
 `enrolled` result is persisted only if its tenant and account are the passkey
 session's (`account-enrollment-mismatch` otherwise). `legacy` (or any other
 state) is refused with `account-bind-refused` before the refresh token is
-spent. Tokens,
+spent.
+
+On a Mac that is **already enrolled**, `account_bind` sends no request and
+writes nothing. It answers `{"outcome":"already_enrolled","binding_state":"bound"}`
+when the enrollment it holds is the signed-in account's own: the session's
+tenant (decoded from its `tcn1_` token, as the sign-in's tenant check reads
+it) equals the enrollment config's `tenant_id`, **and** the session was signed
+in to a `bound` account (the `binding_state` stored with it at sign-in). This
+is the first run's Welcome back case: the enrollment is reported after P-7
+opened, and the person signs in with that account's passkey. Anything else
+-- no session, another tenant, an `unbound` or `legacy` account, or a stored
+session without a `binding_state` -- is refused as before with
+`account-already-enrolled`. The config records a tenant and no account, so
+the check is a tenant match; it identifies one account because a binding row
+(and so a `bound` state) is only ever written for a passkey-origin account,
+each created alone in a freshly minted tenant, and it accepts nothing the
+sign-in's own tenant check had not already accepted when it kept the
+session. Recording the enrolled account at enrollment would make it
+account-precise; that is not done yet. Added in v1.1 additively: the macOS
+shell treats it exactly as `enrolled` (Verify for a `bound` account accepts
+either); a shell that does not know it reads an unknown outcome and fails
+closed (`account-bind-invalid`). Tokens,
 rotations and atomic device/config persistence stay in Rust/Keychain. Binding
 creates no folder/trace/body consent. Native login remains weak and native add
 keeps the existing first-strong-authenticator gate; adding another requires
@@ -6268,12 +7048,14 @@ relaxation of origin/CORS/CSP controls.
 |---|---|---|
 | `snapshot` | immediately after `subscribe` | `{pending[], status}` |
 | `queue_changed` | queue contents changed | `{}` |
-| `status_changed` | pause/resume, a lapsed timed pause, or health changed | `{}` |
-| `digest_due` | batching interval elapsed with pending work | `{pending, text}` |
+| `status_changed` | pause/resume, a lapsed timed pause, health changed, a suggestion stamp or switch changed, a history poll found verdict news, dropped waiting news that was taken back or moved to a Never folder, or made a stale `status.nudge` readable again (a routine poll publishes nothing), or a daemon tick found `status.nudge` or `status.idle_sessions` moved by time alone -- an idle threshold crossed, a "Not now" lapsed, the news mark aged out, or the history poll gone stale. The tick compares with the previous tick, so it publishes at most once per change, at most once per `poll_interval_secs`, and never when nothing moved; a change another path already announced may be announced once more | `{}` |
+| `digest_due` | batching interval elapsed with pending work, and the master and digest notification switches are on and no standalone re-engagement notification posted in the last hour | `{pending, contributed, contributed_projects, credit_pending, text, fold?}` -- `fold` is `{kind, text}` when the attention arbiter folded a re-engagement sentence in as the digest's third sentence; `text` already ends with it |
 | `resync_required` | this client fell behind the event buffer | `{}` |
 | `preview_ready` | a scheduled preview finished and was delivered | the same object `preview_request` returns for a cache hit -- see "Scheduled previews" |
 | `inference_call_added` | the poll tick read a call from IronWire's log that no earlier tick had (K14) | `{id, tool, model, proof}` -- see below |
 | `managed_changed` | a saved model account or managed session changed (see `docs/managed-sessions.md`) | `{revision}` |
+| `history_changed` | the daemon's history poll found verdicts that are new against its own high-water mark (nudge S4); never on the silent first poll; always followed by `status_changed` | `{newly_accepted, newly_held, newly_final}` -- counts from that poll alone; see below |
+| `reengage_due` | **opt-in**: the attention arbiter chose one standalone re-engagement notification this tick; sent only to a subscriber that named it in `subscribe`'s `accepts` | `{kind, title, body, actions: [{id, label}]}` -- see "Re-engagement notifications" below |
 
 `inference_call_added` is published where the daemon already reads IronWire's
 `/log`: the poll tick's routing refresh. Nothing is fetched for it and it adds
@@ -6295,9 +7077,105 @@ no poll of its own, so a call is announced on the first tick after it lands
 - At most 64 per tick, the newest kept, so a burst cannot push a subscriber
   into `resync_required`. Re-read `tool_destinations` for exact counts.
 
+`history_changed` is published by the daemon's own history poll, which runs
+on `history_poll_secs` and about a minute and a half after an upload. Its
+counts are what that one poll found, by the same rule as
+`status.nudge`'s `verdicts_landed` (see "`status.nudge`"), but counts only:
+no credit figure, no label, no submission id. A shell that shows history should re-read
+`list_history`; one that shows the suggestion re-reads `status`, which the
+`status_changed` that follows tells it to do. A shell that does not know the
+event ignores it, as with every event it does not know.
+
 `subscribe` sends a full `snapshot` before any delta, so a client never has to
 race `list_pending` against the stream at startup. On `resync_required`, call
 `list_pending` and `status` again.
+
+### Opt-in events
+
+Some events are delivered only to a subscriber that asked for them. Today
+there is one: `reengage_due`. A subscriber names the ones it can render in
+`subscribe`'s optional `accepts`:
+
+```json
+{"id": 1, "method": "subscribe", "params": {"accepts": ["reengage_due"]}}
+```
+
+- **Absent or `null` `accepts`** (every shell written before this existed):
+  the subscriber receives no opt-in event, and the response is
+  `{"subscribed": true}` exactly as before. Nothing else about the stream
+  changes.
+- **An array of strings:** the daemon keeps the opt-in names it recognizes
+  and drops the rest, so a newer shell may declare a later event to an older
+  daemon without being refused. Ordinary event names are dropped as well;
+  every subscriber already receives them. The response echoes what was kept:
+  `{"subscribed": true, "accepts": ["reengage_due"]}`. A daemon that predates
+  `accepts` answers without the field, which is how a shell tells the two
+  apart.
+- **Anything else** (not an array, or an array holding a non-string) is
+  refused with `bad_params` / `subscribe-accepts-invalid`, and the
+  connection keeps whatever subscription it had before.
+- **A repeat `subscribe` on the same connection replaces the earlier
+  declaration**; it does not add to it. Subscribing again without `accepts`
+  withdraws it.
+
+The daemon counts live subscribers per declared event. The attention
+arbiter publishes a standalone `reengage_due`, and stamps it against its
+caps, only while at least one live subscriber has declared `reengage_due`.
+Otherwise the item stays deferred with the reason `no_renderer` and spends
+no budget, so an older shell never uses up a slot on a notification it cannot
+draw. A declaration ends with its connection, however the connection ends.
+
+The FFI's in-process path (an embedded daemon, no socket) declares through
+`tc_subscribe_with_accepts(handle, accepts_json, cb, ctx)`, whose
+`accepts_json` is the same array: that subscription receives the events it
+declared and counts as a renderer until `tc_unsubscribe` returns. Plain
+`tc_subscribe` declares nothing: it never receives an opt-in event and never
+counts. A `subscribe` request sent in-process (`tc_call("subscribe",
+{"accepts": [...]})`, or any other caller of the daemon's local dispatcher)
+registers nothing, so it is validated as above but answered with
+`accepts: []`; only `tc_subscribe_with_accepts` declares in-process. On the
+attached path both send the declaration in the `subscribe` request and follow
+the rules above.
+
+### Re-engagement notifications
+
+On every digest tick the daemon runs the attention arbiter (nudge A2). It
+considers two kinds today:
+
+- `idle_sessions` (N1): waiting sessions in Ask-me folders, idle for the
+  threshold, that no earlier announcement named, while the shared in-app
+  "Not now" is not in force.
+- `verdicts_landed` (N2): verdict news from a fresh history poll that no
+  earlier announcement covered. News that grew since its announcement is a
+  candidate again, under its own interval.
+
+Nothing is a candidate while the daemon is paused, under a consent hold, or
+signed out. The arbiter then either folds the strongest candidate into a
+digest that posts this tick (`digest_due.fold`), or posts one on its own as
+`reengage_due`, or holds every candidate for a labelled reason (quiet hours,
+caps, the gap, no renderer, muted). It posts at most one per tick. Every
+announcement, folded or standalone, is recorded in the attention log the
+caps count against, and the sessions an idle announcement named are not
+named again.
+
+```json
+{"event": "reengage_due", "data": {"kind": "idle_sessions", "title": "Trace Commons",
+  "body": "2 sessions from Codex have been idle for 3 days. Contribute them?",
+  "actions": [{"id": "review", "label": "Review"}, {"id": "not_now", "label": "Not now"}]}}
+```
+
+Every word is composed by the daemon; a shell posts `title` and `body` as
+they are and draws `actions` in order. `id` is `review` (open Traces at the
+idle sessions), `see_history` (open History), or `not_now` (dismiss the
+notification and send nothing, so the in-app suggestion is not silenced).
+The words are DRAFT, NEEDS APPROVAL; the whole fixed table is `tc_nudge_copy_json`. A Traces row's tags ("Fits a
+mission", the estimate band and tier, and the band's explainer) are worded
+by `tc_nudge_entry_tags_json` from the row's own `mission_fit` and
+`credit_estimate`, present only when there is something true to draw. The
+digest switch's Settings help is worded by `tc_nudge_digest_help_json` from
+`get_settings`' `digest_schedule` and `digest_interval_secs`: the evening
+line, or the interval in whole hours with its singular at one hour, and
+nothing for an interval that is not whole hours.
 
 ## Queue states
 

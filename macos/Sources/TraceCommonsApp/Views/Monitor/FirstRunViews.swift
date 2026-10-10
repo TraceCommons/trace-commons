@@ -50,7 +50,7 @@ struct FirstRunWindowView: View {
                 // to its step would let run past the window's bottom edge (a
                 // Uses step with many scopes), out of reach.
                 .frame(width: FirstRunProgress.paneWidth)
-                .padding(.vertical, GlassTokens.Space.windowPadding * 3)
+                .padding(.vertical, GlassTokens.Space.paneGap * 3)
             } else if model.requiresOnboarding {
                 // The legacy startup notice left with the legacy window
                 // (R15); this says the startup as the Inference tab does: a
@@ -72,6 +72,8 @@ struct FirstRunWindowView: View {
         .frame(minWidth: FirstRunProgress.paneWidth + 80, minHeight: 640)
         // A screen's modals and confirmations cover the whole window.
         .glassModalHost()
+        // A folder's tile mark, in the core's words.
+        .environment(\.glassFolderMark, TracesTreeWords.table?.folderMark ?? "")
         .onAppear { model.refreshAll() }
         // Finishing first run hands off to the Monitor: at the destination
         // an earlier opener left waiting, on Home otherwise. Initially too:

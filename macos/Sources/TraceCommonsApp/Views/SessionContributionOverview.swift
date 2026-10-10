@@ -142,12 +142,16 @@ struct SessionWithdrawalAction: View {
             GlassEyebrowCard(copy.nextAction) {
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     if let result = model.withdrawals[record.submissionID] {
-                        WithdrawalOutcomeView(result: result)
+                        // A failure is said under Try again, the button it
+                        // is about; any other outcome heads the card.
+                        let failed = WithdrawalOutcomeView.isFailure(result)
+                        if !failed { WithdrawalOutcomeView(result: result) }
                         if shouldOfferRetry(result) {
-                            Button(copy.withdraw) { model.withdraw(record) }
+                            Button(WithdrawalCopy.tryAgain) { model.withdraw(record) }
                                 .buttonStyle(GlassButtonStyle(.glass))
                                 .frame(minHeight: 44)
                         }
+                        if failed { WithdrawalOutcomeView(result: result) }
                     } else if confirming {
                         WithdrawalConfirmationView(
                             status: currentStatus,
@@ -181,6 +185,13 @@ struct SessionWithdrawalAction: View {
 struct WithdrawalOutcomeView: View {
     let result: AppModel.WithdrawalResult
 
+    /// A failed withdrawal: the failed request's red line, drawn under the
+    /// retry it is about (Ron, 2026-10-09).
+    static func isFailure(_ result: AppModel.WithdrawalResult) -> Bool {
+        if case .failed = result { return true }
+        return false
+    }
+
     var body: some View {
         let (text, status): (String, GlassStatus) = {
             switch result {
@@ -192,8 +203,85 @@ struct WithdrawalOutcomeView: View {
                 return (WithdrawalCopy.failureSentence(label: label), .ask)
             }
         }()
-        GlassStatusLabel(text, status: status)
-            .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            // #1146 heads a completed withdrawal "Withdrawn by you".
+            if case .withdrawn = result {
+                Text(WithdrawalCopy.resultHeading)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+            }
+            if Self.isFailure(result) {
+                GlassAlert(text)
+            } else {
+                GlassStatusLabel(text, status: status)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+/// The withdrawal confirmation as #1146's `WithdrawalControl` raises it:
+/// a glass modal over the window titled "Confirm withdrawal" with its
+/// description, the consequences in the body, and Keep it / Confirm
+/// withdrawal in the footer, the confirm in the outside ink. Closing it
+/// while the withdrawal is in flight is ignored, so its outcome is seen.
+struct WithdrawalConfirmationModal: View {
+    let status: String
+    let keepLabel: String
+    let inFlight: Bool
+    let onKeep: () -> Void
+    let onConfirm: () -> Void
+
+    var body: some View {
+        let confirmation = WithdrawalCopy.confirmation(for: .init(status: status))
+        let keep = { if !inFlight { onKeep() } }
+        GlassModal(
+            title: confirmation?.question ?? WithdrawalCopy.disclosureUnavailable,
+            subtitle: confirmation?.description,
+            actions: Self.actions(confirmation, keepLabel: keepLabel, inFlight: inFlight, keep: keep, confirm: onConfirm),
+            onCancel: keep
+        ) {
+            GlassModalBody(spacing: GlassTokens.Space.s4) {
+                if let confirmation {
+                    if let ambiguity = confirmation.ambiguity {
+                        Text(ambiguity)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(Array(confirmation.bodies.enumerated()), id: \.offset) { index, body in
+                        GlassStatusLabel(body, status: index == confirmation.gravest ? .outside : .off)
+                            .fontWeight(index == confirmation.gravest ? .semibold : nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let credit = confirmation.credit {
+                        Text(credit)
+                            .glassType(GlassTokens.TypeScale.body)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if !WithdrawalCopy.disclosureUnavailable.isEmpty {
+                    // Not confirmable without the core's words: #1146's line
+                    // says why, and only the way back is offered.
+                    GlassStatusLabel(WithdrawalCopy.disclosureUnavailable, status: .outside)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// Keep it, then Confirm withdrawal (destructive, never on Return, and
+    /// disarmed while in flight); without the core's words, Keep it only.
+    static func actions(
+        _ confirmation: WithdrawalCopy.Confirmation?, keepLabel: String, inFlight: Bool,
+        keep: @escaping () -> Void, confirm: @escaping () -> Void
+    ) -> [GlassModalAction] {
+        var actions = [GlassModalAction(keepLabel, role: .cancel, isEnabled: !inFlight, action: keep)]
+        if let confirmation {
+            actions.append(.destructive(
+                inFlight ? confirmation.busyLabel : confirmation.confirmLabel, isEnabled: !inFlight, action: confirm))
+        }
+        return actions
     }
 }
 
@@ -208,7 +296,12 @@ struct WithdrawalConfirmationView: View {
         if let confirmation = WithdrawalCopy.confirmation(for: .init(status: status)) {
             confirmationBody(confirmation)
         } else {
-            // Not confirmable without the core's words; the way back stays.
+            // Not confirmable without the core's words; the way back stays,
+            // and #1146's line says why withdrawal is not offered.
+            if !WithdrawalCopy.disclosureUnavailable.isEmpty {
+                GlassStatusLabel(WithdrawalCopy.disclosureUnavailable, status: .outside)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Button(keepLabel, action: onKeep)
                 .buttonStyle(GlassButtonStyle(.glass))
                 .keyboardShortcut(.cancelAction)
@@ -219,11 +312,13 @@ struct WithdrawalConfirmationView: View {
     private func confirmationBody(_ confirmation: WithdrawalCopy.Confirmation) -> some View {
         GlassWell {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                if let question = confirmation.question {
-                    Text(question)
-                        .glassType(GlassTokens.TypeScale.bodyStrong)
-                        .foregroundStyle(GlassColor.textPrimary)
-                }
+                Text(confirmation.question)
+                    .glassType(GlassTokens.TypeScale.bodyStrong)
+                    .foregroundStyle(GlassColor.textPrimary)
+                Text(confirmation.description)
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let ambiguity = confirmation.ambiguity {
                     Text(ambiguity)
                         .glassType(GlassTokens.TypeScale.caption)
@@ -245,8 +340,10 @@ struct WithdrawalConfirmationView: View {
                         .buttonStyle(GlassButtonStyle(.glass))
                         .keyboardShortcut(.cancelAction)
                         .frame(minHeight: 44)
-                    Button(inFlight ? "Withdrawing..." : confirmation.confirmLabel, action: onConfirm)
-                        .buttonStyle(GlassButtonStyle(.primary))
+                    // #1146: a glass button in the outside ink, never the
+                    // accent fill: withdrawing cannot be taken back.
+                    Button(inFlight ? confirmation.busyLabel : confirmation.confirmLabel, action: onConfirm)
+                        .buttonStyle(GlassButtonStyle(.destructive))
                         .frame(minHeight: 44)
                         .disabled(inFlight)
                 }

@@ -90,6 +90,6 @@ struct InsightsDisclosure<Content: View>: View {
 /// The hairline between a screen's sections.
 struct InsightsRule: View {
     var body: some View {
-        Rectangle().fill(GlassColor.hairline).frame(height: 0.5).accessibilityHidden(true)
+        GlassHairline(GlassColor.hairline)
     }
 }

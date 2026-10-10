@@ -85,7 +85,7 @@ enum RulesScreenLayout {
         case refused
     }
 
-    /// The modes a folder's picker offers. Automatic needs an enrolment the
+    /// The modes a folder's picker offers. Automatic needs an enrollment the
     /// daemon holds (`FirstRunState.holdsEnrolment`), so a person without
     /// one -- watching only, a passkey not yet bound -- is not offered it; a folder the daemon already
     /// arms keeps it, so the picker can show what is in force, and picking
@@ -99,7 +99,7 @@ enum RulesScreenLayout {
     /// A pick on a folder's picker. The daemon's own mode clears the
     /// folder's answer, so it is not sent again. Automatic is a grant, so
     /// it is never silent: it waits for the arming confirmation, and a
-    /// person without an enrolment is refused it.
+    /// person without an enrollment is refused it.
     static func pick(_ state: inout FirstRunState, project: ProjectRow, wanted: ProjectMode) -> PickOutcome {
         let id = project.projectId
         if wanted == project.mode {
@@ -116,7 +116,7 @@ enum RulesScreenLayout {
     }
 
     /// The arming confirmation was accepted: the only writer of Automatic.
-    /// Refused for a person without an enrolment and for a folder the daemon will
+    /// Refused for a person without an enrollment and for a folder the daemon will
     /// not arm, whatever the view asked.
     static func confirmArming(_ state: inout FirstRunState, project: ProjectRow) -> Bool {
         guard FirstRunNavigation.canChooseAutomatic(state),
@@ -137,11 +137,19 @@ enum RulesScreenLayout {
         }
     }
 
-    /// The past-session card's note. Watching only has no enrolment, so the
+    /// A folder's older sessions beyond the newest the picker lists, in the
+    /// core's words; nil when there are none.
+    static func notListedNote(_ count: Int, copy: FirstRunCopy.Rules) -> String? {
+        count > 0 ? FirstRunCopy.fill(copy.notListed, ["count": String(count)]) : nil
+    }
+
+    /// The past-session card's note. Watching only has no enrollment, so the
     /// sessions picked here are queued on this Mac and none is sent; the
-    /// core's line says they wait there. Nil for every other account.
+    /// core's line says they wait there. Nil for every other account, and
+    /// for watching only while the daemon still holds an enrollment, when
+    /// Start sends nothing (`FirstRunPlan`) and nothing waits.
     static func pastSessionsNote(_ state: FirstRunState, copy: FirstRunCopy.Rules) -> String? {
-        state.account == .watchOnly ? copy.pastSessionsWatchOnly : nil
+        state.account == .watchOnly && !state.daemonHoldsEnrolment ? copy.pastSessionsWatchOnly : nil
     }
 
     static func groupState(_ state: FirstRunState, projectID: String, sessions: [PastSession]) -> GroupState {
@@ -275,6 +283,15 @@ enum RulesScreenLayout {
         copy.rules.retry
     }
 
+    /// What the screen draws: the folders once read; while a read runs,
+    /// the loading line, even when the last read failed, so a retry never
+    /// leaves the old failure and a live retry up beside it (Kristi's review
+    /// of #1261); the failure only once no read is running.
+    static func phase(projects: [ProjectRow]?, loadFailed: Bool, loading: Bool) -> RulesLoadPhase {
+        if let projects { return .loaded(projects) }
+        return loadFailed && !loading ? .failed : .loading
+    }
+
     /// Continue waits for the folders: never while they are loading or
     /// could not be read.
     static func canContinue(projects: [ProjectRow]?) -> Bool {
@@ -285,6 +302,13 @@ enum RulesScreenLayout {
     static func folder(_ project: ProjectRow) -> String {
         project.projectPath.isEmpty ? project.displayLabel : project.projectPath
     }
+}
+
+/// What Rules draws in place of its cards (`RulesScreenLayout.phase`).
+enum RulesLoadPhase: Equatable {
+    case loading
+    case failed
+    case loaded([ProjectRow])
 }
 
 /// Ron's Rules screen (#1030 `rules-screen.tsx`, Custom setup's W-5) in
@@ -303,6 +327,8 @@ struct RulesScreen: View {
     /// A read is in flight, so a second press of Retry does not start another.
     @State private var loading = false
     @State private var sessions: [String: [PastSession]] = [:]
+    /// Each folder's older sessions beyond the ones listed (`not_listed`).
+    @State private var notListed: [String: Int] = [:]
     /// Folders whose past sessions were refused: drawn as unavailable, not
     /// as an empty list beside card 1's count.
     @State private var refused: Set<String> = []
@@ -361,7 +387,8 @@ struct RulesScreen: View {
     }
 
     @ViewBuilder private var content: some View {
-        if let projects {
+        switch RulesScreenLayout.phase(projects: projects, loadFailed: loadFailed, loading: loading) {
+        case .loaded(let projects):
             if projects.isEmpty {
                 GlassCard(quiet: true) {
                     Text(copy.rules.empty)
@@ -373,7 +400,7 @@ struct RulesScreen: View {
                 rulesCard(projects)
                 pastSessionsCard(projects)
             }
-        } else if loadFailed {
+        case .failed:
             // No Back to retry through (Ron's review of #1235, item 9): the
             // core's retry reads the folders again.
             HStack(spacing: GlassTokens.Space.s4) {
@@ -386,7 +413,7 @@ struct RulesScreen: View {
                     .buttonStyle(GlassButtonStyle(.secondary))
                     .disabled(loading)
             }
-        } else {
+        case .loading:
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassSpinner()
                 Text(copy.rules.loading)
@@ -491,21 +518,21 @@ struct RulesScreen: View {
         let folder = RulesScreenLayout.folder(project)
         let rows = sessions[id] ?? []
         if RulesScreenLayout.rule(runner.state, for: project) == .ignore {
-            // Ron's dimmed Never row (`ftux-muted-row`): the list row's off
-            // opacity, over the secondary ink that still reads once faded.
+            // Ron's dimmed Never row (`ftux-muted-row`), dimmed by ink, not
+            // opacity: tertiary text still clears 4.5:1 in both appearances
+            // (owner ruling, 2026-10-07: the floors win everywhere).
             HStack(spacing: GlassTokens.Space.s4) {
                 GlassCheckMark(checked: false)
                 Text(folder)
                     .glassType(GlassTokens.TypeScale.mono)
-                    .foregroundStyle(GlassColor.textSecondary)
+                    .foregroundStyle(GlassColor.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
                 Text(FirstRunCopy.fill(copy.rules.neverCount, ["count": String(sessionCount(project) ?? rows.count)]))
                     .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+                    .foregroundStyle(GlassColor.textTertiary)
             }
-            .opacity(GlassTokens.Opacity.rowOff)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(FirstRunCopy.fill(copy.rules.neverLabel, ["folder": folder]))
         } else if refused.contains(id) {
@@ -539,6 +566,12 @@ struct RulesScreen: View {
                 if open.contains(id) {
                     sessionList(project, rows: rows)
                         .padding(.leading, GlassTokens.Space.s8)
+                    if let note = RulesScreenLayout.notListedNote(notListed[id] ?? 0, copy: copy.rules) {
+                        Text(note)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textTertiary)
+                            .padding(.leading, GlassTokens.Space.s8)
+                    }
                 }
             }
         }
@@ -636,6 +669,7 @@ struct RulesScreen: View {
                 continue
             }
             sessions[project.projectId] = RulesScreenLayout.offered(list.sessions, state: runner.state)
+            notListed[project.projectId] = list.notListed
         }
     }
 }

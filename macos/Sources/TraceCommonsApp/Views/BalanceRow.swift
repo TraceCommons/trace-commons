@@ -15,30 +15,19 @@ import TCShellCore
 /// balance is healthy. A low figure painted red would be this app inventing a
 /// limit nobody set, on an account whose ceiling may not exist at all.
 ///
-/// Drawn inside `CredentialSection` rather than beside it: the balance is
-/// what the key above is for, and a contributor who has just signed in should
-/// find it on the same card.
+/// The body of #1146's balance panel (`PrivateAIBalanceCard`), which draws
+/// the heading and the re-read link above it. It draws no button: the
+/// sign-in a balance needs is the credential card's own `obtain` -- the same
+/// ceremony, the same browser, the same key -- drawn there beside the
+/// provider chooser it uses (`BalanceSurface.actionToDraw`).
 struct BalanceRow: View {
     @EnvironmentObject private var model: AppModel
     let copy: PrivateInferenceCopy
-    /// What the sign-in row is already offering, so this row does not draw
-    /// the same button a second time. The decision is
-    /// `BalanceSurface.actionToDraw`'s.
-    let credentialAction: CredentialAction
-    /// The sign-in row's own handler. Reused rather than reimplemented: this
-    /// row's `obtain` IS that row's `obtain` -- the same ceremony, the same
-    /// browser, the same key -- and a second implementation would be a second
-    /// thing to keep in agreement.
-    let run: (CredentialAction) -> Void
 
     var body: some View {
         let status = model.balanceStatus
         let tone = BalanceSurface.tone(status, calls: model.balanceCalls)
-        let action = BalanceSurface.actionToDraw(
-            balance: BalanceSurface.action(status, calls: model.balanceCalls),
-            credential: credentialAction)
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-            GlassSectionRule(copy.balanceTitle)
             // A sentence OR the figures, never both: every state but the one
             // that was read has null figures behind it, and the sentence for
             // a null remaining amount is about an uncapped account, which is
@@ -58,7 +47,6 @@ struct BalanceRow: View {
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            actionButton(action)
         }
     }
 
@@ -103,20 +91,6 @@ struct BalanceRow: View {
             {
                 Text(observed).glassType(GlassTokens.TypeScale.caption).foregroundStyle(GlassColor.textSecondary)
             }
-        }
-    }
-
-    /// The one button this row may offer, or none.
-    ///
-    /// `.none` draws nothing rather than a disabled control, for
-    /// `CredentialSection.actionButton`'s reason. It is also what a duplicate
-    /// of the sign-in row's own button becomes.
-    @ViewBuilder
-    private func actionButton(_ action: CredentialAction) -> some View {
-        if let label = CredentialSurface.actionLabel(action, copy: copy) {
-            Button(label) { run(action) }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .disabled(model.credentialBusy)
         }
     }
 }

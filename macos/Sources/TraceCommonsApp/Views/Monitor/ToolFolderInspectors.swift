@@ -4,9 +4,12 @@ import TCDesign
 import TCShellCore
 
 /// Ron's Folder inspector (#1146, `waiting-page.tsx` `FolderInspector`):
-/// the folder's path, what is waiting and its size; its contribution rule
-/// with the mode picker; and, while sessions wait, Submit all, Submit all
-/// as (a modal with one outcome for every eligible session) and Ignore.
+/// the header, the shared/kept legend, then three sections, each an
+/// expander heading over bare content: the folder's path, what is waiting
+/// and its size; its contribution rule with the mode picker; and, while
+/// sessions wait, Ron's Decisions card (`waiting-project-folder.tsx`) with
+/// Submit all eligible, Submit all as (a modal with one outcome for every
+/// eligible session) and Ignore.
 ///
 /// There is no Tool inspector: the tree has no tool level (owner,
 /// 2026-10-05). Every mode change takes the tree's route
@@ -19,6 +22,9 @@ import TCShellCore
 struct FolderInspector: View {
     let store: TracesStore
     let folder: TracesTree.FolderNode
+    /// History as of its last good read, for the shared count; nil when
+    /// unread, and the count is then a dash.
+    var history: [DaemonData.HistoryRow]? = nil
 
     /// A mode change waiting on its confirmation.
     @State private var confirming: TracesTreeView.Confirmation?
@@ -27,20 +33,33 @@ struct FolderInspector: View {
 
     var body: some View {
         if let words = store.words {
-            VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-                header(words)
-                GlassEyebrowCard(words.inspector.project) {
-                    GlassKeyValueList(Self.rows(folder, words: words))
-                }
-                GlassEyebrowCard(words.inspector.contributionRule) {
-                    rule(words)
-                }
-                if !folder.sessions.isEmpty && folder.mode != .ignore {
-                    GlassEyebrowCard(words.inspector.decisions) {
-                        decisions(words)
+            // Scrolls as the Summary and a session do: disclosure lines, a
+            // refusal or a short window never push the pane past the window.
+            ScrollView {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
+                    InspectorHeader(tile: .folder, title: folder.label, sub: Self.headerSub(folder, words: words))
+                    // The legend says its words or is not drawn, as the Summary's.
+                    if let table = MonitorWords.table {
+                        HStack(spacing: GlassTokens.Space.s3) {
+                            GlassLegendCell(table.shared, value: Self.shared(folder, history: history), status: .shared)
+                            GlassLegendCell(table.kept, value: String(folder.sessions.count), status: .kept)
+                        }
+                    }
+                    InspectorSection(words.inspector.project) {
+                        GlassKeyValueList(Self.rows(folder, words: words))
+                    }
+                    InspectorSection(words.inspector.contributionRule) {
+                        VStack(alignment: .leading, spacing: GlassTokens.Space.s3) { rule(words) }
+                    }
+                    if !folder.sessions.isEmpty && folder.mode != .ignore {
+                        InspectorSection(words.inspector.decisions) {
+                            decisions(words)
+                        }
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .scrollIndicators(.never)
             .frame(maxWidth: .infinity, alignment: .leading)
             // Whole-window confirmations, as the tree's: the destructive
             // action right-most and never on Return; Escape cancels.
@@ -52,21 +71,6 @@ struct FolderInspector: View {
     }
 
     // MARK: Parts
-
-    private func header(_ words: MonitorTracesCopy) -> some View {
-        HStack(spacing: GlassTokens.Space.s4) {
-            GlassToolTile(.folder, large: true)
-            VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
-                Text(folder.label)
-                    .glassType(GlassTokens.TypeScale.title)
-                    .foregroundStyle(GlassColor.textPrimary)
-                    .lineLimit(2)
-                Text(Self.headerSub(folder, words: words))
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textTertiary)
-            }
-        }
-    }
 
     /// The rule: the three-way picker with the core's names, or the core's
     /// line for a folder it does not list. A Never folder shows Never here
@@ -84,46 +88,70 @@ struct FolderInspector: View {
             )
             .disabled(store.writing.contains(folder.id))
             ForEach(store.disclosureLines(folder.disclosure), id: \.self) { caption($0) }
-            if folder.isBucket { caption(ProjectCopy.unresolvedBucketNote) }
+            if folder.isBucket, let note = ProjectCopy.unresolvedBucketNote { caption(note) }
         } else {
             caption(words.inspector.noRule)
         }
     }
 
-    /// What is waiting, and what to do with all of it at once.
+    /// Ron's Decisions card (`waiting-project-folder.tsx`): the folder,
+    /// its path, what is waiting, what is eligible and what was withheld,
+    /// then Submit all eligible, Submit all as and Ignore, each on one line.
     @ViewBuilder
     private func decisions(_ words: MonitorTracesCopy) -> some View {
         let offer = store.groupOffer(folder)
         let busy = store.writing.contains(folder.id)
-        caption(FirstRunCopy.fill(words.counts.waitingCount, ["count": String(folder.sessions.count)]))
-        if let withheld = offer.withheldLine, !withheld.isEmpty {
-            caption(withheld)
-        }
-        if let refused = store.writeErrors[folder.id] {
-            GlassNotice(tone: .outside, title: words.line(for: refused)) { EmptyView() }
-        }
-        HStack(spacing: GlassTokens.Space.s4) {
-            if Self.offersSubmitAll(folder, store: store) {
-                Button(store.submittingFolder == folder.id
-                    ? words.tree.submitting : TracesTreeView.submitTitle(offer.count, words: words))
-                {
-                    Task { await store.contributeFolder(folder, verdict: nil) }
+        GlassCard(quiet: true) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s5) {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    Text(folder.label)
+                        .glassType(GlassTokens.TypeScale.bodyStrong)
+                        .foregroundStyle(GlassColor.textPrimary)
+                    if let path = folder.path, !path.isEmpty {
+                        caption(path)
+                    }
+                    caption(Self.waitingLine(folder.sessions.count, words: words))
+                    if let eligible = Self.eligibleLine(folder, offer: offer, words: words) {
+                        caption(eligible)
+                    }
                 }
-                .buttonStyle(GlassButtonStyle(.glass))
-                .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
-                if let outcome = store.disclosure?.outcome {
-                    Button(outcome.submitAllAs) { choosingVerdict = true }
+                // Ron's buttons wrap as his row does at this width: Submit
+                // all eligible on its own line, then Submit all as and
+                // Ignore, every label on one line. Ignore, the decline, is
+                // a link after the actions (Ron, 2026-10-09).
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+                    let submits = Self.offersSubmitAll(folder, store: store)
+                    if submits {
+                        Button(store.submittingFolder == folder.id
+                            ? words.tree.submitting : Self.submitAllTitle(offer.count, words: words))
+                        {
+                            Task { await store.contributeFolder(folder, verdict: nil) }
+                        }
                         .buttonStyle(GlassButtonStyle(.glass))
-                        .help(outcome.submitAllAsTooltip)
+                        .help(TracesTreeView.submitHelp(offer.withheldLine, words: words))
+                    }
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        if submits, let outcome = store.disclosure?.outcome {
+                            Button(outcome.submitAllAs) { choosingVerdict = true }
+                                .buttonStyle(GlassButtonStyle(.glass))
+                                .help(outcome.submitAllAsTooltip)
+                        }
+                        if let copy = ignoreCopy {
+                            Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
+                                .buttonStyle(GlassButtonStyle(.link))
+                                .help(copy.tooltip)
+                        }
+                    }
+                }
+                .lineLimit(1)
+                .disabled(busy)
+                // A refused write, under the buttons it is about.
+                if let refused = store.writeErrors[folder.id] {
+                    GlassAlert(words.line(for: refused))
                 }
             }
-            if let copy = ignoreCopy {
-                Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .help(copy.tooltip)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .disabled(busy)
     }
 
     /// Ron's `SubmitAllAsControl`: one outcome for every eligible session,
@@ -253,6 +281,45 @@ struct FolderInspector: View {
             : FirstRunCopy.fill(words.inspector.applyOutcome, ["count": String(count)])
     }
 
+    /// Ron's "Submit all eligible (n)", in the core's words.
+    static func submitAllTitle(_ count: Int, words: MonitorTracesCopy) -> String {
+        FirstRunCopy.fill(words.inspector.submitAllEligible, ["count": String(count)])
+    }
+
+    /// "n waiting sessions", the singular its own line.
+    static func waitingLine(_ count: Int, words: MonitorTracesCopy) -> String {
+        count == 1
+            ? words.inspector.waitingSessionsOne
+            : FirstRunCopy.fill(words.inspector.waitingSessions, ["count": String(count)])
+    }
+
+    /// "n eligible", then the core's withheld line after a middle dot, as
+    /// #1146 draws it under every folder that offers Submit all; nil when
+    /// nothing in the folder can be submitted.
+    static func eligibleLine(
+        _ folder: TracesTree.FolderNode, offer: GroupSubmitOffer, words: MonitorTracesCopy
+    ) -> String? {
+        guard folder.contributableCount != nil else {
+            // The daemon asked no eligibility question: the folder submits
+            // whole, and the line counts what Submit all eligible counts
+            // (#1146 draws "{n} eligible" beside it).
+            return offer.offersContribute ? FirstRunCopy.fill(words.tree.eligibleCount, ["count": String(offer.count)]) : nil
+        }
+        let eligible = FirstRunCopy.fill(words.tree.eligibleCount, ["count": String(offer.count)])
+        guard let withheld = offer.withheldLine, !withheld.isEmpty else { return eligible }
+        return "\(eligible) · \(withheld)"
+    }
+
+    /// The folder's shared count: the history records from this project
+    /// that still stand as contributed, as the Summary's statistics count
+    /// them. A dash when history is unread or capped: never a part count.
+    static func shared(_ folder: TracesTree.FolderNode, history: [DaemonData.HistoryRow]?) -> String {
+        guard let rows = SummaryFacts.wholeHistory(history) else { return "—" }
+        return String(rows.filter {
+            $0.projectId == folder.id && SummaryFacts.contributedStatuses.contains($0.status ?? "")
+        }.count)
+    }
+
     /// "Project · <tool>" for the tool most of its sessions came from, or
     /// the plain word when none is known.
     static func headerSub(_ folder: TracesTree.FolderNode, words: MonitorTracesCopy) -> String {
@@ -267,7 +334,7 @@ struct FolderInspector: View {
         let sizes = folder.sessions.map(\.sizeBytes)
         let size = sizes.contains(where: { $0 == nil })
             ? "—"
-            : ByteCountFormatter.string(fromByteCount: Int64(sizes.compactMap { $0 }.reduce(0, +)), countStyle: .file)
+            : ByteCountFormatter.string(fromByteCount: Int64(sizes.compactMap { $0 }.reduce(0, +)), countStyle: .memory)
         return [
             .init(words.inspector.path, folder.path.flatMap { $0.isEmpty ? nil : $0 } ?? "—", mono: true),
             .init(MonitorWords.waiting, String(folder.sessions.count)),

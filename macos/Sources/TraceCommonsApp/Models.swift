@@ -62,8 +62,13 @@ struct QueueEntry: Decodable, Identifiable, Hashable {
     /// than repeating `projectPath`, so a row renders this line only when
     /// it says something.
     let sessionPath: String?
-    let sizeBytes: Int
-    let discoveredAt: Date
+    /// The transcript's size and when the daemon found it. Every entry the
+    /// legacy queue decodes carries both (the decoder requires them); nil
+    /// only on a session carried over from the data contract
+    /// (`QueueEntryBridge.previewEntry`) whose daemon did not report it,
+    /// which is never drawn as zero bytes or as found at the epoch.
+    let sizeBytes: Int?
+    let discoveredAt: Date?
     let state: QueueState
     let reasonLabel: String?
     let attempts: Int
@@ -697,6 +702,9 @@ struct DaemonSettingsView: Decodable, Equatable {
     let geminiSourceMode: String?
     let clineSourceMode: String?
     var opencodeSourceMode: String? = nil
+    /// The declared folder of exported traces: `watch`, `off`, or `unset`,
+    /// never its path. Watched folders draws its own row from it.
+    var trajectorySourceMode: String? = nil
     /// The local-proxy declaration this daemon is holding, or nil for none.
     /// Nil means off, with no fallback: connecting to a loopback port
     /// because nobody said otherwise would probe a service the contributor
@@ -756,6 +764,7 @@ struct DaemonSettingsView: Decodable, Equatable {
         case geminiSourceMode = "gemini_source_mode"
         case clineSourceMode = "cline_source_mode"
         case opencodeSourceMode = "opencode_source_mode"
+        case trajectorySourceMode = "trajectory_source_mode"
         case ironwire
         case admissionEvidenceRequired = "admission_evidence_required"
         case tokenDistributionsContribution = "token_distributions_contribution"
@@ -837,6 +846,9 @@ enum DaemonEvent: Equatable {
         creditPending: Double,
         text: String
     )
+    /// One standalone re-engagement notification, in the daemon's words.
+    /// Delivered only because this app subscribes declaring it accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     case resyncRequired
     /// The ABI's synthetic frame for a delivery gap. Treated exactly like
     /// `resync_required`: refetch rather than reason about what was missed.
@@ -1014,6 +1026,8 @@ struct TokenStorageView: Decodable, Equatable {
     let scopeNote: String
     let cleanupLabel: String
     let discardLabel: String
+    /// The discard confirmation's title: the full name the short button drops.
+    let discardTitle: String?
     let discardConfirmation: String
     let cancelLabel: String
     let confirmLabel: String
@@ -1021,7 +1035,7 @@ struct TokenStorageView: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case captureEnabled = "capture_enabled", captureLabel = "capture_label", captureConfirmation = "capture_confirmation", captureNotice = "capture_notice"
         case stateLine = "state_line", scopeNote = "scope_note", cleanupLabel = "cleanup_label"
-        case discardLabel = "discard_label", discardConfirmation = "discard_confirmation"
+        case discardLabel = "discard_label", discardTitle = "discard_title", discardConfirmation = "discard_confirmation"
         case cancelLabel = "cancel_label", confirmLabel = "confirm_label", failureLine = "failure_line"
     }
 }

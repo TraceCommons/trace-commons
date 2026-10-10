@@ -1,122 +1,110 @@
+import Foundation
 import TCBridge
 import TCShellCore
 
-// The legacy Settings screen's words, at the path the wording ratchet
-// (`ShellWordingTests`) records them under.
-//
-// The screen itself is gone: every section now draws on glass from
-// `Views/Settings/`, and those files author no sentence. What the old
-// bodies wrote is held here, verbatim, until the core exports it -- a
-// sentence leaves this file only for the core, and the count shrinks then.
+// The legacy Settings screen's words. The screen itself is gone: every
+// section now draws on glass from `Views/Settings/`. What the old bodies
+// wrote is the core's now (`shell_words_copy::settings_words`, through
+// `ShellWords`, #1146 parity 2026-10-07). The notices' dismiss word below
+// is the core's too.
 
 /// Section headings the Settings list shows too, and the change log's
 /// sentences. Held once here so the list and the section say the same
 /// words. A namespace now; the view of this name was retired with the
 /// legacy screen.
 enum SettingsContent {
-    static let consentHeading = "How may your traces be used?"
+    static var consentHeading: String { ShellWords.table?.settings.consentHeading ?? "" }
     /// #1146's `sections.ts` word, from the core (owner ruling, 2026-10-06).
     static var auditHeading: String { MonitorWords.table?.shell.changesHeading ?? "" }
 
-    /// Fixed action labels to sentences. The wording is the Linux shell's
-    /// `audit_sentence`, verbatim, including its catch-all: an action this
-    /// build does not know still gets a row, because a change that happened
-    /// and is not listed is exactly what this log exists to prevent.
+    /// Fixed action labels to sentences, the core's. An action this build
+    /// does not know still gets a row, because a change that happened and
+    /// is not listed is exactly what this log exists to prevent.
     static func auditSentence(_ action: String, project: String?) -> String {
-        let sentence: String
-        switch action {
-        case "armed-auto-upload": sentence = "Automatic contributing turned on for"
-        case "disarmed-auto-upload": sentence = "Automatic contributing turned off for"
-        case "queue-bulk-approved": sentence = "The whole queue was approved"
-        case "consent-scopes-changed": sentence = "Permissions changed"
-        case "near-ai-notice-acknowledged": sentence = "The extra privacy scan was confirmed"
-        default: sentence = "Changed"
-        }
+        guard let words = ShellWords.table?.settings else { return "" }
+        let sentence = words.auditActions[action] ?? words.auditChanged
         guard let project, !project.isEmpty else { return sentence }
-        return "\(sentence) \(project)"
+        return sentence + " " + project
     }
 }
 
 // MARK: - Words the glass sections read
 
-/// Every sentence this file authors, in one place, so the glass sections
-/// can read them without authoring any of their own. The ratchet
-/// (`ShellWordingTests`) keys on this file's path: these sentences stay here
-/// until the core exports them, and then this table shrinks.
+/// Every sentence the glass Settings sections read that has no other core
+/// table, from the core's `settings_words`.
 enum SettingsLegacyWords {
-    static let connected = "Connected"
-    static let notConnected = "Not connected"
-    static let queuedNothingSent = "Sessions are being queued, but nothing can be sent."
-    static let extraScanConfigured = "Extra privacy scan configured"
-    static func sessionFinishedAfter(_ secs: Int) -> String {
-        "A session counts as finished after \(secs) seconds of quiet."
+    private static var words: ShellWordsCopy.Settings? { ShellWords.table?.settings }
+    private static func fill(_ template: String?, _ values: [String: String]) -> String {
+        ShellWords.fill(template ?? "", values)
     }
+
+    static var connected: String { words?.connected ?? "" }
+    static var notConnected: String { words?.notConnected ?? "" }
+    static var queuedNothingSent: String { words?.queuedNothingSent ?? "" }
+    static var extraScanConfigured: String { words?.extraScanConfigured ?? "" }
+    static func sessionFinishedAfter(_ secs: Int) -> String {
+        fill(words?.sessionFinishedAfter, ["seconds": String(secs)])
+    }
+    /// The core's singular at one hour, so it never reads "every 1 hours".
     static func atMostOneNotification(_ hours: Int) -> String {
-        "At most one notification every \(hours) hours, and none when nothing is waiting."
+        fill(hours == 1 ? words?.atMostOneNotificationOne : words?.atMostOneNotification,
+             ["hours": String(hours)])
     }
     static func undecidedDropped(_ days: Int) -> String {
-        "Undecided sessions are dropped after \(days) days. Dropped means never sent."
+        fill(words?.undecidedDropped, ["days": String(days)])
     }
     static func stateLabel(_ title: String, _ value: Bool) -> String {
-        "\(title): \(value ? "yes" : "no")"
+        fill(value ? words?.stateYes : words?.stateNo, ["title": title])
     }
     static var startAtLogin: String { MonitorWords.table?.shell.startAtLogin ?? "" }
-    static let waitingOnApproval = "Waiting on approval in System Settings."
-    static let turnOnInSystemSettings = """
-        Turn it on in System Settings -> General -> Login Items to let \
-        Trace Commons start automatically.
-        """
-    static func couldNotTurnOn(_ message: String) -> String { "Couldn't turn this on: \(message)" }
-    static func couldNotTurnOff(_ message: String) -> String { "Couldn't turn this off: \(message)" }
-    static let version = "Version"
-    static let checkNow = "Check Now"
-    static let copy = "Copy"
-    static let checksDaily = "Checks daily"
-    static let checksAutomatically = """
-        Trace Commons checks for updates automatically and asks before installing.
-        """
-    static let managedByHomebrew = "Updates managed by Homebrew"
-    static let homebrewReplaces = """
-        Homebrew installed this copy, so Homebrew replaces it. Run \
-        this in a terminal:
-        """
-    static let updatesUnavailable = "Updates unavailable"
-    static let notCheckedYet = "Not checked yet on this machine."
-    static func lastChecked(_ relative: String) -> String { "Last checked \(relative)." }
-    static let noFeed = """
-        This build has no update feed configured, so it will not look \
-        for new versions. Development builds are like this. Install \
-        from a release DMG to receive updates.
-        """
-    static let insecureFeed = """
-        This build's update feed is not HTTPS, so it has been refused. \
-        Reinstall from a release DMG.
-        """
-    static let updatesOff = "Updates are turned off for this build."
-    static let notificationsRenderedHere = "Notifications rendered by this app"
-    static let pausedNothingSent = "Paused. Nothing is being queued or sent."
-    static let consentHeading = SettingsContent.consentHeading
-    static let appliesFromNow = "Applies to traces you send from now on."
-    static let alwaysIncluded = "Always included"
-    static let optionalEachOne = "Optional — each one lets your traces do more"
-    static let credit = "Credit"
-    static let alwaysOn = "always on"
-    static let nothingPreselected = "Nothing here is pre-selected on your behalf."
-    static let publishedLines = [
-        "Your handle — real handles only, no pseudonyms.",
-        "Aggregate counts: accepted, novelty credit, accept rate.",
-        "The date you went public.",
-        "Your bio, if you write one."
-    ]
-    static let neverLines = [
-        "Your traces or anything in them.",
-        "Per-trace data of any kind.",
-        "Anything about sessions you didn't send."
-    ]
-    static let doNotTrustProfileWording = "Do not trust the public-profile wording on this screen."
-    static let auditHeading = SettingsContent.auditHeading
+    /// #1146's two-level card heads and the watcher card, from the core's
+    /// monitor shell table.
+    static var refresh: String { MonitorWords.table?.shell.settingsRefresh ?? "" }
+    static var consentEyebrow: String { MonitorWords.table?.shell.consentEyebrow ?? "" }
+    static var desktopEyebrow: String { MonitorWords.table?.shell.desktopEyebrow ?? "" }
+    static var desktopTitle: String { MonitorWords.table?.shell.desktopTitle ?? "" }
+    static var discoveryEyebrow: String { MonitorWords.table?.shell.discoveryEyebrow ?? "" }
+    static var discoveryTitle: String { MonitorWords.table?.shell.discoveryTitle ?? "" }
+    static var watcherEyebrow: String { MonitorWords.table?.shell.watcherEyebrow ?? "" }
+    static var watcherTitle: String { MonitorWords.table?.shell.watcherTitle ?? "" }
+    static var watcherWatching: String { MonitorWords.table?.shell.watcherWatching ?? "" }
+    static var watcherPaused: String { MonitorWords.table?.shell.watcherPaused ?? "" }
+    static var watcherCaption: String { MonitorWords.table?.shell.watcherCaption ?? "" }
+    static var connectionReady: String { MonitorWords.table?.shell.connectionReady ?? "" }
+    static var connectionLocalOnly: String { MonitorWords.table?.shell.connectionLocalOnly ?? "" }
+    static var pauseWatcher: String { MonitorWords.table?.shell.pauseWatcher ?? "" }
+    static var resumeWatcher: String { MonitorWords.table?.shell.resumeWatcher ?? "" }
+    static var waitingOnApproval: String { words?.waitingOnApproval ?? "" }
+    static var turnOnInSystemSettings: String { words?.turnOnInSystemSettings ?? "" }
+    static func couldNotTurnOn(_ message: String) -> String { fill(words?.couldNotTurnOn, ["message": message]) }
+    static func couldNotTurnOff(_ message: String) -> String { fill(words?.couldNotTurnOff, ["message": message]) }
+    static var version: String { words?.version ?? "" }
+    static var checkNow: String { words?.checkNow ?? "" }
+    static var copy: String { words?.copy ?? "" }
+    static var checksDaily: String { words?.checksDaily ?? "" }
+    static var checksAutomatically: String { words?.checksAutomatically ?? "" }
+    static var managedByHomebrew: String { words?.managedByHomebrew ?? "" }
+    static var homebrewReplaces: String { words?.homebrewReplaces ?? "" }
+    static var updatesUnavailable: String { words?.updatesUnavailable ?? "" }
+    static var notCheckedYet: String { words?.notCheckedYet ?? "" }
+    static func lastChecked(_ relative: String) -> String { fill(words?.lastChecked, ["relative": relative]) }
+    static var noFeed: String { words?.noFeed ?? "" }
+    static var insecureFeed: String { words?.insecureFeed ?? "" }
+    static var updatesOff: String { words?.updatesOff ?? "" }
+    static var notificationsRenderedHere: String { words?.notificationsRenderedHere ?? "" }
+    static var pausedNothingSent: String { words?.pausedNothingSent ?? "" }
+    static var consentHeading: String { SettingsContent.consentHeading }
+    static var appliesFromNow: String { words?.appliesFromNow ?? "" }
+    static var alwaysIncluded: String { words?.alwaysIncluded ?? "" }
+    /// #1146's group name ("Optional data use").
+    static var optionalEachOne: String { words?.optionalDataUse ?? "" }
+    static var credit: String { words?.credit ?? "" }
+    /// The always-on scope's tag (#1146's "required").
+    static var alwaysOn: String { words?.required ?? "" }
+    static var nothingPreselected: String { words?.nothingPreselected ?? "" }
+    static var auditHeading: String { SettingsContent.auditHeading }
     static var noProjectsYet: String { MonitorWords.table?.shell.projectsEmpty ?? "" }
-    static let nothingChanged = "Nothing has been changed."
+    static var nothingChanged: String { words?.nothingChanged ?? "" }
     static func auditSentence(_ action: String, project: String?) -> String {
         SettingsContent.auditSentence(action, project: project)
     }
@@ -124,17 +112,25 @@ enum SettingsLegacyWords {
 
 // MARK: - The notices' dismiss word
 
-/// What every glass notice that can be put away names its dismiss control.
-/// Moved verbatim from the retired legacy banner (R15), with its counted
-/// sentence: the core's word first, this file's when the core's copy does
-/// not decode, so no notice is ever left undismissable.
+/// What every glass notice that can be put away names its dismiss control:
+/// the core's plain Dismiss (`MonitorTracesCopy.dismiss_action`), never
+/// `dismiss` ("Not this one"), which declines a session for good.
 enum ActionNoticeWords {
-    /// The dismiss control's name, reachable so a glass notice that cannot
-    /// reach the core's word still names its control.
-    static let dismissWord = "Dismiss this message"
-
     /// The core's word for dismissing a notice, for every glass notice that
     /// can be put away; nil when the core's copy does not decode, and the
     /// caller falls back to `dismissWord`.
-    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss
+    static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction
+
+    /// The dismiss control's name when the whole table does not decode: the
+    /// same core word, read from its one key, so a glass notice still names
+    /// its control and no word is written in this shell.
+    static let dismissWord: String = coreDismissWord ?? dismissActionKey() ?? ""
+
+    /// `dismiss_action` alone, from the core's table as JSON.
+    private static func dismissActionKey() -> String? {
+        guard let json = TCCoreCopy.monitorTracesCopyJSON(),
+              let object = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]
+        else { return nil }
+        return object["dismiss_action"] as? String
+    }
 }

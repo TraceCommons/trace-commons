@@ -2170,8 +2170,11 @@ pub(super) async fn mains_database_at(url: &str) -> Arc<dyn Database> {
 }
 
 /// One tenant with two contributor tokens (an owner and another account), an
-/// `AppState` whose account side runs on the migration owner, and a pipeline
-/// service on the runtime role, injected into the state.
+/// `AppState` whose database is the suite's runtime login (`mains_database`:
+/// `NOBYPASSRLS`, the pilot ingest login's groups only), and a pipeline
+/// service on the runtime role, injected into the state. `owner` is the
+/// migration owner's backend, for fixture writes and reads that are not the
+/// ingest runtime's.
 struct WithdrawalFixture {
     state: Arc<AppState>,
     service: Arc<PipelineService>,
@@ -2646,9 +2649,9 @@ async fn pipeline_withdrawal_route_withdraws_through_the_account_session() {
     );
 }
 
-/// Enrols `near_account_id` as the designated NEAR payout account of the
+/// Enrolls `near_account_id` as the designated NEAR payout account of the
 /// account `principal` is linked to, through an owner connection (a fixture
-/// write, as `main`'s NEAR enrolment makes).
+/// write, as `main`'s NEAR enrollment makes).
 async fn designate_near_account(
     owner: &Arc<PgBackend>,
     tenant: &str,
@@ -2703,7 +2706,7 @@ async fn a_withdrawal_after_settle_keeps_and_pays_the_settled_trace_credit() {
     let principal = static_token_principal_ref(&fixture.token);
     let session = account_session_headers(state, &fixture.token).await;
     // The session links the principal to an account; the account's payout
-    // goes to its NEAR account (item 4), so it enrols one.
+    // goes to its NEAR account (item 4), so it enrolls one.
     designate_near_account(&fixture.owner, tenant, &principal, "contributor.testnet").await;
     let run = completed_pipeline_run(&fixture.service, tenant, &principal).await;
 
@@ -2981,6 +2984,176 @@ async fn the_worker_drain_removes_a_withdrawn_revision_from_the_index() {
             .await
             .1,
         "complete"
+    );
+}
+
+/// poldsam P-2 through the worker: a revocation whose pipeline follow-up
+/// was lost (`main` marked the submission revoked and stopped before the
+/// follow-up's own transaction) is recovered by the worker's tenant drain,
+/// which queues and processes the invalidation in one pass, so the revoked
+/// revision's entries leave the index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_recovers_a_revocation_whose_follow_up_was_lost() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let index = IsolatedPipelineIndex::new();
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        index.clone(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_lost_follow_up_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-lost-follow-up-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-lost-follow-up-{suffix}"));
+    let tenant_ref = trace_commons_server::versioned_pipeline::pipeline_tenant_storage_ref(&tenant);
+    let run = completed_pipeline_run(&service, &tenant, &principal).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &run.submission_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id)
+            .await
+            .1,
+        "none",
+        "the lost follow-up queued nothing"
+    );
+
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    pipeline_runtime::drain_pipeline_tenant(
+        state,
+        service.clone(),
+        tenant.clone(),
+        Arc::new(std::sync::Mutex::new(
+            pipeline_runtime::PipelineFollowUpCadence::default(),
+        )),
+    )
+    .await;
+
+    assert_eq!(
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
+        0,
+        "no entry of the revoked revision stays in the index"
+    );
+    assert_eq!(
+        queued_index_invalidation(&runtime, &tenant, run.run_id)
+            .await
+            .1,
+        "complete"
+    );
+}
+
+/// Multi-lens review C10: the worker's bounded release of parked runs runs
+/// again on the next pass when it used its whole limit, as the other bounded
+/// steps do. With one parked run more than the limit
+/// (`PIPELINE_WORKER_MAX_PARKED_RELEASES_PER_TENANT`, 32), two passes with no
+/// wait between them release every run of the revoked submissions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_drain_releases_parked_runs_past_its_bound_on_the_next_pass() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_parked_release_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-parked-release-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-parked-release-{suffix}"));
+    for _ in 0..33 {
+        let run = quarantined_pipeline_run(&service, &tenant, &principal).await;
+        let parked = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Review parks the run");
+        assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    }
+    let parked_runs = || async {
+        let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let parked: i64 = tx
+            .query_one(
+                "SELECT COUNT(*) FROM pipeline_runs
+                  WHERE tenant_id = $1 AND state = 'awaiting_review'",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        parked
+    };
+    let mut client = runtime.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+          WHERE tenant_id = $1",
+        &[&tenant],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(parked_runs().await, 33);
+
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let cadence = Arc::new(std::sync::Mutex::new(
+        pipeline_runtime::PipelineFollowUpCadence::default(),
+    ));
+    pipeline_runtime::drain_pipeline_tenant(
+        state.clone(),
+        service.clone(),
+        tenant.clone(),
+        cadence.clone(),
+    )
+    .await;
+    assert_eq!(parked_runs().await, 1, "one pass releases its limit");
+    pipeline_runtime::drain_pipeline_tenant(state, service.clone(), tenant.clone(), cadence).await;
+    assert_eq!(
+        parked_runs().await,
+        0,
+        "the next pass takes the rest with no wait"
     );
 }
 
@@ -4949,7 +5122,13 @@ async fn pipeline_status_route_reports_the_pipeline_block_to_the_owner() {
     );
     let document: TraceSubmissionStatusUpdate =
         serde_json::from_value(document.clone()).expect("the protocol type reads the document");
-    assert_eq!(document.pipeline.unwrap().instruments[0].atomic_units, "5");
+    assert_eq!(
+        document.pipeline.unwrap().instruments[0]
+            .atomic_units
+            .readable()
+            .map(DecimalAtomicUnits::as_str),
+        Some("5")
+    );
 
     let (status, other) = status_for(state.clone(), fixture.base.other_token.clone()).await;
     assert_eq!(status, StatusCode::OK);
@@ -5118,6 +5297,248 @@ async fn quarantined_pipeline_run(
     assert_eq!(created.admission_decision, "quarantine");
     assert_eq!(created.state, PipelineRunState::Pending);
     created
+}
+
+/// Zaki review 3, Z3-L8 (ruling RB-32): with `main`'s database reviewer
+/// reads, which reach a quarantined pipeline submission, `main`'s legacy
+/// review queue, active-learning queue, next-lease claim, routing summary
+/// and batch re-scrub leave it out, and its decision and lease routes refuse
+/// it with `409 pipeline_run_owns_submission`: the pipeline reviews it
+/// through its own routes (`/v1/review/pipeline/...`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_legacy_review_routes_leave_pipeline_submissions_out() {
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_test_pipeline_service(
+                runtime,
+                artifacts,
+                IsolatedPipelineIndex::new(),
+                vec![RecordingSettlementAdapter::new(
+                    InstrumentId::new("storage_rebate").unwrap(),
+                    "recording_storage_rebate_legacy_review_test_only",
+                    "none",
+                ) as Arc<dyn SettlementAdapter>],
+                None,
+            )
+        },
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-legacy-review-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    {
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+    let state = fixture.state.clone();
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let submission = serde_json::json!(run.submission_id);
+
+    let (status, queue) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    assert!(
+        queue
+            .as_array()
+            .expect("the queue")
+            .iter()
+            .all(|item| item["submission_id"] != submission),
+        "{queue}"
+    );
+    let (status, active) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/active-learning",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{active}");
+    assert!(
+        !active.to_string().contains(&run.submission_id.to_string()),
+        "{active}"
+    );
+
+    let (status, claimed) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/review/leases/claim-next",
+        auth_headers(&reviewer),
+        Some(serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{claimed}");
+
+    // Multi-lens review C19: the routing summary and the batch re-scrub read
+    // the same view, so neither counts nor takes the pipeline's run.
+    let (status, summary) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/routing-summary",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["queue_count"], 0, "{summary}");
+    let (status, rescrub) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/review/quarantine/rescrub",
+        auth_headers(&reviewer),
+        Some(serde_json::json!({"dry_run": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rescrub}");
+    assert_eq!(rescrub["scanned"], 0, "{rescrub}");
+
+    for (path, body) in [
+        (
+            format!("/v1/review/{}/decision", run.submission_id),
+            serde_json::json!({"decision": "approve", "reason": "legacy route"}),
+        ),
+        (
+            format!("/v1/review/{}/lease", run.submission_id),
+            serde_json::json!({}),
+        ),
+    ] {
+        let (status, refused) = route_request(
+            state.clone(),
+            "POST",
+            &path,
+            auth_headers(&reviewer),
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{path}: {refused}");
+        assert_eq!(refused["error"], "pipeline_run_owns_submission", "{path}");
+    }
+}
+
+/// An embedder whose descriptor no test runtime registers.
+struct UnregisteredEmbedder;
+
+impl trace_commons_gate_api::Embedder for UnregisteredEmbedder {
+    fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+        trace_commons_gate_api::Embedder::embed(&ReferenceEmbedder::new(), plaintext)
+    }
+}
+
+impl trace_commons_gate_api::IdentifiedEmbedder for UnregisteredEmbedder {
+    fn dependency_identity(&self) -> &str {
+        "unregistered_embedder_test_only"
+    }
+
+    fn model_id(&self) -> &str {
+        "unregistered-embedder-v1"
+    }
+
+    fn content_descriptor(&self) -> Vec<u8> {
+        b"unregistered-embedder-test-only.v1".to_vec()
+    }
+}
+
+/// Zaki's approval, follow-up ZA-1: boot is refused when a routed or
+/// drained tenant's bundle is not the default package and today's runtime
+/// cannot run it (`validate_pipeline_tenant_bundles`, which ingest runs
+/// before it serves): here an earlier runtime bound the tenant to a package
+/// over an embedder today's runtime does not hold. A drained tenant on
+/// today's default bundle boots.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn boot_refuses_a_tenant_bundle_the_runtime_cannot_run() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let service = assemble_test_pipeline_service(
+        runtime.clone(),
+        local_artifacts(&dir),
+        IsolatedPipelineIndex::new(),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::new("storage_rebate").unwrap(),
+            "recording_storage_rebate_boot_test_only",
+            "none",
+        ) as Arc<dyn SettlementAdapter>],
+        None,
+    );
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-boot-unrunnable-{suffix}");
+    let earlier = MinimalPolicyBundle::minimal_package(
+        &PipelineBundleConfig {
+            instrument_awards: vec![PipelineInstrumentAwardConfig {
+                instrument_id: "storage_rebate".into(),
+                atomic_units: AtomicUnits::from_raw(5),
+                descriptor: storage_rebate_descriptor(),
+            }],
+            include_index: true,
+            variant: None,
+        },
+        &ReferencePerplexityScorer::new(),
+        &UnregisteredEmbedder,
+    )
+    .expect("build the earlier package");
+    let store = PgPipelineStore::new(runtime.clone());
+    store.register_bundle(&tenant, &earlier).await.unwrap();
+    store
+        .activate_bundle_if_none(&tenant, &earlier.bundle_id)
+        .await
+        .unwrap();
+
+    for (routed, drained) in [
+        (
+            TraceTenantRolloutGates::default(),
+            BTreeSet::from([tenant.clone()]),
+        ),
+        (
+            TraceTenantRolloutGates::for_feature(
+                TraceTenantRolloutFeature::PipelineReceipts,
+                &[tenant.as_str()],
+            ),
+            BTreeSet::new(),
+        ),
+    ] {
+        let error = pipeline_runtime::validate_pipeline_tenant_bundles(
+            &service,
+            &routed,
+            &drained,
+            &TEST_MAIN_GATE,
+            true,
+        )
+        .await
+        .expect_err("boot is refused");
+        assert_eq!(
+            error.to_string(),
+            "pipeline_tenant_bundle_dependency_missing"
+        );
+    }
+
+    let current = format!("tenant-boot-current-{suffix}");
+    service.register_default_bundle(&current).await.unwrap();
+    pipeline_runtime::validate_pipeline_tenant_bundles(
+        &service,
+        &TraceTenantRolloutGates::default(),
+        &BTreeSet::from([current]),
+        &TEST_MAIN_GATE,
+        true,
+    )
+    .await
+    .expect("a tenant on today's default bundle boots");
 }
 
 /// The review routes through the router, against a real runtime:
@@ -5291,6 +5712,83 @@ async fn pipeline_review_routes_append_hash_only_audit_rows() {
     );
 }
 
+/// poldsam P-7: the review routes append their audit rows after the claim
+/// or the assessment commits. With the audit log unwritable, each route
+/// still answers the committed result -- the claim's lease token, the
+/// assessment's id -- instead of 500: a retried assessment would get 409 and
+/// the reviewer would never see the decision. No audit row is written; the
+/// failure is logged hash-only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_review_audit_append_answers_the_committed_result() {
+    let Some(mut fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let reviewer = format!("token-review-audit-fail-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    let principal = "principal_sha256:review-audit-fail";
+    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+
+    // A directory where the tenant's audit log file belongs: every append
+    // fails.
+    let audit_log = audit_events_path(&fixture.state.root, &fixture.tenant);
+    if audit_log.is_file() {
+        std::fs::remove_file(&audit_log).unwrap();
+    }
+    std::fs::create_dir_all(&audit_log).unwrap();
+
+    let (status, claim) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/claim", run.run_id),
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claim}");
+    assert!(claim["lease_token"].is_string(), "{claim}");
+    let (status, assessed) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/review/pipeline/runs/{}/assessment", run.run_id),
+        auth_headers(&reviewer),
+        Some(serde_json::json!({
+            "lease_token": claim["lease_token"],
+            "recommendation": "reject",
+            "reason": "privacy_review_required",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{assessed}");
+    assert!(assessed["assessment_id"].is_string(), "{assessed}");
+
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &fixture.tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT (SELECT COUNT(*) FROM pipeline_review_assessments a
+                      WHERE a.tenant_id = $1 AND a.run_id = $2
+                        AND a.assessment_id::text = $4),
+                    (SELECT COUNT(*) FROM trace_audit_events e
+                      WHERE e.tenant_id = $1 AND e.submission_id = $3)",
+            &[
+                &fixture.tenant,
+                &run.run_id,
+                &run.submission_id,
+                &assessed["assessment_id"].as_str().unwrap(),
+            ],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        (row.get::<_, i64>(0), row.get::<_, i64>(1)),
+        (1, 0),
+        "the answered assessment is the committed one, and no audit row was written"
+    );
+}
+
 /// Zaki review 1, minor item M-f: `main`'s gate evaluate route
 /// (`POST /v1/workers/gate/evaluate`) refuses a submission that has a
 /// pipeline run with a label-only `409`, before it scores anything, so the
@@ -5310,7 +5808,13 @@ async fn mains_gate_evaluate_route_refuses_a_submission_with_a_pipeline_run() {
         &vector_token,
         TokenRole::VectorWorker,
     );
-    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    {
+        // The route reads the pipeline's rows through the database store,
+        // which ingest holds with every database, with or without a runtime.
+        let state = Arc::make_mut(&mut fixture.state);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
     let principal = static_token_principal_ref(&fixture.token);
     let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
 
@@ -5353,6 +5857,60 @@ async fn mains_gate_evaluate_route_refuses_a_submission_with_a_pipeline_run() {
         body["error"], "pipeline_run_owns_submission",
         "a submission with no run is not refused by this check ({status})"
     );
+}
+
+/// Multi-lens review C20: the gate evaluate route refuses a pipeline
+/// submission through the database (`AppState::pipeline_store`), as the
+/// other `main` routes do, so a process with no pipeline runtime injected
+/// (the repository binary, a rollback) refuses it too and writes no gate
+/// decision and no second `NoveltyUtility` credit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_gate_evaluate_route_refuses_a_pipeline_submission_with_no_runtime_injected() {
+    let Some(fixture) = withdrawal_fixture().await else {
+        return;
+    };
+    let vector_token = format!("token-vector-{}", Uuid::new_v4().simple());
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(
+        &mut tokens,
+        &fixture.tenant,
+        &vector_token,
+        TokenRole::VectorWorker,
+    );
+    let principal = static_token_principal_ref(&fixture.token);
+    let run = completed_pipeline_run(&fixture.service, &fixture.tenant, &principal).await;
+    let mut runtime_less = fixture.state.clone();
+    {
+        let state = Arc::make_mut(&mut runtime_less);
+        state.tokens = Arc::new(tokens);
+        state.pipeline_service = None;
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(fixture.runtime.clone())));
+    }
+
+    let (status, body) = route_request(
+        runtime_less,
+        "POST",
+        "/v1/workers/gate/evaluate",
+        auth_headers(&vector_token),
+        Some(serde_json::json!({"submission_id": run.submission_id})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "pipeline_run_owns_submission");
+    let decisions: i64 = fixture
+        .owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM trace_gate_decisions WHERE submission_id = $1",
+            &[&run.submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(decisions, 0, "nothing was scored");
 }
 
 // ---------------------------------------------------------------------------
@@ -7938,27 +8496,6 @@ async fn a_withdrawal_completion_runs_the_pipeline_follow_up_and_stops_listing_t
     }
 }
 
-/// The pipeline HTTP harness's own setup and nothing else: the
-/// `<database>_pilot` database created and migrated the way the pilot's was,
-/// the runtime login provisioned, and the owner and runtime connections
-/// opened, as every test here opens them. CI runs it alone against a
-/// database of its own, and the transactions it commits there are the
-/// baseline its no-activity guard holds each real pipeline HTTP step above:
-/// the harness setup by itself commits more than a fixed floor would allow
-/// for, so only commits beyond the baseline show that a step ran its test
-/// (Zaki review 1, round 2, finding 22).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_pipeline_http_harness_sets_up_its_database() {
-    let Some(runtime) = runtime_backend(1).await else {
-        return;
-    };
-    account_owner_backend()
-        .await
-        .expect("the same variable runtime_backend read is set");
-    let _ = mains_database().await;
-    drop(runtime);
-}
-
 // ---------------------------------------------------------------------------
 // `main`'s side paths and submissions with a pipeline run (Zaki review 1,
 // round 2, finding 18).
@@ -8732,10 +9269,532 @@ async fn a_pipeline_credit_event_carries_its_witness_label_and_mains_audit_event
             32
         )
         .await
-        .unwrap(),
+        .unwrap()
+        .audited,
         0
     );
     assert_eq!(audit_rows().await.len(), 1, "a second pass appends nothing");
+}
+
+/// Zaki review 3, Z3-L6: the worker's `CreditMutate` append is idempotent.
+/// A crash after the event reached the file audit log and before the leg was
+/// marked audited makes the next pass find the leg again; the event's id is
+/// the credit event's, so that pass skips an event the file log already
+/// holds instead of appending it twice. Here ingest has no database audit
+/// mirror, so the file log is the only record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_event_already_in_the_file_log_is_not_appended_again() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-once-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let principal = static_token_principal_ref(&format!("token-compat-audit-once-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+        .unwrap()
+        .audited
+    };
+    assert_eq!(append().await, 1);
+    // The crash: the event is in the file log, and the leg is not marked.
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET credit_audited_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    assert_eq!(append().await, 1, "the next pass finds the leg again");
+    let credit_mutations = read_audit_events_in_file_order(dir.path(), &tenant)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "credit_mutate")
+        .count();
+    assert_eq!(
+        credit_mutations, 1,
+        "one CreditMutate event in the file log"
+    );
+}
+
+/// Whether `run_id`'s Trace Credit leg is marked audited.
+async fn credit_leg_is_audited(owner: &PgBackend, tenant: &str, run_id: Uuid) -> bool {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let audited = tx
+        .query_one(
+            "SELECT credit_audited_at IS NOT NULL FROM pipeline_run_settlements
+              WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+            &[&tenant, &run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    audited
+}
+
+/// How many `CreditMutate` rows the database audit log holds for
+/// `submission_id`.
+async fn credit_mutate_audit_rows(owner: &PgBackend, tenant: &str, submission_id: Uuid) -> i64 {
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let rows = tx
+        .query_one(
+            "SELECT COUNT(*) FROM trace_audit_events
+              WHERE tenant_id = $1 AND submission_id = $2 AND action = 'credit_mutate'",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    rows
+}
+
+/// How many `CreditMutate` lines the tenant's file audit log holds. It
+/// counts lines, so it also reads a log with a line that does not parse.
+fn credit_mutate_file_lines(root: &Path, tenant: &str) -> usize {
+    std::fs::read_to_string(audit_events_path(root, tenant))
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"credit_mutate\""))
+        .count()
+}
+
+/// Multi-lens review C9 (a): with a required database mirror the audit row
+/// is written before the file line, so an event with no database row has no
+/// file line and the worker does not read the tenant's file log for it. A
+/// middle line that does not parse (`main`'s own append parses the last line
+/// only) therefore does not stop the tenant's `CreditMutate` event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_append_with_a_required_mirror_does_not_read_the_file_log() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-required-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).require_db_mirror_writes = true;
+    let principal = static_token_principal_ref(&format!("token-compat-audit-required-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    // Two of `main`'s events, in the file log and the database, with a
+    // damaged line between them in the file.
+    let actor = system_audit_tenant(&tenant, "pipeline_test");
+    for _ in 0..2 {
+        append_control_plane_read_audit(state.as_ref(), &actor, "pipeline_test", 0)
+            .await
+            .expect("append one of main's audit events");
+    }
+    let path = audit_events_path(dir.path(), &tenant);
+    let body = std::fs::read_to_string(&path).unwrap();
+    let mut lines = body.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    lines.insert(1, "{\"damaged");
+    std::fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
+
+    let appended = pipeline_runtime::append_pipeline_credit_audit_events(
+        state.as_ref(),
+        service.as_ref(),
+        &tenant,
+        32,
+    )
+    .await
+    .expect("the damaged line is not read");
+    assert_eq!(appended.audited, 1);
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
+        1
+    );
+    assert_eq!(credit_mutate_file_lines(dir.path(), &tenant), 1);
+}
+
+/// Multi-lens review C9 (b): where the worker does read the file log (no
+/// required mirror), it skips a line that does not parse; such a line
+/// cannot be matched by id. The event the log already holds is still found
+/// and not appended again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_pass_skips_a_file_line_that_does_not_parse() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-damaged-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        None,
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    let principal = static_token_principal_ref(&format!("token-compat-audit-damaged-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+    assert_eq!(append().await.unwrap().audited, 1);
+    // The crash, as in the test above, and a damaged line before the event.
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_run_settlements SET credit_audited_at = NULL
+          WHERE tenant_id = $1 AND run_id = $2 AND instrument_id = 'trace_credit'",
+        &[&tenant, &run.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let path = audit_events_path(dir.path(), &tenant);
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("{{\"damaged\n{body}")).unwrap();
+
+    assert_eq!(
+        append().await.expect("the damaged line is skipped").audited,
+        1,
+        "the next pass finds the leg again"
+    );
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        1,
+        "one CreditMutate event in the file log"
+    );
+}
+
+/// A test-only trigger that refuses each audit row of one tenant, so the
+/// database mirror of that tenant's audit events fails. Created and dropped
+/// as the owner; scoped to one tenant, so tests running beside it are
+/// untouched.
+struct AuditMirrorFault {
+    name: String,
+}
+
+impl AuditMirrorFault {
+    async fn install(owner: &PgBackend, tenant: &str) -> Self {
+        let name = format!("c9_fault_{}", Uuid::new_v4().simple());
+        owner
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(&format!(
+                "CREATE FUNCTION {name}() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+                 BEGIN
+                     RAISE EXCEPTION 'injected audit mirror failure';
+                 END;
+                 $$;
+                 CREATE TRIGGER {name}
+                     BEFORE INSERT ON trace_audit_events
+                     FOR EACH ROW
+                     WHEN (NEW.tenant_id = '{tenant}')
+                     EXECUTE FUNCTION {name}();"
+            ))
+            .await
+            .expect("install the audit mirror fault");
+        Self { name }
+    }
+
+    /// `DROP TRIGGER` takes a weak table lock and then ACCESS EXCLUSIVE, so
+    /// two tests that drop their fault at the same time can each wait for
+    /// the other (SQLSTATE 40P01). This takes ACCESS EXCLUSIVE first.
+    async fn remove(self, owner: &PgBackend) {
+        let name = self.name;
+        owner
+            .trace_pool_for_test()
+            .get()
+            .await
+            .unwrap()
+            .batch_execute(&format!(
+                "BEGIN;
+                 LOCK TABLE trace_audit_events IN ACCESS EXCLUSIVE MODE;
+                 DROP TRIGGER {name} ON trace_audit_events;
+                 DROP FUNCTION {name}();
+                 COMMIT;"
+            ))
+            .await
+            .expect("remove the audit mirror fault");
+    }
+}
+
+/// Multi-lens review C9 (d): with a database mirror that is not required,
+/// a pass whose mirror fails leaves the event in the file log only and does
+/// not mark the leg. The next pass mirrors that file event; when the mirror
+/// fails again the leg stays unmarked, as after the first pass, and is
+/// marked only once the database holds the event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_only_credit_audit_event_is_not_marked_until_its_mirror_is_written() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-audit-mirror-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!state.require_db_mirror_writes);
+    let principal = static_token_principal_ref(&format!("token-compat-audit-mirror-{suffix}"));
+    let run = completed_run_of(
+        &service,
+        &tenant,
+        &principal,
+        &model_training_envelope().await,
+    )
+    .await;
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+
+    let fault = AuditMirrorFault::install(&owner, &tenant).await;
+    let first = append().await;
+    let audited_after_first = credit_leg_is_audited(&owner, &tenant, run.run_id).await;
+    let second = append().await;
+    let audited_after_second = credit_leg_is_audited(&owner, &tenant, run.run_id).await;
+    fault.remove(&owner).await;
+    assert!(first.is_err(), "the first pass has no database row");
+    assert!(!audited_after_first);
+    assert_eq!(credit_mutate_file_lines(dir.path(), &tenant), 1);
+    assert!(
+        second.is_err(),
+        "the second pass mirrors the file event, and that fails again"
+    );
+    assert!(
+        !audited_after_second,
+        "a leg with no database audit row is not marked"
+    );
+
+    assert_eq!(append().await.expect("the mirror works again").audited, 1);
+    assert!(credit_leg_is_audited(&owner, &tenant, run.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, run.submission_id).await,
+        1
+    );
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        1,
+        "the file event is mirrored, not appended again"
+    );
+}
+
+/// Multi-lens review C9 (e): one credit event whose audit event cannot be
+/// written does not stop the tenant's later ones. Here the first event is in
+/// the file log only and the database refuses its mirror on each pass: the
+/// tenant had no hashed audit row when that mirror failed, so the database
+/// accepted a later event of `main` and its chain is now past the file-only
+/// event. The pass leaves that leg unmarked, appends the second event and
+/// marks its leg; a pass in which nothing succeeds reports the failure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_credit_audit_event_the_database_refuses_does_not_stop_the_later_ones() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-audit-refused-{suffix}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = trace_credit_payout_service(
+        runtime.clone(),
+        artifacts.clone(),
+        Arc::new(RecordingNearAdapter::new()),
+    );
+    let state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!state.require_db_mirror_writes);
+    let principal = static_token_principal_ref(&format!("token-audit-refused-{suffix}"));
+    let append = || async {
+        pipeline_runtime::append_pipeline_credit_audit_events(
+            state.as_ref(),
+            service.as_ref(),
+            &tenant,
+            32,
+        )
+        .await
+    };
+
+    // The first event reaches the file log only: its mirror fails.
+    let refused = completed_pipeline_run(&service, &tenant, &principal).await;
+    let fault = AuditMirrorFault::install(&owner, &tenant).await;
+    let first = append().await;
+    fault.remove(&owner).await;
+    assert!(first.is_err(), "the first pass has no database row");
+    // The database holds no hashed row of the tenant, so it accepts this
+    // event of `main`, which chains from the file-only event.
+    let actor = system_audit_tenant(&tenant, "pipeline_test");
+    append_control_plane_read_audit(state.as_ref(), &actor, "pipeline_test", 0)
+        .await
+        .expect("append one of main's audit events");
+    let later = completed_pipeline_run(&service, &tenant, &principal).await;
+
+    let second = append().await.expect("the later event is appended");
+    assert_eq!(
+        second,
+        pipeline_runtime::PipelineCreditAuditPass {
+            audited: 1,
+            failed: 1
+        },
+        "the pass counts the leg it marked and the one that failed"
+    );
+    // Closing item N1: the refused leg keeps its place in the next batch,
+    // so a pass that took a whole batch and marked a leg runs again; one
+    // that did not fill its batch waits for the step's clock.
+    assert!(second.used_its_limit(2));
+    assert!(!second.used_its_limit(3));
+    assert!(
+        !pipeline_runtime::PipelineCreditAuditPass {
+            audited: 0,
+            failed: 2
+        }
+        .used_its_limit(2),
+        "a batch of failed legs alone does not run again at once"
+    );
+    assert!(credit_leg_is_audited(&owner, &tenant, later.run_id).await);
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, later.submission_id).await,
+        1
+    );
+    assert!(
+        !credit_leg_is_audited(&owner, &tenant, refused.run_id).await,
+        "the leg whose event the database refuses stays unmarked"
+    );
+    assert_eq!(
+        credit_mutate_audit_rows(&owner, &tenant, refused.submission_id).await,
+        0
+    );
+    assert_eq!(
+        credit_mutate_file_lines(dir.path(), &tenant),
+        2,
+        "one file line for each event"
+    );
+
+    assert!(
+        append().await.is_err(),
+        "a pass in which no leg is marked reports the failure"
+    );
+    assert!(!credit_leg_is_audited(&owner, &tenant, refused.run_id).await);
 }
 
 /// Zaki review 1, round 2, N-8: under `main`'s database contributor reads,
@@ -10896,5 +11955,552 @@ async fn a_withdrawal_of_a_pipeline_submission_works_in_every_routing_state() {
             Some(ReceiptOwner::Pipeline),
             "routing {routing}: the owner of the receipt is unchanged"
         );
+    }
+}
+
+/// Spec 2026-10-08, 4.2 item 14: the production assembler, through the seam
+/// a boot uses (a routed tenant), over scorer and embedder doubles and the
+/// usearch pipeline index on a temporary root (`near-ai-scorer`) or a
+/// qualified wrapper over `IsolatedPipelineIndex` (default features), takes
+/// a receipt to a complete Settle: the Trace Credit ledger row is written
+/// and no payout exists.
+///
+/// Over doubles the scorer and embedder adapters are not
+/// production-qualified (PR #1295 review round 2, Major 1), so this boot
+/// takes the test opt-in instead of `TRACE_COMMONS_PIPELINE_RUNTIME_REQUIRED`;
+/// unqualified routing stays off, so the tenant is routed by its row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_serves_a_routed_tenant_end_to_end() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::Environment).await;
+}
+
+/// The same, for a tenant whose policy `main` reads from the database (the
+/// pilot: `TRACE_COMMONS_DB_TENANT_POLICY_READS=true` globally, no
+/// environment policies). The receipt and the Settle-time `NoveltyUtility`
+/// credit check both read the tenant's `trace_tenant_policies` row, which
+/// allows model training, so the run completes with its ledger row (Zaki's
+/// option 1, PR #1295).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_serves_a_db_policy_tenant_end_to_end() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::Database).await;
+}
+
+/// A tenant on database policy reads whose row cannot be read: the receipt
+/// is refused with `pipeline_authority_read_failed` before any database
+/// work, so no run exists (Zaki's option 1, PR #1295).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_assembly_refuses_a_receipt_whose_policy_read_fails() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFails).await;
+}
+
+/// A tenant on database policy reads whose row cannot be read when Settle
+/// reads it before dispatching the `NoveltyUtility` leg: no leg is
+/// dispatched or settled and no ledger row is written; the run waits in
+/// retry, uncharged; once the read succeeds again it settles exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_policy_read_before_dispatch_retries_and_settles_once() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure: 0,
+    })
+    .await;
+}
+
+/// The same, when the read fails after the dispatch, at the ledger
+/// transaction's own check: the leg stays open with no ledger row, and the
+/// retry repeats the idempotent adapter call and settles exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_policy_read_at_the_ledger_retries_and_settles_once() {
+    serve_a_routed_tenant_end_to_end(TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure: 1,
+    })
+    .await;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TenantPolicyMode {
+    Environment,
+    Database,
+    DatabaseReadFails,
+    /// Reads succeed until Settle; there, after `reads_before_failure`
+    /// successful reads, one read fails.
+    DatabaseReadFailsAtSettle {
+        reads_before_failure: usize,
+    },
+}
+
+/// `main`'s DB mirror as the tenant policy store, with one read failure
+/// that can be armed: after `skip` more successful reads, the next fails.
+struct ArmedTenantPolicies {
+    inner: super::super::production_assembly::DatabaseTenantPolicies,
+    armed: std::sync::Mutex<Option<usize>>,
+}
+
+#[async_trait::async_trait]
+impl super::super::production_assembly::TenantPolicyStore for ArmedTenantPolicies {
+    async fn get_trace_tenant_policy(
+        &self,
+        tenant_id: &str,
+    ) -> Result<
+        Option<trace_commons_server::trace_corpus_storage::TraceTenantPolicyRecord>,
+        DatabaseError,
+    > {
+        let fail = {
+            let mut armed = self.armed.lock().unwrap();
+            match *armed {
+                Some(0) => {
+                    *armed = None;
+                    true
+                }
+                Some(skip) => {
+                    *armed = Some(skip - 1);
+                    false
+                }
+                None => false,
+            }
+        };
+        if fail {
+            return Err(DatabaseError::Query(
+                "injected tenant policy read failure".into(),
+            ));
+        }
+        self.inner.get_trace_tenant_policy(tenant_id).await
+    }
+}
+
+async fn serve_a_routed_tenant_end_to_end(mode: TenantPolicyMode) {
+    let mut armed_store: Option<Arc<ArmedTenantPolicies>> = None;
+    use super::super::production_assembly::tests as production;
+    use super::super::production_assembly::{
+        DatabaseTenantPolicies, TenantPolicyPipelineAuthorityProvider, TenantPolicyStore,
+    };
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-production-assembly-{suffix}");
+    let principal = static_token_principal_ref(&format!("token-production-assembly-{suffix}"));
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    #[cfg(feature = "near-ai-scorer")]
+    let index = Arc::new(
+        super::super::production_assembly::UsearchPipelineIndex::open(
+            &dir.path().join("pipeline-index"),
+            trace_commons_gate_enclave::vector_index_usearch::UsearchVectorIndexConfig {
+                dim: 2,
+                hnsw_m: 16,
+                ef_construction: 64,
+                ef_search: 64,
+                max_open: 8,
+                flush_every: 1_000,
+                flush_interval: None,
+            },
+        )
+        .expect("open the pipeline index"),
+    );
+    #[cfg(not(feature = "near-ai-scorer"))]
+    let index = Arc::new(production::QualifiedIsolatedIndex(
+        IsolatedPipelineIndex::new(),
+    ));
+    let authority = if mode == TenantPolicyMode::DatabaseReadFails {
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| true),
+            Some(Arc::new(production::FailingTenantPolicies) as Arc<dyn TenantPolicyStore>),
+        )
+    } else if mode != TenantPolicyMode::Environment {
+        runtime
+            .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+                tenant_id: tenant.clone(),
+                policy_version: "db-policy-v1".to_string(),
+                allowed_consent_scopes: vec![
+                    serde_storage_string(&ConsentScope::ModelTraining).unwrap(),
+                ],
+                allowed_uses: vec![serde_storage_string(&TraceAllowedUse::ModelTraining).unwrap()],
+                updated_by_principal_ref: principal_storage_ref("admin-token"),
+            })
+            .await
+            .expect("the tenant policy row writes");
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| true),
+            Some({
+                let store = Arc::new(ArmedTenantPolicies {
+                    inner: DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>),
+                    armed: std::sync::Mutex::new(None),
+                });
+                armed_store = Some(store.clone());
+                store as Arc<dyn TenantPolicyStore>
+            }),
+        )
+    } else {
+        TenantPolicyPipelineAuthorityProvider::new(
+            Arc::new(BTreeMap::new()),
+            false,
+            Arc::new(|_: &str| false),
+            None,
+        )
+    };
+    let components = production::test_components_with_authority(
+        production::classifying_privacy(),
+        index.clone(),
+        index,
+        Arc::new(authority),
+    );
+    let mut main_gate = production::MAIN_GATE;
+    main_gate.novelty_utility_microcredits = 2_500_000;
+    let connections = TraceCorpusDbConnections {
+        database: runtime.clone() as Arc<dyn Database>,
+        postgres: runtime.clone(),
+    };
+    let service = assemble_ingest_pipeline_runtime_with_components(
+        Some(&super::super::production_assembly::ProductionPipelineAssembler),
+        Some(&connections),
+        Some(&ConfiguredTraceArtifactStore::legacy(local_artifacts(&dir))),
+        false,
+        trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        true,
+        true,
+        false,
+        None,
+        TEST_NEAR_CONFIRMATION_INTERVAL,
+        TEST_NEAR_PAYOUT_CONTROLS,
+        &PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+        main_gate,
+        Some(components),
+    )
+    .expect("a production assembly over doubles starts with the test opt-in")
+    .expect("an assembler was given, so a service is returned");
+    assert!(!pipeline_runtime_is_production_qualified(&service));
+    assert!(!service.payout_enabled());
+
+    // With unqualified routing off, the runtime routes only a tenant with a
+    // routing row: the operator activated this one.
+    write_routing_as_operator(&tenant, "pipeline").await;
+    service
+        .register_default_bundle(&tenant)
+        .await
+        .expect("register the bundle");
+    let envelope = model_training_envelope().await;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let receipt = service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &tenant,
+            actor_principal_ref: &principal,
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await;
+    if mode == TenantPolicyMode::DatabaseReadFails {
+        assert_eq!(
+            receipt.expect_err("refused").to_string(),
+            trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL
+        );
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let runs: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM pipeline_runs WHERE tenant_id = $1",
+                &[&tenant],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        tx.commit().await.unwrap();
+        assert_eq!(runs, 0, "a refused receipt creates no run");
+        return;
+    }
+    let created = match receipt.expect("the receipt succeeds") {
+        PipelineReceiptResult::Created(created) => created,
+        other => panic!("the receipt creates a run: {other:?}"),
+    };
+    if let TenantPolicyMode::DatabaseReadFailsAtSettle {
+        reads_before_failure,
+    } = mode
+    {
+        // Score, then Review: neither reads the tenant authority.
+        for _ in 0..2 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .expect("the phase runs");
+        }
+        let before = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the run exists");
+        assert_eq!(before.next_phase, Some(Phase::Settle), "{before:?}");
+        *armed_store.as_ref().unwrap().armed.lock().unwrap() = Some(reads_before_failure);
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("a failed policy read is recorded, not raised");
+        let waiting = service
+            .store()
+            .get_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("the run exists");
+        assert_eq!(
+            (waiting.state, waiting.last_error_label.as_deref()),
+            (
+                PipelineRunState::Retry,
+                Some(trace_commons_server::versioned_pipeline_authority::PIPELINE_AUTHORITY_READ_FAILED_LABEL)
+            ),
+            "{waiting:?}"
+        );
+        assert_eq!(
+            waiting.attempt_count, before.attempt_count,
+            "a failed policy read is an uncharged suspension"
+        );
+        let ledger = ledger_rows(&owner, &tenant, waiting.submission_id).await;
+        assert_eq!(ledger, serde_json::json!([]), "no ledger row");
+        let mut client = owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        let settled: i64 = tx
+            .query_one(
+                "SELECT count(*) FROM pipeline_run_settlements
+                  WHERE tenant_id = $1 AND run_id = $2 AND operation_state = 'complete'",
+                &[&tenant, &created.run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(settled, 0, "no leg settled");
+        tx.execute(
+            "UPDATE pipeline_runs SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        // The read succeeds again: the retry settles, once.
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the retry runs");
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("a complete run is not claimed again");
+    } else {
+        for _ in 0..3 {
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .expect("the phase runs");
+        }
+    }
+    let run = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(
+        (run.state, run.last_error_label.as_deref()),
+        (PipelineRunState::Complete, None),
+        "{run:?}"
+    );
+    let ledger = ledger_rows(&owner, &tenant, run.submission_id).await;
+    let rows = ledger.as_array().expect("ledger rows");
+    assert_eq!(rows.len(), 1, "{ledger}");
+    assert_eq!(rows[0]["event_type"], "novelty_utility", "{ledger}");
+    assert_eq!(rows[0]["microcredits"], 2_500_000, "{ledger}");
+    assert_eq!(rows[0]["actor_role"], "vector_worker", "{ledger}");
+
+    let mut client = owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let payout_lines: i64 = tx
+        .query_one(
+            "SELECT count(*) FROM trace_near_credit_outbox WHERE tenant_id = $1",
+            &[&tenant],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    assert_eq!(payout_lines, 0, "no payout");
+}
+
+/// Zaki's option 1 (PR #1295, after review round 2): for a tenant whose
+/// policy `main` reads from the database -- under the global
+/// `TRACE_COMMONS_DB_TENANT_POLICY_READS` and under its tenant rollout --
+/// the pipeline's authority answers what `main`'s admission answers, read
+/// from the same row: with no row (under both values of the require-policy
+/// flag), with a row narrowing scopes and uses, and after the row is
+/// rewritten (by `upsert_trace_tenant_policy`, the write `PUT
+/// /v1/admin/tenant-policy` makes) between two receipts. The environment
+/// map, which names a different policy for the same tenant, is never read
+/// for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn db_policy_tenant_authority_matches_legacy_admission() {
+    use super::super::production_assembly::tests::{policy_test_auth, policy_test_envelope};
+    use super::super::production_assembly::{
+        DatabaseTenantPolicies, TenantPolicyPipelineAuthorityProvider, TenantPolicyStore,
+    };
+    use trace_commons_server::versioned_pipeline_authority::PipelineAuthorityProvider;
+
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let inside = policy_test_envelope(
+        &[ConsentScope::DebuggingEvaluation],
+        ConsentScope::DebuggingEvaluation,
+        &[TraceAllowedUse::Evaluation],
+    )
+    .await;
+    let training = policy_test_envelope(
+        &[ConsentScope::ModelTraining],
+        ConsentScope::ModelTraining,
+        &[TraceAllowedUse::ModelTraining],
+    )
+    .await;
+    let envelopes = [("inside", &inside), ("training", &training)];
+    let write =
+        |tenant_id: String, version: &'static str, scope: ConsentScope, used: TraceAllowedUse| {
+            let runtime = runtime.clone();
+            async move {
+                runtime
+                    .upsert_trace_tenant_policy(StorageTraceTenantPolicyWrite {
+                        tenant_id,
+                        policy_version: version.to_string(),
+                        allowed_consent_scopes: vec![serde_storage_string(&scope).unwrap()],
+                        allowed_uses: vec![serde_storage_string(&used).unwrap()],
+                        updated_by_principal_ref: principal_storage_ref("admin-token"),
+                    })
+                    .await
+                    .expect("the tenant policy row writes");
+            }
+        };
+
+    for global in [true, false] {
+        for require_policy in [false, true] {
+            let tenant_id = format!("tenant-db-policy-{global}-{require_policy}-{suffix}");
+            // The environment names a policy for this tenant too, wider than
+            // any row below: a pipeline that read it would permit `training`
+            // where `main` refuses it.
+            let env_policies = Arc::new(BTreeMap::from([(
+                tenant_id.clone(),
+                TenantSubmissionPolicy {
+                    allowed_consent_scopes: BTreeSet::new(),
+                    allowed_uses: BTreeSet::new(),
+                },
+            )]));
+            let gates = if global {
+                TraceTenantRolloutGates::default()
+            } else {
+                TraceTenantRolloutGates::for_feature(
+                    TraceTenantRolloutFeature::DbTenantPolicyReads,
+                    &[tenant_id.as_str()],
+                )
+            };
+            let root = tempfile::tempdir().unwrap();
+            let mut state = (*crate::tests::test_state(root.path().to_path_buf())).clone();
+            state.db_mirror = Some(runtime.clone() as Arc<dyn Database>);
+            state.db_tenant_policy_reads = global;
+            state.tenant_rollout_gates = gates.clone();
+            state.tenant_policies = env_policies.clone();
+            state.require_tenant_submission_policy = require_policy;
+            assert!(state.db_tenant_policy_reads_for_tenant(&tenant_id));
+            let provider = TenantPolicyPipelineAuthorityProvider::new(
+                super::super::production_assembly::tenant_policy_allowlists(&env_policies),
+                require_policy,
+                Arc::new(move |tenant: &str| {
+                    gates.enabled_for(
+                        TraceTenantRolloutFeature::DbTenantPolicyReads,
+                        global,
+                        tenant,
+                    )
+                }),
+                Some(
+                    Arc::new(DatabaseTenantPolicies(runtime.clone() as Arc<dyn Database>))
+                        as Arc<dyn TenantPolicyStore>,
+                ),
+            );
+            let auth = policy_test_auth(&tenant_id);
+
+            for step in ["no_row", "narrowing_row", "rewritten_row"] {
+                match step {
+                    "narrowing_row" => {
+                        write(
+                            tenant_id.clone(),
+                            "v1",
+                            ConsentScope::DebuggingEvaluation,
+                            TraceAllowedUse::Evaluation,
+                        )
+                        .await
+                    }
+                    "rewritten_row" => {
+                        write(
+                            tenant_id.clone(),
+                            "v2",
+                            ConsentScope::ModelTraining,
+                            TraceAllowedUse::ModelTraining,
+                        )
+                        .await
+                    }
+                    _ => {}
+                }
+                let main_policy = tenant_submission_policy_for_request(&state, &auth)
+                    .await
+                    .expect("main reads the tenant policy");
+                let authority = provider
+                    .resolve_authority(&tenant_id)
+                    .await
+                    .expect("the pipeline reads the tenant policy")
+                    .expect("a tenant on DB policy reads has an authority");
+                assert_eq!(authority.require_policy, require_policy);
+                assert_eq!(
+                    authority.policy,
+                    main_policy.as_ref().map(|policy| {
+                        trace_commons_server::trace_authority::SubmissionAllowlists {
+                            allowed_consent_scopes: policy.allowed_consent_scopes.clone(),
+                            allowed_uses: policy.allowed_uses.clone(),
+                        }
+                    }),
+                    "{step} global={global} require_policy={require_policy}"
+                );
+                for (case, envelope) in envelopes {
+                    let legacy = enforce_tenant_submission_policy(
+                        &auth,
+                        envelope,
+                        main_policy.as_ref(),
+                        require_policy,
+                    )
+                    .is_ok();
+                    let mut scopes = envelope.consent.scopes.clone();
+                    if !scopes.contains(&envelope.trace_card.consent_scope) {
+                        scopes.push(envelope.trace_card.consent_scope);
+                    }
+                    let pipeline = authority.permits(&scopes, &envelope.trace_card.allowed_uses);
+                    assert_eq!(
+                        legacy, pipeline,
+                        "{step} {case} global={global} require_policy={require_policy}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -139,7 +139,7 @@ public class DigestTextTests
         // 2026-08-08-contributor-shell-shared-design.md, "### The digest",
         // and identical to the Linux shell's notify::digest_body test.
         Assert.Equal(
-            "3 sessions ready from trace-commons-server and dotfiles.\n"
+            "3 traces ready from trace-commons-server and dotfiles.\n"
             + "Nothing is sent until you review them.",
             DigestText.Body(3, new[] { "trace-commons-server", "dotfiles" }));
     }
@@ -147,14 +147,14 @@ public class DigestTextTests
     [Fact]
     public void OneSessionIsSingular()
     {
-        Assert.StartsWith("1 session ready from a.", DigestText.Body(1, new[] { "a" }), StringComparison.Ordinal);
+        Assert.StartsWith("1 trace ready from a.", DigestText.Body(1, new[] { "a" }), StringComparison.Ordinal);
     }
 
     [Fact]
     public void ThreeOrMoreProjectsUseTheSpecsListForm()
     {
         Assert.StartsWith(
-            "5 sessions ready from a, b and c.",
+            "5 traces ready from a, b and c.",
             DigestText.Body(5, new[] { "a", "b", "c" }),
             StringComparison.Ordinal);
     }
@@ -163,7 +163,7 @@ public class DigestTextTests
     public void NoProjectsLeavesNoDanglingFrom()
     {
         Assert.Equal(
-            "2 sessions ready.\nNothing is sent until you review them.",
+            "2 traces ready.\nNothing is sent until you review them.",
             DigestText.Body(2, Array.Empty<string>()));
     }
 
@@ -171,7 +171,7 @@ public class DigestTextTests
     public void BlankAndDuplicateLabelsAreDropped()
     {
         Assert.StartsWith(
-            "2 sessions ready from a and b.",
+            "2 traces ready from a and b.",
             DigestText.Body(2, new[] { "a", "", "a", "  ", "b" }),
             StringComparison.Ordinal);
     }
@@ -233,14 +233,14 @@ public class TrayModelTests
     {
         TrayModel model = TrayModel.Compute(3, isPaused: false, isHealthy: true);
         Assert.Equal(3, model.DecisionsOwed);
-        Assert.Equal("Trace Commons — 3 sessions waiting for review.", model.Tooltip);
+        Assert.Equal("Trace Commons — 3 traces waiting for review.", model.Tooltip);
     }
 
     [Fact]
     public void OneDecisionIsSingular()
     {
         Assert.Equal(
-            "Trace Commons — 1 session waiting for review.",
+            "Trace Commons — 1 trace waiting for review.",
             TrayModel.Compute(1, isPaused: false, isHealthy: true).Tooltip);
     }
 
@@ -251,7 +251,7 @@ public class TrayModelTests
         // contributor approve three sessions believing the watcher is
         // running.
         Assert.Equal(
-            "Trace Commons — 3 sessions waiting for review. Paused.",
+            "Trace Commons — 3 traces waiting for review. Paused.",
             TrayModel.Compute(3, isPaused: true, isHealthy: true).Tooltip);
     }
 
@@ -259,7 +259,7 @@ public class TrayModelTests
     public void AttentionStillSaysWhenItIsAlsoUnhealthy()
     {
         Assert.Equal(
-            "Trace Commons — 2 sessions waiting for review. Needs attention.",
+            "Trace Commons — 2 traces waiting for review. Needs attention.",
             TrayModel.Compute(2, isPaused: false, isHealthy: false).Tooltip);
     }
 
@@ -267,7 +267,7 @@ public class TrayModelTests
     public void ANegativeCountCannotProduceAnAttentionState()
     {
         // Defensive against a daemon frame this client failed to parse:
-        // reading "-1 sessions waiting" as attention would be an interruption
+        // reading "-1 traces waiting" as attention would be an interruption
         // caused by a bug.
         TrayModel model = TrayModel.Compute(-4, isPaused: false, isHealthy: true);
         Assert.Equal(TrayIconState.Idle, model.State);
@@ -617,7 +617,7 @@ public class DigestEventTests
     public void ADigestDueFrameCarriesItsPendingCount()
     {
         DaemonEvent? evt = DaemonEvent.Parse(
-            """{"event":"digest_due","data":{"pending":3,"text":"3 sessions ready to contribute"}}""");
+            """{"event":"digest_due","data":{"pending":3,"text":"3 traces ready to contribute"}}""");
 
         Assert.NotNull(evt);
         Assert.Equal(DaemonProtocol.Events.DigestDue, evt!.Event);

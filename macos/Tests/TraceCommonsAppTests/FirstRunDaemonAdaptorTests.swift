@@ -42,7 +42,7 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
 
     /// A watch-only Start has no tenant, so its marker is keyed by the
     /// config directory the daemon runs from. It finishes the first run
-    /// only while the daemon holds no enrolment: an enrolled person must
+    /// only while the daemon holds no enrollment: an enrolled person must
     /// still confirm on Start, whatever an earlier watch-only run wrote.
     func test_aWatchOnlyCompleteIsKeyedByTheConfigDirectory() async {
         let directory = "/tmp/first-run-adaptor-\(UUID().uuidString)"
@@ -72,7 +72,7 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
     }
 
     /// A finished watcher can still join: an invite link opened later takes
-    /// back the watch-only marker while the daemon holds no enrolment, so
+    /// back the watch-only marker while the daemon holds no enrollment, so
     /// the main window hosts the first run again and the coordinator applies
     /// the parked link to Join.
     func test_anInviteLinkReopensAFinishedWatchOnlyRun() async {
@@ -224,6 +224,23 @@ final class FirstRunDaemonAdaptorTests: XCTestCase {
         ] {
             let answer = await model(["invite_lookup": reply]).lookupInvite("INVITE-1")
             XCTAssertEqual(answer, .unavailable, reply)
+        }
+    }
+
+    /// Cancel during the first run's near.ai browser wait: true only once
+    /// the daemon took `near_ai_credential_cancel`; no client, an error, or
+    /// an unreadable reply answers false, which the runner words as the
+    /// sign-in that did not finish.
+    func test_aCancelledLoginIsConfirmedOnlyByTheDaemon() async {
+        let noClient = await AppModel().cancelNearAILogin()
+        XCTAssertFalse(noClient)
+
+        let taken = await model([CredentialSurface.cancelMethod: #"{"result":{}}"#]).cancelNearAILogin()
+        XCTAssertTrue(taken)
+
+        for reply in [#"{"error":{"code":"unavailable","message":"nope"}}"#, #"not json"#] {
+            let answer = await model([CredentialSurface.cancelMethod: reply]).cancelNearAILogin()
+            XCTAssertFalse(answer, reply)
         }
     }
 

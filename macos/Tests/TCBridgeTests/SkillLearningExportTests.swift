@@ -15,7 +15,7 @@ final class SkillLearningExportTests: XCTestCase {
         )
 
         XCTAssertGreaterThanOrEqual(fields.count, 50)
-        XCTAssertEqual(fields["heading"], "Learn from session")
+        XCTAssertEqual(fields["heading"], "Learn from trace")
         XCTAssertTrue(fields.values.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
     }
 
@@ -26,7 +26,7 @@ final class SkillLearningExportTests: XCTestCase {
         )
         XCTAssertEqual(
             TCSkillLearning.errorLine(label: "a-later-daemon-label"),
-            "The skill workflow could not complete. Retry the current step."
+            "Skill workflow could not complete. Retry this step."
         )
     }
 

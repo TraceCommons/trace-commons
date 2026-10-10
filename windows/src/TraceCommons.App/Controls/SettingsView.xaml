@@ -142,7 +142,7 @@
                         Padding="14,12">
                     <StackPanel Spacing="10">
                         <NumberBox x:Name="QuiescenceMinutes"
-                                   Header="Quiet time before a session counts as finished (minutes)"
+                                   Header="Quiet time before a trace counts as finished (minutes)"
                                    Value="{x:Bind Settings.QuiescenceMinutes, Mode=OneWay}"
                                    Minimum="1"
                                    Maximum="240"
@@ -186,7 +186,7 @@
 
                 <TextBlock Text="PROJECTS"
                            Style="{StaticResource TcEyebrowTextStyle}" />
-                <TextBlock Text="No projects seen yet."
+                <TextBlock Text="{x:Bind interop:MonitorShellCopy.ProjectsEmpty}"
                            Visibility="{x:Bind Settings.HasNoProjects, Mode=OneWay}"
                            Style="{StaticResource TcCaptionTextStyle}" />
                 <ItemsControl ItemsSource="{x:Bind Settings.Projects}">

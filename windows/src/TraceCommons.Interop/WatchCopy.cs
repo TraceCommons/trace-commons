@@ -32,7 +32,7 @@ public static class WatchCopy
     /// Continue, which is most of them.
     /// </summary>
     public const string Subtitle =
-        "Every project starts at ask-first: you see each session before anything is sent. "
+        "Every project starts at ask-first: you see each trace before anything is sent. "
         + "Ignore a project to leave it out entirely.";
 
     /// <summary>The eyebrow over the list. Rendered uppercase by the style.</summary>
@@ -136,7 +136,7 @@ public static class WatchCopy
 
     /// <summary>Shown when the daemon reports no projects at all.</summary>
     public const string Empty =
-        "No projects yet. Sessions you run later will appear here, and in Settings.";
+        "No projects yet. Traces you run later will appear here, and in Settings.";
 
     /// <summary>
     /// The bucket's name, from <see cref="UnresolvedBucketCopy"/>. Settings

@@ -17,7 +17,7 @@ function stageTitle(
     case "installed":
       return "Install skill";
     default:
-      return "Learn from session";
+      return "Learn from trace";
   }
 }
 

@@ -47,15 +47,17 @@ pub enum MissionDraftResponse {
 pub fn ui_copy() -> BTreeMap<String, String> {
     [
         ("title", "Mission drafts"),
-        ("intro", "Review mission proposals saved on this device."),
+        // #1146's `mission-drafts-page.tsx` description and choose button.
+        ("intro", "Review proposed evidence-bound runs before anything is executed."),
         ("empty", "No local mission drafts."),
-        ("choose_file", "Choose proposal file"),
+        ("choose_file", "Choose proposal"),
         ("file_selected", "Proposal file selected."),
         ("import", "Import draft"),
         ("refresh", "Refresh drafts"),
         ("refreshed", "Local mission drafts refreshed."),
         ("show", "Inspect draft"),
-        ("delete", "Delete local draft"),
+        // Approved 2026-10-08 (button rule).
+        ("delete", "Delete"),
         ("delete_confirm_title", "Delete local mission draft?"),
         ("delete_confirm", "Delete this draft from the local inbox? The selected source file will remain."),
         ("added", "Draft added to the local inbox."),

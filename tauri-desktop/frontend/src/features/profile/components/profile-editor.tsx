@@ -83,7 +83,7 @@ export function ProfileEditor({
           ) : (
             <p>
               Publishing sends handle and bio to community roster. It does not
-              publish session content.
+              publish trace content.
             </p>
           )}
         </div>

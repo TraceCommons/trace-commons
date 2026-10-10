@@ -169,7 +169,7 @@
           CopyToOutputDirectory="PreserveNewest" />
     <!--
       The preview sheet, whose admission-preparation control must be offered
-      only to a contributor whose enrolment can use it. The enrolment check
+      only to a contributor whose enrollment can use it. The enrollment check
       lives one hop from the property the markup binds, so both halves are
       copied and held by AdmissionPreparationTests.
     -->
@@ -180,7 +180,7 @@
           Link="PreviewSheet.xaml.txt"
           CopyToOutputDirectory="PreserveNewest" />
     <!--
-      The onboarding screen and its view model, for the login-enrolment guard.
+      The onboarding screen and its view model, for the login-enrollment guard.
       TraceCommons.App is WinUI and cannot be referenced from a test assembly,
       so the only way to hold "no shell spells a control name" is to read the
       source as text.

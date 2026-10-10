@@ -14,7 +14,7 @@ public sealed class PendingInviteActivation
     public InviteActivationDecision Take(bool ready, bool needsRoots, bool daemonAvailable, bool onboardingOpen)
     {
         if (!ready || _latest is null) return new(null, null);
-        if (needsRoots) return new(null, "Choose session folders before opening this invite. Only the latest invite is kept.");
+        if (needsRoots) return new(null, "Choose trace folders before opening this invite. Only the latest invite is kept.");
         if (!daemonAvailable)
         {
             Clear();

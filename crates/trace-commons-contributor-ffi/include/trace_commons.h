@@ -791,6 +791,16 @@ int32_t     tc_private_inference_quit_needs_notice(int32_t requested_on, const c
  */
 char*       tc_private_inference_state_line(const char* state);
 
+/* The Private AI runtime tile's word for one private_inference_state label:
+ * every running label is "On", a stopped one "Off", and an unreported or
+ * unfamiliar label "Unknown", never "Off". A shell must not re-implement this
+ * mapping.
+ *
+ * An empty, NULL or non-UTF-8 label answers the unknown word. Returns an owned
+ * string; free it with tc_string_free. NULL only on a caught panic.
+ */
+char*       tc_private_inference_runtime_word(const char* state);
+
 /* How firmly the sentence tc_private_inference_state_line returned reads: one
  * of the TC_PRIVATE_INFERENCE_TONE_* values.
  *
@@ -910,7 +920,7 @@ char*       tc_outcome_refusal_line(const char* label);
 /* Shared queue outcome sentence. Unknown labels are neutral. Free with tc_string_free. */
 char*       tc_queue_outcome_line(const char* label);
 
-/* The sentence for one NEAR AI login-enrolment control name.
+/* The sentence for one NEAR AI login-enrollment control name.
  *
  * Ten labels, each with its own sentence, and anything else -- including a
  * label from a newer daemon, an empty string or NULL -- reaching the generic
@@ -1739,7 +1749,8 @@ char*       tc_gate_held_notice(const char* held_json);
 
 /* Shared settings copy JSON; caller frees with tc_string_free.
  * Includes additive opencode_version_title/opencode_version_detail strings for
- * the opencode-export-version-unsupported health label. No daemon handle needed. */
+ * the opencode-export-version-unsupported health label, and a trajectory
+ * object for the exported-traces row. No daemon handle needed. */
 char*       tc_source_settings_copy(void);
 
 /* The names of the secret detectors the scrubber runs, so a shell can tell a
@@ -2156,6 +2167,32 @@ char*       tc_insights_call(const uint8_t* request, size_t request_len, char** 
 /* Stateless shared Insights UI vocabulary. Opens no store. Owned JSON string;
  * free with tc_string_free. Returns NULL only after a caught panic. */
 char*       tc_insights_copy_json(void);
+/* Every re-engagement nudge string as one JSON object of key to text,
+ * including both candidates of each pending wording choice and every
+ * singular form. Opens no store. Sentences with counts arrive composed on
+ * status.nudge.text / mark_text, reengage_due and digest_due; this table is
+ * for the fixed strings. Owned JSON string; free with tc_string_free.
+ * Returns NULL only after a caught panic. DRAFT, NEEDS APPROVAL. */
+char*       tc_nudge_copy_json(void);
+/* A Traces row's tags, worded by the core from the row's own list_pending
+ * fields. entry_json is a borrowed UTF-8 JSON object carrying the entry's
+ * mission_fit and credit_estimate as the daemon sent them. Returns an owned
+ * JSON object with mission_fit, estimate_band, estimate_tier and
+ * estimate_explainer, each present only when there is something true to
+ * draw: the mission tag above zero, the estimate only while drawn is true.
+ * NULL, unreadable or mistyped input answers {}, which draws nothing. Free
+ * with tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_entry_tags_json(const char* entry_json);
+/* The digest switch's Settings help, composed by the core. settings_json is
+ * a borrowed UTF-8 JSON object carrying digest_schedule and
+ * digest_interval_secs as get_settings sent them. Returns an owned JSON
+ * object with digest_help, present only when there is a line to draw: the
+ * evening line, or the interval in whole hours, singular at one. NULL,
+ * unreadable or mistyped input answers {}, which draws nothing. Free with
+ * tc_string_free. Returns NULL only after a caught panic. DRAFT, NEEDS
+ * APPROVAL. */
+char*       tc_nudge_digest_help_json(const char* settings_json);
 
 /* Handle-free local mission draft inbox, available before enrollment.
  * Synchronous local IO; schedule off the UI thread. Request is borrowed UTF-8
@@ -2190,6 +2227,20 @@ char*       tc_mission_drafts_call(const uint8_t* request, size_t request_len, c
  * "daemon-not-running".
  */
 uint64_t    tc_subscribe(tc_handle*, void (*cb)(const char* event_json, void* ctx), void* ctx);
+
+/* tc_subscribe, declaring which opt-in events this subscriber can render
+ * (subscribe's `accepts`), so it receives them. accepts_json is a borrowed
+ * UTF-8 JSON array of event names, such as ["reengage_due"]; names this
+ * build does not know are ignored. NULL declares none and is exactly
+ * tc_subscribe. On the in-process path the subscription counts as a renderer
+ * until tc_unsubscribe returns, so the daemon posts a standalone
+ * re-engagement notification only while some subscriber can draw it.
+ *
+ * Returns 0 on failure with every tc_last_error label tc_subscribe records,
+ * plus "subscribe-accepts-invalid" when accepts_json is not a JSON array of
+ * strings. Lifetime rules for cb and ctx are tc_subscribe's.
+ */
+uint64_t    tc_subscribe_with_accepts(tc_handle*, const char* accepts_json, void (*cb)(const char* event_json, void* ctx), void* ctx);
 
 /* Cancel a subscription returned by tc_subscribe. Blocks until that
  * subscription's callback is guaranteed to no longer fire before
@@ -2464,6 +2515,13 @@ char*       tc_monitor_traces_copy_json(void);
  * Missions and the menu-bar popover. NULL only on a caught panic.
  */
 char*       tc_monitor_screens_copy_json(void);
+
+/* The words the macOS shell used to write itself
+ * (shell_words_copy::shell_words_copy): withdrawal, the public profile, the
+ * queue's and History's legacy words, the scrubbing caveat and the Settings
+ * sections' sentences. NULL only on a caught panic.
+ */
+char*       tc_shell_words_copy_json(void);
 
 /* The grant screens' words for one disclosure the daemon chose and named
  * (consent_copy::automatic_grant_copy_named): an armed folder's list_projects

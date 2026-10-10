@@ -154,6 +154,30 @@ public struct GlassGallery: View {
                 Button("Link") {}.buttonStyle(GlassButtonStyle(.link))
                 Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive))
             }
+            // The two sizes side by side (owner ruling, 2026-10-08): a
+            // window's action bar, where every button is the CTA's size,
+            // then the same kinds inline.
+            Text("bar")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            GlassActionBar(notes: ["note"]) {
+                HStack(spacing: 10) {
+                    Button("Back") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Spacer(minLength: 0)
+                    Button("Delete") {}.buttonStyle(GlassButtonStyle(.destructive, size: .bar))
+                    Button("Cancel") {}.buttonStyle(GlassButtonStyle(.secondary, size: .bar))
+                    Button("Customize") {}.buttonStyle(GlassButtonStyle(.glass, size: .bar))
+                    Button("Continue") {}.buttonStyle(GlassButtonStyle(.primary))
+                }
+            }
+            Text("inline")
+                .glassType(GlassTokens.TypeScale.eyebrow)
+                .foregroundStyle(GlassColor.textTertiary)
+            HStack(spacing: 10) {
+                Button("Check") {}.buttonStyle(GlassButtonStyle(.glass))
+                Button("Remove") {}.buttonStyle(GlassButtonStyle(.destructive))
+                Button("Details") {}.buttonStyle(GlassButtonStyle(.link))
+            }
             // A set of glass buttons, one chosen (selected), as #1146's
             // aria-pressed.
             HStack(spacing: 6) {
@@ -394,8 +418,8 @@ public struct GlassGallery: View {
                 VStack(spacing: 2) {
                     GlassListRow(depth: .tool, tile: .tool(.claudeCode), title: "tool", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, onToggleExpand: {}, onSubmit: {})
                     GlassListRow(depth: .folder, tile: .folder, title: "folder", sub: "sub", expanded: true, submitTitle: "Submit·3", watched: $watched, menuLabel: "menu", onToggleExpand: {}, onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
-                    GlassListRow(depth: .session, tile: .session, title: "session", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "flagged", flag: .ask, selected: true, submitTitle: "Review", menuLabel: "menu", onSubmit: {}, onMenu: {})
+                    GlassListRow(depth: .session, tile: .session, title: "trace", sub: "paused", off: true, submitTitle: "Submit", menuLabel: "menu", onMenu: {})
                 }
             }
             .frame(width: 420, height: 190)
@@ -406,7 +430,7 @@ public struct GlassGallery: View {
                     Text("content").glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
                 }
                 GlassConsentBlock("consent")
-                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Sessions", "18")])
+                GlassKeyValueList([.init("Path", "~/code/orchard-api", mono: true), .init("Traces", "18")])
                 GlassNotice(tone: .ask, title: "notice") {
                     Text("body")
                 }

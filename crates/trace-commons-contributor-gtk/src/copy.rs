@@ -61,7 +61,7 @@ pub const RESIDUAL_RISK: &str =
 pub fn residual_risk_line(total_redactions: u32) -> String {
     match total_redactions {
         0 => "Scrubbing matched nothing here. That is not the same as there being nothing to \
-              find -- it only recognises patterns it has seen before. Search this session for \
+              find -- it only recognises patterns it has seen before. Search this trace for \
               anything you are worried about."
             .to_string(),
         1 => "Scrubbing removed 1 thing it recognised. It works from patterns, so it misses \
@@ -96,7 +96,7 @@ pub fn residual_risk_line(total_redactions: u32) -> String {
 /// delegated transcripts and dropping none renders no row at all rather
 /// than a line of zeroes.
 pub fn subagent_line(subagent_count: u32, subagents_dropped: u32) -> Option<String> {
-    let trimmed = "left out to keep this session within its size limit; the conversation itself \
+    let trimmed = "left out to keep this trace within its size limit; the conversation itself \
                    is complete.";
     match (subagent_count, subagents_dropped) {
         (0, 0) => None,
@@ -130,7 +130,7 @@ pub const NOT_THIS_ONE: &str = "Not this one";
 /// the click, not leave the contributor to infer it from a card that never
 /// comes back. The second sentence is the reassurance that keeps the first
 /// from reading like an opt-out of the whole project.
-pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this session for good, even if you keep working in \
+pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this trace for good, even if you keep working in \
      it. This project will keep being offered.";
 
 /// The one-click send on a queue row. See
@@ -143,7 +143,7 @@ pub const NOT_THIS_ONE_TOOLTIP: &str = "Skips this session for good, even if you
 /// that for the undo bar, and a toast that once said "Sent." while still
 /// offering Undo was the same contradiction this tooltip must not repeat.
 pub const SUBMIT: &str = "Submit";
-pub const SUBMIT_TOOLTIP: &str = "Approves this session now. Scrubbing runs first; the watcher \
+pub const SUBMIT_TOOLTIP: &str = "Approves this trace now. Scrubbing runs first; the watcher \
      sends it on its next sweep, and you can undo before then.";
 
 /// The same gesture at the project level, on the group's header rather than
@@ -151,7 +151,7 @@ pub const SUBMIT_TOOLTIP: &str = "Approves this session now. Scrubbing runs firs
 /// -- the daemon selects that project's pending entries, this shell never
 /// enumerates them itself.
 pub const SUBMIT_ALL: &str = "Submit all";
-pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting session from this project now. \
+pub const SUBMIT_ALL_TOOLTIP: &str = "Approves every waiting trace from this project now. \
      Scrubbing runs first; the watcher sends them on its next sweep, and you can undo before \
      then.";
 
@@ -199,7 +199,7 @@ pub use trace_commons_contributor::project_copy::ignore_project_reconciled;
 /// needle in the pre-redaction text, and these four sentences are what tell
 /// the two apart. See [`crate::original_search`].
 pub fn search_absent() -> String {
-    "0 matches \u{2014} not in this session".to_string()
+    "0 matches \u{2014} not in this trace".to_string()
 }
 
 pub fn search_all_removed(total: u32) -> String {
@@ -211,7 +211,7 @@ pub fn search_some_remain(remaining: u32, total: u32) -> String {
 }
 
 /// The arm where the app does not know, and must not round that off to a
-/// clean answer. Saying "not in this session" because a call failed would be
+/// clean answer. Saying "not in this trace" because a call failed would be
 /// the most dangerous wrong sentence this tab can print.
 /// What the summary says between the local scan finding nothing and the
 /// daemon answering about the original.
@@ -219,7 +219,7 @@ pub fn search_some_remain(remaining: u32, total: u32) -> String {
 /// Zero matches in the redacted body is not yet an answer to "was it ever
 /// here", so this sentence deliberately claims nothing. The reassuring one
 /// is `search_absent`, and only `apply_original_count` may print it.
-pub const SEARCH_CHECKING_ORIGINAL: &str = "0 matches here. Checking the original session…";
+pub const SEARCH_CHECKING_ORIGINAL: &str = "0 matches here. Checking the original trace…";
 
 pub fn search_unknown() -> String {
     "0 matches in what would be sent \u{2014} couldn't check the original".to_string()
@@ -292,7 +292,7 @@ pub fn history_folder_summary(submissions: usize) -> String {
 
 /// A folder row's right-hand figures: how much is waiting, and how big.
 pub fn folder_summary(sessions: usize, bytes: u64) -> String {
-    let unit = if sessions == 1 { "session" } else { "sessions" };
+    let unit = if sessions == 1 { "trace" } else { "traces" };
     format!(
         "{sessions} {unit}  \u{00b7}  {}",
         crate::model::human_bytes(bytes)
@@ -307,7 +307,7 @@ pub fn folder_summary(sessions: usize, bytes: u64) -> String {
 pub const SUBMIT_FAILED: &str = "That couldn't be approved just now. Nothing has been approved.";
 
 pub const QUEUE_EMPTY_TITLE: &str = "Nothing waiting";
-pub const QUEUE_EMPTY_BODY: &str = "When a session finishes and goes quiet, it shows up here. \
+pub const QUEUE_EMPTY_BODY: &str = "When a trace finishes and goes quiet, it shows up here. \
      Nothing is sent unless you say so.";
 pub const CHECKING: &str = "Checking what would be sent…";
 
@@ -357,7 +357,7 @@ pub const REMOVED_BY_PATTERN: &str = "Removed by pattern";
 pub use trace_commons_contributor::preview_copy::NOTHING_MATCHED;
 
 /// What the chip does now that it is a control.
-pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this session for a value you are worried about";
+pub const NOTHING_MATCHED_TOOLTIP: &str = "Search this trace for a value you are worried about";
 
 /// A secret scrubbing FOUND and did not remove.
 ///
@@ -385,13 +385,13 @@ pub const THIS_WEEK: &str = "This week";
 
 pub fn waiting_heading(waiting: usize) -> String {
     match waiting {
-        1 => "1 session waiting for your decision".to_string(),
-        n => format!("{n} sessions waiting for your decision"),
+        1 => "1 trace waiting for your decision".to_string(),
+        n => format!("{n} traces waiting for your decision"),
     }
 }
 
 pub fn no_longer_waiting(count: u64) -> String {
-    format!("Sessions no longer waiting ({count})")
+    format!("Traces no longer waiting ({count})")
 }
 
 /// The bound on what [`no_longer_waiting`] can account for, stated rather
@@ -402,7 +402,7 @@ pub fn no_longer_waiting(count: u64) -> String {
 /// ineligible verdict, or a project set to be ignored -- and a contributor
 /// who read this list as complete would come away believing sessions had
 /// been accounted for that were never counted at all.
-pub const NOT_OFFERED_BOUND: &str = "This covers sessions that reached the queue. Sessions that were never queued at all are not \
+pub const NOT_OFFERED_BOUND: &str = "This covers traces that reached the queue. Traces that were never queued at all are not \
      counted here.";
 
 // --- Preview -----------------------------------------------------------
@@ -430,7 +430,7 @@ pub const BODY_NOT_AVAILABLE_HERE: &str = concat!(
 );
 
 pub const PERMISSIONS_INTRO: &str =
-    "If you contribute this session, it will carry these permissions:";
+    "If you contribute this trace, it will carry these permissions:";
 pub const PERMISSIONS_REQUESTED_NOTE: &str = concat!(
     "These are the permissions this device requests. ",
     app_name!(),
@@ -539,7 +539,7 @@ pub fn undo_headline(project_label: &str) -> String {
 
 /// Explains automatic sending and when approval can still be undone.
 pub const UNDO_BODY: &str =
-    "Approved sessions will send automatically. You can undo until uploading starts.";
+    "Approved traces will send automatically. You can undo until uploading starts.";
 
 /// Closes the notice without changing the approval.
 pub const LET_IT_SEND: &str = "Dismiss";
@@ -733,7 +733,7 @@ pub fn withdraw_confirmation(stage: WithdrawStage) -> WithdrawConfirmation {
         WithdrawStage::Unknown => WithdrawConfirmation {
             question: WITHDRAW_QUESTION,
             ambiguity: Some(
-                "This session may already have been distributed. Withdrawal cannot recall distributed copies.",
+                "This trace may already have been distributed. Withdrawal cannot recall distributed copies.",
             ),
             bodies: &[WITHDRAW_BODY_COMMONS_DISTRIBUTED],
             gravest: Some(0),
@@ -760,18 +760,13 @@ pub fn withdraw_result_sentence(reach: Option<&str>) -> String {
     }
 }
 
-/// Withdrawal is authenticated by an account session, which this build has
-/// no way to obtain. Leads with the fact that nothing happened: a
-/// contributor must not walk away from a failed withdrawal believing their
-/// trace was taken back.
-pub const WITHDRAW_ACCOUNT_SESSION_REQUIRED: &str = concat!(
-    "Nothing was withdrawn and nothing was deleted. Withdrawal is an account-level act, so it \
-     is authenticated by your ",
-    app_name!(),
-    " account rather than by this device -- that is what lets you withdraw a trace after \
-     losing the machine that sent it. This build has no account sign-in yet, so it cannot \
-     make the request."
-);
+/// The signed-out withdrawal line, read from the core's withdrawal table
+/// (#1280 review) so every shell says the same thing. It is said before any
+/// request is made, so it never claims an answer from the server, and it
+/// states that nothing was withdrawn as a sentence of its own.
+pub fn withdraw_account_session_required() -> &'static str {
+    trace_commons_contributor::shell_words_copy::withdrawal_words().account_session_required
+}
 
 /// The daemon's label for "the server has no record of this submission for
 /// this account".
@@ -797,7 +792,7 @@ pub const WITHDRAW_NOT_FOUND_LABELS: [&str; 3] = ["not-found", "not_found", "sub
 /// indistinguishable to whoever is asked to help.
 pub fn withdraw_failure_sentence(label: &str) -> String {
     if label == "account-session-required" {
-        return WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string();
+        return withdraw_account_session_required().to_string();
     }
     if WITHDRAW_NOT_FOUND_LABELS.contains(&label) {
         return WITHDRAW_NOT_FOUND.to_string();
@@ -817,7 +812,7 @@ pub fn withdraw_failure_sentence(label: &str) -> String {
 /// reason bulk is left out rather than worded around: `withdraw_bulk`
 /// reports only `withdrawn` and `failed` counts, so afterwards there is no
 /// per-trace tier to report and rule 1 cannot be honoured at all.
-pub const WITHDRAW_NO_BULK: &str = "Withdraw sessions individually to see the result for each one.";
+pub const WITHDRAW_NO_BULK: &str = "Withdraw traces individually to see the result for each one.";
 
 /// The row-level progress label while a withdrawal is in flight. Present
 /// tense, because nothing has happened yet.
@@ -885,7 +880,7 @@ pub const CHECK_SCAN_UNSET: &str = "No extra privacy scan";
 // contributor may be interrupted -- so each label says what the number does
 // to the contributor rather than naming the setting.
 
-pub const KNOB_QUIESCENCE_TITLE: &str = "Quiet time before a session counts as finished";
+pub const KNOB_QUIESCENCE_TITLE: &str = "Quiet time before a trace counts as finished";
 pub const KNOB_QUIESCENCE_UNIT: &str = "minutes";
 pub const KNOB_HOLD_TITLE: &str = "How long you can take something back";
 pub const KNOB_HOLD_UNIT: &str = "seconds after you approve";
@@ -961,7 +956,7 @@ pub const PUBLISHED_BODY: &str = "Your handle -- real handles only, no pseudonym
      write one.";
 pub const NEVER_HEADING: &str = "What never does";
 pub const NEVER_BODY: &str = "Your traces or anything in them. Per-trace data of any kind. \
-     Anything about sessions you didn't send.";
+     Anything about traces you didn't send.";
 pub const GO_PUBLIC_ACKNOWLEDGEMENT: &str = "I understand my handle and aggregate counts become \
      public. Leaving the roster removes me from future snapshots.";
 pub const GO_PUBLIC_CONFIRM: &str = "Go public";
@@ -1128,7 +1123,7 @@ pub const NOTIFY_NOTHING_SENT: &str = "Nothing is sent until you review them.";
 /// rendered by the portal implementation itself (GNOME Shell, Plasma, ...).
 pub const PORTAL_BACKGROUND_REASON: &str = concat!(
     app_name!(),
-    " reviews new sessions and uploads only what you approve."
+    " reviews new traces and uploads only what you approve."
 );
 
 // --- Autostart -----------------------------------------------------------
@@ -1234,7 +1229,7 @@ pub fn portal_status_line(
 /// when onboarding is built.
 pub const FLATPAK_SESSION_ROOTS_EXPLANATION: &str = concat!(
     app_name!(),
-    " needs to read your Claude Code and Codex session files. It asks for access to those \
+    " needs to read your Claude Code and Codex trace files. It asks for access to those \
      folders only."
 );
 
@@ -1251,7 +1246,7 @@ pub fn health_sentence(label: &str) -> &'static str {
             trace_commons_contributor::source_copy::OPENCODE_VERSION_DETAIL
         }
         "not-logged-in" => {
-            "Not connected. Sessions are being queued, but nothing can be sent until you \
+            "Not connected. Traces are being queued, but nothing can be sent until you \
              reconnect. Nothing has been lost."
         }
         "pii-filter-unavailable" => {
@@ -1285,7 +1280,7 @@ pub fn health_sentence(label: &str) -> &'static str {
         "queue-full" => {
             concat!(
                 app_name!(),
-                " has stopped queuing new sessions -- 500 are already waiting. Review or clear \
+                " has stopped queuing new traces -- 500 are already waiting. Review or clear \
                  some to start again."
             )
         }
@@ -1605,7 +1600,7 @@ pub const ONBOARD_WATCH_TITLE: &str = "What to watch";
 /// The subtitle screen 5 never had. States the default first, because the
 /// default is what happens to a contributor who reads nothing and clicks
 /// Continue -- which is most of them.
-pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you see each session before anything is sent. Ignore a \
+pub const ONBOARD_WATCH_SUBTITLE: &str = "Every project starts at ask-first: you see each trace before anything is sent. Ignore a \
      project to leave it out entirely.";
 
 /// The eyebrow over the list. `style::section` uppercases it.
@@ -1627,14 +1622,14 @@ pub const ONBOARD_WATCH_IGNORED: &str =
 /// screen on EVERY machine until the `local_path` deserialisation bug was
 /// fixed, and it rendered as a title above nothing at all.
 pub const ONBOARD_WATCH_EMPTY: &str =
-    "No projects yet. Sessions you run later will appear here, and in Settings.";
+    "No projects yet. Traces you run later will appear here, and in Settings.";
 
 /// The human name for `policy::UNKNOWN_PROJECT_KEY`. The wire carries the
 /// slug `unknown-project` as this row's `project_label`, because
 /// `project_label_for` deliberately returns the constant rather than risk
 /// deriving a name from a path. A slug is the right answer on the socket and
 /// the wrong one on a screen.
-pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Sessions with no project";
+pub const ONBOARD_WATCH_UNKNOWN_LABEL: &str = "Traces with no project";
 
 /// The note the shared spec asks for: "sessions with no resolvable project
 /// get a permanent plain-English note that they can never be armed."
@@ -1681,7 +1676,7 @@ pub const ONBOARD_DONE_BUTTON: &str = "Finish";
 pub const ROOTS_TITLE: &str = "Which folders may this app watch?";
 pub const ROOTS_BODY: &str = concat!(
     app_name!(),
-    " reads coding-session transcripts. It will not guess where they are, and it will not \
+    " reads coding-agent transcripts. It will not guess where they are, and it will not \
      watch anything until you say so."
 );
 /// Says the consequence, per the copy rules. Without this sentence "skip it"
@@ -1693,17 +1688,17 @@ pub const ROOTS_BODY: &str = concat!(
 /// time another one is.
 pub const ROOTS_BOTH: &str = "Answer for each. Leaving one blank is not the same as skipping it -- an unanswered folder \
      falls back to the standard location, which is probably your real work.";
-pub const ROOTS_CLAUDE: &str = "Claude Code sessions";
-pub const ROOTS_CODEX: &str = "Codex sessions";
-pub const ROOTS_GEMINI: &str = "Gemini CLI sessions";
-pub const ROOTS_CLINE: &str = "Cline sessions";
+pub const ROOTS_CLAUDE: &str = "Claude Code traces";
+pub const ROOTS_CODEX: &str = "Codex traces";
+pub const ROOTS_GEMINI: &str = "Gemini CLI traces";
+pub const ROOTS_CLINE: &str = "Cline traces";
 /// Shown when a store arrives that this build has no name for -- a newer
 /// contributor library discovering a source this shell predates. Deliberately
 /// not one of the named titles: a row must never claim to be a product it is
 /// not, and the path beside it still says exactly what would be read.
-pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent sessions";
+pub const ROOTS_UNKNOWN_SOURCE: &str = "Other agent traces";
 pub const ROOTS_WATCH: &str = "Watch this folder";
-pub const ROOTS_OFF: &str = "I don't use this";
+pub const ROOTS_OFF: &str = "Not used";
 pub const ROOTS_CHOOSE: &str = "Choose a different folder...";
 pub const ROOTS_CONTINUE: &str = "Continue";
 pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is being watched.";
@@ -1711,7 +1706,7 @@ pub const ROOTS_FAILED: &str = "That couldn't be saved just now. Nothing is bein
 /// folder that does not exist yet is allowed, and saying so is more use than
 /// refusing it.
 pub const ROOTS_ABSENT: &str = "Not on this machine";
-pub const ROOTS_EMPTY: &str = "No sessions yet";
+pub const ROOTS_EMPTY: &str = "No traces yet";
 /// Said when an environment variable moved the store, so a path that is not
 /// the usual one does not read as a mistake.
 pub const ROOTS_RELOCATED: &str = "Set by an environment variable";
@@ -1719,13 +1714,13 @@ pub const ROOTS_RELOCATED: &str = "Set by an environment variable";
 /// The evidence line under a discovered folder.
 ///
 /// A count and a recency, because that is what makes this a consent prompt
-/// rather than a text field: "946 sessions, most recent 2 hours ago" tells a
+/// rather than a text field: "946 traces, most recent 2 hours ago" tells a
 /// contributor what they are agreeing to.
 pub fn roots_evidence(session_count: u64, recent: Option<&str>) -> String {
     let sessions = if session_count == 1 {
-        "1 session".to_string()
+        "1 trace".to_string()
     } else {
-        format!("{session_count} sessions")
+        format!("{session_count} traces")
     };
     match recent {
         Some(when) => format!("{sessions}, most recent {when}"),
@@ -1804,7 +1799,7 @@ pub const SUBMIT_SKIP_REASONS: [(&str, &str); 7] = [
     ("not-pending", "already decided"),
     ("not-pinned", "could not be prepared"),
     ("envelope-too-large", "too large to send"),
-    ("session-file-vanished", "the session file is gone"),
+    ("session-file-vanished", "the trace file is gone"),
     ("preview-failed", "could not be read"),
     // Listed so a toast can never render this one as "could not be
     // prepared", which would be a false account of a refusal the
@@ -2242,6 +2237,7 @@ pub use trace_commons_contributor::witness_copy::{
     WITNESS_INFERENCE_DISCLOSURE, WITNESS_INFERENCE_ENABLE, WITNESS_INFERENCE_ENABLED,
     WITNESS_INFERENCE_HEADING, WITNESS_INFERENCE_SAVE_FAILED, WITNESS_INFERENCE_SCOPE_NOTE,
     WITNESS_INTRO, WITNESS_MEASUREMENTS_NOTE, WITNESS_MEASUREMENTS_TITLE,
+    WITNESS_PRIVACY_CONFIRM_DESCRIPTION, WITNESS_PRIVACY_CONFIRM_TITLE,
     WITNESS_SIGNING_ADDRESS_TITLE, WITNESS_TOKEN_CANCEL, WITNESS_TOKEN_CAPTURE_NOTE,
     WITNESS_TOKEN_CONFIRM, WITNESS_TOKEN_DISABLE, WITNESS_TOKEN_DISABLED, WITNESS_TOKEN_DISCLOSURE,
     WITNESS_TOKEN_ENABLE, WITNESS_TOKEN_ENABLED, WITNESS_TOKEN_HEADING, WITNESS_TOKEN_SAVE_FAILED,
@@ -2401,8 +2397,8 @@ mod tests {
 
     #[test]
     fn a_folder_summary_inflects_its_session_count() {
-        assert!(folder_summary(1, 1024).starts_with("1 session "));
-        assert!(folder_summary(2, 1024).starts_with("2 sessions "));
+        assert!(folder_summary(1, 1024).starts_with("1 trace "));
+        assert!(folder_summary(2, 1024).starts_with("2 traces "));
     }
 
     #[test]
@@ -2584,16 +2580,16 @@ mod tests {
 
     #[test]
     fn the_evidence_line_counts_one_session_without_a_plural() {
-        assert_eq!(roots_evidence(1, None), "1 session");
-        assert_eq!(roots_evidence(0, None), "0 sessions");
-        assert_eq!(roots_evidence(946, None), "946 sessions");
+        assert_eq!(roots_evidence(1, None), "1 trace");
+        assert_eq!(roots_evidence(0, None), "0 traces");
+        assert_eq!(roots_evidence(946, None), "946 traces");
     }
 
     #[test]
     fn the_evidence_line_carries_the_recency_when_there_is_one() {
         assert_eq!(
             roots_evidence(946, Some("2 hours ago")),
-            "946 sessions, most recent 2 hours ago"
+            "946 traces, most recent 2 hours ago"
         );
     }
 
@@ -2998,19 +2994,20 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_withdrawal_opens_by_saying_nothing_happened() {
+    fn a_failed_withdrawal_says_nothing_happened() {
         // A contributor must not walk away from a failure believing their
         // trace was taken back, whichever failure it was.
         for sentence in [
-            WITHDRAW_ACCOUNT_SESSION_REQUIRED.to_string(),
+            withdraw_account_session_required().to_string(),
             WITHDRAW_NOT_FOUND.to_string(),
             withdraw_failure_sentence("withdraw-failed"),
             withdraw_failure_sentence("account-session-required"),
             withdraw_failure_sentence("not-found"),
         ] {
             assert!(
-                sentence.starts_with("Nothing was withdrawn"),
-                "a failure sentence does not open by saying nothing happened: {sentence}"
+                sentence.starts_with("Nothing was withdrawn")
+                    || sentence.contains(". Nothing was withdrawn"),
+                "a failure sentence does not say nothing happened: {sentence}"
             );
         }
     }

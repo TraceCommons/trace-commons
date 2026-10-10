@@ -50,6 +50,25 @@ final class MenuPanelStore {
         self.client = client
     }
 
+    // MARK: The nudge row
+
+    /// The lead suggestion's row, in the daemon's words; nil while the
+    /// panel is stale or there is none.
+    var nudgeRow: NudgeSurface.PanelRow? {
+        stale ? nil : NudgeSurface.panelRow(status?.nudge)
+    }
+
+    /// The row was tapped: records that the suggestion was opened, then
+    /// answers where to open the Monitor. The stamp is best effort here;
+    /// a refused one still opens the place, since looking changes nothing.
+    func open(_ row: NudgeSurface.PanelRow) async -> MonitorDestination? {
+        let effect = NudgeSurface.effect(row.intent)
+        if let client {
+            try? await NudgeSurface.send(effect, through: client)
+        }
+        return effect.destination.map(MonitorDestination.init(nudge:))
+    }
+
     /// Follows a new client (or none): the old data is stale until the
     /// new one has been read.
     func attach(_ client: (any DaemonDataClient)?, configDirectory: String? = nil) {
@@ -87,15 +106,17 @@ final class MenuPanelStore {
     }
 
     /// Mixed was pressed while an override is in force. Clearing hands
-    /// every folder back to its own setting, so when any folder's own
-    /// setting is Automatic (or is not known) the core's clear confirmation
-    /// is shown first, as for an override: unattended sending never resumes
-    /// from a single menu press. Otherwise the override is cleared at once.
+    /// every folder back to its own setting, so when the override is Ask me
+    /// or Never and any folder's own setting is Automatic (or is not known),
+    /// the core's clear confirmation is shown first, as for an override:
+    /// unattended sending never resumes from a single menu press. Under an
+    /// Automatic override clearing resumes nothing, so it, like a clear with
+    /// no Automatic folder, happens at once.
     /// Without the core's confirmation nothing is cleared.
     func chooseMixed() async {
         guard canChooseOverride, status?.contributionOverride != nil else { return }
         overrideRefusal = nil
-        guard MenuPanelData.clearNeedsConfirmation(projects) else {
+        guard MenuPanelData.clearNeedsConfirmation(projects, override: status?.contributionOverride?.mode) else {
             await writeOverride { _ = try await $0.clearContributionOverride() }
             return
         }
@@ -161,7 +182,7 @@ final class MenuPanelStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired, .inferenceCallAdded:
                 await load()
-            case .digestDue, .previewReady, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .unknown:
                 break
             }
         }
@@ -251,9 +272,22 @@ enum MenuPanelData {
     /// folder's own setting is Automatic, so clearing resumes unattended
     /// sending there. An unread folder list, or a folder whose own setting
     /// the daemon did not report, needs it too (fail closed).
-    static func clearNeedsConfirmation(_ projects: [ProjectRow]?) -> Bool {
+    static func clearNeedsConfirmation(_ projects: [ProjectRow]?, override: String?) -> Bool {
+        // Under an Automatic override every folder already sends unattended;
+        // clearing starts nothing new (an Automatic folder keeps its own
+        // arming, Ask me folders go back to asking).
+        if override == "auto_upload" { return false }
         guard let projects else { return true }
         return projects.contains { $0.folderMode == nil || $0.folderMode == .autoUpload }
+    }
+
+    /// Whether pressing a mode row only closes the list: with no override
+    /// in force the checked row is the core's roll-up itself, so pressing it
+    /// changes nothing and must not set a global override (#1255 review).
+    /// Under an override, or before a current status, every row is a choice.
+    static func pressOnlyCloses(_ mode: String, status: DaemonData.Status?, stale: Bool) -> Bool {
+        guard !stale, let status, status.contributionOverride == nil else { return false }
+        return listChecks(mode, status: status, stale: stale)
     }
 
     /// Whether the pill's list checks a row, agreeing with the pill: an

@@ -26,9 +26,6 @@ struct WatchedFoldersSection: View {
                             .glassType(GlassTokens.TypeScale.caption)
                             .foregroundStyle(GlassColor.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
-                        if model.sourceRootSaveFailed {
-                            GlassNotice(tone: .outside) { Text(copy.saveFailed) }
-                        }
                         if model.daemonSettings == nil {
                             Text(copy.unavailable)
                                 .glassType(GlassTokens.TypeScale.body)
@@ -44,10 +41,23 @@ struct WatchedFoldersSection: View {
                                     onChoose: { save(kind, .watch(path: $0)) },
                                     onDecline: { save(kind, .off) })
                             }
+                            if let trajectory = copy.trajectory,
+                                let answer = TrajectoryRowState.answer(
+                                    copy: trajectory, mode: model.daemonSettings?.trajectorySourceMode)
+                            {
+                                GlassTrajectoryRow(copy: trajectory, answer: answer) {
+                                    Task { await model.saveSettings(TrajectoryRowState.offParams) }
+                                }
+                            }
                         }
                         if model.sourceRootSaveFailed || model.daemonSettings == nil {
                             Button(copy.retry) { model.refreshSettings() }
                                 .buttonStyle(GlassButtonStyle(.glass))
+                        }
+                        // A refused save, unboxed, under the rows and Retry
+                        // it is about (Ron, 2026-10-09).
+                        if model.sourceRootSaveFailed {
+                            GlassAlert(copy.saveFailed)
                         }
                     }
                 }

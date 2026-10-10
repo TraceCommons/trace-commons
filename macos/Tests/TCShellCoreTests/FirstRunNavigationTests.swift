@@ -111,7 +111,7 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
         XCTAssertEqual(state.sessionRoots.codex, .watch(path: "/Volumes/moved/codex"))
 
-        // "I don't use it" on the added row declares nothing for the tool:
+        // "Not used" on the added row declares nothing for the tool:
         // its own row's answer stands.
         state.answerAdded(path: "/Volumes/moved/codex", watched: false)
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: candidates, requiredScope: nil))
@@ -155,19 +155,30 @@ final class FirstRunNavigationTests: XCTestCase {
         }
     }
 
-    func test_startWaitsForTheRequiredUse() {
+    /// The required use is always included (owner, 2026-10-08), so Start
+    /// waits for it to be known, never for a tick.
+    func test_startWaitsForTheRequiredUseToBeKnownNotTicked() {
         var state = FirstRunState(tier: .quick, step: .uses)
         state.account = .enrolled
         state.scopes = ["evaluation"]
-        XCTAssertFalse(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
-
-        state.scopes.insert("research")
         XCTAssertTrue(FirstRunNavigation.canContinue(state, candidates: [], requiredScope: "research"))
-
         XCTAssertFalse(
             FirstRunNavigation.canContinue(state, candidates: [], requiredScope: nil),
             "with no required use known, Start stays disabled"
         )
+
+        // Including it adds only the required use, once, and keeps the rest.
+        let included = state.includingRequiredScope("research")
+        XCTAssertEqual(included.scopes, ["evaluation", "research"])
+        XCTAssertEqual(included.includingRequiredScope("research"), included)
+        XCTAssertEqual(state.includingRequiredScope(nil), state)
+        var others = included
+        others.scopes = state.scopes
+        XCTAssertEqual(others, state, "nothing but the scopes changes")
+
+        // Start sends what the state holds, the required use included.
+        XCTAssertEqual(
+            FirstRunPlan.calls(for: included, at: .start).first, .setConsentScopes(["evaluation", "research"]))
     }
 
     func test_joinWaitsForAnAccountAnswer() {
@@ -192,7 +203,7 @@ final class FirstRunNavigationTests: XCTestCase {
         state.scopes = ["research"]
         let calls = FirstRunPlan.calls(for: state, at: .start)
         XCTAssertFalse(calls.contains { if case .grantAutomatic = $0 { return true } else { return false } })
-        // Watching has no tenant to key the enrolment's marker by, so Start
+        // Watching has no tenant to key the enrollment's marker by, so Start
         // finishes on the watch-only one (`AppModel.markWatchOnlyComplete`).
         XCTAssertEqual(calls.last, .markWatchOnlyComplete, "Start finishes watching")
     }
@@ -266,6 +277,51 @@ final class FirstRunNavigationTests: XCTestCase {
             [.lookupInvite("INVITE-NEW"), .enroll("INVITE-NEW"), .signInNearAI],
             "the daemon is already running, so it is not started again"
         )
+    }
+
+    /// Kristi's review of #1261: with Back gone, a near.ai sign-in or
+    /// enrollment that keeps failing must not hold the person on Folders or
+    /// Tools. They go back to Join with the near.ai choice cleared, so they
+    /// choose again (near.ai, a passkey, or watch only); every other answer
+    /// is kept, and the daemon is not started twice.
+    func test_aFailedNearAISignInReturnsToJoinWithTheChoiceCleared() {
+        var state = FirstRunState(tier: .custom, step: .tools)
+        state.account = .nearAI
+        state.toolAnswers[.claudeCode] = .watch(path: "/Users/someone/.claude/projects")
+        state.toolAnswers[.codex] = .off
+        state.rules["repo-1"] = .ask
+        state.scopes = ["traces"]
+        state.daemonStarted = true
+        state.startedSettingsJSON = state.sessionRoots.settingsJSON()
+
+        let returned = FirstRunNavigation.returnToJoin(afterNearAIFailure: state)
+        XCTAssertEqual(returned.step, .join)
+        XCTAssertEqual(returned.account, .none, "near.ai is not kept as the answer")
+        var expected = state
+        expected.step = .join
+        expected.account = .none
+        XCTAssertEqual(returned, expected, "every other answer is kept")
+
+        // Until near.ai is chosen again, no Continue signs in or enrolls, so
+        // a session the daemon still keeps is never reused unasked.
+        XCTAssertEqual(FirstRunPlan.calls(for: returned, at: .leaveRoots), [])
+        var watching = returned
+        watching.account = .watchOnly
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .leaveRoots), [])
+        var passkey = returned
+        passkey.account = .passkeyChosen
+        XCTAssertEqual(FirstRunPlan.calls(for: passkey, at: .leaveRoots), [.openPasskeySheets])
+        var again = returned
+        again.account = .nearAI
+        XCTAssertEqual(FirstRunPlan.calls(for: again, at: .leaveRoots), [.nearAILogin, .enrollNearAI])
+    }
+
+    /// Only a near.ai answer is cleared: the function never drops a held
+    /// account.
+    func test_aNearAIFailureKeepsAnyOtherAccount() {
+        var state = FirstRunState(tier: .quick, step: .folders)
+        state.account = .passkey(name: "Mac")
+        XCTAssertEqual(FirstRunNavigation.returnToJoin(afterNearAIFailure: state).account, .passkey(name: "Mac"))
     }
 
     func test_aDeadInviteKeepsAnEarlierEnrolment() {
@@ -345,7 +401,7 @@ final class FirstRunNavigationTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(FirstRunState.self, from: data), state)
     }
 
-    /// Kristi's #1235 B1 floor: Automatic and Start read an enrolment the
+    /// Kristi's #1235 B1 floor: Automatic and Start read an enrollment the
     /// daemon holds, not an account answer. near.ai holds one once its
     /// invite enrolled; a passkey only once Verify bound it.
     func test_automaticAndStartNeedARealEnrolment() {
@@ -367,7 +423,7 @@ final class FirstRunNavigationTests: XCTestCase {
             XCTAssertTrue(FirstRunNavigation.canContinue(held, candidates: [], requiredScope: "required"))
         }
         // Start is offered to watching only and to a chosen passkey, whose
-        // Start reopens the sheets; never to an account without an enrolment.
+        // Start reopens the sheets; never to an account without an enrollment.
         XCTAssertTrue(FirstRunNavigation.canContinue(state(.watchOnly), candidates: [], requiredScope: "required"))
         XCTAssertTrue(FirstRunNavigation.canContinue(state(.passkeyChosen), candidates: [], requiredScope: "required"))
         XCTAssertFalse(FirstRunNavigation.canContinue(state(.nearAI), candidates: [], requiredScope: "required"))

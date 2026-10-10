@@ -159,7 +159,7 @@ pub(super) fn wallet_readiness_refusal(state: &AppState) -> Option<&'static str>
 /// The published witness, with **no ceremony-specific preconditions**.
 ///
 /// Factored out of [`published_witness_named`] rather than duplicated: the
-/// witness is a property of the commons, and both enrolment ceremonies need
+/// witness is a property of the commons, and both enrollment ceremonies need
 /// the same one. What differs is what *else* each requires, which is why the
 /// preconditions stayed with the callers.
 ///
@@ -175,7 +175,7 @@ fn published_witness_material_named() -> Result<PublishedWitness, &'static str> 
     Ok(witness)
 }
 
-/// Whether a NEAR AI login enrolment can actually complete here (#836).
+/// Whether a NEAR AI login enrollment can actually complete here (#836).
 ///
 /// **Deliberately not `published_witness`'s predicate.** That one refuses on
 /// two grounds belonging to the wallet mechanism: `account_near_config`, which
@@ -183,7 +183,7 @@ fn published_witness_material_named() -> Result<PublishedWitness, &'static str> 
 /// which exists so the wallet ceremony can redirect a browser to its wallet
 /// page. The login ceremony has no browser redirect and never reads the
 /// sign-in config, so a commons offering only this path would have had its
-/// enrolments refused for reasons that are not about it -- which is the shape
+/// enrollments refused for reasons that are not about it -- which is the shape
 /// #836 exists to remove, appearing one layer above admission.
 ///
 /// What it does require is what this path needs to leave a contributor able to
@@ -350,7 +350,7 @@ fn published_issuer() -> Option<(String, String)> {
     }
     Some((issuer, audience))
 }
-/// What this commons can enrol, and the properties both ceremonies need.
+/// What this commons can enroll, and the properties both ceremonies need.
 ///
 /// **Two readiness flags, one route.** `ready` is the wallet ceremony and its
 /// meaning is unchanged -- redefining it would silently alter behaviour for
@@ -363,7 +363,7 @@ fn published_issuer() -> Option<(String, String)> {
 /// **either** path can use them. Withholding them from a login-only commons is
 /// what leaves a contributor enrolled and unable to upload -- the config is
 /// written with an empty issuer and fails at their first submission rather
-/// than at enrolment.
+/// than at enrollment.
 pub(super) async fn capabilities(State(state): State<Arc<AppState>>) -> axum::response::Response {
     let wallet = published_witness(&state);
     let login_ready = near_ai_login_ready(&state);
@@ -455,7 +455,7 @@ fn limited(headers: &HeaderMap, action: &str) -> bool {
             client_ip_for_rate_limit(headers)
         ),
         30,
-    ) || !ACCOUNT_RATE_LIMITER.check(&format!("near-provision-{action}:global"), 600)
+    ) || !ACCOUNT_RATE_LIMITER.check_global(&format!("near-provision-{action}:global"), 600)
 }
 fn response(value: serde_json::Value) -> axum::response::Response {
     let mut response = Json(value).into_response();
@@ -968,7 +968,7 @@ mod tests {
     }
 }
 
-// --- NEAR AI login enrolment (#836) ----------------------------------------
+// --- NEAR AI login enrollment (#836) ----------------------------------------
 //
 // The sibling ceremony to the wallet one above, and deliberately separate
 // handlers rather than a mode flag: the two prove different things, and a flag
@@ -1334,7 +1334,7 @@ async fn near_ai_finish(
 // --- Connect near.ai: bind a passkey account (Z2 native passkey identity, S3) --
 //
 // `POST /v1/account/near-ai/provision/bind/{start,finish}`, behind
-// `account_auth_middleware`. For a BOUND account the same routes enrol a
+// `account_auth_middleware`. For a BOUND account the same routes enroll a
 // further device instead (a second Mac signed in with the account's passkey):
 // the ceremony is the same, and finish attaches the device only if the NEAR AI
 // login is the one the session's own account is bound to
@@ -1350,11 +1350,11 @@ async fn near_ai_finish(
 // passkey; the commons introspects a NEAR AI token exactly as provisioning does.
 
 /// The label a bind answers with when the caller's account is neither an
-/// unbound passkey account (bind) nor a bound one (enrol): closed, or legacy
+/// unbound passkey account (bind) nor a bound one (enroll): closed, or legacy
 /// (no binding row). A legacy account has no near.ai login anchor an
-/// enrolment could match.
+/// enrollment could match.
 pub(super) const ACCOUNT_ALREADY_BOUND: &str = "account_already_bound";
-/// The label (and audit stage) an enrolment finish answers with when the
+/// The label (and audit stage) an enrollment finish answers with when the
 /// near.ai identity this Mac proved is not the one the session's own account
 /// is bound to (a second Mac signed in to someone else's near.ai). One fixed
 /// value: the comparison runs inside the session's tenant, so a login that
@@ -1363,7 +1363,7 @@ pub(super) const ACCOUNT_ALREADY_BOUND: &str = "account_already_bound";
 /// (the body has no account field). Nothing was written.
 pub(super) const NEAR_AI_ACCOUNT_MISMATCH: &str = "near_ai_account_mismatch";
 /// The label a bind answers with when the session is not a native one. The
-/// device key the ceremony enrols lives in the daemon, which holds a `tcn1_`
+/// device key the ceremony enrolls lives in the daemon, which holds a `tcn1_`
 /// token; a browser cookie session has no device to prove.
 pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
 /// The label (and audit stage) a bind finish answers with when the daemon's
@@ -1375,7 +1375,7 @@ pub(super) const NATIVE_SESSION_REQUIRED: &str = "native_session_required";
 pub(super) const BIND_DEVICE_KEY_REGISTERED_ELSEWHERE: &str = "device_key_registered_elsewhere";
 
 /// What a ceremony on these routes does for an account in `binding`: an
-/// unbound passkey account binds; a bound one enrols a further device (a
+/// unbound passkey account binds; a bound one enrolls a further device (a
 /// second Mac signed in with the same passkey); anything else has neither.
 fn bind_purpose(
     binding: trace_commons_server::account_binding::AccountBindingState,
@@ -1589,7 +1589,7 @@ async fn near_ai_bind_finish(
     if pending.tenant_id != ctx.tenant_id || pending.account_id != account_id {
         return Err(Some("ceremony_account"));
     }
-    // A ceremony started as a bind never finishes as an enrolment, or the
+    // A ceremony started as a bind never finishes as an enrollment, or the
     // reverse: the account's state moved between start and finish (another
     // Mac bound it meanwhile), so this ceremony is stale. Before the token is
     // spent.
@@ -1697,7 +1697,7 @@ async fn near_ai_bind_finish(
     Ok(bind_response(&provisioned, &secret, outcome, binding_state))
 }
 
-/// A successful bind or enrol finish: the fresh native session and the
+/// A successful bind or enroll finish: the fresh native session and the
 /// account it is on. `outcome` is `bound`, `existing_account` or `enrolled`.
 fn bind_response(
     provisioned: &trace_commons_server::account_onboarding::ProvisionedNearAccount,
@@ -1742,7 +1742,7 @@ mod near_ai_login_tests {
         serde_json::from_value::<NearAiFinishRequest>(ok.clone())
             .expect("the shape without an account parses");
 
-        // `expected_account*` too: an enrolment's expected account is the
+        // `expected_account*` too: an enrollment's expected account is the
         // session's, never a value on the wire a caller could vary to probe.
         for smuggled in [
             "account_id",
@@ -1762,7 +1762,7 @@ mod near_ai_login_tests {
     }
 
     /// Which ceremony the bind routes run for each binding state: an unbound
-    /// account binds, a bound one enrols a further device, and a legacy or
+    /// account binds, a bound one enrolls a further device, and a legacy or
     /// closed account gets neither (`account_already_bound`).
     #[test]
     fn the_binding_state_decides_bind_or_enrol_and_nothing_else_runs() {

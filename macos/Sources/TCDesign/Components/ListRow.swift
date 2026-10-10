@@ -93,8 +93,14 @@ public struct GlassListRow: View {
     /// `GlassTokens.Color.selection`. Solid, so the sub-line keeps text
     /// contrast too (`SelectionContrastTests`).
     static let selectedInk = GlassTokens.Color.textOnAccent
-    /// The sub-line's ink when selected: the same solid ink, not a faded one.
+    /// The sub-line's ink when selected: the same solid white. #1146's
+    /// `.tc-list-row[aria-selected] .tc-list-row__sub` is white at 80%,
+    /// which is 3.5:1 on the selection; the sub-line is text, so it keeps
+    /// 4.5:1 (owner ruling, 2026-10-07: hold the WCAG floors).
     static let selectedSubInk = selectedInk
+
+    /// The watch switch's column, kept on every row (#1146 `38px`).
+    static let watchColumn: CGFloat = GlassTokens.Size.watchSwitchWidth
 
     /// The row's fill: the selection, or the faint hover fill under the
     /// pointer (#1146 `.tc-list-row:hover`), never over a selected row.
@@ -103,10 +109,20 @@ public struct GlassListRow: View {
         return hovering ? GlassTokens.Color.rowHover : nil
     }
 
-    /// An unflagged sub-line's ink. An off row fades by `rowOff`, under which
-    /// tertiary text falls below 4.5:1, so it takes the secondary ink.
+    /// An unflagged sub-line's ink: tertiary, on and off. An off row is no
+    /// longer faded as a whole (#1146's `rowOff` 0.6 put a light off row's
+    /// title at 4.32:1 and its sub-line at 3.02:1); its title steps down to
+    /// the secondary ink instead, and only its tool tile keeps the fade, so
+    /// every word on it clears 4.5:1 in both appearances (owner ruling,
+    /// 2026-10-07: the floors win everywhere; TextContrastTests).
     static func plainSubInk(off: Bool) -> GlassRGBA {
-        off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textTertiary
+        GlassTokens.Color.textTertiary
+    }
+
+    /// The title's ink: the selection's, else secondary on an off row.
+    static func titleInk(selected: Bool, off: Bool) -> GlassRGBA {
+        if selected { return selectedInk }
+        return off ? GlassTokens.Color.textSecondary : GlassTokens.Color.textPrimary
     }
 
     public var body: some View {
@@ -136,11 +152,14 @@ public struct GlassListRow: View {
             }
             .frame(width: 16)
 
+            // Decorative; the one part of an off row that still fades.
             GlassToolTile(tile)
+                .opacity(off ? GlassTokens.Opacity.rowOff : 1)
 
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
                     .glassType(GlassTokens.TypeScale.body.weight(depth == .session ? .medium : .semibold))
+                    .foregroundStyle(Self.titleInk(selected: selected, off: off).color)
                     .lineLimit(1)
                 if let sub {
                     Text(sub)
@@ -151,6 +170,9 @@ public struct GlassListRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Every column is laid out on every row, empty or not (#1146's
+            // grid `16 24 1fr auto 38 22`, with placeholders): a session's
+            // Review pill lines up with its folder's Submit pill.
             if let submitTitle {
                 Button(submitTitle) { onSubmit?() }
                     .buttonStyle(GlassButtonStyle(.submit(done: submitDone)))
@@ -160,18 +182,25 @@ public struct GlassListRow: View {
                     .fixedSize()
                     .disabled(onSubmit == nil)
                     .focusable(submitFocusable)
+            } else {
+                Color.clear.frame(width: 0, height: 0)
             }
 
             if let accessory {
                 accessory
             }
 
+            // A row's switch, when it has one, in #1146's `38px` column. No
+            // placeholder for a row without one: the Traces tree has no
+            // switches (owner, 2026-10-08), so its rows' Review and Submit
+            // sit right beside the row menu, lined up with each other.
             if let watched {
                 Toggle(watchLabel, isOn: watched)
                     .toggleStyle(GlassToggleStyle(.watch, showsLabel: false))
                     // A switch the person cannot change here is disabled, so
                     // assistive tech does not offer a control that does nothing.
                     .disabled(watchDisabled)
+                    .frame(width: Self.watchColumn)
             }
 
             Group {
@@ -193,7 +222,6 @@ public struct GlassListRow: View {
             RoundedRectangle(cornerRadius: GlassTokens.Radius.control, style: .continuous)
                 .fill(Self.fill(selected: selected, hovering: hovering)?.color ?? Color.clear)
         )
-        .opacity(off ? GlassTokens.Opacity.rowOff : 1)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         // A click selects the row. The keyboard does not stop on each row:
@@ -227,7 +255,7 @@ public struct GlassListRow: View {
         return switch flag {
         case .ask: GlassTokens.Color.statusAsk.color
         case .on: GlassTokens.Color.statusOn.color
-        case nil: off ? GlassColor.textSecondary : GlassColor.textTertiary
+        case nil: Self.plainSubInk(off: off).color
         }
     }
 }

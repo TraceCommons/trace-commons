@@ -42,7 +42,7 @@ export function SourceRootsPanel({
           <span className="mb-1.5 block tc-eyebrow">
             {copy?.heading ?? "Source settings"}
           </span>
-          <h2>Session folders</h2>
+          <h2>Trace folders</h2>
         </div>
         <span className="tc-chip self-start">
           Explicit
@@ -188,7 +188,7 @@ function SourceRootRow({
         {modeValue === "watch" && (
           <>
             <label>
-              <span className="sr-only">{label} sessions folder</span>
+              <span className="sr-only">{label} traces folder</span>
               <Input
                 {...form.register("path")}
                 placeholder={

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import TCBridge
+import TCDesign
 import TCShellCore
 
 /// The pieces of app behaviour that SwiftUI does not own.
@@ -43,6 +44,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // reader of this file cannot see the plist, and the app's shape is
         // too load-bearing to leave stated in only one place.
         NSApp.setActivationPolicy(.regular)
+        // The person's Light, Dark or System choice (Settings > General).
+        GlassAppearance.applyStored()
 
         // No window is opened here, and no attempt is made to detect a login
         // launch.
@@ -112,7 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Invite links, delivered above the view layer.
     ///
-    /// This deliberately does not enrol. It fills the field and brings the
+    /// This deliberately does not enroll. It fills the field and brings the
     /// screen up; pressing the button stays a person's decision, because
     /// which commons to join is the question that screen exists to ask. The
     /// other two clients say the same thing at their own registration sites.

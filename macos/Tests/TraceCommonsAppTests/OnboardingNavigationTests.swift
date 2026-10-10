@@ -55,9 +55,12 @@ final class OnboardingNavigationTests: XCTestCase {
         var state = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: true)
         XCTAssertEqual(state.account, .enrolled)
         XCTAssertFalse(JoinScreenLayout.inviteIsEditable(state), "no second invite over the enrolment")
-        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.frame.continueButton)
-        XCTAssertNotEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
+        // An enrollment with no invite or account to show reads "Skip"
+        // (owner ruling, 2026-10-08), with no watch-only note, and goes on
+        // as that enrollment.
+        XCTAssertEqual(JoinScreenLayout.footerTitle(state, copy: copy), copy.join.skip)
         XCTAssertNil(JoinScreenLayout.footerNote(state, copy: copy))
+        XCTAssertTrue(JoinScreenLayout.canForward(state))
         XCTAssertTrue(FirstRunNavigation.canChooseAutomatic(state))
 
         state = JoinScreenLayout.forward(state)
@@ -75,7 +78,7 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start).last, .markComplete,
             "an enrolment finishes on its tenant's marker")
 
-        // An invite link cannot replace the enrolment either.
+        // An invite link cannot replace the enrollment either.
         XCTAssertEqual(OnboardingNavigation.receive(
             invite: "https://issuer.example/i#CODE", in: state, failure: nil, isCommitting: false,
             host: { _ in "issuer.example" }), .discard)
@@ -83,9 +86,9 @@ final class OnboardingNavigationTests: XCTestCase {
 
     /// The daemon's first status can arrive after the first run is up (the
     /// main window hosts it as soon as the daemon runs, before `status`
-    /// says it is enrolled). The enrolment is applied then, over no account
+    /// says it is enrolled). The enrollment is applied then, over no account
     /// answer or watch only; an account Join chose is kept, and an
-    /// enrolment this first run made is left as it is.
+    /// enrollment this first run made is left as it is.
     func test_aLateEnrolmentIsRecordedWithoutReplacingAChosenAccount() {
         let fresh = OnboardingNavigation.initialState(startAt: .join, daemonRunning: true, enrolled: false)
         let late = OnboardingNavigation.recordEnrolment(fresh)
@@ -104,8 +107,8 @@ final class OnboardingNavigationTests: XCTestCase {
         XCTAssertEqual(OnboardingNavigation.recordEnrolment(joined), joined)
     }
 
-    /// The realistic late enrolment: a parked link filled Join before the
-    /// daemon's first status said it was enrolled. Recording that enrolment
+    /// The realistic late enrollment: a parked link filled Join before the
+    /// daemon's first status said it was enrolled. Recording that enrollment
     /// drops the held invite, so it is neither looked up nor joined again
     /// (Review Focus 4), and Join's line names no host the daemon was not
     /// shown to have joined (Review Focus 1), refusal or not.

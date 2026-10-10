@@ -274,6 +274,23 @@ pub(super) fn test_state(root: PathBuf) -> Arc<AppState> {
     test_state_with_options(root, None, None, false, false, false, false)
 }
 
+/// `postgres_backend_for_ingest_test`, for a test that must not pass by
+/// skipping (poldsam P-11): with no database URL set it skips, as every
+/// database test does, and once one is set a database that cannot be
+/// reached or migrated fails the test instead.
+async fn required_postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
+    let configured = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .is_ok();
+    let backend = postgres_backend_for_ingest_test().await;
+    assert!(
+        backend.is_some() || !configured,
+        "a test database URL is set, but the database is unavailable or its \
+         migrations failed: this test must not skip"
+    );
+    backend
+}
+
 async fn postgres_backend_for_ingest_test() -> Option<Arc<PgBackend>> {
     let url = std::env::var("TRACE_COMMONS_PG_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -5491,7 +5508,7 @@ fn append_ranking_backfill_fixture_for_submissions(
     }
 }
 
-fn test_state_with_options(
+pub(crate) fn test_state_with_options(
     root: PathBuf,
     db_mirror: Option<Arc<dyn Database>>,
     artifact_store: Option<Arc<LocalEncryptedTraceArtifactStore>>,
@@ -5753,6 +5770,8 @@ fn configure_unbounded_submit_limits_for_test(tokens: &BTreeMap<String, TenantAu
     for auth in tokens.values() {
         let key =
             submit_principal_rate_limit_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
+        configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
+        let key = large_body_principal_key(&auth.tenant_id, auth.auth_method, &auth.principal_ref);
         configure_submit_rate_limits_for_test(&key, u32::MAX, u32::MAX);
     }
 }
@@ -6101,6 +6120,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
         activity_missions_policy: None,
+        credit_estimate_table: Arc::new(
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+        ),
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -6136,6 +6158,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -11261,8 +11284,9 @@ fn qualified_compatibility_pipeline_service(
 /// compatibility configuration's `is_qualifiable`, so a runtime otherwise
 /// qualified in every dependency is not production-qualified while its
 /// compatibility bundle binds the local reference configuration (all-zero
-/// floors, not qualifiable), and is with a production-compatible one --
-/// including `main`'s pilot shape, a zero tail-fraction floor.
+/// floors, not qualifiable), and is with a production-compatible one: one
+/// with a zero tail-fraction floor (`TEST_MAIN_GATE`: 2000000, 0, 500000),
+/// and one with the pilot template's floors (0, 0, 500000; poldsam P-4).
 #[tokio::test]
 async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_gate() {
     use trace_commons_server::versioned_pipeline_compat::CompatibilityBundleConfig;
@@ -11301,21 +11325,37 @@ async fn a_non_qualifiable_compatibility_configuration_fails_the_qualification_g
     );
 
     let reference = CompatibilityBundleConfig::local_reference();
-    let pilot = CompatibilityBundleConfig::production_compatible(
-        reference.scorer_model_id.clone(),
-        reference.projection_id.clone(),
-        reference.index_id.clone(),
-        &TEST_MAIN_GATE,
-    )
-    .expect("main's pilot floors validate");
-    let production = service(&pilot);
-    assert!(
-        production
-            .bundle_qualification(production.default_package())
-            .expect("the pilot package resolves")
-            .configuration_qualifiable
-    );
-    assert!(pipeline_runtime_is_production_qualified(&production));
+    // The pilot template's floors: `deploy/pilot-gcp/ingest.env.template`.
+    let pilot_gate = trace_commons_server::versioned_pipeline_compat::MainGateConfig {
+        perplexity_floor_micros: Some(0),
+        tail_fraction_floor_micros: Some(0),
+        novelty_floor_micros: Some(500_000),
+        ..TEST_MAIN_GATE
+    };
+    for (gate, floors) in [
+        (&TEST_MAIN_GATE, "a zero tail-fraction floor alone"),
+        (&pilot_gate, "the pilot template's floors"),
+    ] {
+        let config = CompatibilityBundleConfig::production_compatible(
+            reference.scorer_model_id.clone(),
+            reference.projection_id.clone(),
+            reference.index_id.clone(),
+            gate,
+        )
+        .unwrap_or_else(|error| panic!("{floors} validate: {error}"));
+        let production = service(&config);
+        assert!(
+            production
+                .bundle_qualification(production.default_package())
+                .unwrap_or_else(|error| panic!("the {floors} package resolves: {error}"))
+                .configuration_qualifiable,
+            "{floors}"
+        );
+        assert!(
+            pipeline_runtime_is_production_qualified(&production),
+            "{floors}"
+        );
+    }
 }
 
 /// Builds a qualified compatibility service through the seam from the
@@ -12673,6 +12713,167 @@ async fn pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_i
     ));
 }
 
+/// poldsam P-12: the pipeline's test doubles are compiled into the library
+/// (the integration tests and these tests link it built without
+/// `cfg(test)`), so what keeps one out of production is the qualification
+/// gate. An otherwise fully qualified service fails the gate with any one of
+/// them in place, under that dependency's own blocker and no other:
+/// `IsolatedPipelineIndex` as the index, `RecordingSettlementAdapter` as the
+/// adapter of the instrument the package pins, or
+/// `StaticPipelineAuthorityProvider::test_only` as the authority.
+/// (`RecordingNearAdapter`:
+/// `pipeline_runtime_requires_a_qualified_payout_adapter_only_when_payout_is_enabled`.)
+#[tokio::test]
+async fn each_pipeline_test_double_fails_the_qualification_gate() {
+    use trace_commons_gate_api::SettlementAdapter;
+    use trace_commons_gate_api::pipeline::InstrumentId;
+    use trace_commons_server::trace_authority::{SubmissionAllowlists, SubmissionAuthority};
+    use trace_commons_server::versioned_pipeline::{PipelineCaps, PipelineServiceBuilder};
+    use trace_commons_server::versioned_pipeline_authority::{
+        PipelineAuthorityProvider, StaticPipelineAuthorityProvider,
+    };
+    use trace_commons_server::versioned_pipeline_bundle::{
+        MinimalPolicyBundle, PipelineBundleConfig,
+    };
+    use trace_commons_server::versioned_pipeline_credit::{
+        RecordingSettlementAdapter, SettlementAdapterRegistry,
+    };
+    use trace_commons_server::versioned_pipeline_index::IsolatedPipelineIndex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Double {
+        None,
+        Index,
+        SettlementAdapter,
+        Authority,
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let backend = pg_backend_without_a_database().await;
+    let build = |double: Double| -> Arc<PipelineService> {
+        let scorer = Arc::new(QualifiedTestScorer(
+            trace_commons_gate_api::ReferencePerplexityScorer::new(),
+        ));
+        let embedder = Arc::new(QualifiedTestEmbedder(
+            trace_commons_gate_api::ReferenceEmbedder::new(),
+        ));
+        // The package pins the Trace Credit instrument, so its adapter is
+        // one of the bundle's dependencies (decision P4-D7).
+        let package = MinimalPolicyBundle::minimal_package(
+            &PipelineBundleConfig {
+                instrument_awards: vec![qualified_test_trace_credit_award()],
+                include_index: false,
+                variant: None,
+            },
+            scorer.as_ref(),
+            embedder.as_ref(),
+        )
+        .unwrap();
+        let adapter: Arc<dyn SettlementAdapter> = if double == Double::SettlementAdapter {
+            RecordingSettlementAdapter::new(
+                InstrumentId::trace_credit(),
+                "recording_trace_credit_test_only",
+                "none",
+            )
+        } else {
+            Arc::new(QualifiedTestSettlementAdapter {
+                instrument_id: InstrumentId::trace_credit(),
+            })
+        };
+        let registry = SettlementAdapterRegistry::new(vec![adapter]).unwrap();
+        let caps = PipelineCaps {
+            per_instrument_atomic_units: BTreeMap::new(),
+        };
+        let builder = if double == Double::Index {
+            let index = IsolatedPipelineIndex::new();
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        } else {
+            let index = Arc::new(QualifiedTestIndex(IsolatedPipelineIndex::new()));
+            PipelineServiceBuilder::new(
+                backend.clone(),
+                test_artifact_store(dir.path()),
+                package,
+                index.clone(),
+                index,
+                registry,
+                caps,
+            )
+        };
+        let authority: Arc<dyn PipelineAuthorityProvider> = if double == Double::Authority {
+            Arc::new(StaticPipelineAuthorityProvider::test_only(
+                SubmissionAuthority {
+                    tenant: SubmissionAllowlists::default(),
+                    policy: None,
+                    require_policy: false,
+                },
+            ))
+        } else {
+            Arc::new(QualifiedTestAuthority)
+        };
+        Arc::new(
+            builder
+                .with_scorer(scorer)
+                .with_embedder(embedder)
+                .with_authority(authority)
+                .with_privacy(Arc::new(QualifiedTestPrivacy))
+                .build()
+                .expect("build the pipeline service"),
+        )
+    };
+
+    // (the double, its blockers, the gate's answer)
+    let answers = [
+        Double::None,
+        Double::Index,
+        Double::SettlementAdapter,
+        Double::Authority,
+    ]
+    .map(|double| {
+        let service = build(double);
+        let blockers = service
+            .bundle_qualification(service.default_package())
+            .expect("the package resolves")
+            .blockers();
+        (
+            double,
+            blockers,
+            pipeline_runtime_is_production_qualified(&service),
+        )
+    });
+    assert_eq!(
+        answers,
+        [
+            (Double::None, vec![], true),
+            (
+                Double::Index,
+                vec![
+                    "runtime_index_reader_not_production",
+                    "runtime_index_writer_not_production"
+                ],
+                false
+            ),
+            (
+                Double::SettlementAdapter,
+                vec!["runtime_settlement_not_production"],
+                false
+            ),
+            (
+                Double::Authority,
+                vec!["runtime_authority_not_production"],
+                false
+            ),
+        ]
+    );
+}
+
 /// No routed tenants, no required flag, an unqualified
 /// runtime -- starts, because no receipt can reach it.
 #[tokio::test]
@@ -12921,6 +13122,29 @@ fn the_worker_runs_a_follow_up_step_when_woken_or_once_its_interval_has_passed()
     assert_eq!(
         without_audits(cadence.due_steps("tenant-b", unwoken, payout_interval, at(84))),
         steps(true, true),
+        "each tenant has its own clock"
+    );
+
+    // The owner's runtime lens on poldsam P-2: the lost follow-up recovery
+    // has its own clock, once a minute, and no step's wakeup runs it.
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(84)),
+        "a tenant's first pass runs the recovery"
+    );
+    cadence.due_steps("tenant-a", steps(true, true), payout_interval, at(85));
+    assert!(
+        !cadence.lost_follow_ups_due("tenant-a", at(143)),
+        "not again within a minute, whatever was woken"
+    );
+    assert!(cadence.lost_follow_ups_due("tenant-a", at(144)));
+    assert!(!cadence.lost_follow_ups_due("tenant-a", at(145)));
+    cadence.run_again("tenant-a", PipelineFollowUpStep::LostFollowUps);
+    assert!(
+        cadence.lost_follow_ups_due("tenant-a", at(146)),
+        "a full recovery batch leaves it due on the next pass"
+    );
+    assert!(
+        cadence.lost_follow_ups_due("tenant-b", at(146)),
         "each tenant has its own clock"
     );
     assert_eq!(
@@ -28807,6 +29031,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let state = Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
         activity_missions_policy: None,
+        credit_estimate_table: Arc::new(
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+        ),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -28842,6 +29069,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         // (`unqualified_routing_allowed`); a test of production routing
         // builds its state and its service with it off.
         pipeline_unqualified_routing: true,
+        pipeline_runtime_selection: PipelineRuntimeSelection::None,
         pipeline_runtime_required: false,
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
@@ -70702,6 +70930,10 @@ struct PerplexityDriverTestDb {
     /// submission_ids)`, so a test can assert the contributor status lookup
     /// batched its ids rather than reading once per record.
     gate_credit_reads: std::sync::RwLock<Vec<(String, Vec<Uuid>)>>,
+    /// Submissions with a pipeline (`source = 'pipeline_settle'`) row, as
+    /// `(tenant_id, submission_id)`. The two re-score writers leave them
+    /// alone and report 0 rows, as the Postgres guard does.
+    pipeline_settled: std::sync::RwLock<std::collections::HashSet<(String, Uuid)>>,
 }
 
 impl PerplexityDriverTestDb {
@@ -70719,7 +70951,23 @@ impl PerplexityDriverTestDb {
             contributor_cap: std::sync::RwLock::new(std::collections::HashMap::new()),
             audit_events: std::sync::RwLock::new(Vec::new()),
             gate_credit_reads: std::sync::RwLock::new(Vec::new()),
+            pipeline_settled: std::sync::RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Marks `submission_id` as one the pipeline's Settle wrote a row for.
+    fn mark_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) {
+        self.pipeline_settled
+            .write()
+            .unwrap()
+            .insert((tenant_id.to_string(), submission_id));
+    }
+
+    fn is_pipeline_settled(&self, tenant_id: &str, submission_id: Uuid) -> bool {
+        self.pipeline_settled
+            .read()
+            .unwrap()
+            .contains(&(tenant_id.to_string(), submission_id))
     }
 
     /// Seed a `DuplicatePrecheck` derived record for `submission_id` with the
@@ -71764,7 +72012,9 @@ impl_ingest_test_corpus_store! {
         /// `find_gate_decision_by_canonical_hash` and the real Postgres SQL —
         /// otherwise a re-score would corrupt the audit trail on historical rows
         /// stamped with an older gate policy/version. This is what the re-score
-        /// unit + integration tests assert against.
+        /// unit + integration tests assert against. A pipeline-settled
+        /// submission is left alone, and every call reports the rows it
+        /// touched, as the Postgres guard does.
         async fn update_trace_gate_decision_perplexity(
             &self,
             tenant_id: &str,
@@ -71772,7 +72022,10 @@ impl_ingest_test_corpus_store! {
             perplexity_micros: i64,
             peak_perplexity_micros: Option<i64>,
             perplexity_passed: bool,
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -71785,20 +72038,24 @@ impl_ingest_test_corpus_store! {
                         row.perplexity_micros = perplexity_micros;
                         row.peak_perplexity_micros = peak_perplexity_micros;
                         row.perplexity_passed = perplexity_passed;
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres impl: the five V73 columns on the
-        /// latest decision row for the submission, nothing else.
+        /// latest decision row for the submission, nothing else; a
+        /// pipeline-settled submission is left alone (0 rows).
         async fn update_trace_gate_decision_author_perplexity(
             &self,
             tenant_id: &str,
             submission_id: Uuid,
             columns: [Option<i64>; 5],
-        ) -> Result<(), DatabaseError> {
+        ) -> Result<u64, DatabaseError> {
+            if self.is_pipeline_settled(tenant_id, submission_id) {
+                return Ok(0);
+            }
             let mut rows = self.gate_decisions.write().unwrap();
             let latest_decision_id = rows
                 .iter()
@@ -71813,11 +72070,11 @@ impl_ingest_test_corpus_store! {
                         row.tool_result_perplexity_micros = columns[2];
                         row.tool_result_tokens = columns[3];
                         row.attributed_token_fraction_micros = columns[4];
-                        break;
+                        return Ok(1);
                     }
                 }
             }
-            Ok(())
+            Ok(0)
         }
         /// In-memory analogue of the Postgres `update_trace_gate_decision_credit_quality`
         /// impl: record the three credit-quality values in a side table keyed by
@@ -72140,6 +72397,38 @@ impl Database for PerplexityDriverTestDb {
                 }
             })
             .collect())
+    }
+
+    /// In-memory analogue of the Postgres `list_recent_gate_decision_keys`:
+    /// every decision row (any tenant), sorted `decided_at DESC,
+    /// decision_id DESC` as the real query orders it, capped at `limit`.
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow> = self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tenant_id, row)| {
+                trace_commons_server::trace_corpus_storage::GateDecisionKeyRow {
+                    tenant_id: tenant_id.clone(),
+                    submission_id: row.submission_id,
+                    decision_id: row.decision_id,
+                    decided_at: row.decided_at,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then(b.decision_id.cmp(&a.decision_id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
     }
 
     /// In-memory analogue of the Postgres `list_dedup_rederive_rows`
@@ -76506,6 +76795,37 @@ async fn the_default_rescore_clears_author_columns_it_cannot_recompute() {
     }
 }
 
+/// Review of #1294: a submission the pipeline's Settle wrote a row for after
+/// the pass enumerated it is not rewritten (the writers' guard touches 0
+/// rows), and the pass counts it as `pipeline_row_skipped`, never as
+/// `rescored`, in both writing modes.
+#[tokio::test]
+async fn rescore_counts_a_pipeline_row_as_skipped_not_rescored() {
+    for mode in [RescoreMode::Full, RescoreMode::AuthorOnly] {
+        let fx = corrupted_rescore_fixture(Some(Arc::new(FixedRescoreGateService(Some(
+            MEASURED_AUTHOR,
+        )))))
+        .await;
+        let pipeline = fx.snapshot[0].submission_id;
+        fx.db.mark_pipeline_settled("tenant-a", pipeline);
+
+        let summary = run_rescore_perplexity_pass(fx.state.clone(), None, mode)
+            .await
+            .expect("the pass succeeds");
+        assert_eq!(summary.rescored, 2, "{mode:?} {summary:?}");
+        assert_eq!(summary.failed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.author_unattributed, 0, "{mode:?} {summary:?}");
+        assert_eq!(summary.pipeline_row_skipped, 1, "{mode:?} {summary:?}");
+
+        let row = fx
+            .db
+            .gate_decision_for("tenant-a", pipeline)
+            .expect("decision still present");
+        assert_eq!(row.perplexity_micros, 0, "{mode:?}");
+        assert_eq!(author_columns_of(&row), AUTHOR_SENTINEL, "{mode:?}");
+    }
+}
+
 /// Integration test for the re-score task end-to-end with the in-memory gate
 /// service: after a full gate drive populates decisions, corrupting the stored
 /// perplexity and running `run_rescore_perplexity_pass` restores the
@@ -78891,6 +79211,547 @@ fn account_rate_limiter_caps_per_key() {
     );
     // A different key is independent.
     assert!(limiter.check("other-key", CONFIRM_PER_CODE_LIMIT));
+}
+
+/// The pilot edge overwrites X-Forwarded-For, so the last value Caddy wrote is
+/// the only rate-limit identity the application may use. Caller-supplied hops
+/// to its left must not create fresh buckets.
+#[test]
+fn account_rate_limit_client_key_uses_the_rightmost_valid_proxy_hop() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("attacker-chosen, 192.0.2.44"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&headers), "192.0.2.44");
+
+    headers.append("x-forwarded-for", HeaderValue::from_static("198.51.100.17"));
+    assert_eq!(client_ip_for_rate_limit(&headers), "198.51.100.17");
+}
+
+/// One IPv6 subscriber can rotate interface identifiers cheaply. Every
+/// address in its /64 must therefore spend the same bucket, while malformed
+/// and absent proxy values share one conservative unattributed bucket.
+#[test]
+fn account_rate_limit_client_key_coarsens_ipv6_and_rejects_non_addresses() {
+    let mut first = HeaderMap::new();
+    first.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678::1"),
+    );
+    let mut second = HeaderMap::new();
+    second.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("2001:db8:1234:5678:ffff::abcd"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&first), "2001:db8:1234:5678::/64");
+    assert_eq!(
+        client_ip_for_rate_limit(&first),
+        client_ip_for_rate_limit(&second)
+    );
+
+    let mut malformed = HeaderMap::new();
+    malformed.insert(
+        "x-forwarded-for",
+        HeaderValue::from_static("not-an-address"),
+    );
+    assert_eq!(client_ip_for_rate_limit(&malformed), "unattributed");
+    assert_eq!(
+        client_ip_for_rate_limit(&malformed),
+        client_ip_for_rate_limit(&HeaderMap::new())
+    );
+}
+
+/// Rotating rate-limit keys must not grow the process table without bound.
+/// Excess callers share one deliberately stricter overflow bucket.
+#[test]
+fn account_rate_limiter_bounds_distinct_keys_and_overflow_fails_closed() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(
+            limiter.check_at(&format!("surface:rotated-{index}"), 30, now),
+            "the shared overflow bucket admits only its small fixed allowance"
+        );
+    }
+    assert!(!limiter.check_at("surface:another", 30, now));
+    assert_eq!(limiter.tracked_windows_for_test(), 3);
+}
+
+/// A full table must not fold a fixed, code-built global ceiling into the
+/// shared overflow bucket: that would cut every surface's deployment-wide
+/// cap to the overflow allowance, and spend the overflow bucket on global
+/// traffic, exactly when an address-rotation flood is in progress.
+#[test]
+fn account_rate_limiter_keeps_global_ceilings_out_of_the_overflow_bucket() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_at("surface:one", 30, now));
+    assert!(limiter.check_at("surface:two", 30, now));
+    for hit in 0..30 {
+        assert!(
+            limiter.check_global_at("surface-global", 30, now),
+            "global hit {hit} is held to the global limit, not the overflow allowance"
+        );
+    }
+    assert!(!limiter.check_global_at("surface-global", 30, now));
+    assert_eq!(limiter.count_for_test(ACCOUNT_RATE_OVERFLOW_KEY), 0);
+    assert_eq!(limiter.count_for_test("surface-global"), 31);
+}
+
+/// Anonymous callers can mint per-IP keys; they cannot mint authenticated
+/// principals. A key-cardinality flood on the public surfaces must therefore
+/// not push an authenticated principal into the anonymous overflow bucket,
+/// or it throttles trace submission for every contributor not already in the
+/// table.
+#[test]
+fn account_rate_limiter_keeps_principal_keys_out_of_the_anonymous_overflow() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(4);
+    let now = std::time::Instant::now();
+    for index in 0..64 {
+        limiter.check_at(
+            &format!("interstitial-ip:192.0.2.{index}"),
+            INTERSTITIAL_PER_IP_LIMIT,
+            now,
+        );
+    }
+    let submit_key =
+        submit_principal_rate_limit_key("tenant-a", TraceAuthMethod::StaticToken, "principal-a");
+    for hit in 0..SUBMIT_PER_PRINCIPAL_LIMIT {
+        assert!(
+            limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now),
+            "submission {hit} keeps the principal's own budget during an anonymous key flood"
+        );
+    }
+    assert!(!limiter.check_principal_at(&submit_key, SUBMIT_PER_PRINCIPAL_LIMIT, now));
+    assert_eq!(
+        limiter.count_for_test(&submit_key),
+        SUBMIT_PER_PRINCIPAL_LIMIT + 1
+    );
+}
+
+/// The principal table is still bounded: enrollment is cheap enough that
+/// principals are not a fixed population, so new principals past the table
+/// size share their own overflow bucket rather than growing memory.
+#[test]
+fn account_rate_limiter_bounds_the_principal_table_separately() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(2);
+    let now = std::time::Instant::now();
+    assert!(limiter.check_principal_at("submit-principal:one", 30, now));
+    assert!(limiter.check_principal_at("submit-principal:two", 30, now));
+    for index in 0..ACCOUNT_RATE_OVERFLOW_LIMIT {
+        assert!(limiter.check_principal_at(&format!("submit-principal:rotated-{index}"), 30, now));
+    }
+    assert!(!limiter.check_principal_at("submit-principal:another", 30, now));
+    assert!(
+        limiter.check_at("interstitial-ip:192.0.2.1", 30, now),
+        "principal overflow does not spend the anonymous table"
+    );
+}
+
+/// Filling the table repeatedly may prune at most once per cadence, rather
+/// than rescanning every bucket for every attacker-controlled key.
+#[test]
+fn account_rate_limiter_prunes_at_most_once_per_cadence() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(1);
+    let start = std::time::Instant::now();
+    assert!(limiter.check_at("surface:first", 30, start));
+    assert!(limiter.check_at("surface:overflow-a", 30, start));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at(
+        "surface:overflow-b",
+        30,
+        start + StdDuration::from_millis(999)
+    ));
+    assert_eq!(limiter.prune_runs_for_test(), 1);
+
+    assert!(limiter.check_at("surface:overflow-c", 30, start + StdDuration::from_secs(1)));
+    assert_eq!(limiter.prune_runs_for_test(), 2);
+}
+
+/// The public login interstitial needs a header-independent ceiling in
+/// addition to its per-client bucket, just like the confirm endpoint.
+#[test]
+fn interstitial_rate_limit_has_a_global_blast_radius_ceiling() {
+    let limiter = AccountRateLimiter::new();
+    for index in 0..INTERSTITIAL_GLOBAL_LIMIT {
+        assert!(interstitial_rate_limit_allows(
+            &limiter,
+            &format!("192.0.2.{index}")
+        ));
+    }
+    assert!(!interstitial_rate_limit_allows(&limiter, "198.51.100.1"));
+}
+
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. A malformed anonymous body therefore gets the uniform auth
+/// refusal, never an extractor error that proves the server buffered it.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_body_extraction() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    for (method, path) in [
+        ("POST", "/v1/traces"),
+        ("POST", "/v1/token-bundles"),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let response = app(test_state(temp.path().to_path_buf()))
+            .oneshot(
+                axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from("{"))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {path} must reject auth before reading the body"
+        );
+    }
+}
+
+/// Only the explicit upload methods receive the envelope-sized body limit.
+/// Ordinary JSON routes retain a small ceiling even though one upload may be
+/// much larger.
+#[tokio::test]
+async fn ordinary_api_routes_keep_the_small_body_ceiling() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/token-bundles/query")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// Each upload method keeps its own explicit body ceiling instead of the
+/// small router default: envelope-sized for `POST /v1/traces` and bundle
+/// `finalize`, which both carry a whole envelope, and attachment-sized for
+/// bundle `begin` and `put`, whose handlers refuse anything larger anyway.
+fn large_upload_route_ceilings() -> [(&'static str, &'static str, usize); 4] {
+    let attachment = trace_commons_protocol::token_distribution::MAX_ATTACHMENT_BYTES;
+    [
+        ("POST", "/v1/traces", MAX_INGEST_BODY_BYTES),
+        ("POST", "/v1/token-bundles", attachment),
+        (
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            attachment,
+        ),
+        (
+            "POST",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev",
+            MAX_INGEST_BODY_BYTES,
+        ),
+    ]
+}
+
+async fn authenticated_upload_status(method: &str, path: &str, body_bytes: usize) -> StatusCode {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method(method)
+                .uri(path)
+                .header(AUTHORIZATION, "Bearer token-a")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b' '; body_bytes]))
+                .expect("request builds"),
+        )
+        .await
+        .expect("response")
+        .status()
+}
+
+/// The small router default must not override the explicit cap on upload
+/// methods. A body just above 2 MiB reaches each extractor/handler (and fails
+/// there for fixture-specific reasons) rather than being refused by the
+/// ordinary API ceiling -- or by the pre-body gate, which would make a
+/// non-413 status prove nothing.
+#[tokio::test]
+async fn large_upload_routes_retain_the_upload_body_ceiling() {
+    for (method, path, _) in large_upload_route_ceilings() {
+        let status = authenticated_upload_status(method, path, 2 * 1024 * 1024 + 1).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&status),
+            "{method} {path} must pass the gate and retain its upload body ceiling, got {status}"
+        );
+    }
+}
+
+/// The documented maximum is admitted and one byte more is refused, per
+/// route.
+#[tokio::test]
+async fn large_upload_routes_admit_exactly_their_ceiling() {
+    for (method, path, ceiling) in large_upload_route_ceilings() {
+        let at_ceiling = authenticated_upload_status(method, path, ceiling).await;
+        assert!(
+            ![
+                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                StatusCode::TOO_MANY_REQUESTS,
+            ]
+            .contains(&at_ceiling),
+            "{method} {path} must admit a body of exactly {ceiling} bytes, got {at_ceiling}"
+        );
+        assert_eq!(
+            authenticated_upload_status(method, path, ceiling + 1).await,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "{method} {path} must refuse a body of {} bytes",
+            ceiling + 1
+        );
+    }
+}
+
+/// Serve the real router on a loopback port, for probes that must control
+/// exactly which request bytes reach the server.
+async fn serve_ingest_for_test(
+    state: Arc<AppState>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("loopback listener binds");
+    let addr = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let _ = axum::serve(listener, app(state)).await;
+    });
+    (addr, server)
+}
+
+/// Send an upload's headers, declaring a body that is never sent. A handler
+/// that polls the body waits on it; one that answers first does so without it.
+async fn send_upload_headers_without_body(
+    addr: std::net::SocketAddr,
+    method: &str,
+    path: &str,
+    bearer: Option<&str>,
+) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects to the test server");
+    let authorization = bearer
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
+    stream
+        .write_all(
+            format!(
+                "{method} {path} HTTP/1.1\r\nHost: ingest.test\r\n{authorization}\
+                 Content-Type: application/json\r\nContent-Length: 1024\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("request headers write");
+    stream
+}
+
+/// The status line of the response, or `None` if the server has not answered
+/// within `wait`.
+async fn response_status_within(
+    stream: &mut tokio::net::TcpStream,
+    wait: StdDuration,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut buffer = vec![0u8; 64];
+    let read = tokio::time::timeout(wait, stream.read(&mut buffer))
+        .await
+        .ok()?
+        .expect("response reads");
+    let text = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    text.lines().next().map(str::to_owned)
+}
+
+/// Large upload endpoints must authenticate before `Bytes`/`SubmitBody`
+/// extraction. An anonymous upload whose body is never sent is answered
+/// anyway, so the refusal cannot have waited on the body; the authenticated
+/// control proves the probe would notice if it had.
+#[tokio::test]
+async fn large_upload_routes_authenticate_before_polling_the_body() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (addr, server) = serve_ingest_for_test(test_state(temp.path().to_path_buf())).await;
+    for (method, path, _) in large_upload_route_ceilings() {
+        let mut anonymous = send_upload_headers_without_body(addr, method, path, None).await;
+        assert_eq!(
+            response_status_within(&mut anonymous, StdDuration::from_secs(5))
+                .await
+                .as_deref(),
+            Some("HTTP/1.1 401 Unauthorized"),
+            "{method} {path} must refuse an anonymous upload without reading its body"
+        );
+    }
+    let mut control =
+        send_upload_headers_without_body(addr, "POST", "/v1/traces", Some("token-a")).await;
+    assert_eq!(
+        response_status_within(&mut control, StdDuration::from_millis(500)).await,
+        None,
+        "an authenticated upload waits for its body, so the probe can see a body read"
+    );
+    server.abort();
+}
+
+/// A valid token must not be able to buffer unbounded upload bodies: past the
+/// per-principal in-flight cap the next upload is refused before its body is
+/// read, and finished uploads give their slots back.
+#[tokio::test]
+async fn large_upload_gate_caps_in_flight_bodies_per_principal() {
+    // Holding the lock keeps the focused submit tests' resets of the shared
+    // limiter out of the way.
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    const TOKEN: &str = "large-body-gate-token";
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, "tenant-a", TOKEN, TokenRole::Contributor);
+    let mut state = test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).tokens = Arc::new(tokens);
+    let key = large_body_principal_key(
+        "tenant-a",
+        TraceAuthMethod::StaticToken,
+        &static_token_principal_ref(TOKEN),
+    );
+    let (addr, server) = serve_ingest_for_test(state).await;
+    let cap = LARGE_BODY_PER_PRINCIPAL_CONCURRENCY;
+
+    // Some tests reset the shared limiter without that lock, and a reset
+    // zeroes in-flight counts. An attempt that a reset interrupts proves
+    // nothing either way, so it is retried. In an undisturbed attempt, the
+    // stalled uploads still hold every slot when the next upload is answered,
+    // and that upload must be refused. Without a cap, the next upload would
+    // also stall, unanswered, and the assertion below fails.
+    let mut undisturbed_status = None;
+    for _attempt in 0..5 {
+        let mut stalled = Vec::new();
+        for _ in 0..cap {
+            stalled.push(
+                send_upload_headers_without_body(addr, "POST", "/v1/traces", Some(TOKEN)).await,
+            );
+        }
+        let held = tokio::time::timeout(StdDuration::from_secs(2), async {
+            while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) < cap {
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok();
+        if !held {
+            continue;
+        }
+        let mut next = send_upload_headers_without_body(
+            addr,
+            "PUT",
+            "/v1/token-bundles/00000000-0000-0000-0000-000000000001/rev/artifact",
+            Some(TOKEN),
+        )
+        .await;
+        let status = response_status_within(&mut next, StdDuration::from_secs(2)).await;
+        if ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) >= cap {
+            undisturbed_status = Some(status);
+            break;
+        }
+    }
+    assert_eq!(
+        undisturbed_status.expect("in some attempt the stalled uploads held every principal slot"),
+        Some("HTTP/1.1 429 Too Many Requests".to_string()),
+        "an upload past the principal's in-flight cap is refused before its body is read"
+    );
+
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        while ACCOUNT_RATE_LIMITER.in_flight_for_test(&key) > 0 {
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("abandoned uploads release their principal slots");
+    server.abort();
+}
+
+/// The deployment-wide in-flight bound holds across principals, and each
+/// principal's own bound holds before it.
+#[test]
+fn large_upload_slots_bound_each_principal_and_the_deployment() {
+    let limiter = AccountRateLimiter::new();
+    let mut held = Vec::new();
+    for _ in 0..LARGE_BODY_PER_PRINCIPAL_CONCURRENCY {
+        held.push(large_body_slots_for(&limiter, "large-body:first").expect("within the cap"));
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:first").is_none(),
+        "one principal is held to its own in-flight cap"
+    );
+    let mut principal = 0;
+    while (held.len() as u32) < LARGE_BODY_GLOBAL_CONCURRENCY {
+        principal += 1;
+        if let Some(slots) = large_body_slots_for(&limiter, &format!("large-body:p{principal}")) {
+            held.push(slots);
+        }
+    }
+    assert!(
+        large_body_slots_for(&limiter, "large-body:fresh").is_none(),
+        "a fresh principal is refused once the deployment-wide bound is full"
+    );
+    assert_eq!(limiter.in_flight_for_test("large-body:fresh"), 0);
+    held.pop();
+    assert!(large_body_slots_for(&limiter, "large-body:fresh").is_some());
+}
+
+/// Accepted: on the merged upload routes an anonymous request with a method
+/// the route does not serve reaches the pre-body gate (axum layers the merged
+/// fallback too) and gets 401, not 405. That discloses less about routing,
+/// not more; pinned so it is not later read as a regression.
+#[tokio::test]
+async fn anonymous_unknown_methods_on_upload_routes_get_the_auth_refusal() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let response = app(test_state(temp.path().to_path_buf()))
+        .oneshot(
+            axum::http::Request::builder()
+                .method("PATCH")
+                .uri("/v1/traces")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
 /// The concurrency guard caps in-flight slots and releases on drop.
@@ -85606,7 +86467,7 @@ async fn near_outbox_row_text(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn near_credit_outbox_workers_never_touch_a_pipeline_payout_row() {
     let _settlement_guard = SETTLEMENT_TEST_LOCK.lock().await;
-    let Some(backend) = postgres_backend_for_ingest_test().await else {
+    let Some(backend) = required_postgres_backend_for_ingest_test().await else {
         return;
     };
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
@@ -87313,7 +88174,7 @@ fn pii_backstop_hold_only_holds_accepted_content_when_enabled() {
 // mode -- arguments and results with prose withheld, which is the shape a
 // consumer rebuilding runnable tasks asks for (#298) -- went straight into
 // the corpus with no backstop pass at all. The driver always covered
-// structured payloads; only enrolment did not.
+// structured payloads; only enrollment did not.
 #[test]
 fn pii_backstop_holds_a_payload_bearing_trace_with_no_message_text() {
     assert_eq!(
@@ -97004,7 +97865,7 @@ mod admission_pg_tests;
 #[path = "migrated_pg_fixture.rs"]
 mod migrated_pg_fixture;
 
-/// The NEAR AI enrolment ceremony, both halves, over a real PostgreSQL.
+/// The NEAR AI enrollment ceremony, both halves, over a real PostgreSQL.
 ///
 /// **The module name is load-bearing.** The `postgres-suites` job selects this
 /// suite with `cargo test --bin trace-commons-ingest nearai_ceremony_pg_tests
@@ -97637,13 +98498,19 @@ fn pipeline_status_protocol_projection_keeps_instrument_states_separate_and_hash
     assert_eq!(pipeline.responsible_phase.as_deref(), Some("settle"));
     assert_eq!(pipeline.instruments.len(), 2);
     assert_eq!(pipeline.instruments[0].instrument_id, "storage_rebate");
-    assert_eq!(pipeline.instruments[0].atomic_units, u128::MAX.to_string());
+    assert_eq!(
+        pipeline.instruments[0].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(u128::MAX))
+    );
     assert_eq!(
         pipeline.instruments[0].internal_settlement_state,
         "not_applicable"
     );
     assert_eq!(pipeline.instruments[0].payout_state, "disabled");
-    assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+    assert_eq!(
+        pipeline.instruments[1].atomic_units,
+        InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+    );
     assert_eq!(pipeline.instruments[1].operation_state, "complete");
     assert_eq!(
         pipeline.instruments[1].internal_settlement_state,
@@ -97716,7 +98583,7 @@ fn a_withheld_or_never_settled_leg_reports_no_pending_points() {
         assert_eq!(projected.credit_points_final, None);
         assert_eq!(
             projected.pipeline.unwrap().instruments[1].atomic_units,
-            "2500000",
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000)),
             "the pipeline block still carries the award"
         );
     }
@@ -97848,7 +98715,10 @@ fn a_forfeited_or_failed_leg_reports_no_pending_points() {
         );
         assert_eq!(projected.credit_points_final, None, "{operation_state}");
         let pipeline = projected.pipeline.expect("the pipeline block");
-        assert_eq!(pipeline.instruments[1].atomic_units, "2500000");
+        assert_eq!(
+            pipeline.instruments[1].atomic_units,
+            InstrumentAmount::Readable(DecimalAtomicUnits::from(2_500_000))
+        );
         assert_eq!(pipeline.instruments[1].operation_state, operation_state);
     }
 }
@@ -97883,7 +98753,7 @@ fn legacy_and_pipeline_status_documents_remain_wire_compatible() {
         reason_label: None,
         instruments: vec![TraceInstrumentStatusUpdate {
             instrument_id: "trace_credit".to_string(),
-            atomic_units: "7".to_string(),
+            atomic_units: InstrumentAmount::Readable(DecimalAtomicUnits::from(7)),
             operation_state: "pending".to_string(),
             internal_settlement_state: "pending".to_string(),
             payout_rail: "near".to_string(),
@@ -97915,6 +98785,42 @@ async fn unreachable_pipeline_product() -> Arc<PipelineProductStore> {
     .await
     .expect("a lazy pool builds without connecting");
     Arc::new(PipelineProductStore::new(Arc::new(backend)))
+}
+
+/// Multi-lens review C11: `main`'s reviewer routes read the tenant's
+/// pipeline submissions only when the reviewer view comes from the database.
+/// A view read from files holds no pipeline submission, so with file reads
+/// they answer from the files, as on `main`, and do not need the pipeline's
+/// database: the store here cannot reach it, so a read would be a 500.
+#[tokio::test]
+async fn mains_review_routes_from_files_do_not_read_the_pipeline_store() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut state = test_state(temp.path().to_path_buf());
+    let backend = PgBackend::new(&DatabaseConfig::from_postgres_url(
+        "postgres://unused@127.0.0.1:9/unused",
+        1,
+    ))
+    .await
+    .expect("a lazy pool builds without connecting");
+    Arc::make_mut(&mut state).pipeline_store =
+        Some(Arc::new(PgPipelineStore::new(Arc::new(backend))));
+    assert!(!state.db_reviewer_reads_for_tenant("tenant-a"));
+    for uri in [
+        "/v1/review/quarantine",
+        "/v1/review/active-learning",
+        "/v1/review/routing-summary",
+    ] {
+        let (status, body) = pipeline_product_request(
+            state.clone(),
+            "GET",
+            uri,
+            Some("review-token-a"),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
 }
 
 /// Sends one request through the router and returns its status and JSON
@@ -99071,4 +99977,471 @@ async fn near_ai_measurements_handler_refuses_without_a_credential() {
         .await
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+mod credit_estimate_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use credit_estimate::{CreditEstimateEvalQuery, run_credit_estimate_eval};
+    use tower::ServiceExt;
+    use trace_commons_protocol::local_credit_estimate::{
+        LocalEstimateFeatures, LocalEstimateTable,
+    };
+    use trace_commons_server::credit_estimate_fit::EstimateWithheldLabel;
+    use trace_commons_server::trace_gate_service::LegacyDeterministicGateService;
+
+    const USER_TEXTS: [&str; 4] = [
+        "ESTIMATE-FIXTURE-ONE make the build pass",
+        "ESTIMATE-FIXTURE-TWO rotate the key and confirm health",
+        "ESTIMATE-FIXTURE-THREE a session that repeats an earlier one",
+        "ESTIMATE-FIXTURE-FOUR a session still being scored",
+    ];
+    const TENANTS: [&str; 4] = ["tenant-a", "tenant-a", "tenant-b", "tenant-b"];
+
+    struct EvalFixture {
+        _temp: tempfile::TempDir,
+        _artifact_temp: tempfile::TempDir,
+        state: Arc<AppState>,
+        db: Arc<PerplexityDriverTestDb>,
+        submission_ids: Vec<Uuid>,
+        features: Vec<LocalEstimateFeatures>,
+    }
+
+    /// Four stored envelopes over two tenants, gated through the enclave
+    /// mock: two scored under calibration 3, one withheld as a duplicate,
+    /// one with no label yet.
+    async fn eval_fixture() -> EvalFixture {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (artifact_store, decryptor, _) =
+            fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+        let db = Arc::new(PerplexityDriverTestDb::new());
+        let mut submission_ids = Vec::new();
+        let mut features = Vec::new();
+        for (tenant_id, text) in TENANTS.iter().zip(USER_TEXTS) {
+            let envelope = sample_envelope_with_user_input(text).await;
+            features.push(LocalEstimateFeatures::from_envelope(&envelope));
+            let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
+            let submission_id = envelope.submission_id;
+            let receipt = artifact_store
+                .store
+                .put_serialized_json(
+                    &tenant_storage_ref(tenant_id),
+                    TraceArtifactKind::ContributionEnvelope,
+                    &submission_id.to_string(),
+                    &plaintext,
+                )
+                .expect("v2 artifact write");
+            db.seed_ungated_submission(
+                tenant_id,
+                submission_id,
+                StorageTraceObjectRefRecord {
+                    tenant_id: tenant_id.to_string(),
+                    submission_id,
+                    object_ref_id: Uuid::new_v4(),
+                    artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                    object_store: artifact_store.object_store_name().to_string(),
+                    object_key: receipt.object_key.clone(),
+                    content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                    encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                    size_bytes: plaintext.len() as i64,
+                    compression: None,
+                    created_by_job_id: None,
+                    invalidated_at: None,
+                    deleted_at: None,
+                    updated_at: receipt.encrypted_at,
+                    created_at: receipt.encrypted_at,
+                },
+            );
+            submission_ids.push(submission_id);
+        }
+        let db_mirror: Arc<dyn Database> = db.clone();
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).gate_service =
+            Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+        let mut decision_ids = Vec::new();
+        for (tenant_id, submission_id) in TENANTS.iter().zip(&submission_ids) {
+            decision_ids
+                .push(score_submission_for_dedup_test(&state, tenant_id, *submission_id).await);
+        }
+        // The inline gate path writes a credit quality for every decision;
+        // clear the two that must carry none.
+        for i in [2, 3] {
+            db.credit_quality_scores
+                .write()
+                .unwrap()
+                .remove(&(TENANTS[i].to_string(), decision_ids[i]));
+        }
+        for (i, q) in [(0, 150_000), (1, 220_000)] {
+            db.update_trace_gate_decision_credit_quality(TENANTS[i], decision_ids[i], q, 0, 3)
+                .await
+                .expect("seed credit quality");
+        }
+        for (_, row) in db.gate_decisions.write().unwrap().iter_mut() {
+            if row.decision_id == decision_ids[2] {
+                row.credit_withheld_reason = Some("skipped_duplicate".to_string());
+            }
+        }
+        EvalFixture {
+            _temp: temp,
+            _artifact_temp: artifact_temp,
+            state,
+            db,
+            submission_ids,
+            features,
+        }
+    }
+
+    fn query(dry_run: bool, fit: bool) -> CreditEstimateEvalQuery {
+        CreditEstimateEvalQuery {
+            dry_run,
+            limit: None,
+            fit,
+        }
+    }
+
+    /// Rows are label-only: the features the protocol computes from each
+    /// stored envelope, the labels, and a tenant hash. Unlabelled decisions
+    /// are counted and left out; nothing in the response names a
+    /// submission, a tenant, or any content.
+    #[tokio::test]
+    async fn eval_returns_label_only_rows_derived_inside_the_gate() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.counts.decisions, 4, "{:?}", response.counts);
+        assert_eq!(response.counts.submissions, 4);
+        assert_eq!(response.counts.unlabelled, 1);
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.derived, 3);
+        assert_eq!(response.counts.failed, 0);
+        assert!(response.fit.is_none());
+        assert_eq!(response.rows.len(), 3);
+
+        for i in 0..3 {
+            let row = response
+                .rows
+                .iter()
+                .find(|row| row.features == fx.features[i])
+                .unwrap_or_else(|| panic!("row {i} present"));
+            assert!(row.tenant_tag.starts_with('t'), "{}", row.tenant_tag);
+            match i {
+                0 => assert_eq!(row.displayed_credit, Some(1.5)),
+                1 => assert_eq!(row.displayed_credit, Some(2.2)),
+                _ => {
+                    assert_eq!(row.displayed_credit, None);
+                    assert_eq!(row.withheld, Some(EstimateWithheldLabel::Duplicate));
+                }
+            }
+            if i < 2 {
+                assert_eq!(row.credit_quality_calibration_version, Some(3));
+                assert_eq!(row.withheld, None);
+            }
+        }
+
+        let json = serde_json::to_string(&response).expect("serializes");
+        for submission_id in &fx.submission_ids {
+            assert!(!json.contains(&submission_id.to_string()));
+        }
+        for needle in ["tenant-a", "tenant-b", "ESTIMATE-FIXTURE", "decided_at"] {
+            assert!(!json.contains(needle), "{needle} leaked: {json}");
+        }
+    }
+
+    /// Kristi's #1285 review, finding 3: a capped run reads the NEWEST
+    /// decisions, so it reaches the calibration the fit trains on, and
+    /// every submission it reaches has its latest decision -- the one its
+    /// label comes from -- among the rows. Decisions are dated in fixture
+    /// order, so the newest two are submission 3 (unlabelled) and
+    /// submission 2 (withheld); oldest-first would read 0 and 1.
+    #[tokio::test]
+    async fn a_capped_eval_reads_the_newest_decisions() {
+        let fx = eval_fixture().await;
+        let base = Utc::now() - chrono::Duration::days(1);
+        for (_, row) in fx.db.gate_decisions.write().unwrap().iter_mut() {
+            let i = fx
+                .submission_ids
+                .iter()
+                .position(|id| *id == row.submission_id)
+                .expect("fixture submission");
+            row.decided_at = base + chrono::Duration::minutes(i as i64);
+        }
+        let response = run_credit_estimate_eval(
+            fx.state.as_ref(),
+            &CreditEstimateEvalQuery {
+                dry_run: false,
+                limit: Some(2),
+                fit: false,
+            },
+        )
+        .await
+        .expect("eval runs");
+        assert_eq!(response.counts.decisions, 2, "{:?}", response.counts);
+        assert_eq!(response.counts.unlabelled, 1, "{:?}", response.counts);
+        assert_eq!(response.counts.labelled, 1, "{:?}", response.counts);
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].features, fx.features[2]);
+    }
+
+    /// Kristi's #1285 review, finding 4: shuffling alone does not unlink a
+    /// row. Neither the exact credit quality, which sits beside the
+    /// submission id in `trace_gate_decisions`, nor an unsalted tenant hash,
+    /// which anyone with the tenant id can recompute, may appear in a row.
+    /// The label is displayed credit (2 decimals), and the tenant is a tag
+    /// that only says which rows share a tenant within this one run.
+    #[tokio::test]
+    async fn eval_rows_carry_no_value_that_joins_back_to_a_decision() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        let json = serde_json::to_value(&response).expect("serializes");
+        let text = json.to_string();
+        for tenant_id in TENANTS {
+            let hash = sha256_prefixed(tenant_id);
+            assert!(!text.contains(&hash), "unsalted tenant hash: {text}");
+        }
+        for micros in ["150000", "220000", "credit_quality_micros"] {
+            assert!(!text.contains(micros), "{micros} leaked: {text}");
+        }
+        let rows = json["rows"].as_array().expect("rows");
+        let tag_of = |features: &LocalEstimateFeatures| {
+            let row = rows
+                .iter()
+                .find(|row| row["features"] == serde_json::to_value(features).unwrap())
+                .expect("row present");
+            row["tenant_tag"]
+                .as_str()
+                .expect("a tenant tag")
+                .to_string()
+        };
+        // Rows 0 and 1 are tenant-a, row 2 tenant-b.
+        assert_eq!(tag_of(&fx.features[0]), tag_of(&fx.features[1]));
+        assert_ne!(tag_of(&fx.features[0]), tag_of(&fx.features[2]));
+        let shown: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|row| row["displayed_credit"].as_f64())
+            .map(|credit| format!("{credit:.2}"))
+            .collect();
+        assert_eq!(
+            shown,
+            BTreeSet::from(["1.50".to_string(), "2.20".to_string()])
+        );
+    }
+
+    /// A dry run reads labels only: no envelope is loaded or decrypted and
+    /// no row is returned.
+    #[tokio::test]
+    async fn eval_dry_run_counts_without_decrypting() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(true, false))
+            .await
+            .expect("dry run");
+        assert_eq!(response.counts.decisions, 4);
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.unlabelled, 1);
+        assert_eq!(response.counts.derived, 0);
+        assert!(response.rows.is_empty());
+        assert!(response.dry_run);
+    }
+
+    /// A gate service that never sees plaintext fails each row closed: it
+    /// is counted as failed and never becomes a row of zeros.
+    #[tokio::test]
+    async fn eval_counts_rows_a_gate_cannot_derive_as_failed() {
+        let fx = eval_fixture().await;
+        let mut state = fx.state.clone();
+        Arc::make_mut(&mut state).gate_service = Arc::new(LegacyDeterministicGateService::new());
+        let response = run_credit_estimate_eval(state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.failed, 3);
+        assert_eq!(response.counts.derived, 0);
+        assert!(response.rows.is_empty());
+    }
+
+    /// With `fit`, the report rides along; this corpus is far too small for
+    /// a held-out check, so it says so and emits no table.
+    #[tokio::test]
+    async fn eval_fit_reports_and_refuses_to_guess_on_a_tiny_corpus() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, true))
+            .await
+            .expect("eval runs");
+        let fit = response.fit.expect("fit report");
+        assert!(!fit.passed);
+        assert!(fit.table.is_none());
+        assert_eq!(fit.no_table_reason, Some("insufficient_held_out_rows"));
+    }
+
+    fn admin(uri: &str, token: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("request builds")
+    }
+
+    #[tokio::test]
+    async fn eval_route_refuses_bad_queries_missing_dependencies_and_non_admins() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bare = test_state(temp.path().to_path_buf());
+        for (uri, expected) in [
+            (
+                "/v1/admin/credit-estimate-eval",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?dryrun=true",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?dry_run=true&fit=true",
+                StatusCode::BAD_REQUEST,
+            ),
+            // Kristi's #1285 review, finding 3: a limit over the cap is
+            // refused, before any dependency is looked at, rather than
+            // run unbounded.
+            (
+                "/v1/admin/credit-estimate-eval?limit=10001",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?limit=-1",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app(bare.clone())
+                .oneshot(admin(uri, "admin-token-a"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+        let response = app(bare)
+            .oneshot(admin("/v1/admin/credit-estimate-eval", "token-a"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn eval_route_returns_rows_to_an_admin() {
+        let fx = eval_fixture().await;
+        let response = app(fx.state.clone())
+            .oneshot(admin(
+                "/v1/admin/credit-estimate-eval?limit=10",
+                "admin-token-a",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["rows"].as_array().map(Vec::len), Some(3), "{value}");
+        assert_eq!(value["counts"]["labelled"], 3);
+    }
+
+    async fn get_table(state: Arc<AppState>) -> (StatusCode, serde_json::Value) {
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/credit-estimate/table")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    /// Unauthenticated, and the built-in table when none is installed: a
+    /// client parses it with the same validator it applies to any table.
+    #[tokio::test]
+    async fn table_route_serves_the_built_in_without_credentials() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (status, body) = get_table(test_state(temp.path().to_path_buf())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            LocalEstimateTable::from_value(&body).expect("client accepts it"),
+            LocalEstimateTable::built_in()
+        );
+    }
+
+    fn three_tier_table() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "features_version": "lef1",
+            "version": "f20261008",
+            "credit_quality_calibration": "cq3",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+            "cut_offs": [6.0, 9.0],
+            "bands": [
+                {"low": 1.1, "high": 2.0},
+                {"low": 1.4, "high": 2.6},
+                {"low": 1.9, "high": 3.2}
+            ],
+            "withheld_share": 0.08
+        })
+    }
+
+    #[tokio::test]
+    async fn table_route_serves_an_installed_table() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let installed = LocalEstimateTable::from_value(&three_tier_table()).unwrap();
+        Arc::make_mut(&mut state).credit_estimate_table = Arc::new(installed.clone());
+        let (status, body) = get_table(state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(LocalEstimateTable::from_value(&body).unwrap(), installed);
+    }
+
+    /// No path is the built-in table; a valid file is that table; a file
+    /// the client would refuse, or one that cannot be read, is a boot
+    /// error with a label, never an empty table served at request time.
+    #[test]
+    fn table_from_path_loads_validates_or_refuses() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            credit_estimate::table_from_path(None).unwrap(),
+            LocalEstimateTable::built_in()
+        );
+        let good = temp.path().join("good.json");
+        std::fs::write(&good, three_tier_table().to_string()).unwrap();
+        assert_eq!(
+            credit_estimate::table_from_path(Some(&good))
+                .unwrap()
+                .tier_count(),
+            3
+        );
+        let mut refused = three_tier_table();
+        refused["schema_version"] = serde_json::json!(2);
+        let bad = temp.path().join("bad.json");
+        std::fs::write(&bad, refused.to_string()).unwrap();
+        for path in [bad, temp.path().join("missing.json")] {
+            let err = credit_estimate::table_from_path(Some(&path)).unwrap_err();
+            assert_eq!(err.to_string(), "credit_estimate_table_invalid");
+        }
+    }
 }

@@ -73,7 +73,11 @@ fn first_run_picker_methods_are_documented_with_every_label() {
         past::LABEL_NOT_PENDING,
         past::LABEL_SESSION_PROJECT_CHANGED,
         past::LABEL_SESSION_UNREADABLE,
+        past::LABEL_SESSION_INELIGIBLE,
+        past::LABEL_SESSION_DUPLICATE,
+        past::LABEL_INCLUDED_SESSIONS_LIMIT,
         past::AUDIT_PAST_SESSIONS_INCLUDED,
+        "past-sessions-requires-async",
         "project-id-unrecognized",
         "project_id-invalid",
         "contribution-override-never",
@@ -94,9 +98,14 @@ fn first_run_picker_methods_are_documented_with_every_label() {
         "not_queued",
         "never",
         "still_active",
+        "held_for_review",
+        "ineligible",
     ] {
         let quoted = format!("`{state}`");
         assert!(contract.contains(&quoted), "undocumented state: {state}");
+    }
+    for field in ["`not_listed`", "`approved_entry_ids`", "`hold_until`"] {
+        assert!(contract.contains(field), "undocumented field: {field}");
     }
     assert!(
         contract.contains("### The `trajectory_source` declaration"),
@@ -112,7 +121,7 @@ use trace_commons_contributor::source::claude_code::ClaudeCodeSource;
 fn fixture_config(device_key_id: &str) -> trace_commons_contributor::config::ContributorConfig {
     trace_commons_contributor::config::ContributorConfig {
         inference_receipt_endpoint: None,
-        consent_scopes_chosen: false,
+        consent_scopes_chosen: Some(true),
         witness_origin: None,
         inference_receipt_check_attestation: false,
         schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
@@ -295,7 +304,7 @@ async fn arming_autonomy_over_the_socket_is_now_allowed() {
     store
         .save_config(&trace_commons_contributor::config::ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: trace_commons_contributor::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION

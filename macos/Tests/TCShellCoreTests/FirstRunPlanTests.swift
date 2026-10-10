@@ -14,7 +14,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     /// `answered` on Uses, after leaving the roots enrolled its invite: the
-    /// enrolment Start's scopes, grant and marker belong to.
+    /// enrollment Start's scopes, grant and marker belong to.
     private func onUses(tier: FirstRunTier = .quick) -> FirstRunState {
         var state = answered(tier: tier)
         state.step = .uses
@@ -101,8 +101,64 @@ final class FirstRunPlanTests: XCTestCase {
         }
     }
 
+    /// Create passkey on Join opens the sheets over Join (#1030): with no
+    /// daemon yet it starts one watching nothing -- Claude Code and Codex
+    /// both declared `off`, so the start gate admits it and no folder is
+    /// read -- then opens them. A running daemon only opens them.
+    func test_createPasskeyOnJoinStartsTheDaemonWatchingNothing() throws {
+        let state = FirstRunState()
+        let calls = FirstRunPlan.calls(for: state, at: .passkeyOnJoin)
+        XCTAssertEqual(calls.count, 2)
+        XCTAssertEqual(calls.last, .openPasskeySheets)
+        let declared = try settings(calls.first)
+        XCTAssertEqual(declared.count, 2, "only the two roots the start gate reads")
+        XCTAssertEqual(declared["claude_source"] as? [String: String], ["mode": "off"])
+        XCTAssertEqual(declared["codex_source"] as? [String: String], ["mode": "off"])
+
+        var running = state
+        running.daemonStarted = true
+        XCTAssertEqual(FirstRunPlan.calls(for: running, at: .passkeyOnJoin), [.openPasskeySheets])
+    }
+
+    /// Wherever Join offers no passkey, Create passkey plans nothing: an
+    /// invite held or enrolled (the daemon refuses a passkey account over an
+    /// enrollment), a signed-in near.ai, an enrollment, a held passkey.
+    func test_createPasskeyOnJoinPlansNothingBesideAnotherAccount() {
+        var withInvite = FirstRunState()
+        withInvite.invite = "INVITE-1"
+        var enrolledInvite = FirstRunState()
+        enrolledInvite.enrolledInvite = "INVITE-1"
+        var signedIn = FirstRunState(account: .nearAI)
+        signedIn.signedIn = true
+        for state in [
+            withInvite, enrolledInvite, signedIn, FirstRunState(account: .enrolled),
+            FirstRunState(account: .passkey(name: "Mac")), FirstRunState(account: .passkey(name: "")),
+        ] {
+            XCTAssertEqual(FirstRunPlan.calls(for: state, at: .passkeyOnJoin), [], "\(state.account)")
+        }
+    }
+
+    /// The daemon Join started holds `off` for both roots. Folders then sends
+    /// only what differs from that, never a second start, and a row
+    /// answered `off` again is not resent.
+    func test_foldersAfterAPasskeyStartSendsOnlyTheChangedRoots() throws {
+        var state = answered()
+        state.invite = ""
+        state.account = .passkey(name: "Mac")
+        state.daemonStarted = true
+        state.startedSettingsJSON = FirstRunPlan.watchNothingSettingsJSON
+        let calls = FirstRunPlan.calls(for: state, at: .leaveRoots)
+        guard case .setSourceSettings(let json)? = calls.first else {
+            return XCTFail("expected setSourceSettings, got \(calls)")
+        }
+        XCTAssertEqual(calls.count, 1)
+        let sent = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: String]])
+        XCTAssertEqual(Set(sent.keys), ["claude_source"])
+        XCTAssertEqual(sent["claude_source"]?["mode"], "watch")
+    }
+
     /// A new passkey creates an account of its own, and the daemon refuses
-    /// to create one over an enrolment (`account-already-enrolled`), so an
+    /// to create one over an enrollment (`account-already-enrolled`), so an
     /// invite and a chosen passkey never both reach the daemon. Join keeps
     /// them apart (`JoinScreenLayout.lookUp`); the plan refuses the pair anyway:
     /// the invite is joined and no sheet opens.
@@ -282,7 +338,7 @@ final class FirstRunPlanTests: XCTestCase {
     }
 
     /// Review Focus 5: Start finishes watching. Watch only holds no
-    /// enrolment, so nothing goes to the enrolment's config (the daemon
+    /// enrollment, so nothing goes to the enrollment's config (the daemon
     /// refuses consent scopes without one) and nothing is granted; Start
     /// ends in the watch-only marker, which needs no tenant. Custom's local
     /// choices (folder rules, past sessions, Private AI) are still sent.
@@ -308,6 +364,63 @@ final class FirstRunPlanTests: XCTestCase {
             .setPrivateAI(true),
             .markWatchOnlyComplete,
         ])
+    }
+
+    /// The first-run consent bug, exactly: the daemon holds an enrollment
+    /// (an invite enrolled before a near.ai sign-in failed, or one signed
+    /// out of on Join), the person is on watch only, and Start carries an
+    /// Automatic rule left on a folder and past-session picks. Nothing that
+    /// would use the enrollment is sent -- no rule, no past session, no
+    /// Private AI, no marker -- since every one of them would act under an
+    /// enrollment whose scopes nobody chose, and the watch-only marker cannot
+    /// finish while the daemon is logged in. Start is not offered for it
+    /// either (`canContinue`).
+    func test_watchOnlyUnderAHeldEnrolmentSendsNothing() {
+        var afterFailedSignIn = answered(tier: .custom)
+        afterFailedSignIn.step = .uses
+        afterFailedSignIn.daemonStarted = true
+        afterFailedSignIn.enrolledInvite = "INVITE-1"
+        afterFailedSignIn.account = .watchOnly
+        afterFailedSignIn.scopes = ["debugging_evaluation"]
+        afterFailedSignIn.rules = ["p1": .autoUpload, "p2": .ask]
+        afterFailedSignIn.pastSelections = ["p1": ["s1", "s2"], "p2": ["s3"]]
+        afterFailedSignIn.privateAI = true
+        XCTAssertTrue(afterFailedSignIn.daemonHoldsEnrolment)
+        XCTAssertFalse(afterFailedSignIn.holdsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: afterFailedSignIn, at: .start), [])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(
+                afterFailedSignIn, candidates: [], requiredScope: "debugging_evaluation"))
+
+        var signedOut = afterFailedSignIn
+        signedOut.enrolledInvite = nil
+        signedOut.signedOutOfEnrolment = true
+        XCTAssertTrue(signedOut.daemonHoldsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: signedOut, at: .start), [])
+        XCTAssertFalse(
+            FirstRunNavigation.canContinue(signedOut, candidates: [], requiredScope: "debugging_evaluation"))
+
+        // With no enrollment held, watch only still finishes as before.
+        var watching = afterFailedSignIn
+        watching.enrolledInvite = nil
+        XCTAssertFalse(watching.daemonHoldsEnrolment)
+        XCTAssertEqual(FirstRunPlan.calls(for: watching, at: .start).last, .markWatchOnlyComplete)
+        XCTAssertTrue(FirstRunNavigation.canContinue(watching, candidates: [], requiredScope: "debugging_evaluation"))
+    }
+
+    /// Whether the daemon may hold an enrollment, whatever this first run
+    /// treats as the account: one it enrolled, one an earlier run left, a
+    /// bound passkey, near.ai's, and one signed out of on Join.
+    func test_theDaemonHoldsAnEnrolmentWhateverTheAccountAnswer() {
+        XCTAssertFalse(FirstRunState().daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .watchOnly).daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .nearAI).daemonHoldsEnrolment)
+        XCTAssertFalse(FirstRunState(account: .passkeyChosen).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .enrolled).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .passkey(name: "")).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .watchOnly, enrolledInvite: "I").daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .none, nearAIEnrolled: true).daemonHoldsEnrolment)
+        XCTAssertTrue(FirstRunState(account: .watchOnly, signedOutOfEnrolment: true).daemonHoldsEnrolment)
     }
 
     func test_quickNeverSetsARuleOrIncludesPastSessions() {
@@ -352,8 +465,8 @@ final class FirstRunPlanTests: XCTestCase {
         XCTAssertEqual(FirstRunPlan.calls(for: state, at: .start), [.openPasskeySheets])
     }
 
-    /// Kristi's #1235 B1 floor: scopes, the grant and the enrolment's
-    /// marker belong to an enrolment the daemon holds. An account answer
+    /// Kristi's #1235 B1 floor: scopes, the grant and the enrollment's
+    /// marker belong to an enrollment the daemon holds. An account answer
     /// without one sends none of them.
     func test_noEnrolmentNoScopesGrantOrMarker() {
         var state = answered()

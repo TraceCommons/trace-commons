@@ -11,7 +11,7 @@ export function HistoryDetailView({
     return (
       <section className="tc-card mt-2.5">
         <p className="mt-3 mb-1 tc-body tc-text-tertiary">
-          Reading owned session detail…
+          Reading owned trace detail…
         </p>
       </section>
     );

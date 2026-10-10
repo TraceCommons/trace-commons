@@ -84,11 +84,20 @@ final class CoreCopyExportTests: XCTestCase {
         XCTAssertEqual(try armingCopy(5).question, "Contribute from api automatically?")
     }
 
+    /// Settings' confirmation before Automatic, in Ron's #1146 words.
+    func testTheSettingsConfirmationIsRons() throws {
+        let copy = try armingCopy(0)
+        XCTAssertEqual(copy.settingsQuestion, "Enable automatic contribution for api?")
+        XCTAssertEqual(copy.settingsDescription, "Confirm project-wide automatic contribution.")
+        XCTAssertEqual(copy.settingsDecline, "Ask")
+        XCTAssertEqual(copy.settingsConfirm, "Enable")
+    }
+
     /// The buttons carry their actions, and declining is not permanent: the
     /// daemon silences the offer for thirty days, not forever.
     func testTheArmingButtonsCarryTheirActions() throws {
         let copy = try armingCopy(5)
-        XCTAssertEqual(copy.confirm, "Turn on automatic contributing")
+        XCTAssertEqual(copy.confirm, "Enable")
         XCTAssertEqual(copy.decline, "Not now")
         XCTAssertFalse(copy.decline.lowercased().contains("never"))
         XCTAssertFalse(copy.decline.lowercased().contains("don't ask"))
@@ -98,9 +107,9 @@ final class CoreCopyExportTests: XCTestCase {
     func testTheArmingBodyIsTheAgreedWording() throws {
         XCTAssertEqual(
             try armingCopy(0).body,
-            "Sessions from this project will be scrubbed and contributed without asking "
-                + "you, from now on. You won't review them first. Sessions already on this Mac "
-                + "keep waiting for you to pick them.\n\nNo session is sent until it has been "
+            "Traces from this project will be scrubbed and contributed without asking "
+                + "you, from now on. You won't review them first. Traces already on this Mac "
+                + "keep waiting for you to pick them.\n\nNo trace is sent until it has been "
                 + "quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't "
                 + "sent yet goes back to waiting for you, and anything already sent stays sent."
         )

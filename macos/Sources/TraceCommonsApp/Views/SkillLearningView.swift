@@ -36,16 +36,14 @@ struct SkillLearningView: View {
 
                 stage(for: state)
 
+                // A failed request, unboxed, under the stage's buttons; its
+                // Dismiss a link after the line (Ron, 2026-10-09).
                 if let message = state.failure, message != dismissedFailure {
-                    GlassNotice(tone: .outside) {
-                        HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                            Text(message)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                            Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }
-                                .buttonStyle(GlassButtonStyle(.glass))
-                                .frame(minHeight: 44)
-                        }
+                    HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                        GlassAlert(message)
+                        Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }
+                            .buttonStyle(GlassButtonStyle(.link))
+                            .fixedSize()
                     }
                 }
             }
@@ -172,18 +170,20 @@ struct SkillLearningView: View {
 
             evaluationContract(candidate)
 
-            if let error = validation?.error,
-               let message = TCSkillLearning.errorLine(label: error)
-            {
-                GlassNotice(tone: .outside) { Text(message).fixedSize(horizontal: false, vertical: true) }
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                Button(working ? copy.reviewing : copy.reviewAction) {
+                    model.reviewSkill(from: record, draft: draft)
+                }
+                .buttonStyle(GlassButtonStyle(.primary))
+                .frame(minHeight: 44)
+                .disabled(working || validation?.valid != true)
+                // Why Review is refused, under it.
+                if let error = validation?.error,
+                   let message = TCSkillLearning.errorLine(label: error)
+                {
+                    GlassAlert(message)
+                }
             }
-
-            Button(working ? copy.reviewing : copy.reviewAction) {
-                model.reviewSkill(from: record, draft: draft)
-            }
-            .buttonStyle(GlassButtonStyle(.primary))
-            .frame(minHeight: 44)
-            .disabled(working || validation?.valid != true)
         }
         .task(id: draft) {
             do {
@@ -303,17 +303,19 @@ private struct SkillReviewPreview: View {
             .glassType(GlassTokens.TypeScale.mono)
             .foregroundStyle(GlassColor.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
+            // The action first, Edit skill after it as a link (Ron,
+            // 2026-10-09).
             HStack(spacing: GlassTokens.Space.s4) {
-                Button(copy.editSkill) { model.editSkill(from: record) }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .frame(minHeight: 44)
-                    .disabled(working)
                 Button(working ? copy.testing : copy.approveAndTest) {
                     model.testSkill(from: record)
                 }
                 .buttonStyle(GlassButtonStyle(.primary))
                 .frame(minHeight: 44)
                 .disabled(working)
+                Button(copy.editSkill) { model.editSkill(from: record) }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .frame(minHeight: 44)
+                    .disabled(working)
             }
         }
     }
@@ -390,11 +392,9 @@ private struct SkillEvaluationResults: View {
                 }
             }
 
+            // The action first, Edit skill after it as a link (Ron,
+            // 2026-10-09).
             HStack(spacing: GlassTokens.Space.s4) {
-                Button(copy.editSkill) { model.editSkill(from: record) }
-                    .buttonStyle(GlassButtonStyle(.glass))
-                    .frame(minHeight: 44)
-                    .disabled(working)
                 if report.installAllowed {
                     Button(working ? copy.preparing : copy.reviewInstall) {
                         model.reviewSkillInstall(from: record)
@@ -403,6 +403,10 @@ private struct SkillEvaluationResults: View {
                     .frame(minHeight: 44)
                     .disabled(working)
                 }
+                Button(copy.editSkill) { model.editSkill(from: record) }
+                    .buttonStyle(GlassButtonStyle(.link))
+                    .frame(minHeight: 44)
+                    .disabled(working)
             }
         }
     }
@@ -534,26 +538,27 @@ private struct SkillInstallPreview: View {
             skillFieldLabel(copy.exactMarker)
             skillCodeBlock(plan.markerJSON)
             if !plan.canInstall {
-                GlassNotice(tone: .outside) {
-                    Text(
+                // Retry first, Edit skill after it as a link, then why the
+                // install cannot go ahead, under them (Ron, 2026-10-09).
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        Button(working ? copy.preparing : copy.retryInstall) {
+                            model.reviewSkillInstall(from: record)
+                        }
+                        .buttonStyle(GlassButtonStyle(.primary))
+                        .frame(minHeight: 44)
+                        .disabled(working)
+                        Button(copy.editSkill) { model.editSkill(from: record) }
+                            .buttonStyle(GlassButtonStyle(.link))
+                            .frame(minHeight: 44)
+                            .disabled(working)
+                    }
+                    GlassAlert(
                         plan.occupied
                             ? TCSkillLearning.errorLine(label: "skill-install-occupied")
                                 ?? copy.unavailable
                             : copy.unavailable
                     )
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: GlassTokens.Space.s4) {
-                    Button(copy.editSkill) { model.editSkill(from: record) }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .frame(minHeight: 44)
-                        .disabled(working)
-                    Button(working ? copy.preparing : copy.retryInstall) {
-                        model.reviewSkillInstall(from: record)
-                    }
-                    .buttonStyle(GlassButtonStyle(.primary))
-                    .frame(minHeight: 44)
-                    .disabled(working)
                 }
             } else {
                 Button(working ? copy.installing : copy.installAction) {

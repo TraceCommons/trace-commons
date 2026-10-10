@@ -89,7 +89,7 @@ final class ComputeSkillsParityTests: XCTestCase {
             "ComputeContent(model: model, allowance: $allowance)\n"
                 + "            .onChange(of: model.snapshot?.ramAllowanceGib, initial: true)"))
         let inspector = try Self.text("Views/Monitor/HistoryInspector.swift")
-        // The always-present stack, scrolling with History's page.
+        // The always-present stack, scrolling in the inspector's pane.
         XCTAssertTrue(inspector.contains(
             "var body: some View {\n        VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {\n"))
         XCTAssertTrue(inspector.contains(
@@ -228,7 +228,8 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertFalse(inspector.contains("SkillLearningGate."))
         XCTAssertFalse(inspector.contains("model.loadSessionDetail(record)"))
         let window = try Self.text("Views/MonitorWindowView.swift")
-        XCTAssertTrue(window.contains("set: { selectedHistory = $0 }"))
+        XCTAssertTrue(window.contains(
+            "set: { Self.openHistory($0, selected: &selectedHistory, showsInspector: &showsInspector) }"))
     }
 
     func test_skillsLivesInTheHistoryInspector() throws {
@@ -240,11 +241,11 @@ final class ComputeSkillsParityTests: XCTestCase {
         // A new row is a new panel: the draft and the install status are per
         // record, and the inspector pane outlives a change of selection.
         XCTAssertTrue(inspector.contains(".id(record.submissionID)"))
-        // The opened row's details are drawn in History's left pane, below
-        // the list (Task 8 of the #1146 port).
-        let homeViews = try Self.text("Views/Monitor/HomeViews.swift")
-        XCTAssertTrue(homeViews.contains("HistoryDetailInspector(row: opened)"))
+        // The opened row's details are the inspector's (Ron's inspector
+        // auto-open); the window scrolls the inspector column.
+        XCTAssertTrue(inspector.contains("var body: some View {\n        HistoryDetailInspector(row: row)\n"))
         let window = try Self.text("Views/MonitorWindowView.swift")
+        XCTAssertTrue(window.contains("HistoryInspectorPane(row: row)"))
         XCTAssertTrue(window.contains("@SceneStorage(\"monitor.selectedHistory\") private var selectedHistory = \"\""))
         let home = try Self.text("Views/Monitor/HomeViews.swift")
         XCTAssertTrue(home.contains("HistoryPage(store: store, statusLabel: statusLabel, selection: $selection,"))
@@ -259,7 +260,7 @@ final class ComputeSkillsParityTests: XCTestCase {
                        "TCSkillLearning.validateDraftJSON(", "TCSkillLearning.errorLine(label:", "copy.rollbackDisclosure",
                        "copy.evaluationDisclosure", "GlassTextField(", "GlassEyebrowCard(copy.heading)",
                        "GlassExpander(copy.sourceEvidence,", "GlassExpander(copy.inspectRuns,",
-                       "GlassExpander(copy.modelOutput,", "GlassNotice(tone: .outside)", ".task(id: draft)",
+                       "GlassExpander(copy.modelOutput,", "GlassAlert(message)", ".task(id: draft)",
                        ".milliseconds(150)", "private struct SkillReviewPreview: View",
                        "private struct SkillEvaluationResults: View", "private struct SkillTrialRow: View",
                        "private struct SkillInstallPreview: View", "private struct InstalledSkillPanel: View"] {
@@ -272,7 +273,7 @@ final class ComputeSkillsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(
             "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord) { dismissedFailure = message }"))
         XCTAssertTrue(try Self.text("Views/SettingsView.swift").contains(
-            "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismiss"))
+            "static let coreDismissWord = MonitorTracesCopy.decode(fromJSON: TCCoreCopy.monitorTracesCopyJSON())?.dismissAction"))
     }
 
     /// A rollback asks first, in the core's words (owner ruling,

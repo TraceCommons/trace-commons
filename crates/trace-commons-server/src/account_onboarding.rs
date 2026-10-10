@@ -149,7 +149,7 @@ pub struct NearAiLoginPending {
     pub nonce_hex: String,
     /// The S256 challenge from start; finish presents the verifier for it.
     pub code_challenge: String,
-    /// The device public key this ceremony enrols, base64.
+    /// The device public key this ceremony enrolls, base64.
     pub device_public_key: String,
     /// Unix seconds. Enforced by the row's own expiry as well, so a stale
     /// ceremony is unusable even if this field were ignored.
@@ -223,7 +223,7 @@ pub const BIND_REFUSED_ANCHOR_CLAIMED: &str = "anchor_claimed";
 /// The device key is already registered under a different tenant.
 ///
 /// `device_keys.device_key_id` is a global primary key, so provisioning (and
-/// bind, which enrols the same daemon key) cannot place the key under this
+/// bind, which enrolls the same daemon key) cannot place the key under this
 /// tenant, and the key would go on authenticating into the tenant that holds
 /// it. Named, so it is not one more `near_provisioning_refused`; label-only,
 /// because which tenant holds the key is exactly what must not be disclosed.
@@ -238,7 +238,7 @@ pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -
     matches!(error, crate::error::DatabaseError::Pool(label) if label == DEVICE_KEY_REGISTERED_ELSEWHERE)
 }
 
-/// An enrolment's login does not resolve to the session's own account.
+/// An enrollment's login does not resolve to the session's own account.
 ///
 /// Decided inside the account's own tenant, under RLS, so the check never
 /// reads another tenant: an anchor held by some other account and no anchor
@@ -249,7 +249,7 @@ pub fn is_device_key_registered_elsewhere(error: &crate::error::DatabaseError) -
 /// [`is_near_ai_enrol_account_mismatch`].
 pub const NEAR_AI_ENROL_ACCOUNT_MISMATCH: &str = "near_ai_enrol_account_mismatch";
 
-/// Whether an enrolment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
+/// Whether an enrollment error is the named [`NEAR_AI_ENROL_ACCOUNT_MISMATCH`]
 /// refusal.
 pub fn is_near_ai_enrol_account_mismatch(error: &crate::error::DatabaseError) -> bool {
     matches!(error, crate::error::DatabaseError::Pool(label) if label == NEAR_AI_ENROL_ACCOUNT_MISMATCH)

@@ -4,7 +4,8 @@ import XCTest
 
 @testable import TraceCommonsApp
 
-/// Ron's first-run frame (#1030 `ftux-frame.tsx`): the tier as the eyebrow,
+/// Ron's first-run frame (#1030 `ftux-frame.tsx`): the tier as the eyebrow
+/// (Custom setup only, owner 2026-10-08),
 /// the tier's step labels in the progress, and "Custom setup instead" only on
 /// Quick's Folders (`tool-screens.tsx`). Read from the real core table and
 /// the frame's source, the house pattern for a SwiftUI view.
@@ -39,7 +40,10 @@ final class FirstRunFrameTests: XCTestCase {
 
         let source = try Self.source()
         XCTAssertTrue(source.contains("GlassPane"))
-        XCTAssertTrue(source.contains("copy.frame.eyebrow(for: state.tier)"))
+        // No tier tag on either setup (owner, 2026-10-08): the tier is only
+        // the pane's accessible name.
+        XCTAssertEqual(source.components(separatedBy: "copy.frame.eyebrow(for: state.tier)").count - 1, 1)
+        XCTAssertTrue(source.contains(".accessibilityLabel(copy.frame.eyebrow(for: state.tier))"))
         XCTAssertTrue(source.contains("GlassStepProgress(labels: copy.frame.steps(for: state.tier)"))
     }
 
@@ -54,13 +58,113 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertEqual(offered.map(\.tier), [.quick])
         XCTAssertEqual(offered.map(\.step), [.folders])
 
-        // The link exists once, behind that guard, and switches the tier.
+        // Withdrawn while a commit runs.
+        XCTAssertFalse(
+            FirstRunFrameLayout.offersCustomSetupInstead(
+                FirstRunState(tier: .quick, step: .folders), isCommitting: true))
+
+        // The button exists once, behind that guard, and switches the tier.
         let source = try Self.source()
         XCTAssertEqual(source.components(separatedBy: "copy.frame.customSetupInstead").count - 1, 1)
         let guardRange = try XCTUnwrap(source.range(of: "FirstRunFrameLayout.offersCustomSetupInstead(state, isCommitting: isCommitting)"))
         let linkRange = try XCTUnwrap(source.range(of: "copy.frame.customSetupInstead"))
         XCTAssertLessThan(guardRange.lowerBound, linkRange.lowerBound)
         XCTAssertTrue(source.contains("FirstRunNavigation.switchTier(state, to: .custom)"))
+
+        // Owner, 2026-10-08: in the footer's right side, immediately left of
+        // Continue, as the neutral secondary button, not a link.
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let rowBody = String(source[row.upperBound...])
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        let customize = try XCTUnwrap(rowBody.range(of: "copy.frame.customSetupInstead"))
+        let primary = try XCTUnwrap(rowBody.range(of: "Button(action: footer.action)"))
+        XCTAssertLessThan(spacer.lowerBound, customize.lowerBound)
+        XCTAssertLessThan(customize.lowerBound, primary.lowerBound)
+        let customizeBody = String(rowBody[customize.upperBound...].prefix(200))
+        XCTAssertTrue(customizeBody.contains(".buttonStyle(GlassButtonStyle(.glass, size: .bar))"), customizeBody)
+        XCTAssertFalse(source.contains("GlassButtonStyle(.link)"))
+    }
+
+    /// Owner, 2026-10-08 (reversing Ron's review of #1235, item 9): Back on
+    /// the footer's left on every step after Join, in either tier, never on
+    /// Join, withdrawn while a commit runs, in the core's word, as the
+    /// neutral secondary button. It goes to the previous step.
+    func test_backIsOfferedOnEveryStepAfterJoin() throws {
+        var offered: [FirstRunState] = []
+        for tier in [FirstRunTier.quick, .custom] {
+            for step in FirstRunNavigation.steps(for: tier) {
+                let state = FirstRunState(tier: tier, step: step)
+                XCTAssertFalse(FirstRunFrameLayout.offersBack(state, isCommitting: true), "\(tier) \(step)")
+                if FirstRunFrameLayout.offersBack(state) { offered.append(state) }
+            }
+        }
+        XCTAssertEqual(offered.map(\.step), [.folders, .uses, .tools, .rules, .uses])
+        XCTAssertFalse(offered.contains { $0.step == .join })
+
+        // Back from Quick's Folders is Join, from Quick's Uses is Folders.
+        XCTAssertEqual(FirstRunNavigation.back(FirstRunState(tier: .quick, step: .folders)).step, .join)
+        XCTAssertEqual(FirstRunNavigation.back(FirstRunState(tier: .quick, step: .uses)).step, .folders)
+
+        XCTAssertEqual(try copy().frame.back, "Back")
+        let source = try Self.source()
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let rowBody = String(source[row.upperBound...])
+        let back = try XCTUnwrap(rowBody.range(of: "if FirstRunFrameLayout.offersBack(state, isCommitting: isCommitting) {"))
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        XCTAssertLessThan(back.lowerBound, spacer.lowerBound, "Back sits on the left")
+        let backBody = String(rowBody[back.upperBound..<spacer.lowerBound])
+        XCTAssertTrue(backBody.contains("Button(copy.frame.back)"))
+        XCTAssertTrue(backBody.contains("state = FirstRunNavigation.back(state)"))
+        XCTAssertTrue(backBody.contains(".buttonStyle(GlassButtonStyle(.glass, size: .bar))"))
+    }
+
+    /// Owner ruling, 2026-10-08: every button in the footer's action bar is
+    /// Continue's size. Back, Customize and Cancel are `.bar`; no button in
+    /// the bar is left at the inline size.
+    func test_everyFooterButtonIsTheCTAsSize() throws {
+        let source = try Self.source()
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let end = try XCTUnwrap(source.range(of: "extension FirstRunFrame where", range: row.upperBound..<source.endIndex))
+        let rowBody = String(source[row.upperBound..<end.lowerBound])
+        let styles = rowBody.components(separatedBy: ".buttonStyle(").dropFirst().map { String($0.prefix(60)) }
+        XCTAssertEqual(styles.count, 4, rowBody)
+        for style in styles where !style.hasPrefix("GlassButtonStyle(.primary)") {
+            XCTAssertTrue(style.contains("size: .bar"), style)
+        }
+        for name in ["copy.frame.back", "copy.frame.customSetupInstead"] {
+            let at = try XCTUnwrap(rowBody.range(of: name))
+            XCTAssertTrue(String(rowBody[at.upperBound...].prefix(200)).contains("size: .bar"), name)
+        }
+    }
+
+    /// Owner ruling, 2026-10-08: text about taking the primary action sits
+    /// directly above the action bar, in the one TCDesign placement, after
+    /// the scrolling content and the pinned row; the footer row draws none.
+    func test_actionNotesSitDirectlyAboveTheActionBar() throws {
+        let footer = FirstRunFooter(title: "", isEnabled: true, note: "state", action: {})
+        XCTAssertEqual(FirstRunFrameLayout.actionNotes(actionNote: "standing", footer: footer), ["standing", "state"])
+        XCTAssertEqual(
+            FirstRunFrameLayout.actionNotes(actionNote: nil, footer: FirstRunFooter(title: "", isEnabled: true, action: {})), [])
+        XCTAssertEqual(FirstRunFrameLayout.actionNotes(actionNote: "", footer: footer), ["state"])
+
+        let source = try Self.source()
+        let body = try XCTUnwrap(source.range(of: "var body: some View {"))
+        let rest = source[body.upperBound...]
+        let scroll = try XCTUnwrap(rest.range(of: "ScrollView {"))
+        let pinned = try XCTUnwrap(rest.range(of: "                pinned\n"))
+        let bar = try XCTUnwrap(rest.range(
+            of: "GlassActionBar(\n"
+                + "                    notes: FirstRunFrameLayout.actionNotes(actionNote: actionNote, footer: footer),\n"
+                + "                    noteInset: FirstRunFrameLayout.contentInset\n"
+                + "                ) {\n"
+                + "                    footerRow\n"))
+        XCTAssertLessThan(scroll.lowerBound, pinned.lowerBound)
+        XCTAssertLessThan(pinned.lowerBound, bar.lowerBound)
+        let row = try XCTUnwrap(source.range(of: "private var footerRow: some View {"))
+        let end = try XCTUnwrap(source.range(of: "extension FirstRunFrame where", range: row.upperBound..<source.endIndex))
+        let rowBody = String(source[row.upperBound..<end.lowerBound])
+        XCTAssertFalse(rowBody.contains("footer.note"), "the footer row draws no note of its own")
+        XCTAssertEqual(rowBody.components(separatedBy: "Text(").count - 1, 1, "only Continue's own label")
     }
 
     /// Ron's Continue carries "Answer every tool above to continue" as its
@@ -76,6 +180,42 @@ final class FirstRunFrameTests: XCTestCase {
                 XCTAssertFalse(FirstRunFrameLayout.showsAnswerEveryTool(state, footer: enabled))
             }
         }
+    }
+
+    /// Cancel during the near.ai browser wait (owner, 2026-10-07): only
+    /// while the sign-in runs, in the core's first-run "Cancel", as a small
+    /// secondary button beside the spinning Continue, on Folders and Tools
+    /// only, and nowhere else in Ron's footer.
+    func test_cancelAppearsOnlyWhileTheSignInRuns() throws {
+        let words: FirstRunCopy = try copy()
+        XCTAssertNil(FoldersScreenLayout.signInCancel(waiting: false, copy: words, action: {}))
+        let cancel = try XCTUnwrap(FoldersScreenLayout.signInCancel(waiting: true, copy: words, action: {}))
+        XCTAssertEqual(cancel.title, words.passkey.cancel)
+        XCTAssertNil(FirstRunFooter(title: "", isEnabled: false, action: {}).cancel, "no Cancel unless a screen gives one")
+
+        for file in ["FoldersScreen.swift", "ToolsScreen.swift"] {
+            let source = try Self.appSource("Views/FirstRun/\(file)")
+            XCTAssertTrue(
+                source.contains("cancel: FoldersScreenLayout.signInCancel(waiting: runner.signInWaiting, copy: copy)"),
+                file)
+            XCTAssertTrue(source.contains("await runner.cancelSignIn()"), file)
+        }
+        for file in ["JoinScreen.swift", "RulesScreen.swift", "UsesScreen.swift"] {
+            XCTAssertFalse(try Self.appSource("Views/FirstRun/\(file)").contains("signInCancel"), file)
+        }
+
+        // In the footer row: after the spacer, before Continue, secondary.
+        let frame = try Self.source()
+        let row = try XCTUnwrap(frame.range(of: "private var footerRow: some View {"))
+        let rowBody = String(frame[row.upperBound...])
+        let spacer = try XCTUnwrap(rowBody.range(of: "Spacer(minLength: 0)"))
+        let cancelButton = try XCTUnwrap(rowBody.range(of: "if let cancel = footer.cancel {"))
+        let primary = try XCTUnwrap(rowBody.range(of: "Button(action: footer.action)"))
+        XCTAssertLessThan(spacer.lowerBound, cancelButton.lowerBound)
+        XCTAssertLessThan(cancelButton.lowerBound, primary.lowerBound)
+        let cancelBody = String(rowBody[cancelButton.upperBound..<primary.lowerBound])
+        XCTAssertTrue(cancelBody.contains("Button(cancel.title, action: cancel.action)"))
+        XCTAssertTrue(cancelBody.contains("GlassButtonStyle(.secondary, size: .bar)"))
     }
 
     private static func appSource(_ path: String) throws -> String {
@@ -161,20 +301,15 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(body.contains(".accessibilityAddTraits(.isHeader)"), "FirstRunTitle must carry the header trait")
     }
 
-    /// Ron's review of #1235, items 9 to 12: no Back on any screen, the
-    /// tier label on the right of the bar, the 450pt pane, titles fixed
-    /// while only the cards scroll, and an error notice in the body after
-    /// the cards.
+    /// Ron's review of #1235, items 10 to 12 (the tier tag since removed,
+    /// owner 2026-10-08): the 450pt pane, titles fixed while only the cards
+    /// scroll, and an error notice in the body after the cards. Back is the
+    /// frame's alone (owner, 2026-10-08): no screen draws one of its own.
     func test_theFrameMatchesRonsLayout() throws {
         let frame = try Self.source()
-        XCTAssertFalse(frame.contains("onBack"), "no Back on any screen")
-        XCTAssertFalse(frame.contains("copy.passkey.back"))
-        // The tier label sits on the right: a spacer, then the eyebrow.
-        let bar = try XCTUnwrap(frame.range(of: "private var bar: some View {"))
-        let barBody = String(frame[bar.upperBound...].prefix(400))
-        let spacer = try XCTUnwrap(barBody.range(of: "Spacer(minLength: 0)"))
-        let eyebrow = try XCTUnwrap(barBody.range(of: "copy.frame.eyebrow(for: state.tier)"))
-        XCTAssertLessThan(spacer.lowerBound, eyebrow.lowerBound)
+        XCTAssertEqual(frame.components(separatedBy: "Button(copy.frame.back)").count - 1, 1)
+        // No tier tag on either setup (owner, 2026-10-08).
+        XCTAssertFalse(frame.contains("private var bar: some View {"))
         // The header is fixed above the one ScrollView; the notice follows
         // the cards inside it.
         let body = try XCTUnwrap(frame.range(of: "GlassPane {"))
@@ -190,6 +325,8 @@ final class FirstRunFrameTests: XCTestCase {
         for screen in Self.screens {
             let source = try Self.appSource("Views/FirstRun/\(screen.file)")
             XCTAssertFalse(source.contains("onBack"), screen.file)
+            XCTAssertFalse(source.contains("copy.frame.back"), screen.file)
+            XCTAssertFalse(source.contains("FirstRunNavigation.back("), screen.file)
             XCTAssertFalse(source.contains("ScrollView"), "\(screen.file): only the frame scrolls")
             // The frame's header closure, between its footer and
             // `content:`, holds the title.
@@ -217,9 +354,9 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(tools.contains("dash: [4, 3]"))
         XCTAssertTrue(tools.contains("GlassTokens.Color.purpleText"))
         XCTAssertFalse(tools.contains(".opacity(dragging"))
-        // "Get {tool}": the small secondary button with the download icon.
+        // "Download": the neutral glass pill with the download icon.
         let row = try Self.appSource("Views/FirstRun/ToolAnswerRow.swift")
-        XCTAssertTrue(row.contains("GlassButtonStyle(.secondary, small: true)"))
+        XCTAssertTrue(row.contains("GlassButtonStyle(.glass)"))
         XCTAssertTrue(row.contains("systemImage: \"arrow.down.to.line\""))
         // Start sharing shows a spinner while it runs.
         let uses = try Self.appSource("Views/FirstRun/UsesScreen.swift")
@@ -237,11 +374,16 @@ final class FirstRunFrameTests: XCTestCase {
         XCTAssertTrue(uses.contains("GlassTokens.Color.statusOnText"))
         // The Private AI switch is the settings style.
         XCTAssertTrue(uses.contains("GlassToggleStyle(.settings, showsLabel: false)"))
-        // Join's bold sentence is in the primary text colour.
+        // Join's body is one regular paragraph (owner, 2026-10-08).
         let join = try Self.appSource("Views/FirstRun/JoinScreen.swift")
-        XCTAssertTrue(join.contains("Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary)"))
-        // Never rows on Rules are dimmed.
+        XCTAssertFalse(join.contains("bodyEmphasis"))
+        // The page content has its own side margin; the step progress and
+        // the button row do not.
+        XCTAssertEqual(FirstRunFrameLayout.contentInset, 20)
+        // Never rows on Rules are dimmed by ink, never by an opacity that
+        // takes their words under 4.5:1.
         let rules = try Self.appSource("Views/FirstRun/RulesScreen.swift")
-        XCTAssertTrue(rules.contains(".opacity(GlassTokens.Opacity.rowOff)"))
+        XCTAssertFalse(rules.contains(".opacity(GlassTokens.Opacity.rowOff)"))
+        XCTAssertTrue(rules.contains("dimmed by ink, not"))
     }
 }

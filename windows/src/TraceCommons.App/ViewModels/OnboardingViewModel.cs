@@ -15,7 +15,7 @@ namespace TraceCommons.App.ViewModels;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Until this existed the Windows app could not enrol anyone: there was no
+/// Until this existed the Windows app could not enroll anyone: there was no
 /// invite handling in it at all, so an app-only contributor had to install
 /// the CLI and run <c>login</c> there. None of it needed new protocol --
 /// every method called here was already in the daemon's pinned
@@ -34,7 +34,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 {
     private static readonly OnboardingCopy? SharedOnboardingCopy = OnboardingCopy.Load();
 
-    /// The shared payload, for the login-enrolment offer's own sentences.
+    /// The shared payload, for the login-enrollment offer's own sentences.
     /// Loaded once for the same reason the onboarding copy is: these are
     /// facts about the build, not about a running daemon.
     private static readonly PrivateInferenceCopy? SharedPrivateInferenceCopy =
@@ -218,7 +218,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 .ConfigureAwait(true);
             if (response.IsError)
             {
-                // `message` is the daemon's control name -- the enrolment
+                // `message` is the daemon's control name -- the enrollment
                 // handler answers a label and nothing else, because the
                 // errors underneath can quote a remote body or a URL.
                 string label = response.Error?.Message ?? string.Empty;
@@ -778,25 +778,6 @@ public sealed class ConsentScopeViewModel : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsSelected)));
         }
     }
-
-    /// <summary>
-    /// The short bold label for a scope named on a preview summary.
-    /// </summary>
-    /// <remarks>
-    /// Only the preview sheet's permission rows still use this, because that
-    /// view model has no <c>consent_options</c> answer to read. Onboarding
-    /// and Settings read <see cref="ConsentOption.Title"/>, the core's own
-    /// words. Moving the preview onto the core's title is a follow-up.
-    /// </remarks>
-    public static string ScopeTitle(string wireName) => wireName switch
-    {
-        "debugging_evaluation" => "Finding bugs and measuring agents",
-        "benchmark_only" or "benchmark_creation" => "Turn my traces into test cases",
-        "ranking_training" or "reward_model_training" => "Train models that judge agent output",
-        "model_training" => "Train coding models directly",
-        "public_attribution" => "List my handle publicly as a contributor",
-        _ => wireName.Replace('_', ' '),
-    };
 }
 
 public sealed class ProjectViewModel : INotifyPropertyChanged

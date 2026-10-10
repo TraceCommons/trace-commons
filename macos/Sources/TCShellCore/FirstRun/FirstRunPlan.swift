@@ -13,7 +13,7 @@ public enum FirstRunCall: Equatable, Sendable {
     /// (`account_sign_in`).
     case signInNearAI
     /// Without an invite: the near.ai login (the browser sign-in, skipped
-    /// when the daemon already keeps one), then the enrolment through it
+    /// when the daemon already keeps one), then the enrollment through it
     /// (`near_ai_account_enroll`). Signing in with near.ai needs no invite
     /// (owner, Ron's review of #1235).
     case nearAILogin
@@ -27,7 +27,7 @@ public enum FirstRunCall: Equatable, Sendable {
     case includePastSessions(projectID: String, [String])
     case setPrivateAI(Bool)
     case grantAutomatic(witness: String?)
-    /// The completion marker for an enrolment, keyed by its tenant.
+    /// The completion marker for an enrollment, keyed by its tenant.
     case markComplete
     /// The completion marker for watching only, which has no tenant to key
     /// a marker by.
@@ -61,6 +61,10 @@ public enum NearAILoginPoll: Equatable, Sendable {
 
 /// Where the first run commits answers to the daemon.
 public enum CommitPoint: Equatable, Sendable {
+    /// Create passkey on Join (#1030 `ftux-page.tsx`): the sheets open over
+    /// Join, so the daemon their ceremony completes with starts here when it
+    /// is not running yet. The step does not move.
+    case passkeyOnJoin
     /// Leaving Folders (Quick) or Tools (Custom): the daemon starts, then
     /// the invite deferred from Join is looked up and joined, and the
     /// account chosen there is signed in or created.
@@ -74,9 +78,39 @@ public enum CommitPoint: Equatable, Sendable {
 public enum FirstRunPlan {
     public static func calls(for state: FirstRunState, at commit: CommitPoint) -> [FirstRunCall] {
         switch commit {
+        case .passkeyOnJoin: return passkeyOnJoin(state)
         case .leaveRoots: return leaveRoots(state)
         case .start: return start(state)
         }
+    }
+
+    /// The declaration a daemon started on Join holds until Folders or Tools
+    /// answers: Claude Code and Codex both `off`, so the start gate
+    /// (`daemon::settings::roots_declared`) admits it and nothing is read.
+    /// An undeclared root would read the tool's conventional folder unasked,
+    /// so it is never started without one. Binding an account
+    /// (`nearai_onboarding::bind`) reads no source settings, so the passkey
+    /// ceremony completes against this daemon. The first run never reads
+    /// these `off`s back as answers: the next commit sends every row that
+    /// differs (`changedDeclarations`), and a resumed first run sends the
+    /// whole declaration again (`OnboardingNavigation.initialState`).
+    public static let watchNothingSettingsJSON: String? = SessionRoots(claude: .off, codex: .off).settingsJSON()
+
+    /// Create passkey on Join: start the daemon watching nothing when it is
+    /// not running, then open the sheets. Nothing when Join offers no
+    /// passkey (a held invite, a signed-in near.ai, an enrollment or a held
+    /// passkey), as `JoinScreenLayout.showsPasskeyAction` decides; the daemon
+    /// refuses a passkey account over an enrollment (`account-already-enrolled`).
+    private static func passkeyOnJoin(_ state: FirstRunState) -> [FirstRunCall] {
+        let invite = state.invite.trimmingCharacters(in: .whitespacesAndNewlines)
+        let held: Bool = {
+            if case .passkey = state.account { return true }
+            return state.account == .enrolled
+        }()
+        guard !state.signedIn, !held, invite.isEmpty, state.enrolledInvite == nil else { return [] }
+        if state.daemonStarted { return [.openPasskeySheets] }
+        guard let json = watchNothingSettingsJSON else { return [] }
+        return [.startDaemon(settingsJSON: json), .openPasskeySheets]
     }
 
     private static func leaveRoots(_ state: FirstRunState) -> [FirstRunCall] {
@@ -106,7 +140,7 @@ public enum FirstRunPlan {
             }
         }
         // A new passkey creates an account of its own, and the daemon
-        // refuses to create one over an enrolment
+        // refuses to create one over an enrollment
         // (`account-already-enrolled`), so no sheet opens beside an invite.
         // Join keeps the two apart; this refuses the pair anyway.
         if state.account == .passkeyChosen, !joinsInvite, state.enrolledInvite == nil {
@@ -144,8 +178,8 @@ public enum FirstRunPlan {
         return object as? [String: [String: String]]
     }
 
-    /// Watch only holds no enrolment, so Start sends nothing that belongs
-    /// to one: no consent scopes (the daemon keeps them in the enrolment's
+    /// Watch only holds no enrollment, so Start sends nothing that belongs
+    /// to one: no consent scopes (the daemon keeps them in the enrollment's
     /// config and refuses them without it), no grant, and the watch-only
     /// marker instead of the tenant's. Custom's folder rules, past sessions
     /// and Private AI are local to the daemon and are sent either way: for
@@ -156,12 +190,21 @@ public enum FirstRunPlan {
     /// A passkey chosen on Join and not yet created holds no account, so
     /// Start reopens its sheets and sends nothing else: the sheets are not
     /// awaited, and nothing may run behind them. Any other account answer
-    /// without an enrolment the daemon holds sends nothing at all, since
+    /// without an enrollment the daemon holds sends nothing at all, since
     /// scopes, the grant and the marker all belong to one (`canContinue`
     /// keeps Start off for it).
+    ///
+    /// Watching only while the daemon still holds an enrollment
+    /// (`FirstRunState.daemonHoldsEnrolment`: one signed out of on Join, or
+    /// an invite enrolled before a near.ai sign-in failed) sends nothing at
+    /// all. Its rules and past sessions would act under that enrollment,
+    /// whose scopes nobody chose here, and its marker is refused while the
+    /// daemon is logged in. Join does not offer watch only then, and
+    /// `canContinue` keeps Start off for it.
     private static func start(_ state: FirstRunState) -> [FirstRunCall] {
         if state.account == .passkeyChosen { return [.openPasskeySheets] }
         let watchOnly = state.account == .watchOnly
+        if watchOnly, state.daemonHoldsEnrolment { return [] }
         guard watchOnly || state.holdsEnrolment else { return [] }
         var calls: [FirstRunCall] = watchOnly ? [] : [.setConsentScopes(state.scopes.sorted())]
         if state.tier == .custom {

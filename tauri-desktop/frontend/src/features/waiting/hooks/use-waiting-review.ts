@@ -92,7 +92,7 @@ export function useWaitingReview(onApproved?: (scope: UndoScope) => void) {
       setCorrection("");
       return true;
     } catch {
-      setActionError("Could not dismiss session.");
+      setActionError("Could not dismiss trace.");
       return false;
     }
   };
@@ -136,7 +136,7 @@ export function useWaitingReview(onApproved?: (scope: UndoScope) => void) {
       setActionError(
         isCredentialRefusal
           ? null
-          : "Could not approve session. Nothing is reported as sent.",
+          : "Could not approve trace. Nothing is reported as sent.",
       );
     }
   };
@@ -162,7 +162,7 @@ export function useWaitingReview(onApproved?: (scope: UndoScope) => void) {
   const error = actionError
     ? actionError
     : previewQuery.isError
-      ? "The session file changed while it was being read. Nothing has been sent, and nothing will be until it can be shown to you."
+      ? "The trace file changed while it was being read. Nothing has been sent, and nothing will be until it can be shown to you."
       : null;
 
   return {

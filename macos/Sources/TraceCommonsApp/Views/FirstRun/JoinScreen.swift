@@ -30,6 +30,10 @@ enum JoinLookUpOutcome: Equatable {
 /// Join's decisions (#1030 `join-screen.tsx`), apart from the view so they
 /// can be tested. Every string is the core's.
 enum JoinScreenLayout {
+    /// The extra space above the invite card (under the body), on top of the
+    /// frame's own gap (owner, 2026-10-08): `s8` + this under the body.
+    static let extraGap = GlassTokens.Space.s4
+
     /// Contributing needs an account; without one, setup is watching only.
     static func hasAccount(_ state: FirstRunState) -> Bool {
         switch state.account {
@@ -38,19 +42,66 @@ enum JoinScreenLayout {
         }
     }
 
+    /// "Skip: watch only" is offered only while the daemon holds no
+    /// enrollment (`FirstRunState.daemonHoldsEnrolment`). Watching only
+    /// beside one would act under it, and could never finish: its marker is
+    /// refused while the daemon is logged in.
+    static func offersWatchOnly(_ state: FirstRunState) -> Bool {
+        !state.daemonHoldsEnrolment
+    }
+
+    /// An enrollment the daemon holds for this run and nobody signed out of
+    /// -- an invite enrolled before a near.ai sign-in failed, near.ai's own
+    /// -- is the account when none is answered, as an earlier run's is
+    /// (`OnboardingNavigation.recordEnrolment`).
+    static func heldEnrolmentIsTheAccount(_ state: FirstRunState) -> Bool {
+        !state.signedOutOfEnrolment && (state.enrolledInvite != nil || state.nearAIEnrolled)
+    }
+
+    /// "Skip" whenever no account was signed into on Join, including when
+    /// the daemon already holds an enrollment from before; "Continue" once
+    /// one was (owner ruling, 2026-10-08). The body tells the person to
+    /// click "Skip", so the button always matches it.
     static func footerTitle(_ state: FirstRunState, copy: FirstRunCopy) -> String {
-        hasAccount(state) ? copy.frame.continueButton : copy.join.skip
+        hasSignedInAccount(state) ? copy.frame.continueButton : copy.join.skip
+    }
+
+    /// Whether Join shows an account as signed into: near.ai or a passkey
+    /// answered on this run, a known invite joined, or a held near.ai
+    /// enrollment, and nothing signed out of. An enrollment the daemon holds
+    /// with no invite or account to show (an earlier run's, a preset
+    /// config's) draws no signed-in card, so the button reads "Skip" there
+    /// too; pressing it still goes on as that enrollment (`forward`).
+    static func hasSignedInAccount(_ state: FirstRunState) -> Bool {
+        if state.signedOutOfEnrolment { return false }
+        switch state.account {
+        case .nearAI, .passkeyChosen, .passkey: return true
+        case .none, .watchOnly, .enrolled:
+            return !(state.enrolledInvite ?? "").isEmpty || state.nearAIEnrolled
+        }
     }
 
     static func footerNote(_ state: FirstRunState, copy: FirstRunCopy) -> String? {
-        hasAccount(state) ? nil : copy.join.skipNote
+        hasAccount(state) || !offersWatchOnly(state) ? nil : copy.join.skipNote
+    }
+
+    /// Whether the footer can move on: with an account, as watch only, or
+    /// as the enrollment this run holds. An enrollment signed out of waits for
+    /// an account to be chosen.
+    static func canForward(_ state: FirstRunState) -> Bool {
+        hasAccount(state) || offersWatchOnly(state) || heldEnrolmentIsTheAccount(state)
     }
 
     /// The footer's action. Without an account it is "Skip: watch only",
-    /// which answers watch only; either way the person moves on.
+    /// which answers watch only, or -- while the daemon holds this run's
+    /// enrollment -- Continue as that enrollment; either way the person moves
+    /// on. With nothing to go on as, it does nothing (`canForward`).
     static func forward(_ state: FirstRunState) -> FirstRunState {
+        guard canForward(state) else { return state }
         var forwarded = state
-        if !hasAccount(forwarded) { forwarded.account = .watchOnly }
+        if !hasAccount(forwarded) {
+            forwarded.account = offersWatchOnly(forwarded) ? .watchOnly : .enrolled
+        }
         return FirstRunNavigation.next(forwarded)
     }
 
@@ -88,6 +139,20 @@ enum JoinScreenLayout {
         if passkeyDone(state) || state.account == .enrolled { return nil }
         if nearAIChosen(state) { return copy.nearAiChosen }
         return copy.nearAiText
+    }
+
+    /// Why near.ai is no longer chosen: its login or enrollment did not
+    /// succeed and the commit returned here (`returnToJoin(afterNearAIFailure:)`).
+    /// The core's line the step would have said it in, shown only while no
+    /// account is answered; choosing again takes it down.
+    static func nearAINotice(_ state: FirstRunState, failure: FirstRunFailure?, copy: FirstRunCopy) -> String? {
+        guard state.account == .none else { return nil }
+        switch failure {
+        case .signInFailed?, .nearAIEnrollFailed?:
+            return FoldersScreenLayout.notice(for: failure, copy: copy, onboarding: nil)
+        default:
+            return nil
+        }
     }
 
     /// An invite is held: pasted and found, or already enrolled.
@@ -162,6 +227,24 @@ enum JoinScreenLayout {
         state.enrolledInvite == nil && !passkeyDone(state)
     }
 
+    /// The card shows its invite field unless an invite was joined or a
+    /// passkey holds the account: an enrollment recorded with no invite
+    /// shows the field, closed (`inviteIsEditable`), rather than a joined
+    /// line naming an invite nobody entered.
+    static func showsInviteField(_ state: FirstRunState) -> Bool {
+        inviteIsEditable(state) || (!joinedInvite(state) && !passkeyDone(state))
+    }
+
+    /// An invite this first run (or an earlier one) is known to have joined.
+    /// An enrollment recorded without one (`OnboardingNavigation.recordEnrolment`
+    /// writes an empty `enrolledInvite`: an earlier run joined through
+    /// near.ai or a passkey, or the daemon was already enrolled) joined no
+    /// invite the shell knows of, so the card never says "Joined" for it.
+    static func joinedInvite(_ state: FirstRunState) -> Bool {
+        guard let enrolled = state.enrolledInvite else { return false }
+        return !enrolled.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     static func inviteLine(
         _ state: FirstRunState,
         lookup: DaemonData.InviteLookup?,
@@ -169,7 +252,7 @@ enum JoinScreenLayout {
         copy: FirstRunCopy.Join,
         refused: Bool = false
     ) -> JoinInviteLine {
-        if state.enrolledInvite != nil {
+        if joinedInvite(state) {
             return .joined(
                 FirstRunCopy.fill(
                     copy.inviteJoined,
@@ -200,17 +283,33 @@ enum JoinScreenLayout {
     /// The one credit-range unit the daemon accepts (`CREDIT_RANGE_UNIT_POINTS`).
     static let pointsPerAcceptedTrace = "points_per_accepted_trace"
 
-    /// The passkey ceremony completes with the daemon, which runs only once
-    /// Folders or Tools commits. Before then Create passkey records the
-    /// choice (`togglePasskey`) and the commit opens the sheets
-    /// (`FirstRunCall.openPasskeySheets`); once the daemon runs, it opens
-    /// them now. A chosen passkey's button undoes instead. A signed-in
-    /// near.ai already holds the daemon's account session, so a passkey is
-    /// not created over it, as near.ai is not chosen over a passkey
+    /// The passkey ceremony completes with the daemon. Once it runs, Create
+    /// passkey opens the sheets now, over Join (#1030 `ftux-page.tsx`). A
+    /// chosen passkey's button undoes instead (a choice an earlier build
+    /// recorded for the Folders or Tools commit). A signed-in near.ai
+    /// already holds the daemon's account session, so a passkey is not
+    /// created over it, as near.ai is not chosen over a passkey
     /// (`canToggleNearAI`).
     static func passkeyOpensNow(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
-        hasPasskeyAccount && state.daemonStarted && showsPasskeyAction(state) && !passkeyChosen(state)
-            && !passkeyDone(state)
+        hasPasskeyAccount && state.daemonStarted && offersPasskey(state)
+    }
+
+    /// Before the daemon runs, Create passkey starts it, watching nothing,
+    /// and then opens the sheets over Join (`FirstRunRunner.openPasskeyOnJoin`),
+    /// so the person never meets them on a later step.
+    static func passkeyStartsDaemon(_ state: FirstRunState, hasPasskeyAccount: Bool) -> Bool {
+        offersPasskey(state) && !passkeyOpensNow(state, hasPasskeyAccount: hasPasskeyAccount)
+    }
+
+    /// Create passkey is the button's action: offered, not chosen, not held.
+    private static func offersPasskey(_ state: FirstRunState) -> Bool {
+        showsPasskeyAction(state) && !passkeyChosen(state) && !passkeyDone(state)
+    }
+
+    /// The line under the passkey card when Create passkey could not start
+    /// the daemon its sheets need.
+    static func passkeyFailureLine(_ failure: FirstRunFailure?, copy: FirstRunCopy.Join) -> String? {
+        failure == .passkeyUnavailable ? copy.passkeyUnavailable : nil
     }
 
     /// Create passkey chosen and not yet created: the choice is undoable.
@@ -233,9 +332,9 @@ enum JoinScreenLayout {
 
     /// A signed-in near.ai is held, and a passkey is never created over it,
     /// so the passkey card offers no action then (`passkeyOpensNow`); nor
-    /// over an enrolment an earlier first run left; nor beside a held
+    /// over an enrollment an earlier first run left; nor beside a held
     /// invite, since the daemon refuses to create a passkey account over an
-    /// enrolment (`account-already-enrolled`) and `passkeyLine` says so.
+    /// enrollment (`account-already-enrolled`) and `passkeyLine` says so.
     static func showsPasskeyAction(_ state: FirstRunState) -> Bool {
         !state.signedIn && state.account != .enrolled && !holdsInvite(state)
     }
@@ -272,13 +371,15 @@ enum JoinScreenLayout {
     /// claims an account that is not linked. `account_sign_out` has already
     /// ended the daemon's account session, the one near.ai holds too.
     ///
-    /// The daemon has no call that drops an enrolment, so one it holds --
-    /// this run's invite, near.ai's invite-free enrolment, a passkey Verify
-    /// bound, an earlier first run's --
-    /// may outlive the sign-out. It is cleared here and marked
-    /// (`signedOutOfEnrolment`), which fails closed: nothing that belongs to
-    /// an enrolment is sent for it, and it is not recorded as the account
-    /// again. Every other answer (tools, rules, uses) is kept.
+    /// An enrollment the daemon holds -- this run's invite, near.ai's
+    /// invite-free enrollment, a passkey Verify bound, an earlier first
+    /// run's -- outlives the sign-out until the daemon unenrolls. It is
+    /// cleared here and marked (`signedOutOfEnrolment`), which fails
+    /// closed: nothing that belongs to an enrollment is sent for it, and it
+    /// is not recorded as the account again. The runner then asks the
+    /// daemon to unenroll (`FirstRunRunner.unenrollAfterSignOut`) and clears
+    /// the mark once it confirms, which offers watch only again. Every other
+    /// answer (tools, rules, uses) is kept.
     static func signOut(_ state: FirstRunState) -> FirstRunState {
         var cleared = state
         if state.holdsEnrolment || state.enrolledInvite != nil || state.nearAIEnrolled || state.account == .enrolled {
@@ -296,10 +397,11 @@ enum JoinScreenLayout {
     /// Record how the passkey sheets ended. A sign-in ends them only once
     /// Verify bound its account, or joined this Mac to the account another
     /// Mac bound (`PasskeySheetOutcome.signedIn`), so every held passkey is
-    /// an enrolment. The login itself carries no name
+    /// an enrollment. The shell's login result carries no name
     /// (`NativePasskeyCoordinator.perform(.login)` returns none); the
     /// outcome carries the one the daemon remembers for the signed-in
-    /// account's own record, when it has one. Without it (and after a switch
+    /// account's own record, when it has one: a name given here, or the
+    /// label the server returned for that passkey at sign-in. Without it (and after a switch
     /// to an existing account) the passkey is held with an empty name, which
     /// `passkeyLine` never shows.
     static func apply(
@@ -325,17 +427,18 @@ enum JoinScreenLayout {
 }
 
 /// Ron's Join (#1030 `join-screen.tsx`) in glass: the title, the invite card,
-/// the passkey and near.ai cards, the quiet no-sharing card, and "Skip:
+/// the passkey and near.ai cards, the no-sharing card, and "Skip:
 /// watch only" until an account exists.
 ///
 /// Join holds no daemon client: on a first pass the daemon is not running.
-/// The invite is looked up and enrolled, a chosen near.ai signed in and a
-/// chosen passkey's sheets opened, when Folders or Tools commits
-/// (`FirstRunPlan`). The one daemon path here is `passkeyAccount`, whose
-/// ceremony completes with the daemon: back on Join after the daemon
-/// started, Create passkey opens the sheets at once. They are presented by
-/// `firstRunPasskeySheets`, which the first-run host
-/// (`OnboardingCoordinatorView`) mounts once for every step.
+/// The invite is looked up and enrolled, and a chosen near.ai signed in,
+/// when Folders or Tools commits (`FirstRunPlan`). Create passkey is the
+/// exception (#1030): its sheets open over Join, so when the daemon is not
+/// running it starts it first, declaring both roots `off` so nothing is read
+/// (`CommitPoint.passkeyOnJoin`), and the ceremony completes there through
+/// `passkeyAccount`. The sheets are presented by `firstRunPasskeySheets`,
+/// which the first-run host (`OnboardingCoordinatorView`) mounts once for
+/// every step.
 struct JoinScreen: View {
     let copy: FirstRunCopy
     @ObservedObject var runner: FirstRunRunner
@@ -353,48 +456,56 @@ struct JoinScreen: View {
         FirstRunFrame(
             copy: copy,
             state: $runner.state,
+            // About taking the action, so directly above the action bar, not
+            // in the cards (owner ruling, 2026-10-08).
+            actionNote: copy.join.noSharing,
             footer: FirstRunFooter(
                 title: JoinScreenLayout.footerTitle(runner.state, copy: copy),
-                isEnabled: true,
+                isEnabled: !runner.isCommitting && JoinScreenLayout.canForward(runner.state),
                 note: JoinScreenLayout.footerNote(runner.state, copy: copy),
                 action: { runner.state = JoinScreenLayout.forward(runner.state) })
         ) {
             title
         } content: {
             inviteCard
+                .padding(.top, JoinScreenLayout.extraGap)
             passkeyCard
             nearAICard
+            if let notice = JoinScreenLayout.nearAINotice(runner.state, failure: runner.failure, copy: copy) {
+                GlassAlert(notice)
+            }
             if let notice = runner.passkeyOutcome?.joinNotice(copy) {
                 GlassNotice(tone: .ask) { Text(notice) }
-            }
-            GlassCard(quiet: true) {
-                Text(copy.join.noSharing)
-                    .glassType(GlassTokens.TypeScale.label)
-                    .foregroundStyle(GlassColor.textSecondary)
             }
         }
     }
 
+    /// The title, then the body as one paragraph (owner, 2026-10-08).
     private var title: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
             FirstRunTitle(light: copy.join.titleLight, bold: copy.join.titleBold)
-            (Text(copy.join.body) + Text(" ")
-                + Text(copy.join.bodyEmphasis).bold().foregroundColor(GlassColor.textPrimary))
+            Text(copy.join.body)
                 .glassType(GlassTokens.TypeScale.body)
                 .foregroundStyle(GlassColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private var inviteCard: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                if JoinScreenLayout.inviteIsEditable(runner.state) {
+                if JoinScreenLayout.showsInviteField(runner.state) {
+                    // The field as it always reads; closed while an
+                    // enrollment the daemon holds came with no invite, since
+                    // no second invite is joined over it.
+                    let editable = JoinScreenLayout.inviteIsEditable(runner.state)
                     HStack(alignment: .bottom, spacing: GlassTokens.Space.s3) {
                         GlassTextField(copy.join.inviteEyebrow, text: draftBinding, prompt: copy.join.invitePlaceholder)
                             .onSubmit(lookUp)
+                            .disabled(!editable)
                         Button(copy.join.lookUp, action: lookUp)
                             .buttonStyle(GlassButtonStyle(.glass))
-                            .disabled(!JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
+                            .disabled(!editable || !JoinScreenLayout.canLookUp(currentDraft, in: runner.state))
                     }
                 } else {
                     Text(copy.join.inviteEyebrow)
@@ -418,7 +529,7 @@ struct JoinScreen: View {
         case .joined(let line):
             GlassStatusLabel(line, status: .on)
         case .error(let line):
-            GlassNotice(tone: .outside) { Text(line) }
+            GlassAlert(line)
         case .note(let line):
             Text(line)
                 .glassType(GlassTokens.TypeScale.label)
@@ -426,7 +537,7 @@ struct JoinScreen: View {
         }
     }
 
-    private var passkeyCard: some View {
+    @ViewBuilder private var passkeyCard: some View {
         accountCard(
             eyebrow: copy.join.passkeyEyebrow,
             text: JoinScreenLayout.passkeyLine(runner.state, copy: copy.join),
@@ -434,16 +545,24 @@ struct JoinScreen: View {
             showsAction: JoinScreenLayout.showsPasskeyAction(runner.state)
         ) {
             Button(action: passkeyAction) {
-                // Choosing opens nothing until the daemon runs, so only the
-                // undo carries a glyph, as on the near.ai card.
+                // Only the undo of a choice recorded for later carries a
+                // glyph, as on the near.ai card; starting the daemon for the
+                // sheets shows the spinner.
                 if JoinScreenLayout.passkeyChosen(runner.state) {
                     Label(JoinScreenLayout.passkeyAction(runner.state, copy: copy), systemImage: "arrow.uturn.backward")
                         .labelStyle(.titleAndIcon)
                 } else {
-                    Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
+                    HStack(spacing: GlassTokens.Space.s3) {
+                        if runner.isCommitting { GlassSpinner() }
+                        Text(JoinScreenLayout.passkeyAction(runner.state, copy: copy))
+                    }
                 }
             }
             .buttonStyle(GlassButtonStyle(.glass))
+            .disabled(runner.isCommitting)
+        }
+        if let line = JoinScreenLayout.passkeyFailureLine(runner.failure, copy: copy.join) {
+            GlassAlert(line)
         }
     }
 
@@ -487,13 +606,20 @@ struct JoinScreen: View {
                         Text(text)
                             .glassType(GlassTokens.TypeScale.label)
                             .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                Spacer(minLength: 0)
+                // #1030's `ftux-row--between`: the text takes the row and
+                // the action keeps its own width. The action is fixed at its
+                // ideal size so the text column can never squeeze it to zero
+                // width and wrap its label out of sight.
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if let done {
                     GlassStatusLabel(done, status: .on)
+                        .fixedSize()
                 } else if showsAction {
                     action()
+                        .fixedSize()
                 }
             }
         }
@@ -513,6 +639,7 @@ struct JoinScreen: View {
     }
 
     private func lookUp() {
+        guard JoinScreenLayout.inviteIsEditable(runner.state) else { return }
         let looked = JoinScreenLayout.lookUp(currentDraft, in: runner.state, failure: runner.failure, host: issuerHost)
         runner.state = looked.state
         runner.failure = looked.failure
@@ -520,11 +647,14 @@ struct JoinScreen: View {
         if looked.outcome != .refused { draft = nil }
     }
 
-    /// Before the daemon runs, record or undo the choice; once it runs,
-    /// open the sheets.
+    /// Open the sheets over Join: at once while the daemon runs, after
+    /// starting it otherwise. A choice recorded for later is undone.
     private func passkeyAction() {
-        if JoinScreenLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: passkeyAccount != nil) {
+        let hasAccount = passkeyAccount != nil
+        if JoinScreenLayout.passkeyOpensNow(runner.state, hasPasskeyAccount: hasAccount) {
             runner.requestPasskey()
+        } else if JoinScreenLayout.passkeyStartsDaemon(runner.state, hasPasskeyAccount: hasAccount) {
+            Task { await runner.openPasskeyOnJoin() }
         } else {
             runner.state = JoinScreenLayout.togglePasskey(runner.state)
         }

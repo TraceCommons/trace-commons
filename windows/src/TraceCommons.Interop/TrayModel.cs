@@ -57,7 +57,16 @@ public sealed class TrayModel
     /// truncates or fails on overflow rather than telling anyone.
     /// </summary>
     public const int MaxTooltipLength = 127;
-    public const string DecisionCountUnavailable = "Decision count unavailable.";
+
+    /// <summary>
+    /// An unknown decision count, in the core's words
+    /// (<c>preview_copy::decisions_owed_text</c> with no count), as GTK says it.
+    /// Read once: the words do not change while the process runs.
+    /// </summary>
+    public static string DecisionCountUnavailable => UnknownCountLine.Value;
+
+    private static readonly Lazy<string> UnknownCountLine =
+        new(() => NativeMethods.TakeOwnedString(NativeMethods.tc_decisions_owed_text(-1)) ?? string.Empty);
 
     private TrayModel(TrayIconState state, int? decisionsOwed, string tooltip, string menuHeader)
     {
@@ -139,13 +148,13 @@ public sealed class TrayModel
     };
 
     /// <summary>
-    /// "3 sessions waiting for review." -- the same sentence the main window's
+    /// "3 traces waiting for review." -- the same sentence the main window's
     /// status line uses, so the tray and the window never word the same fact
     /// two ways.
     /// </summary>
     private static string Waiting(int owed) => owed == 1
-        ? "1 session waiting for review."
-        : string.Format(CultureInfo.CurrentCulture, "{0} sessions waiting for review.", owed);
+        ? "1 trace waiting for review."
+        : string.Format(CultureInfo.CurrentCulture, "{0} traces waiting for review.", owed);
 
     /// <summary>
     /// Trims to what <c>szTip</c> can hold, on a character boundary and with
@@ -324,14 +333,14 @@ public static class DigestText
     {
         ArgumentNullException.ThrowIfNull(projectLabels);
 
-        string noun = pendingCount == 1 ? "session" : "sessions";
+        string noun = pendingCount == 1 ? "trace" : "traces";
         string from = JoinProjects(projectLabels);
         return $"{pendingCount} {noun} ready{from}.\n{NothingSent}";
     }
 
     /// <summary>
     /// The contribution half: what went out unasked since the last digest.
-    /// Null when nothing did -- a line reading "0 sessions contributed" is
+    /// Null when nothing did -- a line reading "0 traces contributed" is
     /// worse than no line.
     /// </summary>
     /// <remarks>
@@ -356,7 +365,7 @@ public static class DigestText
             return null;
         }
 
-        string noun = contributedCount == 1 ? "session" : "sessions";
+        string noun = contributedCount == 1 ? "trace" : "traces";
         var named = new List<string>(projectLabels.Count);
         foreach (string label in projectLabels)
         {

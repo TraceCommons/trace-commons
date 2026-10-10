@@ -467,7 +467,7 @@ pub struct PreviewSummary {
     /// Preview is a local operation -- no lock, no running loop, no network
     /// -- and requiring an enrollment for it was incidental rather than
     /// necessary: a contributor should be able to see what would be sent
-    /// *before* deciding to enrol, which is exactly when the question
+    /// *before* deciding to enroll, which is exactly when the question
     /// matters most.
     ///
     /// When this is `false`, `envelope_digest` and `input_fingerprint`
@@ -1436,7 +1436,7 @@ mod tests {
         let device = crate::identity::DeviceIdentity::load_or_generate(store).unwrap();
         ContributorConfig {
             inference_receipt_endpoint: None,
-            consent_scopes_chosen: false,
+            consent_scopes_chosen: Some(true),
             witness_origin: None,
             inference_receipt_check_attestation: false,
             schema_version: crate::config::CONTRIBUTOR_CONFIG_SCHEMA_VERSION.into(),
