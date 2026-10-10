@@ -2293,6 +2293,15 @@ legs are forfeited. A Review or Score attempt whose commit is refused, for
 any reason (the submission stopped being operable, its lease expired, a
 settlement adapter is missing), deletes the objects it wrote.
 
+A run that waits for Review or Score when its submission is withdrawn,
+revoked, expired or purged ends on its next attempt: `failed` with
+`submission_inoperable`, charged that one attempt, with nothing scored
+and no settlement leg seeded. That holds for a run held before Score by a
+suspended Score policy too, once the policy is resumed. Such a run is not
+a fault; a run that ends `attempts_exhausted` is. Settle does not end the
+run this way: it completes the run, excluded from the index, with its
+open legs forfeited as above.
+
 `main`'s revocation routes (`DELETE /v1/traces/{id}`,
 `POST /v1/traces/{id}/revoke`, `DELETE /v1/traces`) mark the submission
 revoked as before, and, when the submission has a pipeline run, then make

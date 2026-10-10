@@ -10106,15 +10106,16 @@ async fn content_reads_refuse_withdrawn_submissions() {
 }
 
 /// Asserts that Score committed nothing for `run`: no Score outcome and
-/// no settlement rows, and the run still waits for Score, in a charged
-/// retry under `submission_inoperable` (the P2 allowlist routes that label
-/// to a charged retry outside Review).
+/// no settlement rows, and the run ended in Score, `failed` under
+/// `submission_inoperable`: an inoperable submission is permanent, so Score
+/// ends the run on that attempt as Review does (#1345), rather than taking
+/// P2's charged retry.
 async fn assert_score_refused_as_inoperable(
     service: &PipelineService,
     tenant: &str,
     run: &PipelineRunRecord,
 ) {
-    assert_eq!(run.state, PipelineRunState::Retry);
+    assert_eq!(run.state, PipelineRunState::Failed);
     assert_eq!(
         run.last_error_label.as_deref(),
         Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
@@ -10211,6 +10212,10 @@ async fn score_commit_refuses_a_submission_withdrawn_after_the_read() {
         .unwrap()
         .expect("the Score attempt runs");
     assert_score_refused_as_inoperable(&service, &tenant, &refused).await;
+    assert_eq!(
+        refused.attempt_count, 1,
+        "the commit's refusal ends the run on the attempt it was charged"
+    );
 }
 
 /// Builds the P1 byte-wrapper `encode_pipeline_artifact_bytes` produces
@@ -36432,6 +36437,7 @@ async fn a_submission_with_a_withdrawal_time_is_not_operable_for_score() {
         .unwrap()
         .expect("the Score attempt runs");
     assert_eq!(scored.next_phase, Some(Phase::Score), "{scored:?}");
+    assert_eq!(scored.state, PipelineRunState::Failed, "{scored:?}");
     assert_eq!(
         scored.last_error_label.as_deref(),
         Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
@@ -39836,6 +39842,189 @@ async fn a_suspended_policy_leaves_the_run_retryable_and_resumes_under_the_same_
     );
     assert_eq!(history[0], suspended);
     assert_eq!(history[1], resumed);
+}
+
+/// How `submission_inoperable_while_held_before_score_ends_the_run` makes
+/// the held run's submission inoperable.
+#[derive(Clone, Copy, Debug)]
+enum InoperableBeforeScore {
+    /// `main`'s revocation routes (`DELETE /v1/traces`) mark the
+    /// submission `revoked`.
+    Revoked,
+    /// A withdrawal's tombstone (`trace_withdrawals`).
+    Withdrawn,
+}
+
+/// #1345: a run held before Score (its Score policy suspended) whose
+/// submission is revoked or withdrawn while it waits ends `failed` /
+/// `submission_inoperable` on the first Score attempt after the resume, as
+/// Review ends an inoperable submission. It used to take P2's charged retry:
+/// the run spent its whole Score budget within about a minute and ended
+/// `attempts_exhausted`, which reads as a fault. Nothing is scored and no
+/// settlement row is seeded.
+async fn submission_inoperable_while_held_before_score_ends_the_run(how: InoperableBeforeScore) {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = policy_tenant("inoperable-before-score");
+    let created = policy_test_run(&service, &tenant).await;
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    let bundle_id = reviewed.bundle_id.clone();
+    let actor = policy_actor();
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "suspend",
+            &actor,
+            "unsafe_bound_policy",
+        )
+        .await
+        .expect("suspend the Score policy");
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run is claimed");
+    assert_eq!(held.state, PipelineRunState::Retry);
+    assert_eq!(held.next_phase, Some(Phase::Score));
+    assert_eq!(
+        held.last_error_label.as_deref(),
+        Some(PIPELINE_POLICY_NOT_RUNNABLE_LABEL)
+    );
+    assert_eq!(held.attempt_count, 0, "the hold charges nothing");
+
+    match how {
+        InoperableBeforeScore::Revoked => {
+            let mut owner = owner_client().await;
+            let tx = owner_tenant_tx(&mut owner, &tenant).await;
+            tx.execute(
+                "UPDATE trace_submissions SET status = 'revoked', revoked_at = NOW()
+                  WHERE tenant_id = $1 AND submission_id = $2",
+                &[&tenant, &created.submission_id],
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        InoperableBeforeScore::Withdrawn => {
+            withdraw_submission(&backend, &tenant, created.submission_id).await;
+        }
+    }
+
+    service
+        .intervene_policy(
+            &tenant,
+            &bundle_id,
+            Phase::Score,
+            "resume",
+            &actor,
+            "policy_rechecked",
+        )
+        .await
+        .expect("resume the Score policy");
+
+    // Drive the run as the worker would, each retry due at once, until it
+    // ends or its budget is spent.
+    let mut ended = None;
+    for _ in 0..=held.max_attempts {
+        force_due(&backend, &tenant, created.run_id).await;
+        let Some(run) = service.process_run(&tenant, created.run_id).await.unwrap() else {
+            break;
+        };
+        if run.state == PipelineRunState::Failed {
+            ended = Some(run);
+            break;
+        }
+    }
+    let ended = ended.unwrap_or_else(|| panic!("{how:?}: the run ends"));
+    assert_eq!(
+        (ended.state, ended.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL)
+        ),
+        "{how:?}: the run ends as an inoperable submission, not a fault"
+    );
+    assert!(
+        ended.attempt_count <= 1,
+        "{how:?}: Score is charged at most one attempt, got {}",
+        ended.attempt_count
+    );
+    assert_eq!(ended.next_phase, Some(Phase::Score), "{how:?}");
+    assert_eq!(
+        outcome_phases(&service, &tenant, created.run_id).await,
+        vec![Phase::Admission, Phase::Review],
+        "{how:?}: nothing is scored"
+    );
+    assert!(
+        service
+            .store()
+            .list_settlements(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "{how:?}: no settlement row is seeded"
+    );
+    // The operational summary reads it as Review's inoperable end reads: a
+    // terminal error under `submission_inoperable`, not `attempts_exhausted`.
+    let summary = PipelineProductStore::new(backend.clone())
+        .operational_summary(&tenant)
+        .await
+        .unwrap();
+    let buckets: Vec<(String, String, Option<String>, u64)> = summary
+        .work
+        .iter()
+        .map(|bucket| {
+            (
+                bucket.phase.clone(),
+                bucket.state.clone(),
+                bucket.reason_label.clone(),
+                bucket.count,
+            )
+        })
+        .collect();
+    assert_eq!(
+        buckets,
+        vec![(
+            "score".to_string(),
+            "failed".to_string(),
+            Some(PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string()),
+            1u64,
+        )],
+        "{how:?}"
+    );
+    assert_eq!(
+        (summary.retryable_error_count, summary.terminal_error_count),
+        (0, 1),
+        "{how:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_revoked_while_held_before_score_ends_submission_inoperable() {
+    submission_inoperable_while_held_before_score_ends_the_run(InoperableBeforeScore::Revoked)
+        .await;
+}
+
+#[tokio::test]
+async fn a_run_withdrawn_while_held_before_score_ends_submission_inoperable() {
+    submission_inoperable_while_held_before_score_ends_the_run(InoperableBeforeScore::Withdrawn)
+        .await;
 }
 
 /// Review Focus 4 (GRD-004): a policy suspended while a phase runs cannot

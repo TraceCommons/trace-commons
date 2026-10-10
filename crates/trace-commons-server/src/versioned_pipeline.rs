@@ -12139,7 +12139,7 @@ impl PipelineService {
             // of every other P2 branch below -- a Score or Settle phase slow
             // enough to outrun its lease (a chunked NEAR AI scorer, a
             // CPU-bound embedder) must never be mistaken for
-            // `index_key_conflict`, a Review-only inoperable submission, a
+            // `index_key_conflict`, an inoperable submission, a
             // typed `PolicyError`, a missing settlement adapter, or the
             // generic `minimal_policy_failed` retry.
             Err(error) if is_stale_lease_error(&error) => {
@@ -12196,18 +12196,30 @@ impl PipelineService {
                 {
                     return self.mark_failed_or_record_lease_expired(&run, &label).await;
                 }
-                // In Review, an inoperable
-                // submission (withdrawn, expired, or purged) is permanent --
-                // the condition that caused it can never reverse -- so the
-                // run ends terminally here rather than waiting out P2's
-                // ordinary charged retry for this label. This covers both
-                // `commit_review`'s own refusal and the existing
+                // In Review and Score, an inoperable submission (revoked,
+                // withdrawn, expired, or purged) is permanent -- the
+                // condition that caused it can never reverse -- so the run
+                // ends terminally here, on the attempt the claim charged,
+                // rather than spending its budget in P2's ordinary charged
+                // retry for this label and ending `attempts_exhausted`
+                // (#1345). In Review this covers `commit_review`'s and
+                // `record_privacy_pass`'s own refusals and the
                 // `load_object_bytes` refusal `load_source_bytes` hits
-                // before Review even runs its policy. Every other phase
-                // keeps the charged retry below (Score's read of the
-                // already-validated approved bytes, for one).
+                // before Review runs its policy; in Score, the same refusal
+                // on the approved-bytes read (`load_approved_bytes`) and
+                // `commit_score`'s re-check under its own transaction. Both
+                // commits wrote nothing, so there is nothing to undo.
+                //
+                // Settle is not listed: it never raises this label. Its
+                // guard forfeits the open legs under the withdrawal rules
+                // (`withdrawal_forfeit_label`) and commits the run
+                // `complete`, excluded from the index as
+                // `submission_inoperable`. Failing a Settle run here would
+                // instead forfeit its legs as `run_failed`
+                // (`resolve_open_settlement_legs_on_tx`), so a Settle run
+                // that ever raised it keeps the charged retry below.
                 if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
-                    && run.next_phase == Some(Phase::Review)
+                    && matches!(run.next_phase, Some(Phase::Review | Phase::Score))
                 {
                     return self
                         .mark_failed_or_record_lease_expired(
