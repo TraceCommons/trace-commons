@@ -48,11 +48,17 @@ Version 1:
   folder's root. Each list is "any of"; an empty or absent list does not
   restrict; the lists combine with AND per session. A mission fits when at
   least `min_sessions` readable sessions satisfy every non-empty list.
-- Bounds, equal to what the client catalogue accepts: at most 32 values a
+- Bounds, all within what the client catalogue accepts: at most 32 values a
   list, each 1-64 bytes of lowercase ASCII letters, digits, `-` or `_`, no
   duplicates within a list; `min_sessions` 1-1000; at least one non-empty list,
   so a predicate never fits everything; a mission carrying one has a title of
   at most 200 characters. Unknown fields in a version-1 block are refused.
+  Only the 32-value list bound and the 200-character title are the client
+  catalogue's own (`ContributionMissionCatalogue`); it has no charset, length,
+  duplicate or non-empty rule and reads `min_sessions` 0 as 1. Those rules,
+  and with them "never fits everything", are enforced by the protocol
+  (`MissionPredicateV1`), and the daemon feeds the matcher only predicates
+  that passed them.
 - `TRACE_COMMONS_ACTIVITY_MISSIONS_POLICY_JSON` accepts only version 1. A
   malformed block, or any other version, fails startup like the rest of the
   policy.
