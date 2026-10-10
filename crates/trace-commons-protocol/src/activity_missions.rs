@@ -10,9 +10,10 @@
 //! client to match on its own machine. A version-1 block is read strictly; a
 //! block of a later version is carried verbatim, still digest-covered, and
 //! treated as absent, never half-read. Every predicate block serializes as
-//! key-sorted JSON (see [`crate::canonical_json`]), so a reader that does not
-//! know a version re-serializes it to the same bytes and the policy digest
-//! still agrees. The server never evaluates a predicate and accepts no
+//! key-sorted JSON (see [`crate::canonical_json`]), and a later version may
+//! hold no float and no integer outside i64/u64 (a block that does is
+//! malformed), so a reader that does not know a version re-serializes it to
+//! the same bytes and the policy digest still agrees. The server never evaluates a predicate and accepts no
 //! matching result.
 use chrono::{DateTime, Datelike, Days, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
@@ -85,7 +86,9 @@ pub enum MissionPredicate {
     /// Read and validated.
     V1(MissionPredicateV1),
     /// A later version, kept key-sorted so the digest still verifies, and
-    /// never interpreted. An operator policy refuses it.
+    /// never interpreted. It may hold no float and no integer outside
+    /// i64/u64, which would not re-serialize to the bytes the server hashed.
+    /// An operator policy refuses it.
     Unsupported(serde_json::Value),
 }
 
@@ -168,11 +171,27 @@ impl<'de> Deserialize<'de> for MissionPredicate {
             serde_json::from_value(value)
                 .map(MissionPredicate::V1)
                 .map_err(|_| D::Error::custom("activity_missions_predicate_invalid"))
-        } else {
+        } else if exact_json(&value) {
             Ok(MissionPredicate::Unsupported(
                 crate::canonical_json::canonical_value(&value),
             ))
+        } else {
+            Err(D::Error::custom("activity_missions_predicate_invalid"))
         }
+    }
+}
+
+/// Whether `value` re-serializes to the bytes it was parsed from, given
+/// key-sorted output: true unless it holds a number the default parser does
+/// not keep exactly -- a float, or an integer outside i64/u64, which it reads
+/// as a float. A later-version predicate block is held to this, so the
+/// digest a reader recomputes over it is the one the server took.
+fn exact_json(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number.is_i64() || number.is_u64(),
+        serde_json::Value::Array(items) => items.iter().all(exact_json),
+        serde_json::Value::Object(map) => map.values().all(exact_json),
+        _ => true,
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -918,5 +937,43 @@ mod tests {
         let round: ActivityCatalogue =
             serde_json::from_slice(&serde_json::to_vec(&catalogue).unwrap()).unwrap();
         assert_eq!(round, catalogue);
+    }
+
+    /// A later-version block may carry only JSON a reader without
+    /// `float_roundtrip` or `arbitrary_precision` re-serializes to the same
+    /// bytes: no float and no integer outside i64/u64. Either one, anywhere
+    /// in the block, makes it malformed, so the digest a reader recomputes
+    /// is never taken over bytes that differ from what the server hashed.
+    #[test]
+    fn activity_missions_unknown_predicate_version_refuses_numbers_that_do_not_round_trip() {
+        for number in [
+            "1.331993865736232e-34",
+            "0.5",
+            "1.0",
+            "18446744073709551616",
+            "-9223372036854775809",
+        ] {
+            for block in [
+                format!(r#"{{"version":2,"weight":{number}}}"#),
+                format!(r#"{{"version":2,"nested":{{"list":[1,{number}]}}}}"#),
+            ] {
+                let mut published = serde_json::to_string(&predicate_policy_json(
+                    serde_json::json!({"version": 2}),
+                ))
+                .unwrap();
+                published = published.replace(r#"{"version":2}"#, &block);
+                assert!(published.contains(number), "{published}");
+                assert!(
+                    serde_json::from_str::<ActivityPolicy>(&published).is_err(),
+                    "{block}"
+                );
+            }
+        }
+        // Integers inside i64/u64, strings, booleans, null, arrays and
+        // objects are carried.
+        let carried = serde_json::json!({"version":2,"max":u64::MAX,"min":i64::MIN,"on":true,"off":null,"nested":{"list":["a",1]}});
+        let reader: ActivityPolicy =
+            serde_json::from_value(predicate_policy_json(carried)).unwrap();
+        assert_eq!(reader.missions[0].supported_predicate(), None);
     }
 }

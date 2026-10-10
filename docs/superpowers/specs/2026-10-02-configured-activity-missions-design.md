@@ -62,7 +62,11 @@ Version 1:
 - A reader that meets a later version keeps the block verbatim (key-sorted, so
   the digest still verifies) and treats the mission as having no predicate; it
   never half-reads one. A later version must therefore also be emitted
-  key-sorted. The block is the policy's one versioned extension point: every
+  key-sorted, and may hold no float and no integer outside i64/u64: a reader
+  parses numbers with serde_json's default parser, which does not keep those
+  exactly, so its re-serialized bytes, and the digest, would differ. A
+  later-version block holding one is malformed and refuses the catalogue. The
+  block is the policy's one versioned extension point: every
   other policy object stays strict.
 
 Rollout order matters. Mission objects are strict, so a contributor build

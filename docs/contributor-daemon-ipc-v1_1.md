@@ -7519,7 +7519,10 @@ and digest-covered; changing their shape requires a supported schema-version
 change rather than an unversioned extension. The one versioned extension point
 is a mission's optional `predicate` block: version 1 is read strictly (an
 unknown field in it refuses the catalogue), while a block of a later version is
-carried, key-sorted so the digest still verifies, and treated as absent. The
+carried, key-sorted so the digest still verifies, and treated as absent. A
+later-version block holding a float or an integer outside i64/u64 is malformed
+and refuses the catalogue, since it would not re-serialize to the bytes the
+server hashed. The
 catalogue this method returns carries predicates as published; matching on them
 happens only in the daemon's mission slot.
 
