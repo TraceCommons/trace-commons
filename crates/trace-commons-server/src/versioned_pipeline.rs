@@ -311,6 +311,43 @@ pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_rev
 /// returned by then is a classifier failure
 /// (`privacy_classification_failed`).
 const PIPELINE_PRIVACY_PASS_MAX_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(900);
+/// What a privacy pass keeps back from the Review lease cap for the work
+/// around its classifier call: loading the source, storing the output,
+/// the record transaction and the Review commit (decision P8).
+const PIPELINE_PRIVACY_PASS_COMMIT_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
+/// The base of the charged retry backoff under
+/// `privacy_classification_failed`: `30 s x 2^(attempt_count - 1)`,
+/// legacy's PII backstop shape (`TRACE_PII_BACKSTOP_DEFAULT_BACKOFF_BASE_SECONDS`).
+const PIPELINE_PRIVACY_RETRY_BASE_SECONDS: i64 = 30;
+
+/// The bound on one privacy pass classifier call (decision P8). For a
+/// boundary that runs a prose-PII classifier it is
+/// `min(ceiling, review_lease x PIPELINE_LEASE_RENEWAL_CAP_FACTOR -
+/// PIPELINE_PRIVACY_PASS_COMMIT_MARGIN)`, so the pass ends inside the
+/// Review lease cap with time left to commit; a Review lease that leaves
+/// the classifier less than the margin (under 30 s) is refused with
+/// `PIPELINE_LEASE_CONFIG_INVALID_LABEL`. A boundary that classifies
+/// nothing (a pass-through or a test double, whose call is local) is
+/// bounded by `ceiling` alone, so a short test lease never times it out.
+/// `ceiling` is `PIPELINE_PRIVACY_PASS_MAX_TIMEOUT` outside tests.
+fn privacy_pass_timeout_for(
+    review_lease: Duration,
+    classifies_prose_pii: bool,
+    ceiling: std::time::Duration,
+) -> anyhow::Result<std::time::Duration> {
+    if !classifies_prose_pii {
+        return Ok(ceiling);
+    }
+    let cap = (review_lease * PIPELINE_LEASE_RENEWAL_CAP_FACTOR)
+        .to_std()
+        .unwrap_or_default();
+    let available = cap.saturating_sub(PIPELINE_PRIVACY_PASS_COMMIT_MARGIN);
+    anyhow::ensure!(
+        available >= PIPELINE_PRIVACY_PASS_COMMIT_MARGIN,
+        PIPELINE_LEASE_CONFIG_INVALID_LABEL
+    );
+    Ok(available.min(ceiling))
+}
 /// Safe label of a receipt for a submission id that the legacy path owns
 /// (`PipelineReceiptResult::LegacyOwned`): the ownership row names the legacy
 /// path, or a legacy submission row holds the id. A conflict with a legacy
@@ -5563,6 +5600,17 @@ impl PgPipelineStore {
     /// budget in about one second; one hour apart, the budget covers hours
     /// in which an operator can correct the store, and the terminal bound
     /// stays.
+    ///
+    /// Under `privacy_classification_failed` (the Review-start privacy
+    /// pass's classifier failed or timed out, decision D3) the delay is
+    /// legacy's PII backstop backoff, `PIPELINE_PRIVACY_RETRY_BASE_SECONDS x
+    /// 2^(attempt_count - 1)` (30, 60, 120, 240 s), so the attempt budget
+    /// outlasts a classifier outage of minutes rather than a second; and a
+    /// run that exhausts its attempts under it is failed with that label,
+    /// not `attempts_exhausted`, so its status reads as held content
+    /// (`quarantined`, Q1). A worker that crashes mid-pass is not recorded
+    /// here: the `claim_next` sweep fails such a run as
+    /// `attempts_exhausted`, a crash rather than a classifier verdict.
     pub async fn mark_retry(
         &self,
         run: &PipelineRunRecord,
@@ -5573,6 +5621,8 @@ impl PgPipelineStore {
         let multiplier = 1_i64 << exponent;
         let delay_milliseconds = DEFAULT_RETRY_MILLISECONDS.saturating_mul(multiplier);
         let hourly = error_label == PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL;
+        let privacy_classification = error_label == PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL;
+        let privacy_delay_seconds = PIPELINE_PRIVACY_RETRY_BASE_SECONDS.saturating_mul(multiplier);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
         let row = tx
@@ -5590,10 +5640,11 @@ impl PgPipelineStore {
                          WHEN $7::boolean THEN NOW() + ",
                     suspension_max_delay_sql!(),
                     "
+                         WHEN $8::boolean THEN NOW() + ($9::bigint * INTERVAL '1 second')
                          ELSE NOW() + ($5::bigint * INTERVAL '1 millisecond')
                      END,
                      last_error_label = CASE
-                         WHEN attempt_count >= max_attempts THEN $4
+                         WHEN attempt_count >= max_attempts AND NOT $8::boolean THEN $4
                          ELSE $3
                      END,
                      updated_at = NOW()
@@ -5609,6 +5660,8 @@ impl PgPipelineStore {
                     &delay_milliseconds,
                     &lease_token,
                     &hourly,
+                    &privacy_classification,
+                    &privacy_delay_seconds,
                 ],
             )
             .await?
@@ -8343,6 +8396,7 @@ pub struct PipelineServiceBuilder {
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
     unqualified_routing: bool,
     index_rebuild_fence_margin: std::time::Duration,
+    privacy_pass_timeout_ceiling: std::time::Duration,
 }
 
 impl PipelineServiceBuilder {
@@ -8377,6 +8431,7 @@ impl PipelineServiceBuilder {
             index_rebuild_fence_margin: std::time::Duration::from_secs(
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
+            privacy_pass_timeout_ceiling: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
         }
     }
 
@@ -8486,6 +8541,15 @@ impl PipelineServiceBuilder {
         self
     }
 
+    /// Replaces the privacy pass's 900 s ceiling
+    /// (`PIPELINE_PRIVACY_PASS_MAX_TIMEOUT`, decision P8). For tests only: a
+    /// short ceiling lets a test see a classifier call time out.
+    #[doc(hidden)]
+    pub fn with_privacy_pass_timeout_ceiling(mut self, ceiling: std::time::Duration) -> Self {
+        self.privacy_pass_timeout_ceiling = ceiling;
+        self
+    }
+
     /// Resolves the default package once, so a service that cannot run its
     /// own default bundle fails at construction rather than on the first
     /// receipt.
@@ -8566,6 +8630,13 @@ impl PipelineServiceBuilder {
                 PIPELINE_NOVELTY_UTILITY_CENTRAL_ISSUER_DENIED_LABEL
             );
         }
+        let privacy_pass_timeout = privacy_pass_timeout_for(
+            self.lease_config.review(),
+            self.privacy
+                .as_ref()
+                .is_some_and(|privacy| privacy.classifies_prose_pii()),
+            self.privacy_pass_timeout_ceiling,
+        )?;
         let service = PipelineService {
             store: PgPipelineStore::new(self.backend.clone()),
             backend: self.backend,
@@ -8589,6 +8660,7 @@ impl PipelineServiceBuilder {
             novelty_utility_checks: self.novelty_utility_checks,
             unqualified_routing: self.unqualified_routing,
             index_rebuild_fence_margin: self.index_rebuild_fence_margin,
+            privacy_pass_timeout,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
         service
@@ -8716,6 +8788,9 @@ pub struct PipelineService {
     /// The index rebuild's write fence margin
     /// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`).
     index_rebuild_fence_margin: std::time::Duration,
+    /// The bound on one privacy pass classifier call, computed at build
+    /// (`privacy_pass_timeout_for`, decision P8).
+    privacy_pass_timeout: std::time::Duration,
     /// The follow-up steps this service queued work for, per tenant, since
     /// the worker last took them (`take_follow_ups`).
     follow_ups: std::sync::Mutex<BTreeMap<String, PipelineFollowUps>>,
@@ -10871,9 +10946,10 @@ impl PipelineService {
         Ok(bytes)
     }
 
-    /// The bound on one privacy pass classifier call.
+    /// The bound on one privacy pass classifier call, fixed when the
+    /// service was built (`privacy_pass_timeout_for`, decision P8).
     fn privacy_pass_timeout(&self) -> std::time::Duration {
-        PIPELINE_PRIVACY_PASS_MAX_TIMEOUT
+        self.privacy_pass_timeout
     }
 
     /// The Review-start privacy pass (spec 2026-10-09): returns the run as
@@ -10894,10 +10970,13 @@ impl PipelineService {
     /// crash before the record, or a lease lost mid-call); exactly one result
     /// is recorded.
     ///
-    /// Fail-closed: no boundary is `privacy_control_missing`, and Review is
-    /// never run on the unclassified source; a classifier error or timeout
-    /// is the permanent `PolicyError` `privacy_classification_failed`, never
-    /// a fall back to the deterministic result.
+    /// Fail-closed: no boundary is `privacy_control_missing` (an uncharged
+    /// wait, decision P6), and Review is never run on the unclassified
+    /// source; a classifier error or timeout is the permanent `PolicyError`
+    /// `privacy_classification_failed` (a charged retry on the legacy
+    /// backoff that fails the run under that label once its attempts are
+    /// spent, `PgPipelineStore::mark_retry`), never a fall back to the
+    /// deterministic result.
     async fn ensure_privacy_pass(
         &self,
         run: &PipelineRunRecord,
@@ -11649,7 +11728,11 @@ impl PipelineService {
                 // Ruling FR3: a settlement adapter the service does not hold
                 // is a deployment gap, not the trace's fault -- the same
                 // uncharged suspension as a missing bound dependency. So is
-                // a missing per-instrument cap. (An artifact store that
+                // a missing per-instrument cap, and so is a worker built
+                // without the privacy boundary the Review-start privacy pass
+                // needs (decision P6): Review never runs on the unclassified
+                // source, and the run waits for a deployment that has one.
+                // (An artifact store that
                 // cannot derive a compatibility Score's object key, or
                 // prepares the object under another key, is a failed store
                 // call: the typed transient `PolicyError` above, from
@@ -11657,6 +11740,7 @@ impl PipelineService {
                 if let Some(gap) = [
                     PIPELINE_SETTLEMENT_ADAPTER_MISSING_LABEL,
                     PIPELINE_SETTLEMENT_CAP_MISSING_LABEL,
+                    PIPELINE_PRIVACY_CONTROL_MISSING_LABEL,
                 ]
                 .into_iter()
                 .find(|gap| *gap == label)
@@ -11742,7 +11826,8 @@ impl PipelineService {
 
     /// P2's charged retry with a worker present. When this retry exhausts
     /// the run's attempts -- `mark_retry` then fails the run as
-    /// `attempts_exhausted` -- a Settle run first reconciles its dispatched
+    /// `attempts_exhausted`, or as `privacy_classification_failed` under
+    /// that label -- a Settle run first reconciles its dispatched
     /// external legs, and `mark_retry` forfeits every other
     /// open leg in the transaction that fails the run. The claim holds the
     /// lease, so no other writer moves `attempt_count` under it: the claimed
@@ -16443,6 +16528,56 @@ mod tests {
         assert_eq!(
             pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
             PrivacyRisk::High
+        );
+    }
+
+    /// Decision P8: the pass timeout is `min(900 s, review lease x
+    /// PIPELINE_LEASE_RENEWAL_CAP_FACTOR - 60 s)` for a boundary that runs a
+    /// prose-PII classifier, so a pass always ends inside the Review lease
+    /// cap with time left to commit. A Review lease too short to leave the
+    /// classifier 60 s refuses the build. A boundary that classifies nothing
+    /// is bounded by the ceiling only, never by a short test lease, and
+    /// never by a negative value.
+    #[test]
+    fn privacy_pass_timeout_fits_inside_the_review_lease_cap() {
+        let ceiling = PIPELINE_PRIVACY_PASS_MAX_TIMEOUT;
+        let seconds = std::time::Duration::from_secs;
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(300), true, ceiling).unwrap(),
+            seconds(900)
+        );
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(120), true, ceiling).unwrap(),
+            seconds(420)
+        );
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(30), true, ceiling).unwrap(),
+            seconds(60)
+        );
+        let error = privacy_pass_timeout_for(Duration::seconds(20), true, ceiling)
+            .expect_err("a classifier left under 60 s refuses the build");
+        assert_eq!(error.to_string(), PIPELINE_LEASE_CONFIG_INVALID_LABEL);
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(20), false, ceiling).unwrap(),
+            seconds(900)
+        );
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(5), false, ceiling).unwrap(),
+            seconds(900)
+        );
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(1), false, ceiling).unwrap(),
+            seconds(900)
+        );
+        // The test-only ceiling knob bounds both kinds of boundary.
+        let short = std::time::Duration::from_millis(200);
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(5), false, short).unwrap(),
+            short
+        );
+        assert_eq!(
+            privacy_pass_timeout_for(Duration::seconds(300), true, short).unwrap(),
+            short
         );
     }
 

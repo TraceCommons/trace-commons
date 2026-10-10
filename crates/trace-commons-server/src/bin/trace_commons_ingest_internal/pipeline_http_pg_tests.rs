@@ -7087,9 +7087,10 @@ impl PipelinePrivacyBoundary for MarkerRedactingBoundary {
     }
 }
 
-/// A privacy boundary whose classifier half always fails: the classifier outage a
-/// receipt must fail closed on. The same test double as
-/// `versioned_pipeline_runtime_pg.rs`'s `FailingPrivacyBoundary`.
+/// A privacy boundary whose classifier half always fails: the classifier
+/// outage the Review-start privacy pass must fail closed on. The same test
+/// double as `versioned_pipeline_runtime_pg.rs`'s `FailingPrivacyBoundary`
+/// built without `fail_deterministic`.
 struct FailingPrivacyBoundary;
 
 #[async_trait::async_trait]
@@ -7615,23 +7616,21 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
     let (base, stop, server) = serve_pipeline_app(failing_state).await;
     let mut failing = sample_envelope_with_user_input("Summarise the failing-boundary notes").await;
     failing.privacy.residual_pii_risk = ResidualPiiRisk::Low;
-    let (status, refused) = post_trace(
+    // The classifier is not on the receipt (spec 2026-10-09): a classifier
+    // outage no longer refuses the upload. The receipt stores the
+    // post-deterministic source and answers `processing`; the worker's
+    // Review-start privacy pass meets the outage, and the run waits in a
+    // charged retry under `privacy_classification_failed` (30 s backoff, so
+    // it is still waiting when this test reads it).
+    let (status, received) = post_trace(
         &client,
         &base,
         &failing_token,
         &serde_json::to_vec(&failing).expect("envelope serialises"),
     )
     .await;
-    assert_eq!(status, 500, "{refused}");
-    assert_eq!(
-        refused,
-        serde_json::json!({"error": "trace commons operation failed"}),
-        "the refusal is a label"
-    );
-    assert!(
-        !refused.to_string().contains("failing-boundary"),
-        "{refused}"
-    );
+    assert_eq!(status, 200, "{received}");
+    assert_eq!(received["status"], "processing", "{received}");
     let mut client_pg = runtime.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client_pg, &failing_tenant).await;
     let runs: i64 = tx
@@ -7643,7 +7642,32 @@ async fn compatibility_bundle_through_http_with_review_privacy_withdrawal_and_ex
         .unwrap()
         .get(0);
     tx.commit().await.unwrap();
-    assert_eq!(runs, 0, "a failed rescrub creates no run");
+    assert_eq!(runs, 1, "a classifier outage does not refuse the receipt");
+    wait_for_run_state(&runtime, &failing_tenant, failing.submission_id, "retry").await;
+    let tx = tenant_tx(&mut client_pg, &failing_tenant).await;
+    let row = tx
+        .query_one(
+            "SELECT last_error_label, attempt_count, privacy_pass_object_ref_id IS NULL,
+                    approved_object_ref_id IS NULL,
+                    EXTRACT(EPOCH FROM next_attempt_at - updated_at)::BIGINT
+               FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+            &[&failing_tenant, &failing.submission_id],
+        )
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        row.get::<_, Option<String>>(0).as_deref(),
+        Some("privacy_classification_failed")
+    );
+    assert_eq!(row.get::<_, i32>(1), 1, "one charged attempt");
+    assert!(row.get::<_, bool>(2), "no pass is recorded");
+    assert!(row.get::<_, bool>(3), "nothing is approved");
+    assert_eq!(
+        row.get::<_, i64>(4),
+        30,
+        "the first retry waits the legacy backoff's 30 s"
+    );
     stop.send(()).expect("send shutdown");
     join_within(server, 20, "failing boundary test server").await;
 }

@@ -98328,6 +98328,39 @@ async fn settlement_posture_handler_refuses_without_a_credential() {
 // `pipeline_http_pg_tests.rs`.
 // ---------------------------------------------------------------------------
 
+/// Q1 (async privacy rescrub, Task 8): a run that failed because its
+/// privacy classification kept failing is held content in `main`'s
+/// vocabulary, `quarantined`, not `accepted`. A run that failed for any
+/// other reason keeps the status of the state it failed in.
+#[test]
+fn main_status_maps_a_failed_privacy_classification_to_quarantined() {
+    use trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus;
+    let failed = |reason_label: &str| PipelineContributorStatus {
+        processing: PipelineProcessingStatus::Failed,
+        responsible_phase: None,
+        reason_label: Some(reason_label.to_string()),
+        credit: PipelineCreditStatus::Unscored,
+        submission_status: "received".to_string(),
+        admission_decision: "admit".to_string(),
+        ..pipeline_contributor_status_fixture()
+    };
+    assert_eq!(
+        main_status_for_pipeline(&failed("privacy_classification_failed")),
+        "quarantined"
+    );
+    assert_eq!(
+        main_status_for_pipeline(&failed("attempts_exhausted")),
+        "accepted"
+    );
+    let mut retrying = failed("privacy_classification_failed");
+    retrying.processing = PipelineProcessingStatus::Retry;
+    assert_eq!(
+        main_status_for_pipeline(&retrying),
+        "accepted",
+        "a classification still being retried is undecided, as today"
+    );
+}
+
 /// A pipeline status whose Trace Credit leg is finalized, with a second
 /// instrument at the largest amount an `AtomicUnits` holds.
 fn pipeline_contributor_status_fixture() -> PipelineContributorStatus {

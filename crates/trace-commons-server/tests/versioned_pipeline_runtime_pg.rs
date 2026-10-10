@@ -45678,6 +45678,21 @@ async fn privacy_pass_test_service(
     privacy: Arc<dyn PipelinePrivacyBoundary>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    Arc::new(
+        privacy_pass_test_builder(backend, artifact_store, privacy, crash_point)
+            .build()
+            .expect("build pipeline service"),
+    )
+}
+
+/// The builder `privacy_pass_test_service` builds, for a test that sets one
+/// more knob before it builds (Task 8's pass timeout ceiling).
+fn privacy_pass_test_builder(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+    crash_point: Option<PipelineCrashPoint>,
+) -> PipelineServiceBuilder {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(
@@ -45718,7 +45733,7 @@ async fn privacy_pass_test_service(
     if let Some(crash_point) = crash_point {
         builder = builder.with_crash_point(crash_point);
     }
-    Arc::new(builder.build().expect("build pipeline service"))
+    builder
 }
 
 /// An envelope whose event content carries `markers`, submitted for a fresh
@@ -47353,4 +47368,181 @@ async fn quarantined_rejection_same_dispatch_commits_after_the_pass() {
     let rows = privacy_pass_attempt_rows(&backend, &tenant, created.run_id).await;
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].2, "committed");
+}
+
+/// Task 8: the stored delay of the retry `run` was scheduled with, in whole
+/// seconds. `mark_retry` sets `next_attempt_at` and `updated_at` from the
+/// same `NOW()`, so their difference is the backoff it chose, with no
+/// wall-clock slack.
+fn scheduled_retry_seconds(run: &PipelineRunRecord) -> i64 {
+    (run.next_attempt_at - run.updated_at).num_seconds()
+}
+
+/// Task 8: a classifier that keeps failing is a charged retry under
+/// `privacy_classification_failed`, on the legacy backoff (30 s doubling,
+/// decision D3), and the run fails closed under that same label once its
+/// attempts are spent -- never `attempts_exhausted`, and never a fall back
+/// to the deterministic source. The receipt itself succeeds: the
+/// classifier is not on it.
+#[tokio::test]
+async fn classifier_failure_retries_then_fails_closed() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        Arc::new(FailingPrivacyBoundary {
+            fail_deterministic: false,
+        }),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_markers(&service, "classifier-failure", &[]).await;
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    assert_eq!(count_runs(&backend, &tenant).await, 1);
+    let max_attempts = created.max_attempts;
+    assert_eq!(max_attempts, 5, "V93's default attempt budget");
+
+    for attempt in 1..=max_attempts {
+        let run = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs the pass");
+        assert_eq!(run.attempt_count, attempt, "{run:?}");
+        assert_eq!(
+            run.last_error_label.as_deref(),
+            Some("privacy_classification_failed"),
+            "{run:?}"
+        );
+        assert!(run.privacy_pass_object_ref_id.is_none(), "{run:?}");
+        assert!(run.approved_object_ref_id.is_none(), "{run:?}");
+        assert_eq!(run.next_phase, Some(Phase::Review));
+        if attempt < max_attempts {
+            assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+            let expected = 30_i64 << (attempt - 1);
+            assert_eq!(
+                scheduled_retry_seconds(&run),
+                expected,
+                "attempt {attempt} waits 30 s x 2^(attempt-1): {run:?}"
+            );
+            force_due(&backend, &tenant, created.run_id).await;
+        } else {
+            assert_eq!(run.state, PipelineRunState::Failed, "{run:?}");
+        }
+    }
+    assert!(
+        service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a failed run is terminal"
+    );
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        0
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "received"
+    );
+}
+
+/// Task 8 (decision P6): a worker without a privacy boundary is a
+/// deployment gap, not the trace's fault -- an uncharged wait under
+/// `privacy_control_missing`, never Review on the unclassified source.
+#[tokio::test]
+async fn missing_boundary_is_an_uncharged_wait() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let receiving = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        default_privacy_boundary(),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_with_markers(&receiving, "missing-boundary", &[]).await;
+    let dispatching = test_service_with_controls(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        Some(allow_all_authority()),
+        None,
+    )
+    .await;
+    let run = dispatching
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review is dispatched");
+    assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some("privacy_control_missing"),
+        "{run:?}"
+    );
+    assert_eq!(run.attempt_count, 0, "a missing boundary is not charged");
+    assert!(run.privacy_pass_object_ref_id.is_none());
+    assert!(run.approved_object_ref_id.is_none());
+    assert_eq!(
+        review_outcome_count(&dispatching, &tenant, created.run_id).await,
+        0
+    );
+}
+
+/// Task 8 (decision P8): a classifier call that outlives the pass timeout
+/// is a classifier failure -- the same charged retry under
+/// `privacy_classification_failed` -- not a pass that waits on the
+/// classifier for as long as it takes.
+#[tokio::test]
+async fn classifier_timeout_is_a_classifier_failure() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let classifier_calls = Arc::new(AtomicUsize::new(0));
+    let service = Arc::new(
+        privacy_pass_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            Arc::new(CountingSlowClassifierBoundary {
+                deterministic_calls: Arc::new(AtomicUsize::new(0)),
+                classifier_calls: classifier_calls.clone(),
+            }),
+            None,
+        )
+        .with_privacy_pass_timeout_ceiling(std::time::Duration::from_millis(200))
+        .build()
+        .expect("build pipeline service"),
+    );
+    let (tenant, created) = submit_with_markers(&service, "classifier-timeout", &[]).await;
+    let run = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        service.process_run(&tenant, created.run_id),
+    )
+    .await
+    .expect("the pass gives up on the classifier at its timeout")
+    .unwrap()
+    .expect("Review runs the pass");
+    assert_eq!(classifier_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some("privacy_classification_failed"),
+        "{run:?}"
+    );
+    assert_eq!(run.attempt_count, 1);
+    assert_eq!(scheduled_retry_seconds(&run), 30, "{run:?}");
+    assert!(run.privacy_pass_object_ref_id.is_none());
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        0
+    );
 }

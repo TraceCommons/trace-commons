@@ -586,6 +586,14 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-i
 
 - [ ] **Step 5: Commit** `Retry a failed privacy classification on the legacy backoff and fail closed`.
 
+Recorded while implementing Task 8:
+- P8 is a pure function, `privacy_pass_timeout_for(review_lease, classifies_prose_pii, ceiling)`, so the VP unit test needs no built service. `build()` calls it with `self.privacy.is_some_and(classifies_prose_pii)` and stores the result on the service; `privacy_pass_timeout()` returns it. The refusal is "less than `PIPELINE_PRIVACY_PASS_COMMIT_MARGIN` left for the classifier", so a 30 s Review lease is the shortest accepted (60 s bound) and 20 s refuses. The test-only knob is `PipelineServiceBuilder::with_privacy_pass_timeout_ceiling` (`#[doc(hidden)]`); it replaces the 900 s ceiling for both kinds of boundary.
+- `mark_retry` takes two more parameters (`$8` the label is `privacy_classification_failed`, `$9` the delay in seconds, `30 << min(attempt_count - 1, 9)`); the exhaustion arm writes `attempts_exhausted` only when `$8` is false. Nothing else in `src/` reads `attempts_exhausted`.
+- `privacy_control_missing` joins the FR3 deployment-gap array beside the two settlement gaps (uncharged `mark_transient_retry`); no allowlist edit.
+- RT gains `privacy_pass_test_builder` (the builder `privacy_pass_test_service` builds) for the timeout test's knob, and `scheduled_retry_seconds(run)` = `next_attempt_at - updated_at`, which `mark_retry` sets from one `NOW()`, so the backoff is asserted exactly. The timeout test reuses `CountingSlowClassifierBoundary` with a 200 ms ceiling.
+- The HTTP leg also asserts the stored first backoff is 30 s. Without it the leg could pass before the fix by catching the run in its first 50 ms `retry`.
+- Red run: `classifier_failure_retries_then_fails_closed` failed on the first backoff (0 s against 30 s); `missing_boundary_is_an_uncharged_wait` on the label (`minimal_policy_failed`); the VP unit test and RT's timeout test failed to compile (no `privacy_pass_timeout_for`, no `with_privacy_pass_timeout_ceiling`); `main_status_maps_a_failed_privacy_classification_to_quarantined` mapped to `accepted`; the HTTP test failed at the leg's backoff assertion (0 against 30). The whole ingest bin had no test pinning `accepted` for a failed pipeline run.
+
 ### Task 9: Withdrawal, purge, and legacy readers (Q3)
 
 **Files:** RT withdrawal and retention-purge tests; HTTP (end-to-end withdrawal through the revocation-propagation worker; legacy-reader pin).

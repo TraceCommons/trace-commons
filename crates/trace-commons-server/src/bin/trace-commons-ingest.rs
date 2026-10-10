@@ -17402,7 +17402,11 @@ fn submission_status_from_pipeline(
 /// `main`'s receipt reports for the same privacy decision: `quarantined`
 /// when it waits for a human review or its Admission quarantined it,
 /// `rejected` when Admission rejected it, and `accepted` otherwise. A run
-/// that failed keeps the value of the state it failed in.
+/// that failed keeps the value of the state it failed in, except one that
+/// failed because its Review-start privacy classification kept failing
+/// (`privacy_classification_failed`, owner decision Q1): its content was
+/// never classified, so it reports `quarantined`, held content, rather
+/// than `accepted`.
 fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
     match status.submission_status.as_str() {
         "accepted" => "accepted",
@@ -17417,6 +17421,12 @@ fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str 
             "quarantined"
         }
         _ if status.admission_decision == "reject" => "rejected",
+        _ if status.processing == PipelineProcessingStatus::Failed
+            && status.reason_label.as_deref()
+                == Some(trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL) =>
+        {
+            "quarantined"
+        }
         _ => "accepted",
     }
 }
