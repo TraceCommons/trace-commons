@@ -663,7 +663,11 @@ The full run is long (see [Time and memory](#time-and-memory)):
 The export reads the session files of the dataset in name order. It keeps
 the first 10,000 that the translator accepts and that pass the word filter.
 For the network pin, it reads 10,128 files. It downloads each file that is
-not in the cache `.local/pipeline/hf-cache/`, 16 files at a time.
+not in the cache `.local/pipeline/hf-cache/`, 4 files at a time. The
+window is small so that the export sends fewer concurrent requests to
+Hugging Face while the export does not wait after an HTTP 429 (issue #1308).
+The measured times of this section were taken with a window of 16. They are
+not repeated with a window of 4.
 
 The first export of the network pin cannot complete in one run. Hugging
 Face limits a client with no token to 3,000 file requests in each window

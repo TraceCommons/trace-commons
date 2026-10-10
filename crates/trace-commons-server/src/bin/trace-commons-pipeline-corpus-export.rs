@@ -151,8 +151,10 @@ fn pretty_json(value: &Value) -> anyhow::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The sessions that are downloaded at the same time in remote mode.
-const DOWNLOAD_WINDOW: usize = 16;
+/// The sessions that are downloaded at the same time in remote mode. The
+/// window is small while Hugging Face is not told to wait after an HTTP 429
+/// (issue #1308).
+const DOWNLOAD_WINDOW: usize = 4;
 
 struct SelectionFilter {
     min_words: usize,
