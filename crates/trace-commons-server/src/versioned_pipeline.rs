@@ -2901,8 +2901,10 @@ impl PgPipelineStore {
     /// Records the Review-start privacy pass on `run`, in one tenant
     /// transaction under the run's lease, modelled on `commit_review`: the
     /// pass object's ref, the post-classifier privacy values on the
-    /// submission row, the six `privacy_pass_*` columns on the run, and the
-    /// attempt's staged `privacy-pass` row moved to `committed`.
+    /// submission row (and, for an escalated pass, its status moved from
+    /// `received` to `quarantined`, #1326), the six `privacy_pass_*` columns
+    /// on the run, and the attempt's staged `privacy-pass` row moved to
+    /// `committed`.
     ///
     /// Lock order as `commit_review`: the run row (`ensure_current_lease`),
     /// then the submission row (`review_submission_is_operable`). No policy
@@ -2988,11 +2990,21 @@ impl PgPipelineStore {
             ],
         )
         .await?;
+        // #1326: an escalated pass holds the run for a human, so an
+        // Admission-admitted run's `received` row moves to `quarantined`, as
+        // `main`'s PII backstop quarantines the equal state. `main`'s record
+        // readers (the assessment route's consent check among them) read no
+        // `received` row, and the contributor and `main`'s review counts see
+        // the hold. An Admission-quarantined row is already `quarantined`; a
+        // cleared pass leaves the status as it is.
         let updated_submission = tx
             .execute(
                 "UPDATE trace_submissions
                  SET privacy_risk = $3, residual_risk_basis = $4, redaction_counts = $5,
-                     redaction_pipeline_version = $6, updated_at = NOW()
+                     redaction_pipeline_version = $6,
+                     status = CASE WHEN $7::text = 'escalated' AND status = 'received'
+                                   THEN 'quarantined' ELSE status END,
+                     updated_at = NOW()
                  WHERE tenant_id = $1 AND submission_id = $2",
                 &[
                     &run.tenant_id,
@@ -3001,6 +3013,7 @@ impl PgPipelineStore {
                     &residual_risk_basis,
                     &redaction_counts,
                     &pass.redaction_pipeline_version,
+                    &pass.outcome.as_db(),
                 ],
             )
             .await?;

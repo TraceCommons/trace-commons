@@ -1692,8 +1692,12 @@ out of it, and it runs whatever the bundle's Review policy does.
    `privacy_pass_recorded_at`. The same transaction writes the
    post-classifier `privacy_risk`, `residual_risk_basis`, `redaction_counts`
    and `redaction_pipeline_version` back to the submission row. It changes
-   neither the run's attempt count nor its phase, nor the submission's
-   status.
+   neither the run's attempt count nor its phase. When the pass escalates a
+   run Admission admitted, the same transaction moves the submission's
+   status from `received` to `quarantined`, as `main`'s PII backstop
+   quarantines a trace it holds for a human (#1326); `main`'s review counts
+   (`review_sla`, `urgent_reviews`) then count the hold, as they count a run
+   Admission quarantined. A `cleared` pass leaves the status as it is.
 4. Hand off. The Review policy gets the output's bytes as its source
    artifact. Review's derived record names the pass object as its input.
 
@@ -2606,7 +2610,7 @@ pipeline block (`processing_state`). The mapping:
 | Submission status in `trace_submissions` | Run | `status` |
 |---|---|---|
 | `accepted`, `rejected`, `revoked`, `expired`, `purged`, `quarantined` | any | the same value |
-| `received` (Review has not decided) | Admission quarantined it, or it waits for a human review (the privacy pass escalated it) | `quarantined` |
+| `received` (Review has not decided) | Admission quarantined it, or it waits for a human review (the privacy pass escalated it; a pass recorded by a build from before #1326 left the row `received`, a newer one stores `quarantined`) | `quarantined` |
 | `received` | Admission rejected it | `rejected` |
 | `received` | failed with `privacy_classification_failed` (its content was never classified) | `quarantined` |
 | `received` | any other state: waiting for its privacy pass, or failed for another reason | `accepted` |
