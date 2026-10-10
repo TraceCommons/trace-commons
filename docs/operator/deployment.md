@@ -806,11 +806,8 @@ No grant allows `DELETE` on assessments, snapshots, or items. A trigger
 refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
 their submission or tenant, through foreign-key cascades.
 
-V118 adds `pipeline_runs.review_audit_pending_at`, the marker of a review
-audit event that the worker must still append. Apply V118 as the migrator
-before you install the binary, as for every migration above. V118 locks
-`pipeline_runs` until it commits. During that time, the uploads of routed
-tenants, the pipeline worker and `main`'s gate driver wait.
+V118 adds the `review_audit_pending_at` row above: see
+[V118](#v118-the-review-audit-marker).
 
 These routes also write tables older than V62, which no pipeline migration
 grants anything on. The pilot's V62-era table-wide grants cover them:
@@ -1245,6 +1242,25 @@ Check before deploying:
 ```sql
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_object_ref_id', 'UPDATE');
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_approval_resolved_reasons', 'UPDATE');
+```
+
+### V118: the review audit marker
+
+V118 adds `pipeline_runs.review_audit_pending_at`, the marker of a review
+audit event that the worker must still append, a partial index on it, and
+`UPDATE (review_audit_pending_at)` for `trace_ingest_runtime`. Apply V118 as
+the migrator before you install the binary, after V117. V118 locks
+`pipeline_runs` until it commits. During that time, the uploads of routed
+tenants, the pipeline worker and `main`'s gate driver wait.
+
+A build from before V118 runs on a V118 database. A Review decision that it
+commits gets no audit event. An assessment that it records gets a second
+`review_decision` event when a newer build commits its Review.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'review_audit_pending_at', 'UPDATE');
 ```
 
 ### Build and install

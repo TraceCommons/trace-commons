@@ -15072,7 +15072,7 @@ async fn route_pipeline_receipt(
 /// commit: the receipt re-scrubs its own copy of the envelope, which can
 /// raise the risk, so the handler's envelope is not the source. The
 /// Review-start privacy pass can change the stored risk later; the row
-/// keeps the receipt's, and `reconcile_db_mirror` does not compare the two
+/// keeps the receipt's unless a pass ended before this read, and `reconcile_db_mirror` does not compare the two
 /// for a pipeline submission.
 async fn append_pipeline_receipt_submitted_event(
     state: &AppState,

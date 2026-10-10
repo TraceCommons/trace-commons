@@ -1672,8 +1672,9 @@ receipt commits. The event holds the uploader's principal reference, as
 `main`'s event does. An admitted receipt's event has no status, and its audit
 row says `received`. A quarantined or rejected receipt's event has that
 status. The audit row holds the privacy risk that the receipt stored. The
-privacy pass at Review can change the stored risk later. The row keeps the
-receipt's risk, and `main`'s reconciliation does not compare the two for a
+privacy pass at Review can change the stored risk later. The row usually
+keeps the receipt's risk (a pass that ends before the route reads the risk
+back gives the row the later risk), and `main`'s reconciliation does not compare the two for a
 pipeline submission. When the append fails, the upload answers `500`, and the run exists
 and is processed. Such a failure usually leaves the tenant's audit chain one
 event ahead in the database. Until the audit-chain repair, each new upload of
@@ -2001,8 +2002,10 @@ cadence of the credit audit events. It appends the assessment event with the
 id `assessment_id` when the log has none. The stored `reviewer_sha256:`
 reference then names the reviewer. The pass also appends one
 `lifecycle_status_change` event, with the actor `pipeline_worker`, for each
-automatic Review decision. It clears the marker once each event of the run
-exists. The time of an event is the time of the append. A decision from
+Review commit. The hold of the privacy pass (`privacy_pass_review_required`)
+and its failure (`privacy_classification_failed`) commit no Review decision
+and get no event; the pass record on `pipeline_runs` is the record. The pass
+clears the marker once each event of the run exists. The time of an event is the time of the append. A decision from
 before V118 gets no event. A failed event keeps its marker and logs
 `pipeline_worker_review_audit_item_failed` with a hash of the run id. A
 failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit
@@ -2950,7 +2953,12 @@ pipeline submissions out of its sources: they are exported through pipeline
 snapshots.
 `main`'s operational summary leaves the derived records of pipeline
 submissions out of its vector counts and its `missing_active_vectors` gate.
-Its submission counts and review counts include pipeline submissions.
+Its submission counts and review counts include a pipeline submission only
+when its stored status is one that `main` reads. A run that Admission
+quarantined is counted. A run that the privacy pass holds, and a run that
+failed with `privacy_classification_failed`, keep the stored status
+`received` and are in no count of `main`: read `work` in the pipeline
+operational summary and `GET /v1/review/pipeline/quarantine`.
 `main`'s benchmark export, its two ranker exports and its process-evaluation
 worker leave pipeline submissions out. The process-evaluation job route
 refuses one with `409` `pipeline_run_owns_submission`.
@@ -2972,7 +2980,10 @@ each comparison they would fail:
   checks, whose database side then reads without the pipeline rows;
 - the check that an accepted submission's envelope object reads back: a
   pipeline submission's objects are the pipeline's own source and approved
-  revision, which the pipeline reads and checks itself.
+  revision, which the pipeline reads and checks itself;
+- the privacy risk in a Submit audit row against the stored risk
+  (`db_audit_submission_metadata_mismatches`): the privacy pass rewrites the
+  stored risk, and the row keeps the receipt's.
 
 Each row is found through its pipeline run, not by its shape. `main`'s own
 rows keep every check: a legacy row with no file record is still a blocking

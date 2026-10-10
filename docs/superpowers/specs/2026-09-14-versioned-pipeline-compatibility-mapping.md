@@ -132,9 +132,9 @@ Five differences from `main` follow:
    are unchanged.
 5. Legacy readers of derived records (`list_trace_derived_records`, the
    reviewer metadata views, the ranker export's summary-hash dedupe) now see
-   a pipeline submission's canonical summary and hash. The ranker export
-   collapses pipeline submissions with the same hash, as it collapses
-   `main`'s. The vector index worker reads only `duplicate_precheck` records,
+   a pipeline submission's canonical summary and hash. The ranker exports,
+   the benchmark export and process evaluation leave pipeline submissions
+   out (#1185, L1-2), so their dedupe never sees one. The vector index worker reads only `duplicate_precheck` records,
    and the pipeline's are `summary` records, so it is unaffected.
 
 An empty Score award set is a completed decision. It is not an incomplete
