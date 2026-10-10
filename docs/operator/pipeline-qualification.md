@@ -375,11 +375,16 @@ passed.
     of each: sources, `build.rs`, tests, and fixtures. Today these are the
     server, `-attestation`, `-build-info`, `-gate-api`, `-gate-enclave`,
     `-operator-client`, and `-protocol` crates. A `[dev-dependencies]` table
-    is not followed: a dev-dependency never links into a binary, so the
-    contributor crate (the server's one path dev-dependency) is outside;
+    is not followed, so the contributor crate (the server's one path
+    dev-dependency) is outside. That crate is compiled into the test
+    binaries a qualification run builds, but not into the server binaries
+    the revision identifies: a contributor change can change what a
+    qualification run finds (a compile failure, a journey test) and keep
+    the revision, and cannot change what the deployed server does;
   - each file that a Rust file of those crates includes from elsewhere in the
-    tree (`include_str!`, `include_bytes!`, `include!`, or a `#[path]`
-    module). Today these are `docs/operator/register-stats-role.md`,
+    tree (`include_str!`, `include_bytes!`, `include!`, or a `#[path]` or
+    `#[cfg_attr(..., path = "...")]` module), and, transitively, each file
+    that a Rust file loaded that way includes. Today these are `docs/operator/register-stats-role.md`,
     `docs/superpowers/reports/2026-05-14-model-bakeoff-result-a26.json`, and
     `docs/superpowers/specs/versioned-pipeline-compatibility-baseline-v1.json`;
   - `Cargo.toml`, `Cargo.lock`, `rust-toolchain`, `rust-toolchain.toml`, and a
@@ -407,7 +412,9 @@ passed.
   `code_revision_manifest_invalid`), a path that leaves the checkout
   (`code_revision_path_outside_tree`), an include whose argument is not a
   string literal or `concat!(env!("CARGO_MANIFEST_DIR"), "...")`
-  (`code_revision_include_unresolved`), and an included file outside the
+  (`code_revision_include_unresolved`), a Rust file loaded from outside the
+  covered crates that declares a child module out of line (`mod name;`,
+  also `code_revision_include_unresolved`), and an included file outside the
   covered paths that is not in the checkout
   (`code_revision_include_missing`).
 

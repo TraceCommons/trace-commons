@@ -165,8 +165,14 @@ CODE_REVISION_COVERED = (
 )
 
 # The dependency tables whose `path` entries are part of a crate's build. A
-# `[dev-dependencies]` table is not one of them: a dev-dependency never links
-# into a binary (#1249, an owner decision).
+# `[dev-dependencies]` table is not one of them (#1249, an owner decision): a
+# dev-dependency is compiled into the test binaries a qualification run
+# builds, but never into the server binaries the revision identifies. So a
+# change to one (the contributor crate) can change what a qualification run
+# finds, a compile failure for one, and keep the revision; it cannot change
+# what the deployed server does. Adding "dev-dependencies" here for the root
+# crate alone would cover it, and would requalify on every contributor
+# change.
 _BUILD_DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
 
 # `include_str!`, `include_bytes!` and `include!`. An argument is a string
@@ -181,7 +187,15 @@ _INCLUDE_MANIFEST_DIR = re.compile(
     r'\s*"([^"\\]*)"\s*,?\s*\)\s*,?\s*\)'
 )
 _INCLUDE_IN_STRING = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*\\"')
-_PATH_ATTRIBUTE = re.compile(r'#\s*\[\s*path\s*=\s*"([^"\\]*)"\s*\]')
+# `#[path = "..."]`, and `#[cfg_attr(<cfg>, path = "...")]`, which loads a
+# module file the same way when its condition holds.
+_PATH_ATTRIBUTE = re.compile(r'#\s*\[\s*(?:cfg_attr\s*\([^\]]*?\bpath|path)\s*=\s*"([^"\\]*)"')
+# An out-of-line module declaration, `mod name;`, with any attributes and
+# visibility. In a Rust file outside the covered crates its file is not
+# resolved by the scan, so one is refused (`code_revision_include_unresolved`).
+_OUT_OF_LINE_MODULE = re.compile(
+    r"(?m)^\s*(?:#\s*\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*;"
+)
 
 
 def _tree_relative(base, relative):
@@ -260,22 +274,24 @@ def _code_revision_crates(root):
 def _included_paths(root, crate, source):
     """The files the Rust source `source` (relative to `root`, in the crate
     at `crate`) includes or loads as a module by `#[path]`, relative to
-    `root`."""
+    `root`, each paired with whether it is Rust source (`include!` and
+    `#[path]`; not `include_str!` or `include_bytes!`)."""
     text = (root / source).read_text(errors="replace")
     directory = os.path.dirname(source)
     found = []
     for call in _INCLUDE_CALL.finditer(text):
         if _INCLUDE_IN_STRING.match(text, call.start()):
             continue
+        is_source = text.startswith("include!", call.start())
         literal = _INCLUDE_LITERAL.match(text, call.start())
         if literal:
-            found.append(_tree_relative(directory, literal.group(1)))
+            found.append((_tree_relative(directory, literal.group(1)), is_source))
             continue
         manifest_relative = _INCLUDE_MANIFEST_DIR.match(text, call.start())
         require(manifest_relative is not None, "code_revision_include_unresolved")
-        found.append(_tree_relative(crate, manifest_relative.group(1).lstrip("/")))
+        found.append((_tree_relative(crate, manifest_relative.group(1).lstrip("/")), is_source))
     for attribute in _PATH_ATTRIBUTE.finditer(text):
-        found.append(_tree_relative(directory, attribute.group(1)))
+        found.append((_tree_relative(directory, attribute.group(1)), True))
     return found
 
 
@@ -314,27 +330,50 @@ def _code_revision_paths():
     """The files the code revision hashes, sorted (#1249): of the listed
     files, those under a crate of `_code_revision_crates`, under an entry of
     `CODE_REVISION_COVERED`, or included (`include_str!`, `include_bytes!`,
-    `include!`, `#[path]`) by a Rust file of a covered crate. An included
-    file outside those prefixes that is not listed is refused
-    (`code_revision_include_missing`): its bytes would otherwise be left out
-    of the hash unseen. The scan reads comments too, so a comment naming
-    such a file adds it, which only widens the revision."""
+    `include!`, `#[path]`, `#[cfg_attr(..., path = ...)]`) by a Rust file of
+    a covered crate, or, transitively, by a Rust file that one of those
+    loads by `include!` or `#[path]`. An included file outside those
+    prefixes that is not listed is refused (`code_revision_include_missing`):
+    its bytes would otherwise be left out of the hash unseen. So is an
+    out-of-line `mod name;` in a loaded Rust file outside the covered crates
+    (`code_revision_include_unresolved`): the scan does not resolve its
+    file. The scan reads comments too, so a comment naming such a file adds
+    it, which only widens the revision."""
     files = _listed_files()
     prefixes = [*_code_revision_crates(ROOT), *CODE_REVISION_COVERED]
 
     def covered(path):
         return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
 
+    crates = _code_revision_crates(ROOT)
     selected = {path for path in files if covered(path)}
-    for crate in _code_revision_crates(ROOT):
-        for source in sorted(path for path in selected if path.startswith(crate + "/") and path.endswith(".rs")):
-            for included in _included_paths(ROOT, crate, source):
-                # A target under a covered prefix is hashed already, or is
-                # not there and so cannot change what is built.
-                if covered(included):
-                    continue
+    # Each Rust file of a covered crate, then, transitively, each file an
+    # `include!` or `#[path]` loads as Rust source, wherever it is: what that
+    # file includes is compiled into the same crate. `CARGO_MANIFEST_DIR` is
+    # the including crate's throughout.
+    pending = [
+        (source, crate)
+        for crate in crates
+        for source in sorted(path for path in selected if path.startswith(crate + "/") and path.endswith(".rs"))
+    ]
+    scanned = {source for source, _ in pending}
+    while pending:
+        source, crate = pending.pop()
+        if not any(source.startswith(other + "/") for other in crates):
+            # A module file outside every covered crate: a child module it
+            # declares out of line lives in a file the scan does not
+            # resolve, so it is refused rather than left out.
+            text = (ROOT / source).read_text(errors="replace")
+            require(_OUT_OF_LINE_MODULE.search(text) is None, "code_revision_include_unresolved")
+        for included, is_source in _included_paths(ROOT, crate, source):
+            if not covered(included):
                 require(included in files, "code_revision_include_missing")
                 selected.add(included)
+            # A target under a covered prefix that is not listed is not
+            # there, and so cannot change what is built.
+            if is_source and included in files and included not in scanned:
+                scanned.add(included)
+                pending.append((included, crate))
     return sorted(selected, key=lambda path: path.encode())
 
 

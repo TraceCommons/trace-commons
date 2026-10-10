@@ -4915,9 +4915,10 @@ class CodeRevisionScopeTests(unittest.TestCase):
                 self.assertEqual(self._after(relative), self.base, relative)
 
     def test_a_dev_dependency_and_what_only_it_includes_keep_the_revision(self):
-        """Owner decision (#1249): a dev-dependency never links into a
-        binary, so the crate, and a file that only it includes, are outside
-        the revision."""
+        """Owner decision (#1249): a dev-dependency is compiled into test
+        binaries only, never into the server binaries the revision
+        identifies, so the crate, and a file that only it includes, are
+        outside the revision."""
         for relative in ("crates/dev-only/src/lib.rs", "crates/dev-only/Cargo.toml", "macos/icon.txt"):
             with self.subTest(relative=relative):
                 self.assertEqual(self._after(relative), self.base, relative)
@@ -4993,6 +4994,57 @@ class CodeRevisionScopeTests(unittest.TestCase):
         self._refused("code_revision_include_missing")
         with_module = self._after("tools/shared.rs", "// shared\n")
         self.assertNotEqual(self._after("tools/shared.rs", "// shared v2\n"), with_module)
+
+    def test_what_a_module_outside_the_crate_includes_is_covered(self):
+        """A Rust file outside the covered crates that a covered crate loads
+        (`#[path]` or `include!`) is scanned in turn, so what it includes
+        is covered too (review of #1348, minor 1, case A)."""
+        for loader in ('#[path = "../../../tools/shared.rs"]\nmod shared;\n', 'include!("../../../tools/shared.rs");\n'):
+            with self.subTest(loader=loader):
+                _write_tree(
+                    self.repo,
+                    {
+                        "crates/dep-a/src/lib.rs": loader,
+                        "tools/shared.rs": 'pub const DATA: &str = include_str!("data.txt");\n',
+                        "tools/data.txt": "data v1\n",
+                    },
+                )
+                with_module = environment._code_revision_hash()
+                self.assertIn("tools/data.txt", environment._code_revision_paths())
+                self.assertNotEqual(self._after("tools/data.txt", "data v2\n"), with_module)
+
+    def test_an_include_missing_behind_a_module_outside_the_crate_is_refused(self):
+        _write_tree(
+            self.repo,
+            {
+                "crates/dep-a/src/lib.rs": '#[path = "../../../tools/shared.rs"]\nmod shared;\n',
+                "tools/shared.rs": 'pub const DATA: &str = include_str!("gone.txt");\n',
+            },
+        )
+        self._refused("code_revision_include_missing")
+
+    def test_a_module_outside_the_crate_with_an_out_of_line_child_is_refused(self):
+        """Its child module's file is not resolved by the scan, so the
+        revision is refused rather than computed without it. An inline
+        child module is fine."""
+        _write_tree(
+            self.repo,
+            {
+                "crates/dep-a/src/lib.rs": '#[path = "../../../tools/shared.rs"]\nmod shared;\n',
+                "tools/shared.rs": "pub mod inline { pub const X: u8 = 1; }\n",
+            },
+        )
+        environment._code_revision_hash()
+        self._write("tools/shared.rs", "pub mod child;\n")
+        self._refused("code_revision_include_unresolved")
+
+    def test_a_cfg_attr_path_module_outside_the_crate_is_covered(self):
+        """`#[cfg_attr(<cfg>, path = "...")]` loads a module file as
+        `#[path]` does (review of #1348, minor 1, case B)."""
+        self._write("crates/dep-a/src/lib.rs", '#[cfg_attr(not(test), path = "../../../tools/n.rs")]\nmod n;\n')
+        self._refused("code_revision_include_missing")
+        with_module = self._after("tools/n.rs", "// n v1\n")
+        self.assertNotEqual(self._after("tools/n.rs", "// n v2\n"), with_module)
 
     def test_a_patched_crate_is_covered(self):
         self._write("Cargo.toml", _SCOPE_WORKSPACE["Cargo.toml"] + '[patch.crates-io]\nserde = { path = "vendor/serde" }\n')
