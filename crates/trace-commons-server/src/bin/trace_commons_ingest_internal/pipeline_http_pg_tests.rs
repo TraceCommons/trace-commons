@@ -5314,6 +5314,26 @@ async fn quarantined_pipeline_run(
     created
 }
 
+/// `quarantined_pipeline_run`, then one worker dispatch: the Review-start
+/// privacy pass is recorded and the policy parks the run `awaiting_review`.
+/// A run received from V117 on is claimable for review only once its pass is
+/// recorded (Task 6, critique 1 (1)), so every review-route test starts here.
+async fn parked_pipeline_run(
+    service: &PipelineService,
+    tenant: &str,
+    principal: &str,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    let created = quarantined_pipeline_run(service, tenant, principal).await;
+    let parked = service
+        .process_run(tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview, "{parked:?}");
+    assert!(parked.privacy_pass_object_ref_id.is_some());
+    parked
+}
+
 /// Zaki review 3, Z3-L8 (ruling RB-32): with `main`'s database reviewer
 /// reads, which reach a quarantined pipeline submission, `main`'s legacy
 /// review queue, active-learning queue, next-lease claim, routing summary
@@ -5585,7 +5605,7 @@ async fn pipeline_review_routes_answer_409_422_and_404_for_an_inoperable_run() {
     let principal = "principal_sha256:review-routes";
     let claim_uri = |run_id: Uuid| format!("/v1/review/pipeline/runs/{run_id}/claim");
 
-    let held = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let held = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
     let (status, claim) = route_request(
         fixture.state.clone(),
         "POST",
@@ -5624,7 +5644,7 @@ async fn pipeline_review_routes_answer_409_422_and_404_for_an_inoperable_run() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
     assert_eq!(refused["error"], "quarantine reason is unresolved");
 
-    let inoperable = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let inoperable = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
     let mut client = fixture.runtime.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &fixture.tenant).await;
     tx.execute(
@@ -5664,7 +5684,7 @@ async fn pipeline_review_routes_append_hash_only_audit_rows() {
     insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
     Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
     let principal = "principal_sha256:review-audit";
-    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let run = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
 
     let (status, claim) = route_request(
         fixture.state.clone(),
@@ -5743,7 +5763,7 @@ async fn a_failed_review_audit_append_answers_the_committed_result() {
     insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
     Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
     let principal = "principal_sha256:review-audit-fail";
-    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let run = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
 
     // A directory where the tenant's audit log file belongs: every append
     // fails.
@@ -8950,7 +8970,7 @@ async fn the_pipeline_assessment_route_applies_mains_privileged_action_consent_c
         }
     };
 
-    let scoped_run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let scoped_run = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
     let lease = claim(state.clone(), scoped_reviewer.clone(), scoped_run.run_id).await;
     let (status, refused) = assess(
         state.clone(),
@@ -8966,7 +8986,7 @@ async fn the_pipeline_assessment_route_applies_mains_privileged_action_consent_c
     );
     assert!(!assessed(scoped_run.run_id).await);
 
-    let run = quarantined_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
+    let run = parked_pipeline_run(&fixture.service, &fixture.tenant, principal).await;
     let lease = claim(state.clone(), reviewer.clone(), run.run_id).await;
     let (status, refused) = assess(narrowed, reviewer.clone(), run.run_id, lease.clone()).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
@@ -12532,4 +12552,114 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
             }
         }
     }
+}
+
+/// Task 6: a privacy boundary whose classifier half raises the envelope's
+/// residual risk to Medium and reports `FoundAndRemoved`, so the
+/// Review-start privacy pass escalates an Admission-admitted run (test
+/// doubles live in the test files).
+struct EscalatingClassifierBoundary;
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for EscalatingClassifierBoundary {
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(Vec::new())
+    }
+
+    async fn rescrub_classifier(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        Ok(vec![ResidualRiskCondition::FoundAndRemoved])
+    }
+}
+
+/// Task 6: the review queue route lists a run the privacy pass escalated,
+/// with `hold_reason = privacy_pass_review_required` (not Admission's
+/// reason, which an admitted run does not have) and
+/// `assessment_superseded = false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason() {
+    let Some(mut fixture) = withdrawal_fixture_with(
+        |runtime, artifacts| {
+            assemble_compatibility_pipeline_service(
+                runtime,
+                &ConfiguredTraceArtifactStore::legacy(artifacts),
+                IsolatedPipelineIndex::new(),
+                2_500_000,
+                Arc::new(EscalatingClassifierBoundary),
+            )
+        },
+        false,
+    )
+    .await
+    else {
+        return;
+    };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let reviewer = format!("token-review-escalated-{suffix}");
+    let mut tokens = (*fixture.state.tokens).clone();
+    insert_token(&mut tokens, &fixture.tenant, &reviewer, TokenRole::Reviewer);
+    Arc::make_mut(&mut fixture.state).tokens = Arc::new(tokens);
+    fixture
+        .service
+        .register_default_bundle(&fixture.tenant)
+        .await
+        .expect("register the bundle");
+
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    let raw = serde_json::to_vec(&envelope).unwrap();
+    let key = envelope.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) = fixture
+        .service
+        .submit(PipelineReceiptRequest {
+            source_session: None,
+            tenant_id: &fixture.tenant,
+            actor_principal_ref: "principal_sha256:escalated-queue",
+            counts_toward_quota: true,
+            request_idempotency_key: &key,
+            request_bytes: &raw,
+            server_envelope: &envelope,
+            residual_risk_basis: &[],
+            limits: PipelineAdmissionLimits {
+                max_per_tenant_per_hour: 0,
+                max_per_principal_per_hour: 0,
+            },
+        })
+        .await
+        .expect("the receipt succeeds")
+    else {
+        panic!("the receipt creates a run")
+    };
+    assert_eq!(created.admission_decision, "admit");
+    let held = fixture
+        .service
+        .process_run(&fixture.tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+
+    let (status, queue) = route_request(
+        fixture.state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    let queue = queue.as_array().expect("a review queue").clone();
+    assert_eq!(queue.len(), 1, "{queue:?}");
+    assert_eq!(queue[0]["run_id"], created.run_id.to_string());
+    assert_eq!(queue[0]["admission_reason"], serde_json::Value::Null);
+    assert_eq!(queue[0]["hold_reason"], "privacy_pass_review_required");
+    assert_eq!(queue[0]["assessment_superseded"], false);
 }

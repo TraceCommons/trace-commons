@@ -113,13 +113,20 @@ macro_rules! reviewable_submission_sql {
 }
 
 /// A run, aliased `p`, that waits for a human review: at Review, quarantined
-/// by Admission, and idle (`pending`, `retry`, or `awaiting_review`). The
-/// review queue also leaves out a run that has an assessment; a claim checks
-/// that in a statement of its own, after it holds the run's lock (Zaki review
-/// 1, round 2, finding 8).
+/// by Admission or escalated by the Review-start privacy pass, and idle
+/// (`pending`, `retry`, or `awaiting_review`). A run that needs the privacy
+/// pass (`privacy_pass_required`, every run received from V117 on) waits
+/// for review only once its pass is recorded (critique 1 (1)), so no human
+/// assesses content the classifier has not seen; a run received before V117
+/// keeps the earlier rule. The review queue also leaves out a run that has
+/// an assessment (unless the pass escalated it after that assessment,
+/// decision P9); a claim checks that in a statement of its own, after it
+/// holds the run's lock (Zaki review 1, round 2, finding 8).
 macro_rules! run_waiting_for_review_sql {
     () => {
-        "p.next_phase = 'review' AND p.admission_decision = 'quarantine'
+        "p.next_phase = 'review'
+         AND (p.admission_decision = 'quarantine' OR p.privacy_pass_outcome = 'escalated')
+         AND (NOT p.privacy_pass_required OR p.privacy_pass_object_ref_id IS NOT NULL)
          AND p.state IN ('pending', 'retry', 'awaiting_review')"
     };
 }
@@ -288,6 +295,12 @@ pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_alr
 /// the backstop for a binary without the predicate. The refused commit
 /// writes nothing.
 pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
+/// Safe label of a run the Review-start privacy pass escalated (its risk is
+/// above the receipt-time risk, decision P3), held for a human whatever
+/// Admission decided: the run's parking label, the review queue's hold
+/// reason, and a reason an approving assessment must resolve. Distinct from
+/// Admission's `privacy_review_required`.
+pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_review_required";
 /// The ceiling on one privacy pass classifier call. A call that has not
 /// returned by then is a classifier failure
 /// (`privacy_classification_failed`).
@@ -1576,6 +1589,29 @@ pub struct SubmissionReceiptPrivacy {
     pub residual_pii_risk: ResidualPiiRisk,
     /// The stored basis labels; empty when the column is NULL.
     pub residual_risk_basis: Vec<String>,
+}
+
+/// A stored human assessment and when it was recorded
+/// (`pipeline_review_assessments.recorded_at`). The Review arm ignores an
+/// assessment recorded before the run's privacy pass when the pass
+/// escalated (critique 1 (2), decision P9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReviewAssessment {
+    pub assessment: HumanReviewAssessment,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// One row of the review queue: the run, the reason it is held, and whether
+/// the assessment it has was recorded before a privacy pass that escalated
+/// it (decision P9: such a run is listed, but cannot be claimed or assessed
+/// again).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipelineReviewQueueEntry {
+    pub run: PipelineRunRecord,
+    /// `privacy_pass_review_required` when the privacy pass escalated the
+    /// run, else the run's `admission_reason`.
+    pub hold_reason: Option<String>,
+    pub assessment_superseded: bool,
 }
 
 /// A run identity not yet persisted: computed deterministically from the
@@ -2989,7 +3025,10 @@ impl PgPipelineStore {
     /// `leased` (and then, worse, a run that has already failed -- `failed`
     /// never clears `next_phase`); without the decision predicate, a
     /// reviewer could claim an `Admit` run that is simply waiting its own
-    /// automatic Review turn; without the assessment predicate, a reviewer
+    /// automatic Review turn (an `Admit` run the privacy pass escalated is
+    /// the exception: the server holds it for a human, so it is claimable,
+    /// and a run that needs the pass is claimable only once its pass is
+    /// recorded); without the assessment predicate, a reviewer
     /// could re-claim a run that already has one, and a later
     /// `record_review_assessment` would then hit
     /// `pipeline_review_assessments`'s `UNIQUE (tenant_id, run_id)` instead
@@ -3004,8 +3043,9 @@ impl PgPipelineStore {
     ///
     /// The outcome tells the cases apart under the run's lock: `Ineligible`
     /// when the run is not waiting for review (it does not exist, is not at
-    /// Review, is not `pending`/`retry`/`awaiting_review`, is not a
-    /// quarantine, or already has an assessment), and
+    /// Review, is not `pending`/`retry`/`awaiting_review`, is neither a
+    /// quarantine nor escalated by the privacy pass, needs a privacy pass it
+    /// does not have yet, or already has an assessment), and
     /// `HeldByAnotherReviewer` when another reviewer holds a live claim on
     /// an otherwise eligible run (Ruling T3-9(b): ingest answers the first
     /// `404` and only the second `409`).
@@ -3137,11 +3177,12 @@ impl PgPipelineStore {
     /// `claim_review` uses: a worker's `claim_run` and this lookup take the
     /// same row lock, so the loser re-reads the winner's committed state.
     ///
-    /// An `Approve` recommendation still refuses
+    /// An `Approve` recommendation refuses
     /// (`quarantine reason is unresolved`) unless `resolved_quarantine_reasons`
-    /// names the run's own `admission_reason`, or the run was quarantined
-    /// under no logged reason at all and at least one reason is resolved --
-    /// unchanged from the port.
+    /// names every reason that holds the run: its own `admission_reason`, if
+    /// it has one, and `privacy_pass_review_required`, if the privacy pass
+    /// escalated it. A run held for no logged reason at all needs at least
+    /// one resolved reason, as in the port.
     pub async fn record_review_assessment(
         &self,
         claim: &PipelineReviewClaim,
@@ -3166,7 +3207,8 @@ impl PgPipelineStore {
         let row = tx
             .query_opt(
                 concat!(
-                    "SELECT p.admission_reason, p.state, p.submission_id
+                    "SELECT p.admission_reason, p.privacy_pass_outcome, p.state,
+                            p.submission_id
                      FROM pipeline_runs p
                      WHERE p.tenant_id = $1 AND p.run_id = $2 AND ",
                     run_waiting_for_review_sql!(),
@@ -3201,6 +3243,10 @@ impl PgPipelineStore {
             ));
         };
         let admission_reason: Option<String> = row.get("admission_reason");
+        let pass_escalated = row
+            .get::<_, Option<String>>("privacy_pass_outcome")
+            .as_deref()
+            == Some(PrivacyPassOutcome::Escalated.as_db());
         let run_state: String = row.get("state");
         let submission_id: Uuid = row.get("submission_id");
         if !review_submission_is_operable(&tx, &claim.tenant_id, submission_id).await? {
@@ -3213,10 +3259,21 @@ impl PgPipelineStore {
             ));
         }
         if recommendation == ReviewRecommendation::Approve {
-            let resolved_admission_reason = admission_reason
-                .as_ref()
-                .is_some_and(|reason| resolved.iter().any(|item| item.as_str() == reason));
-            if !resolved_admission_reason && (admission_reason.is_some() || resolved.is_empty()) {
+            // Every reason that holds the run must be resolved: Admission's,
+            // if it gave one, and the privacy pass's, if it escalated.
+            let required: Vec<&str> = admission_reason
+                .as_deref()
+                .into_iter()
+                .chain(pass_escalated.then_some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL))
+                .collect();
+            let unresolved = if required.is_empty() {
+                resolved.is_empty()
+            } else {
+                !required
+                    .iter()
+                    .all(|reason| resolved.iter().any(|item| item.as_str() == *reason))
+            };
+            if unresolved {
                 return Err(DatabaseError::Constraint(
                     "quarantine reason is unresolved".to_string(),
                 ));
@@ -3284,19 +3341,21 @@ impl PgPipelineStore {
     }
 
     /// The stored assessment for `run_id`, if a reviewer has recorded one
-    /// (port `ef97a459` lines 1007 to 1052, unchanged). Read into
-    /// `ReviewInput.human_assessment` before every Review attempt.
+    /// (port `ef97a459` lines 1007 to 1052), with the time it was recorded.
+    /// Read into `ReviewInput.human_assessment` before every Review attempt;
+    /// `recorded_at` lets the Review arm ignore an assessment recorded
+    /// before a privacy pass that escalated the run (critique 1 (2)).
     pub async fn load_review_assessment(
         &self,
         tenant_id: &str,
         run_id: Uuid,
-    ) -> Result<Option<HumanReviewAssessment>, DatabaseError> {
+    ) -> Result<Option<StoredReviewAssessment>, DatabaseError> {
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let row = tx
             .query_opt(
                 "SELECT assessment_id, recommendation, reason_code,
-                        resolved_quarantine_reasons, evidence_hash
+                        resolved_quarantine_reasons, evidence_hash, recorded_at
                  FROM pipeline_review_assessments
                  WHERE tenant_id = $1 AND run_id = $2",
                 &[&tenant_id, &run_id],
@@ -3320,12 +3379,15 @@ impl PgPipelineStore {
             .map_err(|_| {
                 DatabaseError::Serialization("invalid resolved quarantine reasons".to_string())
             })?;
-            Ok(HumanReviewAssessment {
-                assessment_id: row.get("assessment_id"),
-                recommendation,
-                reason,
-                resolved_quarantine_reasons,
-                evidence_hash: row.get("evidence_hash"),
+            Ok(StoredReviewAssessment {
+                assessment: HumanReviewAssessment {
+                    assessment_id: row.get("assessment_id"),
+                    recommendation,
+                    reason,
+                    resolved_quarantine_reasons,
+                    evidence_hash: row.get("evidence_hash"),
+                },
+                recorded_at: row.get("recorded_at"),
             })
         })
         .transpose()
@@ -3384,7 +3446,13 @@ impl PgPipelineStore {
     }
 
     /// Runs waiting for a human assessment, oldest first, label-only fields
-    /// (brief Step 3). Ruling T3-2 adds `awaiting_review` to the states
+    /// (brief Step 3). Each entry carries the reason that holds the run
+    /// (`privacy_pass_review_required` when the privacy pass escalated it,
+    /// else Admission's reason) and whether its assessment is superseded: a
+    /// run whose only assessment was recorded before the pass escalated it
+    /// is listed with `assessment_superseded`, since the Review arm ignores
+    /// that assessment and the run cannot be assessed again (decision P9);
+    /// every other assessed run is left out. Ruling T3-2 adds `awaiting_review` to the states
     /// selected -- the port's `list_policy_interventions`-adjacent draft
     /// predates that state. Ruling T3-6 excludes a run whose submission is
     /// no longer operable, the same predicate `review_submission_is_operable`
@@ -3396,20 +3464,29 @@ impl PgPipelineStore {
         &self,
         tenant_id: &str,
         limit: usize,
-    ) -> Result<Vec<PipelineRunRecord>, DatabaseError> {
+    ) -> Result<Vec<PipelineReviewQueueEntry>, DatabaseError> {
         let limit = i64::try_from(limit.clamp(1, 500)).unwrap_or(500);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, tenant_id).await?;
         let rows = tx
             .query(
                 concat!(
-                    "SELECT p.* FROM pipeline_runs p
+                    "SELECT p.*,
+                            CASE WHEN p.privacy_pass_outcome = 'escalated'
+                                 THEN 'privacy_pass_review_required'
+                                 ELSE p.admission_reason
+                            END AS queue_hold_reason,
+                            (a.run_id IS NOT NULL) AS queue_assessment_superseded
+                       FROM pipeline_runs p
                       JOIN trace_submissions s
                         ON s.tenant_id = p.tenant_id AND s.submission_id = p.submission_id
+                      LEFT JOIN pipeline_review_assessments a
+                        ON a.tenant_id = p.tenant_id AND a.run_id = p.run_id
                       WHERE p.tenant_id = $1 AND ",
                     run_waiting_for_review_sql!(),
-                    " AND NOT EXISTS (SELECT 1 FROM pipeline_review_assessments a
-                                       WHERE a.tenant_id = p.tenant_id AND a.run_id = p.run_id)
+                    " AND (a.run_id IS NULL
+                           OR (p.privacy_pass_outcome = 'escalated'
+                               AND a.recorded_at < p.privacy_pass_recorded_at))
                       AND ",
                     reviewable_submission_sql!(),
                     " ORDER BY p.created_at, p.run_id
@@ -3419,7 +3496,15 @@ impl PgPipelineStore {
             )
             .await?;
         tx.commit().await?;
-        rows.iter().map(pipeline_run_from_row).collect()
+        rows.iter()
+            .map(|row| {
+                Ok(PipelineReviewQueueEntry {
+                    run: pipeline_run_from_row(row)?,
+                    hold_reason: row.get("queue_hold_reason"),
+                    assessment_superseded: row.get("queue_assessment_superseded"),
+                })
+            })
+            .collect()
     }
 
     /// Commits the Score outcome together with the exact index command it
@@ -5600,8 +5685,9 @@ impl PgPipelineStore {
     }
 
     /// Parks a run Review quarantined with no
-    /// human assessment yet (`PipelineRunState::AwaitingReview`, always the
-    /// label `review_assessment_required`) instead of retrying it under
+    /// human assessment yet (`PipelineRunState::AwaitingReview`, under the
+    /// label `review_assessment_required`, or `privacy_pass_review_required`
+    /// for a run the privacy pass escalated) instead of retrying it under
     /// `mark_transient_retry`'s hourly backoff forever. No claim query
     /// selects `awaiting_review`, so a parked run does no further work on
     /// its own; `record_review_assessment` moves it back to `pending`, due
@@ -11484,7 +11570,8 @@ impl PipelineService {
                         // hour for nothing. Every other transient
                         // `PolicyError`, in Review or any other phase,
                         // keeps the ordinary uncharged retry.
-                        if policy.label() == PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL
+                        if (policy.label() == PIPELINE_REVIEW_ASSESSMENT_REQUIRED_LABEL
+                            || policy.label() == PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL)
                             && run.next_phase == Some(Phase::Review)
                         {
                             self.mark_awaiting_review_or_record_lease_expired(&run, policy.label())
@@ -11827,10 +11914,30 @@ impl PipelineService {
                 // once `record_review_assessment` has moved it back to
                 // `pending`. `None` for a run that has never been
                 // quarantined, or one still waiting on a human assessment.
-                let human_assessment = self
+                let stored_assessment = self
                     .store
                     .load_review_assessment(&run.tenant_id, run.run_id)
                     .await?;
+                // The pass escalated the run: the server holds it for a human
+                // whatever Admission decided, and the policy is not called
+                // until an assessment recorded after the pass exists. One
+                // recorded before the pass (possible only for a run received
+                // before V117) did not see what the pass found and is
+                // ignored (critique 1 (2), decision P9). The transient
+                // label parks the run (`mark_awaiting_review`).
+                if run.privacy_pass_outcome == Some(PrivacyPassOutcome::Escalated) {
+                    let current = stored_assessment.as_ref().is_some_and(|stored| {
+                        run.privacy_pass_recorded_at
+                            .is_some_and(|recorded_at| stored.recorded_at >= recorded_at)
+                    });
+                    if !current {
+                        return Err(PolicyError::transient(
+                            PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL,
+                        )?
+                        .into());
+                    }
+                }
+                let human_assessment = stored_assessment.map(|stored| stored.assessment);
                 let output = bundle
                     .review
                     .execute(&ReviewInput {

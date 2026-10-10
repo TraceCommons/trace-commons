@@ -43405,11 +43405,18 @@ struct PipelineReviewQueueItem {
     run_id: Uuid,
     submission_id: Uuid,
     admission_reason: Option<String>,
+    /// What holds the run: `privacy_pass_review_required` when the
+    /// Review-start privacy pass escalated it, else `admission_reason`.
+    hold_reason: Option<String>,
+    /// The run's assessment was recorded before the privacy pass escalated
+    /// it, so Review ignores it; such a run cannot be claimed again.
+    assessment_superseded: bool,
     created_at: DateTime<Utc>,
 }
 
-/// `GET /v1/review/pipeline/quarantine?limit=N`: quarantined pipeline runs
-/// waiting for a human assessment, oldest first. `PgPipelineStore::
+/// `GET /v1/review/pipeline/quarantine?limit=N`: pipeline runs waiting for a
+/// human assessment (quarantined by Admission or escalated by the privacy
+/// pass), oldest first, each with its hold reason (labels only). `PgPipelineStore::
 /// list_review_queue` already excludes a run whose submission is no longer
 /// operable (Ruling T3-6).
 async fn pipeline_review_quarantine_handler(
@@ -43427,11 +43434,13 @@ async fn pipeline_review_quarantine_handler(
         .await
         .map_err(internal_error)?
         .into_iter()
-        .map(|run| PipelineReviewQueueItem {
-            run_id: run.run_id,
-            submission_id: run.submission_id,
-            admission_reason: run.admission_reason,
-            created_at: run.created_at,
+        .map(|entry| PipelineReviewQueueItem {
+            run_id: entry.run.run_id,
+            submission_id: entry.run.submission_id,
+            admission_reason: entry.run.admission_reason,
+            hold_reason: entry.hold_reason,
+            assessment_superseded: entry.assessment_superseded,
+            created_at: entry.run.created_at,
         })
         .collect();
     Ok(Json(queue))

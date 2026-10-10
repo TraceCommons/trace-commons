@@ -4956,7 +4956,7 @@ async fn quarantined_run_completes_after_an_approving_assessment() {
     let store = service.store();
     let queue = store.list_review_queue(&tenant, 10).await.unwrap();
     assert_eq!(queue.len(), 1);
-    assert_eq!(queue[0].run_id, parked.run_id);
+    assert_eq!(queue[0].run.run_id, parked.run_id);
 
     let reviewer = reviewer_principal_ref('a');
     // A claim attempt does no work on the parked run beyond the claim
@@ -5381,6 +5381,12 @@ async fn claim_and_assessment_refuse_a_run_a_worker_holds_leased() {
     .await;
     let tenant = format!("review-worker-race-{}", uuid::Uuid::new_v4());
     let pending = quarantined_and_pending(&service, &tenant).await;
+    // The race needs a run a reviewer can claim while it is still `pending`
+    // for a worker. A run received from V117 on is claimable only once a
+    // dispatch has recorded its privacy pass, and that dispatch would park
+    // it (no worker claim selects `awaiting_review`), so this run models one
+    // received before V117 (Task 6, critique 1 (1)).
+    mark_received_before_v117(&tenant, pending.run_id).await;
     let store = service.store();
 
     let reviewer = reviewer_principal_ref('1');
@@ -46408,4 +46414,679 @@ async fn approval_without_a_pass_is_refused() {
     assert_eq!(approved.next_phase, Some(Phase::Score));
     assert!(!approved.privacy_pass_required);
     assert_eq!(approved_refs(claimed).await, 1);
+}
+
+// Task 6: the escalation hold, the review queue's view of it, and when an
+// assessment counts.
+
+/// Task 6: a privacy boundary whose deterministic half returns a fixed basis
+/// (`[ConsentContentFlag]` for the consent-flag tests) and whose classifier
+/// half, when built with a risk, sets the envelope's residual risk to it and
+/// reports `FoundAndRemoved`; built with `None` it finds nothing. Counts its
+/// classifier calls per test.
+struct EscalatingBoundary {
+    deterministic_basis: Vec<ResidualRiskCondition>,
+    classifier_risk: Option<ResidualPiiRisk>,
+    classifier_calls: AtomicUsize,
+}
+
+impl EscalatingBoundary {
+    fn new(
+        deterministic_basis: Vec<ResidualRiskCondition>,
+        classifier_risk: Option<ResidualPiiRisk>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            deterministic_basis,
+            classifier_risk,
+            classifier_calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.classifier_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl PipelinePrivacyBoundary for EscalatingBoundary {
+    async fn rescrub_deterministic(
+        &self,
+        _envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        Ok(self.deterministic_basis.clone())
+    }
+
+    async fn rescrub_classifier(
+        &self,
+        envelope: &mut TraceContributionEnvelope,
+    ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
+        self.classifier_calls.fetch_add(1, Ordering::SeqCst);
+        match self.classifier_risk {
+            Some(risk) => {
+                envelope.privacy.residual_pii_risk = risk;
+                Ok(vec![ResidualRiskCondition::FoundAndRemoved])
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// An envelope at `receipt_risk`, submitted for a fresh tenant through
+/// `service`. Returns the tenant and the created run.
+async fn submit_at_risk(
+    service: &PipelineService,
+    tenant_prefix: &str,
+    receipt_risk: ResidualPiiRisk,
+) -> (String, PipelineRunRecord) {
+    let tenant = format!("{tenant_prefix}-{}", uuid::Uuid::new_v4());
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = receipt_risk;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+            .await
+            .unwrap()
+    else {
+        panic!("the receipt creates a run")
+    };
+    (tenant, created)
+}
+
+/// The run's committed Review outcomes.
+async fn review_outcome_count(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> usize {
+    service
+        .store()
+        .list_outcomes(tenant, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|outcome| outcome.phase == Phase::Review)
+        .count()
+}
+
+/// Claims `run_id` for review as reviewer `tag`, or panics.
+async fn claim_for_review(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+    tag: char,
+) -> PipelineReviewClaim {
+    service
+        .store()
+        .claim_review(
+            tenant,
+            run_id,
+            &reviewer_principal_ref(tag),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the run is claimable")
+}
+
+/// Asserts that `run` is held for a human by the privacy pass: parked
+/// `awaiting_review` under `privacy_pass_review_required`, the attempt
+/// given back, the pass recorded as `escalated`, and no Review outcome (a
+/// Review policy that ran would have committed one: `MinimalReviewPolicy`
+/// approves an Admission-admitted run unconditionally).
+async fn assert_held_by_the_pass(service: &PipelineService, tenant: &str, run: &PipelineRunRecord) {
+    assert_eq!(run.state, PipelineRunState::AwaitingReview, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL)
+    );
+    assert_eq!(run.attempt_count, 0, "parking is not a charged attempt");
+    assert_eq!(run.next_phase, Some(Phase::Review));
+    assert_eq!(
+        run.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Escalated)
+    );
+    assert!(run.approved_object_ref_id.is_none());
+    assert_eq!(review_outcome_count(service, tenant, run.run_id).await, 0);
+}
+
+/// Task 6: an Admission-admitted run the privacy pass escalates (Medium,
+/// then High: High is held like Medium, never rejected, D1) is parked for a
+/// human under `privacy_pass_review_required`; the Review policy is not
+/// run; the queue lists it with that hold reason; a reviewer can claim it.
+#[tokio::test]
+async fn escalated_admit_run_parks_for_a_human() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    for classifier_risk in [ResidualPiiRisk::Medium, ResidualPiiRisk::High] {
+        let dir = tempfile::tempdir().unwrap();
+        let boundary = EscalatingBoundary::new(Vec::new(), Some(classifier_risk));
+        let service = privacy_pass_test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            boundary.clone(),
+            None,
+        )
+        .await;
+        let (tenant, created) =
+            submit_at_risk(&service, "escalated-admit", ResidualPiiRisk::Low).await;
+        assert_eq!(created.admission_decision, "admit");
+        let held = service
+            .process_run(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .expect("Review runs the pass");
+        assert_eq!(boundary.calls(), 1);
+        assert_held_by_the_pass(&service, &tenant, &held).await;
+        assert!(
+            service
+                .process_run(&tenant, created.run_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a held run is never claimed on its own"
+        );
+
+        let queue = service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap();
+        assert_eq!(queue.len(), 1, "{queue:?}");
+        assert_eq!(queue[0].run.run_id, created.run_id);
+        assert_eq!(
+            queue[0].hold_reason.as_deref(),
+            Some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL)
+        );
+        assert!(!queue[0].assessment_superseded);
+        let claim = claim_for_review(&service, &tenant, created.run_id, 'a').await;
+        assert_eq!(claim.run_id, created.run_id);
+    }
+}
+
+/// Task 6: an Approve of an escalated run must resolve
+/// `privacy_pass_review_required`; one that resolves nothing, or only
+/// another reason, is refused; one that resolves it releases the run.
+#[tokio::test]
+async fn escalated_approval_must_resolve_privacy_pass_review_required() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "escalated-resolve", ResidualPiiRisk::Low).await;
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let store = service.store();
+    let claim = claim_for_review(&service, &tenant, created.run_id, 'b').await;
+    let pass_reason = ReasonCode::new(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL).unwrap();
+    let other_reason = ReasonCode::new("privacy_review_required").unwrap();
+    for resolved in [Vec::new(), vec![other_reason.clone()]] {
+        let error = store
+            .record_review_assessment(
+                &claim,
+                ReviewRecommendation::Approve,
+                pass_reason.clone(),
+                resolved.clone(),
+            )
+            .await
+            .expect_err("an approval that leaves the pass's hold unresolved is refused");
+        assert!(
+            matches!(&error, DatabaseError::Constraint(label) if label == "quarantine reason is unresolved"),
+            "{resolved:?}: {error:?}"
+        );
+    }
+    let still_held = store
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(still_held.state, PipelineRunState::AwaitingReview);
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            pass_reason.clone(),
+            vec![pass_reason],
+        )
+        .await
+        .expect("an approval that resolves the pass's hold succeeds");
+    let released = store
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(released.state, PipelineRunState::Pending);
+    assert_eq!(released.last_error_label, None);
+    assert!(
+        store
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "an assessment recorded after the pass takes the run off the queue"
+    );
+}
+
+/// Task 6: after an approving assessment, the next dispatch completes
+/// Review on the recorded pass output with no second classifier call.
+#[tokio::test]
+async fn escalated_approval_resumes_without_a_second_classifier_call() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "escalated-resume", ResidualPiiRisk::Low).await;
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let claim = claim_for_review(&service, &tenant, created.run_id, 'c').await;
+    let pass_reason = ReasonCode::new(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL).unwrap();
+    service
+        .store()
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            pass_reason.clone(),
+            vec![pass_reason],
+        )
+        .await
+        .expect("the approval is recorded");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the approval");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    assert_eq!(boundary.calls(), 1, "the recorded pass is never re-run");
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        1
+    );
+    let evidence = review_evidence(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        held.privacy_pass_content_hash.as_deref(),
+        Some(evidence.source_content_hash.as_str()),
+        "Review read the recorded pass output"
+    );
+}
+
+/// Task 6, critique 1 (1): a run that needs the pass is neither listed nor
+/// claimable for review until its pass is recorded.
+#[tokio::test]
+async fn quarantined_run_is_not_claimable_before_its_pass() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), None);
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "quarantine-before-pass", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "quarantine");
+    assert!(created.privacy_pass_required);
+    let store = service.store();
+    assert!(
+        store
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a run without its pass is not listed"
+    );
+    let outcome = store
+        .claim_review(
+            &tenant,
+            created.run_id,
+            &reviewer_principal_ref('d'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, PipelineReviewClaimOutcome::Ineligible),
+        "a run without its pass is not claimable: {outcome:?}"
+    );
+
+    let parked = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and parks the run");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(
+        parked.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        queue[0].hold_reason.as_deref(),
+        Some("privacy_review_required")
+    );
+    claim_for_review(&service, &tenant, created.run_id, 'd').await;
+}
+
+/// Task 6: an Admission-quarantined run (Medium) the pass escalates to High
+/// is held by the server, and an approval must resolve both the Admission
+/// reason and the pass's; the next dispatch approves it through the policy.
+#[tokio::test]
+async fn quarantined_run_escalated_to_high_is_held_for_both_reasons() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "quarantine-to-high", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "quarantine");
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(
+        queue[0].hold_reason.as_deref(),
+        Some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL)
+    );
+    let claim = claim_for_review(&service, &tenant, created.run_id, 'e').await;
+    let admission_reason = ReasonCode::new("privacy_review_required").unwrap();
+    let pass_reason = ReasonCode::new(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL).unwrap();
+    let error = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            admission_reason.clone(),
+            vec![admission_reason.clone()],
+        )
+        .await
+        .expect_err("resolving only Admission's reason is refused");
+    assert!(
+        matches!(&error, DatabaseError::Constraint(label) if label == "quarantine reason is unresolved"),
+        "{error:?}"
+    );
+    let assessment = store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            admission_reason.clone(),
+            vec![admission_reason, pass_reason],
+        )
+        .await
+        .expect("resolving both reasons is accepted");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the approval");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    assert_eq!(boundary.calls(), 1);
+    let evidence = review_evidence(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        evidence.human_assessment_hash.as_deref(),
+        Some(assessment.evidence_hash.as_str())
+    );
+}
+
+/// Task 6, critique 1 (2) and P9: on a run received before V117 (no pass
+/// required, so it was claimable before its pass), an assessment recorded
+/// before a pass that escalates is ignored: the run is held, listed with
+/// `assessment_superseded`, and cannot be claimed again.
+#[tokio::test]
+async fn assessment_recorded_before_the_pass_is_ignored() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "superseded-assessment", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "quarantine");
+    mark_received_before_v117(&tenant, created.run_id).await;
+    let store = service.store();
+    let claim = claim_for_review(&service, &tenant, created.run_id, 'f').await;
+    let admission_reason = ReasonCode::new("privacy_review_required").unwrap();
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            admission_reason.clone(),
+            vec![admission_reason],
+        )
+        .await
+        .expect("an approval before the pass is recorded");
+
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_eq!(boundary.calls(), 1);
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1, "the superseded run is listed");
+    assert!(queue[0].assessment_superseded);
+    assert_eq!(
+        queue[0].hold_reason.as_deref(),
+        Some(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL)
+    );
+    let outcome = store
+        .claim_review(
+            &tenant,
+            created.run_id,
+            &reviewer_principal_ref('7'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, PipelineReviewClaimOutcome::Ineligible),
+        "{outcome:?}"
+    );
+}
+
+/// Task 6: an Admission-quarantined run the pass does not escalate is parked
+/// by the policy under `review_assessment_required`, as before the pass,
+/// and an approval must resolve the Admission reason.
+#[tokio::test]
+async fn admission_quarantine_not_escalated_parks_as_today() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), None);
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "quarantine-cleared", ResidualPiiRisk::Medium).await;
+    let parked = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and the policy");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+    assert_eq!(
+        parked.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    let store = service.store();
+    let claim = claim_for_review(&service, &tenant, created.run_id, '8').await;
+    let pass_reason = ReasonCode::new(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL).unwrap();
+    let admission_reason = ReasonCode::new("privacy_review_required").unwrap();
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            pass_reason.clone(),
+            vec![pass_reason],
+        )
+        .await
+        .expect_err("a cleared pass's label does not resolve Admission's reason");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            admission_reason.clone(),
+            vec![admission_reason],
+        )
+        .await
+        .expect("resolving Admission's reason is accepted");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the approval");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+}
+
+/// The submission row's stored `privacy_risk`.
+async fn stored_privacy_risk(
+    backend: &PgBackend,
+    tenant: &str,
+    submission_id: uuid::Uuid,
+) -> String {
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, tenant).await;
+    let risk: String = tx
+        .query_one(
+            "SELECT privacy_risk FROM trace_submissions
+              WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &submission_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    risk
+}
+
+/// Task 6 (P3 scale): a consent-flag-only receipt is stored as raw `medium`
+/// and admitted at Low; a classifier that finds prose PII (Medium, plus
+/// `FoundAndRemoved`) escalates it, and the run is held, not approved.
+#[tokio::test]
+async fn consent_flag_only_run_escalated_by_the_classifier_is_held() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(
+        vec![ResidualRiskCondition::ConsentContentFlag],
+        Some(ResidualPiiRisk::Medium),
+    );
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "consent-escalated", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "admit");
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    assert_eq!(
+        stored_privacy_risk(&backend, &tenant, created.submission_id).await,
+        "medium",
+        "the row holds the raw risk, never the mapped one"
+    );
+}
+
+/// Task 6 (regression pin): a consent-flag-only receipt the classifier finds
+/// nothing more in is cleared and goes straight through Review.
+#[tokio::test]
+async fn cleared_consent_flag_only_run_goes_straight_to_review() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(vec![ResidualRiskCondition::ConsentContentFlag], None);
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "consent-cleared", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "admit");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert_eq!(boundary.calls(), 1);
 }
