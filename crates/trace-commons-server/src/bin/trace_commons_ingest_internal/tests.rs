@@ -30398,6 +30398,170 @@ async fn pii_backstop_audit_rows_mirror_the_file_audit_log_in_both_dual_write_mo
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
+/// What a backstop release made before the GHSA-q7pr-c684-grrq fix left
+/// behind, re-created on PostgreSQL for one submission.
+struct PreFixBackstopRelease {
+    submission_id: Uuid,
+    stale_hash: String,
+    vector_entry_id: Uuid,
+}
+
+/// Submit a message-text trace carrying `marker` in its prose, drive it
+/// through the backstop with a classifier that removes `marker`, then put back
+/// exactly what a pre-fix release left: the derived row built from the
+/// pre-backstop envelope (DB and file), the submit-time counts and risk, and a
+/// vector entry embedded from the stale summary.
+async fn seed_pre_fix_backstop_release(
+    state: &Arc<AppState>,
+    backend: &Arc<PgBackend>,
+    db_mirror: &Arc<dyn Database>,
+    marker: &str,
+) -> PreFixBackstopRelease {
+    let temp_root = state.root.clone();
+    let mut envelope = sample_envelope().await;
+    make_metadata_only_low_risk(&mut envelope);
+    envelope.consent.message_text_included = true;
+    envelope.events[0].redacted_content = Some(format!("please contact {marker} soon"));
+    let submission_id = envelope.submission_id;
+    let _ = submit_trace_handler(
+        State(state.clone()),
+        auth_headers("token-a"),
+        submit_body(envelope),
+    )
+    .await
+    .expect("submission");
+    let find_derived = |rows: Vec<StorageTraceDerivedRecord>| {
+        rows.into_iter()
+            .find(|row| row.submission_id == submission_id)
+            .expect("derived row")
+    };
+    let stale = find_derived(
+        backend
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived rows"),
+    );
+    assert!(
+        stale
+            .canonical_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains(marker),
+        "fixture: the submit-time summary carries the marker"
+    );
+    let submit_row = backend
+        .get_trace_submission("tenant-a", submission_id)
+        .await
+        .expect("submission row reads")
+        .expect("submission row");
+
+    // Release through the backstop, then put back exactly what a pre-fix
+    // release left: the stale derived row, submit-time counts and risk, and
+    // a vector entry embedded from the stale summary.
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    quarantine_exhausted_pii_backstop(state.as_ref(), db_mirror, &item)
+        .await
+        .expect("exhaustion quarantine");
+    run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
+        .await
+        .expect("re-queue pass");
+    process_one_pii_backstop(
+        state.as_ref(),
+        db_mirror,
+        &item,
+        &BackstopEmailStubAdapter {
+            needle: marker.to_string(),
+        },
+    )
+    .await
+    .expect("backstop release");
+    let stale_hash = stale.canonical_summary_hash.clone().expect("stale hash");
+    backend
+        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
+            derived_id: stale.derived_id,
+            tenant_id: stale.tenant_id.clone(),
+            submission_id,
+            trace_id: stale.trace_id,
+            status: stale.status,
+            worker_kind: stale.worker_kind,
+            worker_version: stale.worker_version.clone(),
+            input_object_ref: stale.input_object_ref.clone(),
+            input_hash: stale.input_hash.clone(),
+            output_object_ref: None,
+            canonical_summary: stale.canonical_summary.clone(),
+            canonical_summary_hash: Some(stale_hash.clone()),
+            summary_model: stale.summary_model.clone(),
+            task_success: stale.task_success.clone(),
+            privacy_risk: stale.privacy_risk.clone(),
+            event_count: stale.event_count,
+            tool_sequence: stale.tool_sequence.clone(),
+            tool_categories: stale.tool_categories.clone(),
+            coverage_tags: stale.coverage_tags.clone(),
+            duplicate_score: stale.duplicate_score,
+            novelty_score: stale.novelty_score,
+            cluster_id: stale.cluster_id.clone(),
+        })
+        .await
+        .expect("restore the stale derived row");
+    let mut stale_file = read_derived_record(temp_root.as_path(), "tenant-a", submission_id)
+        .expect("file derived reads")
+        .expect("file derived exists");
+    stale_file.canonical_summary = stale.canonical_summary.clone().unwrap_or_default();
+    stale_file.canonical_summary_hash = stale_hash.clone();
+    write_derived_record(temp_root.as_path(), &stale_file).expect("restore the stale file copy");
+    assert_eq!(
+        backend
+            .record_released_submission_privacy_summary(
+                "tenant-a",
+                submission_id,
+                &submit_row.privacy_risk,
+                &submit_row.redaction_counts,
+                &stale_hash,
+            )
+            .await
+            .expect("restore submit-time counts"),
+        1
+    );
+    let vector_entry_id = Uuid::new_v4();
+    backend
+        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
+            tenant_id: "tenant-a".to_string(),
+            submission_id,
+            derived_id: stale.derived_id,
+            vector_entry_id,
+            vector_store: "private-vector-adapter".to_string(),
+            embedding_model: "test-embedder".to_string(),
+            embedding_dimension: 4,
+            embedding_version: "2026-08-08".to_string(),
+            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
+            source_hash: stale_hash.clone(),
+            status: StorageTraceVectorEntryStatus::Active,
+            nearest_trace_ids: Vec::new(),
+            cluster_id: None,
+            duplicate_score: None,
+            novelty_score: None,
+            indexed_at: Some(Utc::now()),
+            invalidated_at: None,
+            deleted_at: None,
+        })
+        .await
+        .expect("stale vector entry writes");
+    assert!(
+        !submit_row
+            .redaction_counts
+            .contains_key("privacy_filter:private_email"),
+        "fixture: submit-time counts predate the classifier"
+    );
+    PreFixBackstopRelease {
+        submission_id,
+        stale_hash,
+        vector_entry_id,
+    }
+}
+
 async fn post_rederive_backstop_released(
     state: Arc<AppState>,
     token: &str,
@@ -30453,146 +30617,16 @@ async fn pii_backstop_rederive_released_repairs_derived_rows_released_before_the
     Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
 
     let marker = "zelda-quixote-marlowe";
-    let mut envelope = sample_envelope().await;
-    make_metadata_only_low_risk(&mut envelope);
-    envelope.consent.message_text_included = true;
-    envelope.events[0].redacted_content = Some(format!("please contact {marker} soon"));
-    let submission_id = envelope.submission_id;
-    let _ = submit_trace_handler(
-        State(state.clone()),
-        auth_headers("token-a"),
-        submit_body(envelope),
-    )
-    .await
-    .expect("submission");
+    let PreFixBackstopRelease {
+        submission_id,
+        stale_hash,
+        vector_entry_id,
+    } = seed_pre_fix_backstop_release(&state, &backend, &db_mirror, marker).await;
     let find_derived = |rows: Vec<StorageTraceDerivedRecord>| {
         rows.into_iter()
             .find(|row| row.submission_id == submission_id)
             .expect("derived row")
     };
-    let stale = find_derived(
-        backend
-            .list_trace_derived_records("tenant-a")
-            .await
-            .expect("derived rows"),
-    );
-    assert!(
-        stale
-            .canonical_summary
-            .as_deref()
-            .unwrap_or_default()
-            .contains(marker),
-        "fixture: the submit-time summary carries the marker"
-    );
-    let submit_row = backend
-        .get_trace_submission("tenant-a", submission_id)
-        .await
-        .expect("submission row reads")
-        .expect("submission row");
-
-    // Release through the backstop, then put back exactly what a pre-fix
-    // release left: the stale derived row, submit-time counts and risk, and
-    // a vector entry embedded from the stale summary.
-    let item = GateWorkItem {
-        tenant_id: "tenant-a".to_string(),
-        submission_id,
-    };
-    quarantine_exhausted_pii_backstop(state.as_ref(), &db_mirror, &item)
-        .await
-        .expect("exhaustion quarantine");
-    run_requeue_pii_backstop_pass(state.clone(), "tenant-a".to_string(), 500)
-        .await
-        .expect("re-queue pass");
-    process_one_pii_backstop(
-        state.as_ref(),
-        &db_mirror,
-        &item,
-        &BackstopEmailStubAdapter {
-            needle: marker.to_string(),
-        },
-    )
-    .await
-    .expect("backstop release");
-    let stale_hash = stale.canonical_summary_hash.clone().expect("stale hash");
-    backend
-        .append_trace_derived_record(StorageTraceDerivedRecordWrite {
-            derived_id: stale.derived_id,
-            tenant_id: stale.tenant_id.clone(),
-            submission_id,
-            trace_id: stale.trace_id,
-            status: stale.status,
-            worker_kind: stale.worker_kind,
-            worker_version: stale.worker_version.clone(),
-            input_object_ref: stale.input_object_ref.clone(),
-            input_hash: stale.input_hash.clone(),
-            output_object_ref: None,
-            canonical_summary: stale.canonical_summary.clone(),
-            canonical_summary_hash: Some(stale_hash.clone()),
-            summary_model: stale.summary_model.clone(),
-            task_success: stale.task_success.clone(),
-            privacy_risk: stale.privacy_risk.clone(),
-            event_count: stale.event_count,
-            tool_sequence: stale.tool_sequence.clone(),
-            tool_categories: stale.tool_categories.clone(),
-            coverage_tags: stale.coverage_tags.clone(),
-            duplicate_score: stale.duplicate_score,
-            novelty_score: stale.novelty_score,
-            cluster_id: stale.cluster_id.clone(),
-        })
-        .await
-        .expect("restore the stale derived row");
-    let file_record = read_submission_record(temp.path(), "tenant-a", submission_id)
-        .expect("record reads")
-        .expect("record exists");
-    let mut stale_file = read_derived_record(temp.path(), "tenant-a", submission_id)
-        .expect("file derived reads")
-        .expect("file derived exists");
-    stale_file.canonical_summary = stale.canonical_summary.clone().unwrap_or_default();
-    stale_file.canonical_summary_hash = stale_hash.clone();
-    write_derived_record(temp.path(), &stale_file).expect("restore the stale file copy");
-    assert_eq!(
-        backend
-            .record_released_submission_privacy_summary(
-                "tenant-a",
-                submission_id,
-                &submit_row.privacy_risk,
-                &submit_row.redaction_counts,
-                &stale_hash,
-            )
-            .await
-            .expect("restore submit-time counts"),
-        1
-    );
-    let vector_entry_id = Uuid::new_v4();
-    backend
-        .upsert_trace_vector_entry(StorageTraceVectorEntryWrite {
-            tenant_id: "tenant-a".to_string(),
-            submission_id,
-            derived_id: stale.derived_id,
-            vector_entry_id,
-            vector_store: "private-vector-adapter".to_string(),
-            embedding_model: "test-embedder".to_string(),
-            embedding_dimension: 4,
-            embedding_version: "2026-08-08".to_string(),
-            source_projection: StorageTraceVectorEntrySourceProjection::CanonicalSummary,
-            source_hash: stale_hash.clone(),
-            status: StorageTraceVectorEntryStatus::Active,
-            nearest_trace_ids: Vec::new(),
-            cluster_id: None,
-            duplicate_score: None,
-            novelty_score: None,
-            indexed_at: Some(Utc::now()),
-            invalidated_at: None,
-            deleted_at: None,
-        })
-        .await
-        .expect("stale vector entry writes");
-    assert!(
-        !submit_row
-            .redaction_counts
-            .contains_key("privacy_filter:private_email"),
-        "fixture: submit-time counts predate the classifier"
-    );
 
     // Only an admin may run it, and a mistyped flag is refused, not read as
     // the writing default.
@@ -30699,6 +30733,9 @@ async fn pii_backstop_rederive_released_repairs_derived_rows_released_before_the
         stale_entry.status,
         StorageTraceVectorEntryStatus::Invalidated
     );
+    let file_record = read_submission_record(temp.path(), "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
     assert_eq!(file_record.status, TraceCorpusStatus::Accepted);
 
     // Idempotent: the rewritten row names the rescrubbed ref.
@@ -30714,6 +30751,116 @@ async fn pii_backstop_rederive_released_repairs_derived_rows_released_before_the
             ("remaining", serde_json::json!(0)),
         ],
     );
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+}
+
+/// The remediation runs in bounded batches: `limit` caps the submissions
+/// rewritten per call (a dry run counts against it the same way), `remaining`
+/// reports what is left beyond it, and calling again until `remaining` is 0
+/// converges on every candidate exactly once.
+#[tokio::test]
+async fn pii_backstop_rederive_released_runs_in_bounded_batches_until_remaining_is_zero() {
+    let Some(backend) = postgres_backend_for_ingest_test().await else {
+        return;
+    };
+    cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
+    let temp = tempfile::tempdir().expect("temp dir");
+    let db_mirror: Arc<dyn Database> = backend.clone();
+    let mut state = test_state_with_options(
+        temp.path().to_path_buf(),
+        Some(db_mirror.clone()),
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    Arc::make_mut(&mut state).accept_medium_risk_submissions = true;
+    let first =
+        seed_pre_fix_backstop_release(&state, &backend, &db_mirror, "zelda-quixote-marlowe").await;
+    let second =
+        seed_pre_fix_backstop_release(&state, &backend, &db_mirror, "ignatius-pemberton-vole")
+            .await;
+    let stale_hashes = [first.stale_hash.clone(), second.stale_hash.clone()];
+    let current_hashes = || async {
+        backend
+            .list_trace_derived_records("tenant-a")
+            .await
+            .expect("derived rows")
+            .into_iter()
+            .filter(|row| [first.submission_id, second.submission_id].contains(&row.submission_id))
+            .filter_map(|row| row.canonical_summary_hash)
+            .collect::<Vec<_>>()
+    };
+    let stale_count = |hashes: &[String]| {
+        hashes
+            .iter()
+            .filter(|hash| stale_hashes.contains(hash))
+            .count()
+    };
+    assert_eq!(
+        stale_count(&current_hashes().await),
+        2,
+        "fixture: both stale"
+    );
+
+    let (status, dry) =
+        post_rederive_backstop_released(state.clone(), "admin-token-a", "dry_run=true&limit=1")
+            .await;
+    assert_eq!(status, StatusCode::OK, "{dry}");
+    assert_json_fields(
+        &dry,
+        &[
+            ("backstop_released", serde_json::json!(2)),
+            ("rederived", serde_json::json!(1)),
+            ("remaining", serde_json::json!(1)),
+        ],
+    );
+    assert_eq!(
+        stale_count(&current_hashes().await),
+        2,
+        "a dry run writes nothing"
+    );
+
+    let expected = [
+        // (already_current, rederived, remaining, stale rows left)
+        (0, 1, 1, 1),
+        (1, 1, 0, 0),
+        (2, 0, 0, 0),
+    ];
+    for (call, (already_current, rederived, remaining, stale_left)) in
+        expected.into_iter().enumerate()
+    {
+        let (status, ack) =
+            post_rederive_backstop_released(state.clone(), "admin-token-a", "limit=1").await;
+        assert_eq!(status, StatusCode::OK, "call {call}: {ack}");
+        assert_json_fields(
+            &ack,
+            &[
+                ("backstop_released", serde_json::json!(2)),
+                ("already_current", serde_json::json!(already_current)),
+                ("rederived", serde_json::json!(rederived)),
+                ("remaining", serde_json::json!(remaining)),
+                ("failed", serde_json::json!(0)),
+            ],
+        );
+        assert_eq!(
+            stale_count(&current_hashes().await),
+            stale_left,
+            "call {call}"
+        );
+    }
+    let invalidated = backend
+        .list_trace_vector_entries("tenant-a")
+        .await
+        .expect("vector entries")
+        .into_iter()
+        .filter(|entry| {
+            [first.vector_entry_id, second.vector_entry_id].contains(&entry.vector_entry_id)
+        })
+        .filter(|entry| entry.status == StorageTraceVectorEntryStatus::Invalidated)
+        .count();
+    assert_eq!(invalidated, 2, "both stale vector entries retired");
     cleanup_pg_trace_tenant(backend.as_ref(), "tenant-a").await;
 }
 
