@@ -806,7 +806,7 @@ const PIPELINE_WORKER_CREDIT_AUDIT_INTERVAL: StdDuration = StdDuration::from_sec
 /// The most `CreditMutate` audit events the worker appends for one tenant
 /// in one pass.
 const PIPELINE_WORKER_MAX_CREDIT_AUDITS_PER_TENANT: usize = 32;
-/// The review audit events one pass appends for a tenant (V117).
+/// The review audit events one pass appends for a tenant (V118).
 const PIPELINE_WORKER_MAX_REVIEW_AUDITS_PER_TENANT: usize = 32;
 
 /// A follow-up step of a tenant's drain, after its runs.
@@ -1345,7 +1345,7 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 }
 
 /// The review audit events of the runs the tenant's review audit markers
-/// name (V117, `review_audit_pending_at`): a run's committed Review decision
+/// name (V118, `review_audit_pending_at`): a run's committed Review decision
 /// and its human assessment each get one audit event, and the marker is
 /// cleared once each event of the run exists. The assessment event comes
 /// first. Its id is the assessment's, so the route's own append and this

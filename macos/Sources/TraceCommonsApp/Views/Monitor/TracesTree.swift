@@ -116,12 +116,21 @@ struct TracesTree: Equatable {
 
     /// `scansWhenUnset` is the tools the core reads from their usual folder
     /// while unset, from its source copy (`unset_scans_conventional`).
+    ///
+    /// `keepsOrder` draws the entries in the order the core listed them (an
+    /// order chosen with the Traces order control, `list_pending {order}`):
+    /// folders by their first listed session, sessions as listed, folders
+    /// with nothing waiting after them. Otherwise, newest first as always.
+    /// `onlyWithSessions` leaves out folders with nothing listed, for a list
+    /// the core narrowed (the idle filter).
     static func build(
         entries: [DaemonData.QueueEntry],
         projects: [ProjectRow],
         settings: DaemonData.Settings?,
         scansWhenUnset: Set<SourceKind>,
-        showsIgnored: Bool = false
+        showsIgnored: Bool = false,
+        keepsOrder: Bool = false,
+        onlyWithSessions: Bool = false
     ) -> TracesTree {
         var folders: [String: FolderNode] = [:]
         var order: [String] = []
@@ -151,7 +160,10 @@ struct TracesTree: Equatable {
         var drawn: [FolderNode] = []
         for id in order {
             guard var node = folders[id], showsIgnored || node.mode != .ignore else { continue }
-            node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+            if onlyWithSessions && node.sessions.isEmpty { continue }
+            if !keepsOrder {
+                node.sessions.sort { ($0.startedAt ?? .distantPast) > ($1.startedAt ?? .distantPast) }
+            }
             drawn.append(node)
             if let kind = majorityTool(node.sessions) {
                 byTool[kind, default: []].append(node)
@@ -168,7 +180,20 @@ struct TracesTree: Equatable {
         }
         .sorted { $0.waiting > $1.waiting }
 
-        return TracesTree(tools: tools, unplaced: unplaced, folders: ordered(drawn))
+        return TracesTree(
+            tools: tools, unplaced: unplaced,
+            folders: keepsOrder ? listedOrder(drawn, entries: entries) : ordered(drawn))
+    }
+
+    /// Folders in the order their first session was listed; folders with
+    /// nothing listed after them, by name, as `ordered` places them.
+    static func listedOrder(_ folders: [FolderNode], entries: [DaemonData.QueueEntry]) -> [FolderNode] {
+        var rank: [String: Int] = [:]
+        for (index, entry) in entries.enumerated() where rank[entry.projectId] == nil {
+            rank[entry.projectId] = index
+        }
+        let listed = folders.filter { rank[$0.id] != nil }.sorted { (rank[$0.id] ?? .max) < (rank[$1.id] ?? .max) }
+        return listed + ordered(folders.filter { rank[$0.id] == nil })
     }
 
     /// Newest waiting session first; folders with nothing waiting after

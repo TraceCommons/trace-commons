@@ -142,11 +142,17 @@ struct ToolsSection: View {
                 .buttonStyle(GlassButtonStyle(.glass))
                 .disabled(!form.on || model.routingChecking || model.daemonSettings == nil)
 
+                // Under Apply: a reachable proxy as it stood, any other
+                // answer as the failed request's red line (Ron, 2026-10-09).
                 if let probeLine = model.routingProbeLine {
-                    Text(probeLine)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if probeLine == copy.probeReachable {
+                        Text(probeLine)
+                            .glassType(GlassTokens.TypeScale.caption)
+                            .foregroundStyle(GlassColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        GlassAlert(probeLine)
+                    }
                 }
 
                 Text(copy.appliesAtOnce)

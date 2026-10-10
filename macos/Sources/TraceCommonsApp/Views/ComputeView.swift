@@ -35,9 +35,6 @@ struct ComputeContent: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
-            if model.quitWasRefused, let copy = model.copy, let line = copy.quitRefused {
-                refusal(line)
-            }
             if let snapshot = model.snapshot {
                 Text(snapshot.copy.introduction)
                     .glassType(GlassTokens.TypeScale.body)
@@ -101,17 +98,22 @@ struct ComputeContent: View {
             } else if model.failureLabel != nil {
                 // Failed: the core's sentence for it, else its unknown word;
                 // never a spinner, which would read as working.
+                // The line under Retry, the button it is about.
                 let copy = model.copy
-                refusal(Self.failureLine(copy?.unavailable))
                 if let retry = copy?.retry {
                     Button(retry) { Task { await model.retryOpen() } }
                         .buttonStyle(GlassButtonStyle(.glass))
                         .disabled(model.controlsBusy)
                 }
+                refusal(Self.failureLine(copy?.unavailable))
             } else {
                 // Not answered yet: a spinner, never a control that reads as
                 // working.
                 SettingsAwaiting()
+            }
+            // A refused quit, under the controls (Ron, 2026-10-09).
+            if model.quitWasRefused, let copy = model.copy, let line = copy.quitRefused {
+                refusal(line)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -134,8 +136,10 @@ struct ComputeContent: View {
         RouteDisclosureUnreadableGlassLine.text(line: unavailable, fallback: nil, unknown: unknown)
     }
 
+    /// A failed request's line: plain red caption, no box (Ron,
+    /// 2026-10-09).
     private func refusal(_ line: String) -> some View {
-        GlassNotice(tone: .outside) { Text(line).fixedSize(horizontal: false, vertical: true) }
+        GlassAlert(line)
     }
 
     private func enable() {

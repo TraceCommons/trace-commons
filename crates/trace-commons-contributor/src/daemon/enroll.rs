@@ -38,7 +38,7 @@ const DESCRIPTIONS: [(&str, &str, &str, bool); 5] = [
     (
         "benchmark_only",
         "Turn my traces into test cases",
-        "Parts of your sessions may become benchmark problems that agents are scored against.",
+        "Parts of your traces may become benchmark problems that agents are scored against.",
         true,
     ),
     (

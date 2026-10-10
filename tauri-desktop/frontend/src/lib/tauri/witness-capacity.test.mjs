@@ -48,7 +48,7 @@ test("a malformed object is refused, not read as nothing waiting", () => {
 
 const notice = {
   title: "Waiting for the privacy witness",
-  body: "2 approved sessions are waiting because the privacy witness is busy.",
+  body: "2 approved traces are waiting because the privacy witness is busy.",
   next_check: "Next try",
 };
 

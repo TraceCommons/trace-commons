@@ -97,7 +97,7 @@ export function SettingsPage({
           </div>
           <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
             Pausing stops contribution processing. It does not delete queued
-            sessions or change consent.
+            traces or change consent.
           </p>
           {daemon.error && (
             <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
@@ -132,7 +132,7 @@ export function SettingsPage({
                 <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
                   WATCHER
                 </span>
-                <h2>Session discovery</h2>
+                <h2>Trace discovery</h2>
               </div>
               <Button
                 className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"

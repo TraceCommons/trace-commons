@@ -25,7 +25,7 @@ export function QueueOutcomeDisclosure({
           <span aria-hidden="true" className="text-primary">
             {open ? "⌄" : "›"}
           </span>
-          Sessions no longer waiting ({total})
+          Traces no longer waiting ({total})
         </CollapsibleTrigger>
         <CollapsibleContent className="grid gap-2 pl-5 pt-3 text-[11px] text-muted-foreground">
           {entries
@@ -36,7 +36,7 @@ export function QueueOutcomeDisclosure({
               </span>
             ))}
           <span className="pt-1 leading-[1.5]">
-            This covers sessions that reached the queue. Sessions never queued
+            This covers traces that reached the queue. Traces never queued
             are not counted here.
           </span>
         </CollapsibleContent>

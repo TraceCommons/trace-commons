@@ -421,6 +421,16 @@ private struct HistoryPage: View {
                 if let failure = store.failures["history_rollup"] {
                     GlassNotice(tone: .outside, title: MonitorWords.table?.line(for: failure) ?? "") { EmptyView() }
                 }
+                // Verdict news, in the daemon's words. See history
+                // acknowledges it; this page is already the history.
+                if let card = store.verdictsCard {
+                    NudgeGlassCard(
+                        card: card, busy: store.nudgeBusy,
+                        refusal: store.nudgeError.flatMap { MonitorWords.table?.line(for: $0) }
+                    ) { intent in Task { await store.perform(intent) } }
+                }
+                // The one-time offer to turn verdict notifications on.
+                NudgeOfferCards(place: .history)
                 HistoryStats(store: store)
                 HistoryCommunityCard(store: store)
                 GlassCard {
@@ -497,8 +507,7 @@ private struct HistoryPage: View {
                 .glassType(GlassTokens.TypeScale.caption)
                 .foregroundStyle(GlassColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            case .failed: GlassStatusLabel(words.refreshFailed, status: .outside)
-                .fixedSize(horizontal: false, vertical: true)
+            case .failed: GlassAlert(words.refreshFailed)
             case .idle, .requesting: EmptyView()
             }
         }
@@ -669,7 +678,9 @@ private struct HistoryFilterPill: View {
                 Text("\(count)").monospacedDigit().opacity(0.7)
             }
             .glassType(GlassTokens.TypeScale.caption.weight(.semibold))
-            .foregroundStyle(selected || hovering ? GlassColor.textPrimary : GlassColor.textTertiary)
+            .foregroundStyle(
+                selected ? GlassTokens.Color.textOnSelected.color
+                    : hovering ? GlassColor.textPrimary : GlassColor.textTertiary)
             .lineLimit(1)
             .fixedSize()
             .padding(.horizontal, GlassTokens.Space.s5)
@@ -902,10 +913,16 @@ private struct HistoryListRow: View {
         let control = control
         if record != nil {
             if let result {
-                if HistoryList.showsOutcome(result) {
+                // A failure is said under the retry it is about; any other
+                // outcome above the control (Ron, 2026-10-09).
+                let failed = WithdrawalOutcomeView.isFailure(result)
+                if HistoryList.showsOutcome(result), !failed {
                     WithdrawalOutcomeView(result: result)
                 }
                 withdrawControl(control, copy: copy)
+                if HistoryList.showsOutcome(result), failed {
+                    WithdrawalOutcomeView(result: result)
+                }
             }
         }
         if control == .signIn, let words = MonitorWords.table?.historyActions {
@@ -983,8 +1000,7 @@ private struct HistorySignInStatus: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             if let failure = model.accountSignInFailure {
-                GlassStatusLabel(line(failure), status: .outside)
-                    .fixedSize(horizontal: false, vertical: true)
+                GlassAlert(line(failure))
             }
         }
     }

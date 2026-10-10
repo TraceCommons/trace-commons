@@ -1,4 +1,4 @@
--- V117: the marker of a review audit event that the worker must still append.
+-- V118: the marker of a review audit event that the worker must still append.
 -- A transaction that commits a Review decision or a human review assessment
 -- sets it; the worker's review audit pass clears it. NULL for every run that
 -- exists now: no event is appended for a decision made before this migration.

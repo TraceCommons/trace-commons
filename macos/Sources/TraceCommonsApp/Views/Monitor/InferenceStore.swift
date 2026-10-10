@@ -99,7 +99,7 @@ final class InferenceStore {
                 _ = await (calls, destinations)
             case .snapshot, .statusChanged, .resyncRequired:
                 await load()
-            case .queueChanged, .digestDue, .previewReady, .unknown:
+            case .queueChanged, .digestDue, .reengageDue, .previewReady, .unknown:
                 break
             }
         }

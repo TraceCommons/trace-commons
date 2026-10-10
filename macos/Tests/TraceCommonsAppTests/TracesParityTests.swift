@@ -290,7 +290,7 @@ final class TracesParityTests: XCTestCase {
             "Text(words?.transcriptCaption ?? \"\")\n"
                 + "                    .glassType(GlassTokens.TypeScale.caption)\n",
             "chip.backgroundColor = GlassTokens.Color.controlSelected.color\n"
-                + "            chip.foregroundColor = GlassColor.textPrimary\n",
+                + "            chip.foregroundColor = GlassTokens.Color.textOnSelected.color\n",
             "Text(segment.text)\n                            .glassType(GlassTokens.TypeScale.mono)\n"
                 + "                            .textSelection(.enabled)\n",
             "TranscriptMarkers.chipped(text, font: GlassTokens.TypeScale.mono.font)",
@@ -445,33 +445,38 @@ final class TracesParityTests: XCTestCase {
         XCTAssertEqual(QueueLegacyWords.nothingWaiting, "Nothing is waiting.")
         XCTAssertEqual(
             QueueLegacyWords.nothingWaitingDetail,
-            "When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
+            "When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so.")
         XCTAssertEqual(
             QueueLegacyWords.undoWillSend,
-            "Approved sessions will send automatically. You can undo until uploading starts.")
+            "Approved traces will send automatically. You can undo until uploading starts.")
         XCTAssertEqual(
             QueueLegacyWords.closeNoticeStillSends,
-            "Close this notice. Approved sessions will still send automatically.")
+            "Close this notice. Approved traces will still send automatically.")
         XCTAssertEqual(QueueLegacyWords.closeNotice, "Close this notice.")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(7), "Approved 7s ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(AppModel.Undo.tickCeiling), "Approved 120s+ ago")
         XCTAssertEqual(QueueLegacyWords.approvedAgo(500), "Approved 120s+ ago")
-        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Sessions no longer waiting (3)")
+        XCTAssertEqual(QueueLegacyWords.noLongerWaiting(3), "Traces no longer waiting (3)")
         XCTAssertEqual(
             QueueLegacyWords.notOfferedScope,
-            "This covers sessions that reached the queue. Sessions that were never queued at all are not counted here.")
+            "This covers traces that reached the queue. Traces that were never queued at all are not counted here.")
     }
 
-    /// Declining comes first and neither answer is the primary action, on
-    /// both offers (`QueueView.swift:1262-1268, 1321-1325`).
-    func test_neitherOfferLeadsTheEyeToYes() throws {
+    /// The accept comes first as a glass button and the decline after it as
+    /// a link, on both offers (Ron, 2026-10-09, which replaced the legacy
+    /// queue's decline-first order); neither answer is the primary action.
+    func test_bothOffersPutTheAcceptFirstAndTheDeclineAsALink() throws {
         let offers = try Self.text("Views/Monitor/TracesOffers.swift")
         let decline = try XCTUnwrap(offers.range(of: "copy.offerDecline"))
         let accept = try XCTUnwrap(offers.range(of: "copy.offerAccept"))
-        XCTAssertLessThan(decline.lowerBound, accept.lowerBound)
+        XCTAssertLessThan(accept.lowerBound, decline.lowerBound)
         let armDecline = try XCTUnwrap(offers.range(of: "Button(copy.decline"))
         let armConfirm = try XCTUnwrap(offers.range(of: "Button(copy.confirm"))
-        XCTAssertLessThan(armDecline.lowerBound, armConfirm.lowerBound)
+        XCTAssertLessThan(armConfirm.lowerBound, armDecline.lowerBound)
+        for declineCall in ["Button(copy.offerDecline, action: onDecline)\n                        .buttonStyle(GlassButtonStyle(.link))",
+                            "Button(copy.decline, action: onDecline)\n                            .buttonStyle(GlassButtonStyle(.link))"] {
+            XCTAssertTrue(offers.contains(declineCall), "the decline is not a link: \(declineCall)")
+        }
         let arming = try XCTUnwrap(offers.range(of: "struct ArmingOfferGlassCard"))
         XCTAssertFalse(offers[arming.lowerBound...].prefix(1500).contains("GlassButtonStyle(.primary"))
         let privateAI = try XCTUnwrap(offers.range(of: "struct PrivateAIOfferGlassCard"))
@@ -514,7 +519,7 @@ final class TracesParityTests: XCTestCase {
             XCTAssertTrue(inspector.contains(needle), "ToolFolderInspectors.swift lacks \(needle)")
         }
         let store = try Self.text("Views/Monitor/TracesStore.swift")
-        for needle in ["approveFolder(projectId: folder.id, verdict: verdict)", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
+        for needle in ["projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil", "verdict:", "excludedIneligible", "withheldLine(", "cancelFolder(projectId:",
                        "EligibilitySurface.groupSubmit("] {
             XCTAssertTrue(store.contains(needle), "TracesStore.swift lacks \(needle)")
         }

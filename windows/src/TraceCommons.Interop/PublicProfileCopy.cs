@@ -91,7 +91,7 @@ public static class PublicProfileCopy
     public const string NeverHeading = "What never does";
 
     public const string NeverBody =
-        "Your traces or anything in them. Per-trace data of any kind. Anything about sessions "
+        "Your traces or anything in them. Per-trace data of any kind. Anything about traces "
         + "you didn't send.";
 
     public const string GoPublicAcknowledgement =

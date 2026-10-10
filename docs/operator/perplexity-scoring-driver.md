@@ -111,7 +111,7 @@ canonical table. Summary:
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BATCH_SIZE` | `5` | Submissions enumerated per tick. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_MAX_ATTEMPTS` | `5` | Bounded attempt counter per submission before the driver stops retrying it. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` | `true` | Cache-cost control; falsy values (`0`/`false`/`no`/`off`) disable it. |
-| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | `900000` | Novelty threshold above which a submission is treated as a duplicate and skipped. |
+| `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS` | `900000` | Duplicate-score threshold (micros): a submission whose precheck duplicate score is at or above it is recorded as `skipped_duplicate` without scoring. |
 | `TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS` | `30` | Base backoff after a scoring failure. |
 | `TRACE_COMMONS_GATE_DRIVER_DATABASE_URL` | (none) | The `trace_gate_driver`-role pool connection string, per above. |
 

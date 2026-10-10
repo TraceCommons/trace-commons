@@ -267,7 +267,7 @@ public struct ProjectTool: Decodable, Equatable, Sendable {
 /// beside either view so that neither becomes the owner and the other the
 /// copy -- a near-duplicate is how two surfaces start disagreeing.
 public enum ProjectCopy {
-    public static let unresolvedBucketLabel = "Sessions with no project"
+    public static let unresolvedBucketLabel = "Traces with no project"
 
     // A mode's name is not here. It is the core's
     // (`project_copy::FOLDER_MODE_LABELS`), read through the pill's table:

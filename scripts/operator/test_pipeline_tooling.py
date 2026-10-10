@@ -2283,6 +2283,7 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "tenant_fingerprint": _fake_hash("tenants"),
                     "tenant_count": 2,
                     "audit_event_count": 2,
+                    "credit_delta_zero": False,
                 }
                 fingerprint.update(overrides.get("fingerprint", {}))
                 Path(env["TRACE_COMMONS_PIPELINE_RESTORE_FINGERPRINT_PATH"]).write_bytes(
@@ -2306,6 +2307,8 @@ class _RestoreDrillCase(_CorpusRunCase):
                     "tenant_count": seed["tenant_count"],
                     "audit_events_verified": seed["audit_event_count"],
                 }
+                if seed["credit_delta_zero"]:
+                    evidence["credit_delta_zero"] = True
                 evidence.update(overrides.get("evidence", {}))
                 raw = {
                     "schema": results.SCHEMA,
@@ -2367,6 +2370,13 @@ class _RestoreDrillCase(_CorpusRunCase):
 
 
 class RestoreDrillTests(_RestoreDrillCase):
+    def test_a_zero_delta_seed_passes_and_its_evidence_says_so(self):
+        code = self._drill(fingerprint=_UNCREDITED_SEED)
+        self.assertEqual(code, 0, self.stderr.getvalue())
+        evidence = json.loads((self.run.results_dir / f"{_RESTORE_CHECK}.evidence.json").read_text())
+        self.assertIs(evidence["credit_delta_zero"], True)
+        self.assertIn("legs_per_run=0 credit_events_per_run=0", self.stdout.getvalue())
+
     def test_restore_drill_order(self):
         code = self._drill()
         self.assertEqual(code, 0, self.stderr.getvalue())
@@ -2504,6 +2514,13 @@ class RestoreDrillTests(_RestoreDrillCase):
             ({"safe_blockers": []}, "restore_safe_blocker_missing"),
             ({"fingerprint": {"tenant_id": "tenant-a"}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"completed_credit_event_count": 0}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {"credit_delta_zero": None}}, "restore_fingerprint_invalid"),
+            # A zero-delta seed has no leg, no adapter request, no event.
+            ({"fingerprint": {"credit_delta_zero": True}}, "restore_fingerprint_invalid"),
+            ({"fingerprint": {**_UNCREDITED_SEED, "completed_settlement_count": 1}}, "restore_fingerprint_invalid"),
+            # A zero-delta drill must say so in its evidence.
+            ({"fingerprint": _UNCREDITED_SEED, "evidence": {"credit_delta_zero": False}}, "restore_evidence_mismatch"),
+            ({"evidence": {"credit_delta_zero": True}}, "restore_evidence_mismatch"),
             ({"fingerprint": {"completed_settlement_count": True}}, "restore_fingerprint_invalid"),
             ({"fingerprint": {"artifact_fingerprint": _fake_hash("not-the-tree")}},
              "restore_artifact_fingerprint_mismatch"),
@@ -4756,6 +4773,13 @@ class ActivityMissionInventoryTests(unittest.TestCase):
         for path in ("/v1/activity-missions-extra", "/v1/activity-missions/status", "/v1/activity-missions/"):
             self.assertIsNone(self.inventory.classify_route(path), path)
 
+    def test_the_credit_estimate_table_is_a_public_catalogue(self):
+        """The local credit estimate table is public, non-personal data a
+        client fetches before it has an account, like the mission catalogue."""
+        self.assertEqual(self.inventory.classify_route("/v1/credit-estimate/table"), ("EXP-004", "CRD-004"))
+        for path in ("/v1/credit-estimate", "/v1/credit-estimate/table/extra", "/v1/credit-estimate/tables"):
+            self.assertIsNone(self.inventory.classify_route(path), path)
+
     def test_new_catalogue_is_in_inventory_and_unknown_interfaces_still_fail_closed(self):
         inventory = self.inventory.build_inventory()
         catalogue = [row for row in inventory["routes"] if row["path"] == "/v1/activity-missions"]
@@ -4869,6 +4893,15 @@ def _hf_network_manifest(**overrides):
     }
     manifest.update(overrides)
     return manifest
+
+
+# The seed's credit counts under a zero `NoveltyUtility` delta (the pilot's).
+_UNCREDITED_SEED = {
+    "credit_delta_zero": True,
+    "adapter_request_count": 0,
+    "completed_settlement_count": 0,
+    "completed_credit_event_count": 0,
+}
 
 
 def _remote_report(**overrides):
