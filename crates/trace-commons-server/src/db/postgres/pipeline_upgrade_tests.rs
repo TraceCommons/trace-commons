@@ -127,7 +127,7 @@ const PIPELINE_TABLES: [&str; 20] = [
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, and V110 to V113 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, V110 to V113, and V117 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -164,6 +164,16 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             // V95
             "approved_object_ref_id",
             "approved_content_hash",
+            // V117: the Review-start privacy pass records its result, and
+            // the Review commit links an escalated run's approval to it.
+            "privacy_pass_object_ref_id",
+            "privacy_pass_content_hash",
+            "privacy_pass_source_hash",
+            "privacy_pass_residual_risk_basis",
+            "privacy_pass_outcome",
+            "privacy_pass_recorded_at",
+            "privacy_pass_approval_assessment_hash",
+            "privacy_pass_approval_resolved_reasons",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -403,7 +413,9 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     // newest one in the list; the pipeline versions themselves must be there.
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
-    for pipeline_version in [92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113] {
+    for pipeline_version in [
+        92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113, 117,
+    ] {
         let recorded: bool = admin
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM _trace_commons_migrations WHERE version = $1)",
@@ -570,7 +582,8 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         "a committed attempt row must have its hash: {checks}"
     );
     // Rebase 10 review, M8: an `approved` row always has its hash, so only a
-    // compatibility Score's two artifacts can be staged without one.
+    // compatibility Score's two artifacts can be staged without one. V117
+    // adds the privacy pass's `privacy-pass` row to the rows that need one.
     let approved_hash: Option<String> = admin
         .query_opt(
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint
@@ -584,7 +597,8 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     assert!(
         approved_hash.as_deref().is_some_and(|definition| {
             definition.contains("ciphertext_sha256 IS NOT NULL")
-                && definition.contains("artifact <> 'approved'::text")
+                && definition
+                    .contains("artifact <> ALL (ARRAY['approved'::text, 'privacy-pass'::text])")
         }),
         "an approved attempt row must have its hash: {approved_hash:?}"
     );
@@ -1730,6 +1744,579 @@ async fn v116_adds_source_and_pipeline_run_id_with_defaults() {
         .unwrap()
         .get(0);
     assert!(readable, "the gate driver reads `source`");
+
+    drop(admin);
+    admin_connection.await.expect("the admin connection closes");
+    setup
+        .batch_execute(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .expect("drop the test's own database");
+}
+
+/// V117 (spec 2026-10-09, async privacy rescrub): `pipeline_runs` gains the
+/// Review-start privacy pass's record. The six pass columns are NULL on a run
+/// that existed before V117 and are set together or not at all; the outcome
+/// is `cleared` or `escalated`; the hashes are `sha256:` hex; the two approval
+/// columns are set together and only on an escalated pass; the pass object's
+/// key to `trace_object_refs` is deferred to commit; the ingest runtime may
+/// update the eight columns; and `pipeline_attempt_artifacts` accepts a
+/// `privacy-pass` row, which, like an `approved` row, always has its hash.
+#[tokio::test]
+#[ignore = "requires PostgreSQL 16+ at isolated TRACE_COMMONS_PIPELINE_PG_UPGRADE_TEST_URL"]
+async fn v117_adds_the_privacy_pass_record() {
+    let _serial = UPGRADE_CLUSTER_LOCK.lock().await;
+    let base = isolated_upgrade_database_url();
+    let (prefix, base_name) = base.rsplit_once('/').expect("a database name");
+    let (base_name, query) = base_name
+        .split_once('?')
+        .map_or((base_name, String::new()), |(name, query)| {
+            (name, format!("?{query}"))
+        });
+    let name = format!("{base_name}_v117");
+    let (setup, connection) = tokio_postgres::connect(&base, tokio_postgres::NoTls)
+        .await
+        .expect("connect to the isolated database");
+    tokio::spawn(async move { connection.await.expect("setup connection") });
+    setup
+        .batch_execute(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    setup
+        .batch_execute(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let url = format!("{prefix}/{name}{query}");
+    let (mut admin, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect upgrade admin");
+    let admin_connection =
+        tokio::spawn(async move { connection.await.expect("upgrade connection") });
+    apply_real_migrations_through(&mut admin, 116).await;
+
+    // A run received before V117.
+    let tenant = "upgrade-v117";
+    set_tenant(&admin, tenant).await;
+    let hash = |byte: &str| format!("sha256:{}", byte.repeat(64));
+    let submission_id = uuid::Uuid::new_v4();
+    let run_id = uuid::Uuid::new_v4();
+    let source_ref_id = uuid::Uuid::new_v4();
+    let bundle_id = hash("c");
+    admin
+        .execute(
+            "INSERT INTO trace_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&tenant],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'accepted', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[&tenant, &submission_id, &uuid::Uuid::new_v4(), &hash("d")],
+        )
+        .await
+        .unwrap();
+    let insert_object_ref = |object_ref_id: uuid::Uuid, kind: &'static str, key: String| {
+        let admin = &admin;
+        let content = hash("d");
+        async move {
+            admin
+                .execute(
+                    "INSERT INTO trace_object_refs (
+                        tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                        object_key, content_sha256, encryption_key_ref, size_bytes
+                     ) VALUES ($1, $2, $3, $4, 'store', $5, $6, 'key-ref', 0)",
+                    &[
+                        &tenant,
+                        &submission_id,
+                        &object_ref_id,
+                        &kind,
+                        &key,
+                        &content,
+                    ],
+                )
+                .await
+        }
+    };
+    insert_object_ref(source_ref_id, "submitted_envelope", "source-key".into())
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_bundle_packages (tenant_id, bundle_id, manifest_format_version, package)
+             VALUES ($1, $2, 1, '{}'::jsonb)",
+            &[&tenant, &bundle_id],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs (
+                tenant_id, run_id, submission_id, trace_id, bundle_id,
+                request_idempotency_key, request_content_hash, source_object_ref_id,
+                next_phase, state, admission_decision
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'review', 'pending', 'admit')",
+            &[
+                &tenant,
+                &run_id,
+                &submission_id,
+                &uuid::Uuid::new_v4(),
+                &bundle_id,
+                &hash("e"),
+                &hash("f"),
+                &source_ref_id,
+            ],
+        )
+        .await
+        .unwrap();
+
+    for (version, migration, sql) in MIGRATIONS.iter().filter(|(version, _, _)| *version > 116) {
+        apply_and_record_migration(&mut admin, *version, migration, sql)
+            .await
+            .unwrap_or_else(|error| panic!("apply real V{version} ({migration}): {error}"));
+    }
+
+    const PASS_COLUMNS: [&str; 6] = [
+        "privacy_pass_object_ref_id",
+        "privacy_pass_content_hash",
+        "privacy_pass_source_hash",
+        "privacy_pass_residual_risk_basis",
+        "privacy_pass_outcome",
+        "privacy_pass_recorded_at",
+    ];
+    const APPROVAL_COLUMNS: [&str; 2] = [
+        "privacy_pass_approval_assessment_hash",
+        "privacy_pass_approval_resolved_reasons",
+    ];
+    for column in PASS_COLUMNS.iter().chain(APPROVAL_COLUMNS.iter()) {
+        let present: bool = admin
+            .query_one(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns
+                                 WHERE table_name = 'pipeline_runs' AND column_name = $1)",
+                &[column],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(present, "pipeline_runs.{column} must exist after V117");
+        let null: bool = admin
+            .query_one(
+                &format!(
+                    "SELECT {column} IS NULL FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2"
+                ),
+                &[&tenant, &run_id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(null, "{column} is NULL on a run received before V117");
+    }
+
+    let check_violation = |error: tokio_postgres::Error, constraint: &str| {
+        assert_eq!(error.code(), Some(&SqlState::CHECK_VIOLATION), "{error}");
+        let db_error = error.as_db_error().expect("a database error");
+        assert_eq!(db_error.constraint(), Some(constraint), "{error}");
+    };
+    // Sets the six pass columns (each `None` is left NULL) and the two
+    // approval columns, in one statement.
+    let pass_ref_id = uuid::Uuid::new_v4();
+    let update = |pass: [Option<String>; 6], approval: [Option<String>; 2]| {
+        let admin = &admin;
+        async move {
+            let value = |index: usize, cast: &str| match &pass[index] {
+                Some(value) => format!("{value}::{cast}"),
+                None => "NULL".to_string(),
+            };
+            let approval_value = |index: usize, cast: &str| match &approval[index] {
+                Some(value) => format!("{value}::{cast}"),
+                None => "NULL".to_string(),
+            };
+            admin
+                .execute(
+                    &format!(
+                        "UPDATE pipeline_runs SET
+                            privacy_pass_object_ref_id = {},
+                            privacy_pass_content_hash = {},
+                            privacy_pass_source_hash = {},
+                            privacy_pass_residual_risk_basis = {},
+                            privacy_pass_outcome = {},
+                            privacy_pass_recorded_at = {},
+                            privacy_pass_approval_assessment_hash = {},
+                            privacy_pass_approval_resolved_reasons = {}
+                          WHERE tenant_id = $1 AND run_id = $2",
+                        value(0, "uuid"),
+                        value(1, "text"),
+                        value(2, "text"),
+                        value(3, "jsonb"),
+                        value(4, "text"),
+                        value(5, "timestamptz"),
+                        approval_value(0, "text"),
+                        approval_value(1, "jsonb"),
+                    ),
+                    &[&tenant, &run_id],
+                )
+                .await
+        }
+    };
+    let quoted = |value: &str| format!("'{value}'");
+    let full_pass = |outcome: &str| -> [Option<String>; 6] {
+        [
+            Some(quoted(&pass_ref_id.to_string())),
+            Some(quoted(&hash("1"))),
+            Some(quoted(&hash("2"))),
+            Some(quoted(r#"["found_and_removed"]"#)),
+            Some(quoted(outcome)),
+            Some("NOW()".to_string()),
+        ]
+    };
+    let no_approval = || -> [Option<String>; 2] { [None, None] };
+
+    // The six pass columns are set together or not at all.
+    for missing in 0..PASS_COLUMNS.len() {
+        let mut pass = full_pass("cleared");
+        pass[missing] = None;
+        check_violation(
+            update(pass, no_approval())
+                .await
+                .expect_err("a pass record with a column missing is refused"),
+            "pipeline_runs_privacy_pass_shape",
+        );
+    }
+    check_violation(
+        update(full_pass("other"), no_approval())
+            .await
+            .expect_err("only `cleared` and `escalated` are outcomes"),
+        "pipeline_runs_privacy_pass_outcome_check",
+    );
+    let mut malformed = full_pass("cleared");
+    malformed[1] = Some(quoted("sha256:XYZ"));
+    check_violation(
+        update(malformed, no_approval())
+            .await
+            .expect_err("a malformed content hash is refused"),
+        "pipeline_runs_privacy_pass_content_hash_check",
+    );
+    let mut malformed = full_pass("cleared");
+    malformed[2] = Some(quoted(&"a".repeat(64)));
+    check_violation(
+        update(malformed, no_approval())
+            .await
+            .expect_err("a source hash without its prefix is refused"),
+        "pipeline_runs_privacy_pass_source_hash_check",
+    );
+    let mut not_an_array = full_pass("cleared");
+    not_an_array[3] = Some(quoted(r#"{"label": 1}"#));
+    check_violation(
+        update(not_an_array, no_approval())
+            .await
+            .expect_err("the basis is a JSON array"),
+        "pipeline_runs_privacy_pass_residual_risk_basis_check",
+    );
+
+    // The two approval columns go together, and only on an escalated pass.
+    let approval = || -> [Option<String>; 2] {
+        [
+            Some(quoted(&hash("3"))),
+            Some(quoted(r#"["privacy_pass_review_required"]"#)),
+        ]
+    };
+    for missing in 0..APPROVAL_COLUMNS.len() {
+        let mut half = approval();
+        half[missing] = None;
+        check_violation(
+            update(full_pass("escalated"), half)
+                .await
+                .expect_err("half an approval link is refused"),
+            "pipeline_runs_privacy_pass_approval_shape",
+        );
+    }
+    check_violation(
+        update(full_pass("cleared"), approval())
+            .await
+            .expect_err("a cleared pass has no approval link"),
+        "pipeline_runs_privacy_pass_approval_shape",
+    );
+    check_violation(
+        update([None, None, None, None, None, None], approval())
+            .await
+            .expect_err("no approval link without a pass"),
+        "pipeline_runs_privacy_pass_approval_shape",
+    );
+    let mut malformed_approval = approval();
+    malformed_approval[0] = Some(quoted("sha256:short"));
+    check_violation(
+        update(full_pass("escalated"), malformed_approval)
+            .await
+            .expect_err("a malformed approval hash is refused"),
+        "pipeline_runs_privacy_pass_approval_assessment_hash_check",
+    );
+
+    // The key to the pass object is checked at commit: the run may name the
+    // ref before the same transaction inserts it.
+    // (Explicit BEGIN/COMMIT, so the closures above keep their shared
+    // borrow of the client.)
+    {
+        admin.batch_execute("BEGIN").await.unwrap();
+        admin
+            .execute(
+                "UPDATE pipeline_runs SET
+                privacy_pass_object_ref_id = $3, privacy_pass_content_hash = $4,
+                privacy_pass_source_hash = $5,
+                privacy_pass_residual_risk_basis = '[\"found_and_removed\"]'::jsonb,
+                privacy_pass_outcome = 'escalated', privacy_pass_recorded_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant, &run_id, &pass_ref_id, &hash("1"), &hash("2")],
+            )
+            .await
+            .expect("the run names the pass object before its ref exists");
+        admin
+            .execute(
+                "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes
+             ) VALUES ($1, $2, $3, 'review_snapshot', 'store', 'pass-key', $4, 'key-ref', 0)",
+                &[&tenant, &submission_id, &pass_ref_id, &hash("1")],
+            )
+            .await
+            .unwrap();
+        admin
+            .batch_execute("COMMIT")
+            .await
+            .expect("the deferred key holds at commit");
+    }
+    // A pass object no ref names fails at commit, not at the UPDATE.
+    {
+        admin.batch_execute("BEGIN").await.unwrap();
+        admin
+            .execute(
+                "UPDATE pipeline_runs SET privacy_pass_object_ref_id = $3
+              WHERE tenant_id = $1 AND run_id = $2",
+                &[&tenant, &run_id, &uuid::Uuid::new_v4()],
+            )
+            .await
+            .expect("the key is deferred, so the UPDATE itself succeeds");
+        let error = admin
+            .batch_execute("COMMIT")
+            .await
+            .expect_err("a pass object with no ref is refused at commit");
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::FOREIGN_KEY_VIOLATION),
+            "{error}"
+        );
+    }
+    let fk = admin
+        .query_one(
+            "SELECT condeferrable, condeferred, confdeltype::text
+               FROM pg_constraint
+              WHERE conrelid = 'pipeline_runs'::regclass
+                AND conname = 'pipeline_runs_privacy_pass_object_ref_fk'
+                AND contype = 'f'",
+            &[],
+        )
+        .await
+        .expect("the pass object's key exists");
+    assert!(
+        fk.get::<_, bool>(0) && fk.get::<_, bool>(1),
+        "the pass object's key is DEFERRABLE INITIALLY DEFERRED"
+    );
+    assert_eq!(fk.get::<_, String>(2), "a", "ON DELETE NO ACTION");
+
+    // An escalated pass takes the approval link.
+    update(full_pass("escalated"), approval())
+        .await
+        .expect("an escalated pass with both approval columns");
+
+    // The ingest runtime updates the eight columns.
+    for column in PASS_COLUMNS.iter().chain(APPROVAL_COLUMNS.iter()) {
+        let granted: bool = admin
+            .query_one(
+                "SELECT has_column_privilege('trace_ingest_runtime', 'pipeline_runs', $1, 'UPDATE')",
+                &[column],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(granted, "trace_ingest_runtime may update {column}");
+    }
+
+    // `privacy_pass_required`: FALSE on the run received before V117, TRUE on
+    // a run inserted after it (the column default), and never updatable by
+    // the runtime.
+    let required = |run: uuid::Uuid| {
+        let admin = &admin;
+        async move {
+            admin
+                .query_one(
+                    "SELECT privacy_pass_required FROM pipeline_runs
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[&tenant, &run],
+                )
+                .await
+                .unwrap()
+                .get::<_, bool>(0)
+        }
+    };
+    assert!(
+        !required(run_id).await,
+        "a run received before V117 needs no pass"
+    );
+    let granted: bool = admin
+        .query_one(
+            "SELECT has_column_privilege('trace_ingest_runtime', 'pipeline_runs',
+                                         'privacy_pass_required', 'UPDATE')",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert!(!granted, "the runtime may not update privacy_pass_required");
+    let new_submission_id = uuid::Uuid::new_v4();
+    let new_source_ref_id = uuid::Uuid::new_v4();
+    let new_run_id = uuid::Uuid::new_v4();
+    admin
+        .execute(
+            "INSERT INTO trace_submissions (
+                tenant_id, submission_id, trace_id, auth_principal_ref, schema_version,
+                consent_policy_version, consent_scopes, allowed_uses, retention_policy_id,
+                status, privacy_risk, redaction_pipeline_version, redaction_hash,
+                redaction_counts
+             ) VALUES ($1, $2, $3, 'principal', 'ironclaw.trace_contribution.v1', 'v1',
+                       '[]'::jsonb, '[]'::jsonb, 'retention-default', 'received', 'low', 'v1',
+                       $4, '{}'::jsonb)",
+            &[
+                &tenant,
+                &new_submission_id,
+                &uuid::Uuid::new_v4(),
+                &hash("d"),
+            ],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO trace_object_refs (
+                tenant_id, submission_id, object_ref_id, artifact_kind, object_store,
+                object_key, content_sha256, encryption_key_ref, size_bytes
+             ) VALUES ($1, $2, $3, 'submitted_envelope', 'store', 'new-source-key', $4,
+                       'key-ref', 0)",
+            &[&tenant, &new_submission_id, &new_source_ref_id, &hash("d")],
+        )
+        .await
+        .unwrap();
+    admin
+        .execute(
+            "INSERT INTO pipeline_runs (
+                tenant_id, run_id, submission_id, trace_id, bundle_id,
+                request_idempotency_key, request_content_hash, source_object_ref_id,
+                next_phase, state, admission_decision
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'review', 'pending', 'admit')",
+            &[
+                &tenant,
+                &new_run_id,
+                &new_submission_id,
+                &uuid::Uuid::new_v4(),
+                &bundle_id,
+                &hash("7"),
+                &hash("8"),
+                &new_source_ref_id,
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(
+        required(new_run_id).await,
+        "a run received after V117 needs a pass"
+    );
+    // An approval of it without a pass fails the CHECK.
+    let approve = |run: uuid::Uuid, approved_ref: uuid::Uuid| {
+        let admin = &admin;
+        async move {
+            admin
+                .execute(
+                    "UPDATE pipeline_runs
+                        SET approved_revision_id = $3, approved_object_ref_id = $4,
+                            approved_content_hash = $5
+                      WHERE tenant_id = $1 AND run_id = $2",
+                    &[
+                        &tenant,
+                        &run,
+                        &uuid::Uuid::new_v4(),
+                        &approved_ref,
+                        &hash("9"),
+                    ],
+                )
+                .await
+        }
+    };
+    check_violation(
+        approve(new_run_id, new_source_ref_id)
+            .await
+            .expect_err("an approval without a pass is refused"),
+        "pipeline_runs_privacy_pass_before_approval",
+    );
+    // The run received before V117 is approved without a pass.
+    update([None, None, None, None, None, None], no_approval())
+        .await
+        .expect("clear the earlier run's pass record");
+    approve(run_id, source_ref_id)
+        .await
+        .expect("a run received before V117 is approved without a pass");
+
+    // pipeline_attempt_artifacts: a `privacy-pass` row is a known artifact
+    // and, like `approved`, never lacks its hash.
+    let stage = |artifact: &'static str, ciphertext: Option<String>| {
+        let admin = &admin;
+        async move {
+            admin
+                .execute(
+                    "INSERT INTO pipeline_attempt_artifacts (
+                        tenant_id, run_id, lease_token, artifact, object_key,
+                        ciphertext_sha256, cleanup_after
+                     ) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+                    &[
+                        &tenant,
+                        &run_id,
+                        &uuid::Uuid::new_v4(),
+                        &artifact,
+                        &format!("attempt-{}", uuid::Uuid::new_v4()),
+                        &ciphertext,
+                    ],
+                )
+                .await
+        }
+    };
+    stage("privacy-pass", Some("b".repeat(64)))
+        .await
+        .expect("a privacy-pass row with its hash");
+    check_violation(
+        stage("privacy-pass", None)
+            .await
+            .expect_err("a privacy-pass row without its hash is refused"),
+        "pipeline_attempt_artifacts_approved_hash",
+    );
+    check_violation(
+        stage("approved", None)
+            .await
+            .expect_err("an approved row still needs its hash"),
+        "pipeline_attempt_artifacts_approved_hash",
+    );
+    stage("score-neighbors", None)
+        .await
+        .expect("a compatibility Score row may still be staged without a hash");
+    check_violation(
+        stage("other", Some("b".repeat(64)))
+            .await
+            .expect_err("an unknown artifact is refused"),
+        "pipeline_attempt_artifacts_artifact_check",
+    );
 
     drop(admin);
     admin_connection.await.expect("the admin connection closes");

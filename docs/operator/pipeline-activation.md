@@ -194,7 +194,7 @@ So each submission id has one owner for good:
 The route is decided after authentication, the submit rate limit, envelope
 validation, the admission reservation, the tenant-access check, and the check
 for a retry. It is decided before the server re-scrub, the tombstone check, and
-the submission quota. So a refusal costs no classifier call. It also releases
+the submission quota. So a refusal costs no rescrub. It also releases
 the admission attempt: the attempt is not left processing, so a retry is not
 `409` in progress, and a bounded account gets its charge back. A pipeline
 upload still passes the tombstone and quota checks before the pipeline takes
@@ -873,8 +873,8 @@ the revision that the process was built from.
   help: deploy a build that has a revision.
 
 Both refusals come with the route decision ("Scope lists and the routing
-row"): nothing is stored, the admission attempt is released, and no classifier
-call is made. No state changes. The tenant's row still says `pipeline`, and
+row"): nothing is stored, the admission attempt is released, and no rescrub
+runs. No state changes. The tenant's row still says `pipeline`, and
 its intake returns when the qualification is recorded on that revision, with no
 second `activate`. The process does not contain the tenant.
 
@@ -1533,7 +1533,11 @@ still live queues the revision's removal no earlier than that lease's end
 plus those 60 seconds.
 
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_REVIEW` -- whole seconds, default 300
-  (5 minutes).
+  (5 minutes). With a privacy boundary that classifies prose PII it must be
+  at least 30: the Review-start privacy pass needs at least 60 seconds for
+  its classifier call inside the renewal cap (see "The privacy pass at the
+  start of Review"), and a shorter Review lease refuses the start with
+  `pipeline_lease_config_invalid`.
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SCORE` -- whole seconds, default 1800
   (30 minutes).
 - `TRACE_COMMONS_PIPELINE_LEASE_SECONDS_SETTLE` -- whole seconds, default 300
@@ -1573,6 +1577,13 @@ reset `attempt_count` to 0. So Review, Score and Settle each get the whole
 budget, and a phase that commits on its last attempt leaves the next phase
 claimable.
 
+The Review-start privacy pass runs inside the Review dispatch, under Review's
+lease and Review's attempt budget. A classifier failure is a charged Review
+attempt, and a run whose classifier keeps failing ends `failed` with
+`privacy_classification_failed`, not `attempts_exhausted` ("The privacy pass
+at the start of Review"). A worker that crashes mid-pass is the case above:
+the lease sweep fails it as `attempts_exhausted`.
+
 While a phase runs, a background task renews its lease: every
 `max(lease / 3, 100ms)`, it extends the live claim's lease, stopping as soon
 as the phase ends, the lease is lost (reclaimed by someone else, or already
@@ -1596,8 +1607,9 @@ its renewal does not get to run before the lease expires.
 
 Every pipeline receipt needs two controls from the injected runtime. The
 receipt looks up the tenant's authority and checks that a privacy boundary
-exists before any database work, and it runs the boundary's re-scrub before
-it stages anything. A refused receipt leaves no run and no staged object.
+exists before any database work, and it runs the boundary's deterministic
+re-scrub before it stages anything. A refused receipt leaves no run and no
+staged object.
 
 - **Authority.** The runtime's authority provider must give the tenant a
   submission authority: its consent-scope and allowed-use allowlists. A
@@ -1606,10 +1618,14 @@ it stages anything. A refused receipt leaves no run and no staged object.
   uses does not refuse the receipt: Admission records a `reject` outcome
   with the reason `grant_invalid`.
 - **Privacy.** The runtime's privacy boundary re-scrubs the envelope after
-  the legacy handler's own re-scrub. A runtime with no boundary refuses the
-  receipt with `privacy_control_missing`. A boundary that fails (for
-  example, its classifier is down) refuses it with
-  `privacy_classification_failed`.
+  the legacy handler's own re-scrub. At the receipt it runs only its
+  deterministic half (`rescrub_deterministic`), the bounded, local
+  redactor. The receipt never calls the prose-PII classifier: that runs in
+  the privacy pass at the start of Review (below). A runtime with no
+  boundary refuses the receipt with `privacy_control_missing`. A
+  deterministic re-scrub that fails refuses it with `privacy_rescrub_failed`.
+  A classifier that is down does not refuse the receipt: the receipt
+  answers `processing`, and the pass retries the classifier.
 
 The HTTP response for all three refusals is the generic `500` label
 `trace commons operation failed`, with no trace text; it does not name the
@@ -1621,17 +1637,19 @@ Match the hash to its label:
 |---|---|
 | `authority_control_missing` | `sha256:ace28b6e3470e2f5351a7b47cd67562829124903550a18f71c7a614d6c5cb898` |
 | `privacy_control_missing` | `sha256:ee1bbda14beb581a856f01377bc4f99ae20a67027768b44afc0fec0d16ab720f` |
-| `privacy_classification_failed` | `sha256:eb9a2cfa8cab96c6cee0eab15377b489ba143ae27a68b54cc284dbb053225b1f` |
+| `privacy_rescrub_failed` | `sha256:e83b025015f2fd2d2bd7eeed3c9f79d975764f4407902753a11d5ede2e703347` |
 
 To check a hash, compute it from the label:
 `printf %s authority_control_missing | shasum -a 256`.
 
-The stored source is the content after the boundary's re-scrub, and the
-boundary's findings feed Admission's privacy risk. The replay identity does
-not change: `request_content_hash` is the hash of the raw request, so a
-retry of the same bytes replays the same run and does not call the boundary
-again. `approved_content_hash` is the hash of the stored, transformed
-content. Score and exports read that content only.
+The stored source is the content after the deterministic rescrub; the
+approved content, which is all that Score and exports read, is after the
+classifier. The deterministic rescrub's findings feed Admission's privacy
+risk. The replay identity does not change: `request_content_hash` is the
+hash of the raw request, so a retry of the same bytes replays the same run
+and calls neither half of the boundary again. `approved_content_hash` is the
+hash of the approved content, which Review derives from the privacy pass's
+output.
 
 The authority provider and the privacy boundary are dependencies like the
 scorer and the index. An unqualified one refuses startup with
@@ -1647,30 +1665,263 @@ backend tag, as `main` pairs them (`TRACE_PRIVACY_FILTER_BACKEND`). Over the
 no-op adapter, which is the `none` backend's, it neither classifies prose
 PII nor counts as qualified, so both refusals apply to it.
 
+### The privacy pass at the start of Review
+
+When a worker dispatches a run whose next phase is Review and the run has no
+recorded privacy pass, the server runs the pass before it calls the bundle's
+Review policy. The pass is the server's, not a policy: a bundle cannot opt
+out of it, and it runs whatever the bundle's Review policy does.
+
+1. Load. It reads the stored source (the envelope after the deterministic
+   rescrub) and calls the boundary's classifier half (`rescrub_classifier`)
+   on it, bounded by the pass timeout below.
+2. Store. It writes the classifier's output as a new encrypted object. The
+   object key is per attempt, and the attempt stages a `privacy-pass` row in
+   `pipeline_attempt_artifacts` before it writes, so an attempt that never
+   commits is removed by the attempt sweep ("The attempt artifact sweep").
+   The object ref is a `review_snapshot` ref whose id is derived from the
+   run id alone, with `created_by_job_id` set to the run id (Review's
+   approved ref has none).
+3. Record. In one transaction, under the run's live lease, it inserts the
+   object ref, moves the staged row to `committed`, and records the pass on
+   the run (V117): `privacy_pass_object_ref_id`, `privacy_pass_content_hash`
+   (the hash of the output's plaintext), `privacy_pass_source_hash` (the hash
+   of the source bytes it read), `privacy_pass_residual_risk_basis` (the
+   receipt's and the classifier's conditions, merged, as labels),
+   `privacy_pass_outcome` (`cleared` or `escalated`) and
+   `privacy_pass_recorded_at`. The same transaction writes the
+   post-classifier `privacy_risk`, `residual_risk_basis`, `redaction_counts`
+   and `redaction_pipeline_version` back to the submission row. It changes
+   neither the run's attempt count nor its phase, nor the submission's
+   status.
+4. Hand off. The Review policy gets the output's bytes as its source
+   artifact. Review's derived record names the pass object as its input.
+
+The record holds ids, hashes, labels and timestamps only, and the pass logs
+labels and hashes only, never envelope text or classifier spans.
+
+**Once per run.** A pass recorded on the run is never run again: not after a
+crash, not after a human assessment, not after a restore. The classifier
+call itself can run more than once. A crash before the record transaction
+repeats it, and so does a live worker that loses its lease mid-pass while a
+second worker reclaims the run. Exactly one result is recorded: the record
+transaction needs the live lease and a run with no pass yet. The losing
+attempt's record is refused (a stale lease, or
+`privacy_pass_already_recorded`), and its object is deleted, or swept from
+its staged row. A crash after the record and before the Review policy
+costs one Review attempt; the next dispatch reads the recorded output and
+makes no classifier call.
+
+**Escalation.** The pass compares two risks on Admission's scale. The
+receipt-time risk is the submission row's stored risk and basis as the
+receipt wrote them, mapped the way the receipt maps them for Admission: a
+`medium` whose only basis is `consent_content_flag` is Low. The pass's risk
+is the classifier output's risk with the merged basis, mapped the same way.
+The outcome is `escalated` when the pass's risk is strictly above the
+receipt-time risk, and `cleared` otherwise. So a run Admission admitted (at
+Low) escalates at Medium or High, and a run Admission quarantined (at
+Medium) escalates at High only. A pass-time High is held for a human like
+Medium, never rejected by the pass; a receipt-time High is still rejected by
+Admission (`privacy_risk_rejected`). The server parks an escalated run for a
+human, whatever Admission decided ("Quarantined runs and human review"). A
+`cleared` run goes to the Review policy with the pass output, as an
+Admission-admitted or Admission-quarantined run did before.
+
+**A human decision on an escalated run.**
+
+- A rejection of an escalated run that Admission admitted is committed by
+  the server, not by the bound Review policy, which ignores a human
+  assessment on an admitted run. The Review outcome is `Rejected` with the
+  assessment's reason; its evidence names the pass output's hash as the
+  source and the assessment's `evidence_hash`; its `evaluation.rule_id` is
+  `privacy_pass_human_review_rejected_v1`. The run ends `complete` and the
+  submission `rejected`, as for any Review rejection. An escalated run that
+  Admission quarantined is decided by the bound Review policy, as before.
+- An approval of an escalated run goes through the bound Review policy with
+  the pass output. The approving commit also writes the approving
+  assessment's `evidence_hash` and its resolved reasons on the run
+  (`privacy_pass_approval_assessment_hash`,
+  `privacy_pass_approval_resolved_reasons`), so the approved outcome is
+  linked to the human decision. A run whose pass did not escalate keeps both
+  NULL.
+
+**Approval needs a pass.** A run received after V117, by any binary, has
+`privacy_pass_required = TRUE` (the column's default); a run from before
+V117 has FALSE and keeps today's behaviour. Review's approving commit
+refuses a `privacy_pass_required` run that has no recorded pass, as
+`privacy_pass_missing`, and writes nothing. The CHECK
+`pipeline_runs_privacy_pass_before_approval` refuses any write that gives
+such a run an approved revision without a pass, which also stops a binary
+that lacks the commit's guard from approving a run that has no pass. It
+does not stop such a binary approving a run whose pass is recorded: the
+CHECK sees only that a pass exists, not which object Review read ("Rolling
+back below the privacy pass"). A reviewer cannot list, claim or assess such
+a run until its pass is recorded.
+
+**Failure.** A classifier error or a classifier call past the timeout is
+`privacy_classification_failed`, a charged Review attempt. The next attempt
+is due 30, 60, 120 and 240 seconds later (`30 s x 2^(attempt - 1)`, the
+backoff of `main`'s PII backstop), and after the run's fifth attempt it is
+`failed` with `privacy_classification_failed`, which is terminal. The pass
+never falls back to the deterministic output, and Review never runs on the
+source without a pass. The contributor status of such a run reads
+`quarantined` ("Compatibility credit"). A runtime with no privacy boundary
+cannot run the pass: the run waits in `retry` with `privacy_control_missing`,
+uncharged, like the other deployment gaps in "Settle failures and
+settlement legs", until a boundary is injected.
+
+**Timeout.** The classifier call is bounded by
+`min(900 s, Review lease x 4 - 60 s)`. Four is the lease renewal cap
+(`PIPELINE_LEASE_RENEWAL_CAP_FACTOR`), and the 60 seconds are kept for the
+source read, the store, the record and Review's own commit. At the default
+Review lease (300 s) the bound is 900 s. With a boundary that classifies
+prose PII, a Review lease under 30 s leaves less than 60 s for the
+classifier, and the pipeline service refuses to build with
+`pipeline_lease_config_invalid`. A boundary that does not classify is
+bounded by the 900 s alone.
+
+**`redaction_hash` stays the receipt's.** The pass writes the submission's
+risk, basis, redaction counts and redaction pipeline version, and leaves its
+`redaction_hash` as the deterministic envelope's. `main`'s PII backstop
+refreshes the hash; the pipeline does not, on purpose. A pipeline withdrawal
+writes its tombstone from that hash, and a later receipt checks tombstones
+against the hash of its own deterministic envelope, so a post-classifier
+hash would let a withdrawn trace be received again. And V68's trigger
+revokes every token bundle of a submission whose `redaction_hash` changes.
+
+**Deletion.** The pass object is one of the submission's objects: a
+withdrawal, a revocation and a retention purge invalidate its ref and queue
+its payload deletion with the others ("Withdrawal follow-ups and index
+invalidation", "Retention of pipeline submissions").
+
+#### Rolling back below the privacy pass
+
+A binary from before this change (V116 code) on a V117 database reads every
+row the new binary writes: it reads run columns by name, and the pass ref
+uses an existing artifact kind. Three things need an operator first.
+
+- **Staged pass rows.** The old binary does not know the `privacy-pass`
+  artifact. Its attempt sweep fails its whole pass with
+  `pipeline_attempt_artifact_kind_unrecognized` on a `staged` row of it.
+- **Runs that need a pass.** The old binary cannot approve a
+  `privacy_pass_required` run that has no pass: the CHECK refuses it. It
+  does not make such a run wait, though. The refusal is a database error,
+  which the old dispatch charges as `minimal_policy_failed` on its 50 ms
+  doubling backoff, so the run ends `failed`/`attempts_exhausted`, which is
+  terminal, about a second after it reaches an approval at Review, and its
+  approved object is deleted. That is every Admission-admitted run received
+  after V117 that has no pass yet, and every Admission-quarantined one once
+  it has an approving assessment. A receipt the old binary takes still gets
+  `privacy_pass_required = TRUE` from the column default and reaches Review.
+- **Runs whose pass is recorded and whose Review has not committed.** The
+  old binary's Review reads the run's source, not the pass output, and
+  approves it. Since V117 the source is the receipt's deterministic
+  envelope, which the classifier never saw, so any prose PII the pass
+  removed is in the approved revision, in Score's input and in exports. The
+  CHECK does not refuse it: it requires only that a pass is recorded. The
+  old binary's review queue does not look at the pass either. Examples are
+  an Admission-quarantined run parked `awaiting_review` after its pass, an
+  escalated run a reviewer approved that is back in `pending`, and an
+  Admission-admitted run whose Review commit failed after its pass was
+  recorded (`retry` at Review).
+
+Before rolling back below this revision:
+
+1. With the new binary still running, count the exposed runs per tenant.
+   This is every run still at Review that needs a pass, with a pass
+   recorded or not: the second and third items above both concern it.
+   It also counts runs Review would reject, which is deliberate:
+
+   ```sql
+   SELECT count(*) FROM pipeline_runs
+    WHERE next_phase = 'review' AND privacy_pass_required
+      AND approved_object_ref_id IS NULL;
+   ```
+
+   and list the bundles they are bound to:
+
+   ```sql
+   SELECT DISTINCT bundle_id FROM pipeline_runs
+    WHERE next_phase = 'review' AND privacy_pass_required
+      AND approved_object_ref_id IS NULL;
+   ```
+
+2. Suspend the Review policy ("Suspend a policy": `phase` `review`,
+   `action` `suspend`) of every bundle that query lists, and of the
+   tenant's active bundle. A run under a suspended Review policy
+   waits in `retry` with `bundle_policy_not_runnable`, uncharged. Or stop
+   every process that runs the pipeline workers for the length of the
+   rollback. `contain` is not a substitute: it refuses new receipts and does
+   not stop dispatch.
+3. Let the new binary's attempt sweep drain the staged pass rows until this
+   is 0 for every tenant. A row is due at its `cleanup_after`, four Review
+   leases plus one hour after it was staged, so at the default Review lease
+   the last one is due about 80 minutes after the last Review dispatch:
+
+   ```sql
+   SELECT count(*) FROM pipeline_attempt_artifacts
+    WHERE artifact = 'privacy-pass' AND state = 'staged';
+   ```
+
+4. Roll back. After the roll-forward, resume the suspended policies.
+
+Before deploying this revision, count the runs whose human assessment could
+be superseded by the pass ("Quarantined runs and human review"), per tenant.
+This runs on the V116 database, so it names no V117 column:
+
+```sql
+SELECT count(*) FROM pipeline_runs r
+  JOIN pipeline_review_assessments a USING (tenant_id, run_id)
+ WHERE r.next_phase = 'review'
+   AND r.state IN ('pending', 'retry', 'awaiting_review');
+```
+
+`pipeline_runs` has forced row security, so a plain operator session with no
+tenant context sees no rows and every count reads 0. Run each query per
+tenant, in one session, after
+`SELECT set_config('trace_commons.trace_tenant_id', '<tenant>', false)`, or
+under a role with `BYPASSRLS`.
+
 ## Quarantined runs and human review
 
-A run Review quarantines with no human assessment yet is parked in the
-`awaiting_review` state, with `last_error_label = review_assessment_required`.
+A run is parked in the `awaiting_review` state for one of two causes:
+
+- Review quarantines it (Admission quarantined it) and it has no human
+  assessment yet: `last_error_label = review_assessment_required`.
+- The privacy pass escalated it ("The privacy pass at the start of Review")
+  and it has no current human assessment:
+  `last_error_label = privacy_pass_review_required`. The server parks it
+  before the Review policy is called, whatever Admission decided.
+
 No claim query selects that state, so a parked run is not claimed and does
 not retry hourly forever, and it is not charged: parking gives the claim's
-attempt back the same way a transient retry does.
+attempt back the same way a transient retry does. A run that needs a privacy
+pass (`privacy_pass_required`) is not listed, claimable or assessable until
+its pass is recorded, which takes one worker dispatch after the receipt.
 
 A reviewer moves a parked run on through three routes. Each route needs the
 review credential (a `reviewer` or `admin` token) of the run's tenant, and
 answers `404` when no pipeline runtime is injected:
 
 - `GET /v1/review/pipeline/quarantine?limit=N` lists the tenant's
-  quarantined runs that wait for an assessment, oldest first, with each
-  run's Admission reason (default 50 runs).
+  quarantined or escalated runs that wait for an assessment, oldest first,
+  with each run's Admission reason (default 50 runs). Each item also has
+  `hold_reason`, what holds the run (`privacy_pass_review_required` when
+  the privacy pass escalated it, else the Admission reason), and
+  `assessment_superseded` (below).
 - `POST /v1/review/pipeline/runs/{run_id}/claim` claims a run for the
   reviewer for 30 minutes and returns a `lease_token`. `404` means the run is
-  not waiting for review (it is not at Review, not quarantined, already
-  assessed, or its submission is no longer operable, for example because it
-  was withdrawn). `409` means another reviewer holds a live claim.
+  not waiting for review (it is not at Review, neither quarantined nor
+  escalated, its privacy pass is not recorded yet, already assessed, or its
+  submission is no longer operable, for example because it was withdrawn).
+  `409` means another reviewer holds a live claim.
 - `POST /v1/review/pipeline/runs/{run_id}/assessment` records the
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
-  reason label. An approval must list every Admission reason it resolves in
-  `resolved_quarantine_reasons`, or it is refused with `422`
+  reason label. An approval must list in `resolved_quarantine_reasons` every
+  hold that applies: the Admission reason (for a privacy quarantine,
+  `privacy_review_required`), if Admission quarantined the run, and
+  `privacy_pass_review_required`, if the privacy pass escalated it. An
+  approval that leaves one out is refused with `422`
   (`quarantine reason is unresolved`). A stale claim is `409`. The route
   applies `main`'s privileged-action consent check, as `main`'s review
   decision does: when the reviewer's credential or the tenant's current
@@ -1679,7 +1930,23 @@ answers `404` when no pipeline runtime is injected:
 
 An assessment moves the run back to `pending`, due at once, in the same
 transaction. The worker then runs Review with the assessment: an approval
-continues to Score, a rejection ends the run.
+continues to Score, a rejection ends the run. The privacy pass is not run
+again: Review reads its recorded output. A rejection of an escalated run
+that Admission admitted is committed by the server under
+`privacy_pass_human_review_rejected_v1`, and an approval of any escalated
+run is linked to the run's pass record ("The privacy pass at the start of
+Review").
+
+An assessment recorded before the privacy pass that escalates the run is
+ignored: Review holds the run `awaiting_review` with
+`privacy_pass_review_required` and does not apply that assessment. Only a
+run received before V117 (`privacy_pass_required` false) can reach this,
+because a later run cannot be assessed before its pass. Assessments are
+one per run and cannot be replaced, so such a run has no re-assessment
+path: the queue lists it with `assessment_superseded = true`, a claim
+answers `404`, and its exits are a withdrawal of the submission or
+containment. "Rolling back below the privacy pass" gives the pre-deploy
+query that counts the runs this can reach.
 
 The claim and assessment routes append their audit rows after the claim or
 the assessment commits. When that append fails, the route still answers the
@@ -1749,9 +2016,24 @@ not the trace's fault:
   key, or one that prepares an object under a key other than the one it
   derived (see "The attempt artifact sweep" below). The store, not the
   trace, is at fault, so neither is charged.
+- `privacy_control_missing` (Review): the runtime has no privacy boundary,
+  so the Review-start privacy pass cannot run. Review never runs on the
+  source without it. Inject a boundary; the next attempt runs the pass.
 
 An amount above a configured cap is different: the cap refuses the payment,
 the leg fails as `credit_cap_exceeded`, and the attempt is charged.
+
+A privacy classifier that fails is charged too. When the Review-start
+privacy pass's classifier errors or runs past its timeout, the attempt is
+charged as `privacy_classification_failed`, and the next one is due 30, 60,
+120 and 240 seconds later (`30 s x 2^(attempt - 1)`, the backoff of `main`'s
+PII backstop), not on the short backoff of the other charged labels. With
+the default budget of 5 attempts the run fails no sooner than seven and a
+half minutes after the first failure (450 s of backoff, plus each call),
+with `privacy_classification_failed` itself as its terminal label rather
+than `attempts_exhausted`. A worker that
+crashes mid-pass is not recorded under it: the lease sweep fails such a run
+as `attempts_exhausted`. See "The privacy pass at the start of Review".
 
 The index holds only revisions of runs that completed. A run that fails for
 good at Settle after its index write may have written entries (the write is
@@ -1886,9 +2168,10 @@ the same transaction also:
   partly written), `failed`, or `cancelled`;
 - invalidates every export snapshot that carries the submission;
 - invalidates every object ref of the submission and queues the deletion of
-  each payload: the receipt's source envelope, Review's approved revision,
-  and the two objects Score stores, the index command (embeddings and
-  content hashes) and the neighbour set.
+  each payload: the receipt's source envelope, the Review-start privacy
+  pass's output, Review's approved revision, and the two objects Score
+  stores, the index command (embeddings and content hashes) and the
+  neighbour set.
 
 `main`'s revocation-propagation worker (`POST /v1/workers/revocation-propagation`)
 deletes the queued payloads from the service-owned object store, with its
@@ -2124,7 +2407,11 @@ The routes apply `main`'s export rules:
 - With `TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS` set, a request needs an
   explicit purpose and an explicit consent scope, and the snapshot holds
   only submissions with `low` privacy risk. A quarantined submission a
-  reviewer approved is left out too.
+  reviewer approved is left out too. The risk is the submission row's
+  `privacy_risk`, which the Review-start privacy pass writes with the
+  classifier's result before Review approves anything, so a submission
+  whose classifier found prose PII is left out although its receipt-time
+  risk was `low`.
 - The item limit follows `main`'s: 100 by default, never above
   `max_export_items_per_request`, and never above 500.
 - The scoped credential's and the tenant policy's consent-scope allowlists
@@ -2319,9 +2606,15 @@ pipeline block (`processing_state`). The mapping:
 | Submission status in `trace_submissions` | Run | `status` |
 |---|---|---|
 | `accepted`, `rejected`, `revoked`, `expired`, `purged`, `quarantined` | any | the same value |
-| `received` (Review has not decided) | waiting for a human review, or Admission quarantined it | `quarantined` |
+| `received` (Review has not decided) | Admission quarantined it, or it waits for a human review (the privacy pass escalated it) | `quarantined` |
 | `received` | Admission rejected it | `rejected` |
-| `received` | any other state, a failed run included | `accepted` |
+| `received` | failed with `privacy_classification_failed` (its content was never classified) | `quarantined` |
+| `received` | any other state: waiting for its privacy pass, or failed for another reason | `accepted` |
+
+A run Admission admitted reads `accepted` between the receipt and the worker
+dispatch that runs its privacy pass, and `quarantined` from that dispatch on
+if the pass escalates it. A check that reads the status right after an
+upload must wait for a worker dispatch first.
 
 Its pending points are 0 when its Trace Credit leg will not be paid:
 forfeited, failed, withheld by one of `main`'s credit checks, or a
@@ -2500,7 +2793,7 @@ for the pipeline worker, and a run parked in `awaiting_review` is released.
 An expiry deletes no payload, as `main`'s does not. A purge also invalidates
 the submission's object refs and queues one payload deletion per live object
 (reason `pipeline_retention_purge`) for `main`'s revocation-propagation
-worker, as a pipeline withdrawal does; the maintenance response counts no
+worker, as a pipeline withdrawal does, the privacy pass's output included; the maintenance response counts no
 deleted file for it. This works with no pipeline runtime injected: a runtime
 processes the queued invalidations when it runs.
 
@@ -2571,8 +2864,9 @@ would have gotten on a first success.
 ### The attempt artifact sweep
 
 A second, parallel table, `pipeline_attempt_artifacts` (V108), stages the
-objects a phase attempt writes mid-phase -- Review's approved revision,
-and Score's index command and neighbour set -- the same way
+objects a phase attempt writes mid-phase -- the Review-start privacy pass's
+output (`privacy-pass`, V117), Review's approved revision, and Score's index
+command and neighbour set -- the same way
 `pipeline_receipt_artifacts` stages the receipt's envelope. Who owns
 deleting which row is a fixed split (controller ruling R2-1):
 
@@ -2612,8 +2906,8 @@ deleting which row is a fixed split (controller ruling R2-1):
   `committed` row.
 - A phase attempt whose commit is refused, for any reason (an inoperable
   submission, a stale lease, a missing settlement adapter), deletes the
-  objects it wrote itself, best effort (Review its approved object, Score
-  its index command and neighbour set), and so does a Score attempt whose
+  objects it wrote itself, best effort (the privacy pass its output, Review
+  its approved object, Score its index command and neighbour set), and so does a Score attempt whose
   second write fails after its first. Its `staged` row stays either way;
   this sweep later finds the object already absent and drops the row with
   no delete, or deletes an object that path failed to clean up. The
@@ -2635,14 +2929,16 @@ is not. Those rows are staged with no hash:
   records, as it moves the row to `committed`, and deletes the row of an
   artifact the Score did not write (a duplicate at Score writes no index
   command). A `committed` row always has its hash; V108's guard lets only
-  the commit set a missing hash. Review stages its `approved` row with its
-  hash, and V108 refuses an `approved` row without one, so a row with no
-  hash only ever names a compatibility Score's object.
+  the commit set a missing hash. Review stages its `approved` row, and the
+  privacy pass its `privacy-pass` row, with its hash, and V117 (replacing
+  V108's check) refuses either without one, so a row with no hash only ever
+  names a compatibility Score's object.
 - Every commit that records an attempt's object must move exactly the
   `staged` row that names it: the same object key, and no hash yet or the
-  same hash. The Score commit moves one row for each object it wrote; a
-  Review approval moves its one `approved` row, and a rejection moves none;
-  a receipt's final transaction moves its one receipt row. Anything else --
+  same hash. The Score commit moves one row for each object it wrote; the
+  privacy pass's record moves its one `privacy-pass` row; a Review approval
+  moves its one `approved` row, and a rejection moves none; a receipt's
+  final transaction moves its one receipt row. Anything else --
   the row gone, or naming another object or hash -- refuses the commit as
   `pipeline_attempt_artifact_missing`. The lease was live when the commit
   checked it, and the sweep removes a row only past any lease the attempt
