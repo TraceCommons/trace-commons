@@ -661,10 +661,15 @@ The full run is long (see [Time and memory](#time-and-memory)):
   can also have `admission_test_<run8>_<NN>_pilot` and
   `admission_test_<run8>_<NN>_restored`, and the cleanup drops these too if
   they exist. `<run8>` is the run id without its first letter `q`. The run id
-  is the name of the newest directory under `.local/pipeline/runs/`.
+  is the name of the directory of the run that stopped under
+  `.local/pipeline/runs/`. Several runs can have a directory there. Find the
+  run that stopped, for example from the time of its directory.
   `<NN>` is the number of the scenario with two digits: a `compare --corpus`
-  run has `01`, and a `compare --self-test` run has `01` to `04`. To list the
-  databases that stayed, run `psql postgres://trace@127.0.0.1:<port>/postgres -qtA -c "SELECT datname FROM pg_database WHERE datname LIKE 'admission\_test\_%' OR datname LIKE 'pipeline\_test\_%'"`.
+  run has `01`, and a `compare --self-test` run has `01` to `04`.
+  The list command below shows each database of the server whose name starts
+  with `admission_test_` or `pipeline_test_`, also those of other runs and
+  of local tests. Drop only the names that contain the 8 characters
+  `<run8>` of the run that stopped. To list the databases, run `psql postgres://trace@127.0.0.1:<port>/postgres -qtA -c "SELECT datname FROM pg_database WHERE datname LIKE 'admission\_test\_%' OR datname LIKE 'pipeline\_test\_%'"`.
   To remove one, run `DROP DATABASE "<name>" WITH (FORCE);` on that server.
 - The optimized build had a peak memory of about 7.7 GB on the 12-core
   server of the measurements.
@@ -675,10 +680,10 @@ The export reads the session files of the dataset in name order. It keeps
 the first 10,000 that the translator accepts and that pass the word filter.
 For the network pin, it reads 10,128 files. It downloads each file that is
 not in the cache `.local/pipeline/hf-cache/`, 4 files at a time. The
-window is small so that the export sends fewer concurrent requests to
+download window is small so that the export sends fewer concurrent requests to
 Hugging Face while the export does not wait after an HTTP 429 (issue #1308).
-The measured times of this section were taken with a window of 16. They are
-not repeated with a window of 4.
+The measured times of this section were taken with a download window of 16.
+They are not repeated with a download window of 4.
 
 The first export of the network pin cannot complete in one run. Hugging
 Face limits a client with no token to 3,000 file requests in each window

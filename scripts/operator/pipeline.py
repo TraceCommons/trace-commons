@@ -879,7 +879,12 @@ def _compare_self_test(args, run):
        `high_risk_admission_reject` permits and its declared medium risk as
        one pair that the rule `medium_risk_privacy_review` permits, and
        nothing else: no unexplained difference, no other rule, no refused
-       receipt, no alignment loss (`compare_self_test_risk_fields`).
+       receipt, no alignment loss. A wrong count of permitted pairs gives
+       `compare_self_test_risk_fields`. The other failures give the label
+       of a run that must pass: `comparison_has_unexplained_differences`,
+       `comparison_receipt_refused`, `comparison_alignment_lost`,
+       `comparison_gate_branch_not_exercised`, or
+       `compare_self_test_pass_incomplete`.
     3. The local pin with the baseline's quality floor skewed fails
        (`compare_self_test_skew_passed`), and its report names the pair at
        which the run stopped and `quality_passed`

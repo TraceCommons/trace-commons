@@ -103,7 +103,7 @@ failure is shown.
 | Label | Cause |
 |---|---|
 | `compare_self_test_pass_incomplete` | Scenario 1, 2, or 4 passed, but it was partial or compared no trace. |
-| `compare_self_test_risk_fields` | Scenario 2 passed, but its result is not exactly one pair permitted by `medium_risk_privacy_review` and one pair permitted by `high_risk_admission_reject`, with no unexplained difference, no refused receipt, and no alignment loss. |
+| `compare_self_test_risk_fields` | Scenario 2 passed, but its result is not exactly one pair permitted by `medium_risk_privacy_review` and one pair permitted by `high_risk_admission_reject`, with no unexplained difference, no refused receipt, and no alignment loss. A wrong count of permitted pairs gives this label. The other failures of scenario 2 give the label of a run that must pass: `comparison_has_unexplained_differences`, `comparison_receipt_refused`, `comparison_alignment_lost`, `comparison_gate_branch_not_exercised`, or `compare_self_test_pass_incomplete` (a run that is partial or compared no trace). |
 | `compare_self_test_skew_passed` | Scenario 3 passed. The comparison did not find the changed floor. |
 | `compare_self_test_skew_fields` | Scenario 3 failed, but its report lacks the alignment position or `quality_passed`. |
 | `compare_self_test_not_deterministic` | Scenario 4 gave a `report_digest` that is not the digest of scenario 1. |
