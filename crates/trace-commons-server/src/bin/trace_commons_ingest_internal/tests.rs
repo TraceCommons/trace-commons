@@ -18333,6 +18333,7 @@ fn audit_mirror_normalization_rejects_noncanonical_maintenance_purpose_hash() {
         &audit_event,
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("noncanonical maintenance purpose_hash must fail closed");
 
@@ -18372,6 +18373,7 @@ fn audit_mirror_normalization_rejects_raw_maintenance_purpose() {
         &audit_event,
         StorageTraceAuditAction::Retain,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("live maintenance mirror must reject raw purpose text");
 
@@ -18668,6 +18670,7 @@ fn audit_mirror_normalization_derives_credit_hold_metadata_from_reason() {
         &audit_event,
         StorageTraceAuditAction::CreditMutate,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("credit hold metadata normalizes");
     let metadata_json = serde_json::to_value(&metadata).expect("hold metadata serializes");
@@ -18739,6 +18742,7 @@ fn audit_mirror_normalization_derives_near_credit_outbox_status_metadata_from_re
         &audit_event,
         StorageTraceAuditAction::CreditMutate,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("NEAR status metadata normalizes");
     let metadata_json = serde_json::to_value(&metadata).expect("NEAR status metadata serializes");
@@ -18921,6 +18925,7 @@ fn audit_mirror_normalization_derives_benchmark_registry_outbox_status_metadata_
         &audit_event,
         StorageTraceAuditAction::BenchmarkConvert,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("benchmark registry status metadata normalizes");
     let metadata_json =
@@ -19131,6 +19136,7 @@ fn audit_mirror_normalization_derives_trace_content_read_metadata_from_reason() 
         &audit_event,
         StorageTraceAuditAction::Read,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("trace-content read metadata normalizes");
 
@@ -19170,6 +19176,7 @@ fn audit_mirror_normalization_derives_revocation_metadata_from_reason() {
         &audit_event,
         StorageTraceAuditAction::Revoke,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect("revocation metadata normalizes");
 
@@ -19206,6 +19213,7 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
         &audit_event,
         StorageTraceAuditAction::Submit,
         StorageTraceAuditSafeMetadata::Empty,
+        false,
     )
     .expect_err("submitted audit metadata is required");
     assert!(
@@ -19221,12 +19229,46 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
             status: StorageTraceCorpusStatus::Rejected,
             privacy_risk: "low".to_string(),
         },
+        false,
     )
     .expect_err("submitted audit metadata status drift fails closed");
     assert!(
         status_drift_error
             .to_string()
             .contains("metadata status does not match")
+    );
+
+    // A `submitted` event with no status is a pipeline receipt's only:
+    // any other keeps `main`'s error.
+    let unstatused = TraceCommonsAuditEvent {
+        status: None,
+        ..audit_event
+    };
+    let received = StorageTraceAuditSafeMetadata::Submission {
+        status: StorageTraceCorpusStatus::Received,
+        privacy_risk: "low".to_string(),
+    };
+    let missing_status_error = normalize_audit_event_metadata(
+        &unstatused,
+        StorageTraceAuditAction::Submit,
+        received.clone(),
+        false,
+    )
+    .expect_err("a submitted event with no status requires a pipeline receipt");
+    assert!(
+        missing_status_error
+            .to_string()
+            .contains("requires canonical status")
+    );
+    assert_eq!(
+        normalize_audit_event_metadata(
+            &unstatused,
+            StorageTraceAuditAction::Submit,
+            received.clone(),
+            true,
+        )
+        .expect("a pipeline receipt's event with no status is received"),
+        received
     );
 }
 
@@ -30913,6 +30955,7 @@ fn legacy_mirror_row(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
     )
     .expect("legacy mirror row builds");

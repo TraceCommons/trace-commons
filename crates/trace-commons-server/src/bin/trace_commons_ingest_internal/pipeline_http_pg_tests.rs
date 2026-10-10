@@ -13965,7 +13965,7 @@ async fn a_pipeline_receipt_appends_mains_submitted_audit_event() {
 
     // 5. The backfill projection of the event is accepted.
     let (action, metadata) = audit_backfill_storage_projection(event);
-    let metadata = normalize_audit_event_metadata(event, action, metadata)
+    let metadata = normalize_audit_event_metadata(event, action, metadata, true)
         .expect("the backfill projection of the event is accepted");
     assert_eq!(action, StorageTraceAuditAction::Submit);
     assert_eq!(
@@ -13997,6 +13997,94 @@ async fn a_pipeline_receipt_appends_mains_submitted_audit_event() {
         .await
         .expect("the run reads");
     assert!(run.is_some(), "the run exists");
+}
+
+/// A `submitted` event with no status is a pipeline receipt's only for a
+/// submission with a pipeline run. The database backfill writes such an
+/// event of a pipeline submission (its stored status `received`), and
+/// refuses one of a submission with no pipeline run, as `main` refused every
+/// `submitted` event with no status before the pipeline appended one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let store = Arc::new(PgPipelineStore::new(fixture.runtime.clone()));
+    Arc::make_mut(&mut fixture.state).pipeline_store = Some(store);
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // Two file lines with no database row, as after a database restore: a
+    // `submitted` event with no status for the pipeline submission, then
+    // one for a submission with no pipeline run.
+    let file_only = |submission_id: Uuid| {
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.clone(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status: None,
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some(caller.principal_ref.clone()),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+        write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+        event
+    };
+    let pipeline_event = file_only(envelope.submission_id);
+    let legacy_event = file_only(Uuid::new_v4());
+
+    let report =
+        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
+            .await
+            .expect("the backfill runs");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    assert!(
+        rows.iter()
+            .any(|row| row.audit_event_id == pipeline_event.event_id),
+        "the pipeline submission's event is backfilled: {report:?}"
+    );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.audit_event_id == legacy_event.event_id),
+        "a legacy submitted event with no status is refused: {report:?}"
+    );
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|failure| failure.item_kind == "audit_event"
+                && failure.item_ref == legacy_event.event_id.to_string()),
+        "{report:?}"
+    );
 }
 
 /// An admitted receipt's event has no status; a receipt that Admission

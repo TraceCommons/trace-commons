@@ -1523,6 +1523,7 @@ async fn append_pipeline_payout_audit_event(
             },
             object_ref_id: None,
             actor_role_label: Some("system"),
+            pipeline_receipt: false,
         },
         "pipeline payout audit event",
     )
@@ -1667,6 +1668,7 @@ async fn append_pipeline_lifecycle_audit_event(
             metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
             object_ref_id: None,
             actor_role_label: Some("system"),
+            pipeline_receipt: false,
         },
         context,
     )
@@ -1794,6 +1796,7 @@ async fn append_pipeline_credit_audit_event(
             },
             object_ref_id: None,
             actor_role_label,
+            pipeline_receipt: false,
         };
         match in_file {
             Some(event) => {

@@ -15128,6 +15128,7 @@ async fn append_pipeline_receipt_submitted_event(
             },
             object_ref_id: Some(run.source_object_ref_id),
             actor_role_label: None,
+            pipeline_receipt: true,
         },
         "submission audit event",
     )
@@ -15385,6 +15386,7 @@ async fn submit_trace_handler(
                         metadata: StorageTraceAuditSafeMetadata::Empty,
                         object_ref_id: None,
                         actor_role_label: None,
+                        pipeline_receipt: false,
                     },
                     "idempotent submit audit event",
                 )
@@ -15977,6 +15979,7 @@ async fn revoke_submission(
             metadata: audit_metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "revocation audit event",
     )
@@ -16035,6 +16038,7 @@ async fn revoke_submission(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "revocation artifact invalidation audit event",
         )
@@ -43204,6 +43208,7 @@ async fn apply_review_decision(
             },
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "review decision audit event",
     )
@@ -64502,6 +64507,7 @@ fn submission_audit_row_mirror(
         },
         object_ref_id: Some(deterministic_trace_uuid("submitted-envelope", record)),
         actor_role_label: None,
+        pipeline_receipt: false,
     })
 }
 
@@ -66814,6 +66820,7 @@ fn review_decision_audit_row(
         },
         object_ref_id: None,
         actor_role_label,
+        pipeline_receipt: false,
     })
 }
 
@@ -66874,6 +66881,7 @@ async fn append_lifecycle_status_audit(
                 LifecycleAuditActor::Tenant => None,
                 LifecycleAuditActor::System => Some("system"),
             },
+            pipeline_receipt: false,
         },
         "lifecycle status audit event",
     )
@@ -66913,6 +66921,7 @@ async fn append_lifecycle_counts_audit(
             },
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "lifecycle counts audit event",
     )
@@ -71159,6 +71168,7 @@ fn legacy_segment_resume_row_mirror(event: &TraceCommonsAuditEvent) -> Option<Au
         },
         object_ref_id: None,
         actor_role_label: None,
+        pipeline_receipt: false,
     })
 }
 
@@ -71513,6 +71523,7 @@ async fn run_audit_chain_repair(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "audit chain repair audit event",
         )
@@ -71753,6 +71764,7 @@ async fn run_tombstone_repair(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "tombstone repair audit event",
         )
@@ -71799,6 +71811,11 @@ struct AuditRowMirror {
     /// The row's `actor_role` when the event names no role and the actor is
     /// not the tenant credential: an in-process driver, recorded as `system`.
     actor_role_label: Option<&'static str>,
+    /// The event is a pipeline receipt's `submitted` event, whose submission
+    /// has a pipeline run: an admitted receipt's event has no status (its
+    /// stored status `received` is not an audit status), which
+    /// `normalize_audit_event_metadata` accepts only for such an event.
+    pipeline_receipt: bool,
 }
 
 /// Appends `event` to the file audit log and mirrors it to the DB, with its
@@ -71953,6 +71970,7 @@ async fn append_audit_event_with_db_mirror(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "audit event",
     )
@@ -72086,6 +72104,7 @@ async fn append_single_trace_content_read_audit_row(
             metadata,
             object_ref_id,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "trace content read audit event",
     )
@@ -72174,6 +72193,11 @@ async fn revalidate_db_export_sources(
     Ok(object_ref_ids)
 }
 
+/// `mirror_audit_event_row_to_db` for a row of `main`'s own (no object ref,
+/// no role label, not a pipeline receipt). The backfill, its last caller
+/// outside the tests, builds its row itself since it marks a pipeline
+/// receipt's `submitted` event.
+#[cfg(test)]
 async fn mirror_audit_event_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -72190,6 +72214,7 @@ async fn mirror_audit_event_to_db(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
     )
     .await
@@ -72220,8 +72245,9 @@ fn audit_event_storage_write(
         metadata,
         object_ref_id,
         actor_role_label,
+        pipeline_receipt,
     } = row;
-    let metadata = normalize_audit_event_metadata(event, action, metadata)?;
+    let metadata = normalize_audit_event_metadata(event, action, metadata, pipeline_receipt)?;
     let canonical_event_json = event
         .previous_event_hash
         .as_deref()
@@ -72253,18 +72279,25 @@ fn audit_event_storage_write(
     })
 }
 
+/// `pipeline_receipt`: `event` is a `submitted` event of a submission with
+/// a pipeline run (`AuditRowMirror::pipeline_receipt`).
 fn normalize_audit_event_metadata(
     event: &TraceCommonsAuditEvent,
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
+    pipeline_receipt: bool,
 ) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
     if action == StorageTraceAuditAction::Submit && event.kind == "submitted" {
         // A pipeline receipt's event for an admitted trace has no status:
         // its stored status is `received`, which the audit status type does
-        // not have.
+        // not have. Any other `submitted` event requires its status.
         let expected_status = match event.status {
             Some(status) => storage_corpus_status(status),
-            None => StorageTraceCorpusStatus::Received,
+            None if pipeline_receipt => StorageTraceCorpusStatus::Received,
+            None => anyhow::bail!(
+                "submitted audit event {} requires canonical status",
+                event.event_id
+            ),
         };
         return match metadata {
             StorageTraceAuditSafeMetadata::Submission { status, .. }
@@ -74399,7 +74432,39 @@ async fn backfill_db_mirror_from_files(
         }
         let (action, metadata) =
             audit_backfill_storage_projection_for_records(event, &records_by_submission);
-        match mirror_audit_event_to_db(state, tenant, event, action, metadata).await {
+        // A `submitted` event with no status is written only for a
+        // submission with a pipeline run (a pipeline receipt's, for an
+        // admitted trace); any other is refused, as before the pipeline
+        // appended one. With no pipeline store none is found (fail closed).
+        let pipeline_receipt = match (
+            event.kind.as_str(),
+            event.status,
+            state.pipeline_store.as_ref(),
+        ) {
+            ("submitted", None, Some(store)) => match store
+                .submission_has_pipeline_run(&tenant.tenant_id, event.submission_id)
+                .await
+            {
+                Ok(has_run) => has_run,
+                Err(error) => {
+                    report.record_failure(
+                        "audit_event",
+                        event.event_id.to_string(),
+                        error.to_string(),
+                    );
+                    continue;
+                }
+            },
+            _ => false,
+        };
+        let row = AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+            pipeline_receipt,
+        };
+        match mirror_audit_event_row_to_db(state, tenant, event, row).await {
             Ok(()) => report.backfilled += 1,
             Err(error) => {
                 report.record_failure("audit_event", event.event_id.to_string(), error.to_string())
