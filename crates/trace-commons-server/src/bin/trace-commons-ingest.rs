@@ -71848,9 +71848,10 @@ struct AuditRowMirror {
     /// The row's `actor_role` when the event names no role and the actor is
     /// not the tenant credential: an in-process driver, recorded as `system`.
     actor_role_label: Option<&'static str>,
-    /// The event is a pipeline receipt's `submitted` event, whose submission
-    /// has a pipeline run: an admitted receipt's event has no status (its
-    /// stored status `received` is not an audit status), which
+    /// The event is a pipeline receipt's `submitted` event: set by the
+    /// receipt's own append, and by the backfill for an event whose
+    /// submission has no file record. An admitted receipt's event has no
+    /// status (its stored status `received` is not an audit status), which
     /// `normalize_audit_event_metadata` accepts only for such an event.
     pipeline_receipt: bool,
 }
@@ -72316,8 +72317,8 @@ fn audit_event_storage_write(
     })
 }
 
-/// `pipeline_receipt`: `event` is a `submitted` event of a submission with
-/// a pipeline run (`AuditRowMirror::pipeline_receipt`).
+/// `pipeline_receipt`: `event` is a pipeline receipt's `submitted` event
+/// (`AuditRowMirror::pipeline_receipt`).
 fn normalize_audit_event_metadata(
     event: &TraceCommonsAuditEvent,
     action: StorageTraceAuditAction,
@@ -74469,31 +74470,16 @@ async fn backfill_db_mirror_from_files(
         }
         let (action, metadata) =
             audit_backfill_storage_projection_for_records(event, &records_by_submission);
-        // A `submitted` event with no status is written only for a
-        // submission with a pipeline run (a pipeline receipt's, for an
-        // admitted trace); any other is refused, as before the pipeline
-        // appended one. With no pipeline store none is found (fail closed).
-        let pipeline_receipt = match (
-            event.kind.as_str(),
-            event.status,
-            state.pipeline_store.as_ref(),
-        ) {
-            ("submitted", None, Some(store)) => match store
-                .submission_has_pipeline_run(&tenant.tenant_id, event.submission_id)
-                .await
-            {
-                Ok(has_run) => has_run,
-                Err(error) => {
-                    report.record_failure(
-                        "audit_event",
-                        event.event_id.to_string(),
-                        error.to_string(),
-                    );
-                    continue;
-                }
-            },
-            _ => false,
-        };
+        // A `submitted` event with no status is a pipeline receipt's (for
+        // an admitted trace) when its submission has no file record: a
+        // legacy submission always has one, and a pipeline submission never
+        // does. The signal survives a database restore, which loses each run
+        // admitted after the backup (review of #1331, finding 1). An event
+        // with no status of a submission with a file record is refused, as
+        // before the pipeline appended one.
+        let pipeline_receipt = event.kind == "submitted"
+            && event.status.is_none()
+            && !records_by_submission.contains_key(&event.submission_id);
         let row = AuditRowMirror {
             action,
             metadata,

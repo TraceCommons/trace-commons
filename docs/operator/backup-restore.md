@@ -210,6 +210,14 @@ answers `404` there. Do these steps in this order:
    with `TRACE_COMMONS_REQUIRE_DB_RECONCILIATION_CLEAN` needs. A tenant with
    no audit event after the backup needs no backfill.
 
+   A pipeline receipt admitted after the backup has no run in the restored
+   database, and its `submitted` event in the file has no status. The
+   backfill writes that event with the status `received`, because its
+   submission has no file record (a pipeline submission never has one), and
+   then the tenant's later events. It does not need a pipeline runtime in
+   the process that runs it. The run itself is not restored: the receipt is
+   lost with the rest of the database's changes after the backup.
+
    If a tenant must be stopped before its backfill, send `contain`. It
    commits and stops the tenant's uploads, although it answers the `500`
    label. The record id of that containment is in the log's error line

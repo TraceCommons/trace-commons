@@ -14120,10 +14120,13 @@ async fn a_pipeline_receipt_appends_mains_submitted_audit_event() {
 }
 
 /// A `submitted` event with no status is a pipeline receipt's only for a
-/// submission with a pipeline run. The database backfill writes such an
+/// submission with no file record: a legacy submission always has one, and a
+/// pipeline submission never does. The database backfill writes such an
 /// event of a pipeline submission (its stored status `received`), and
-/// refuses one of a submission with no pipeline run, as `main` refused every
-/// `submitted` event with no status before the pipeline appended one.
+/// refuses one of a submission with a file record, as `main` refused every
+/// `submitted` event with no status before the pipeline appended one. The
+/// legacy record here is `purged`, so the backfill skips its submission row
+/// and the test reads only the audit rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
     let Some(mut fixture) = submitted_audit_fixture().await else {
@@ -14172,12 +14175,23 @@ async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
         event
     };
     let pipeline_event = file_only(envelope.submission_id);
-    let legacy_event = file_only(Uuid::new_v4());
+    let legacy_submission_id = Uuid::new_v4();
+    let legacy_event = file_only(legacy_submission_id);
+    let mut legacy_record = submission_record_with_principal(&caller.principal_ref);
+    legacy_record.tenant_id = tenant.clone();
+    legacy_record.submission_id = legacy_submission_id;
+    legacy_record.status = TraceCorpusStatus::Purged;
 
-    let report =
-        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
-            .await
-            .expect("the backfill runs");
+    let report = backfill_db_mirror_from_files(
+        fixture.state.as_ref(),
+        &caller,
+        &[legacy_record],
+        &[],
+        true,
+        false,
+    )
+    .await
+    .expect("the backfill runs");
     let rows = fixture
         .state
         .db_mirror
@@ -14204,6 +14218,127 @@ async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
             .any(|failure| failure.item_kind == "audit_event"
                 && failure.item_ref == legacy_event.event_id.to_string()),
         "{report:?}"
+    );
+}
+
+/// Review of #1331, finding 1 (major): a database restore loses each
+/// pipeline run admitted after the backup, and the `trace_submissions` row
+/// with it, while the audit file keeps the receipt's `submitted` event with
+/// no status. The backfill takes the event as a pipeline receipt's because
+/// the submission has no file record (a signal that survives the restore),
+/// writes it as `received`, and writes the tenant's later events, which
+/// chain from it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_backfill_writes_a_receipt_event_whose_run_a_restore_lost() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let store = Arc::new(PgPipelineStore::new(fixture.runtime.clone()));
+    Arc::make_mut(&mut fixture.state).pipeline_store = Some(store.clone());
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // The restore: the submission row and its run are gone (the run
+    // cascades with its submission).
+    {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "DELETE FROM pipeline_runs WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("delete the run");
+        tx.execute(
+            "DELETE FROM trace_submissions WHERE tenant_id = $1 AND submission_id = $2",
+            &[&tenant, &envelope.submission_id],
+        )
+        .await
+        .expect("delete the submission row");
+        tx.commit().await.expect("commit the deletes");
+    }
+    assert!(
+        !store
+            .submission_has_pipeline_run(&tenant, envelope.submission_id)
+            .await
+            .expect("the run lookup reads"),
+        "the restore left no run row"
+    );
+
+    // Two file lines with no database row: the receipt's `submitted` event
+    // with no status, then a later event of the tenant.
+    let file_only = |submission_id: Uuid, status: Option<TraceCorpusStatus>| {
+        let event = TraceCommonsAuditEvent {
+            event_id: Uuid::new_v4(),
+            tenant_id: tenant.clone(),
+            submission_id,
+            kind: "submitted".to_string(),
+            created_at: Utc::now(),
+            status,
+            actor_role: Some(TokenRole::Contributor),
+            actor_principal_ref: Some(caller.principal_ref.clone()),
+            reason: Some("auth_method=static_token".to_string()),
+            export_count: None,
+            export_id: None,
+            decision_inputs_hash: None,
+            previous_event_hash: None,
+            event_hash: None,
+        };
+        let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+        write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+        event
+    };
+    let receipt_event = file_only(envelope.submission_id, None);
+    let later_event = file_only(Uuid::new_v4(), Some(TraceCorpusStatus::Accepted));
+
+    let report =
+        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
+            .await
+            .expect("the backfill runs");
+    assert!(
+        !report
+            .failures
+            .iter()
+            .any(|failure| failure.item_kind == "audit_event"),
+        "{report:?}"
+    );
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let receipt_row = rows
+        .iter()
+        .find(|row| row.audit_event_id == receipt_event.event_id)
+        .unwrap_or_else(|| panic!("the receipt's event is backfilled: {report:?}"));
+    assert_eq!(receipt_row.action, StorageTraceAuditAction::Submit);
+    assert_eq!(
+        receipt_row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.audit_event_id == later_event.event_id),
+        "the later event, which chains from it, is backfilled: {report:?}"
     );
 }
 

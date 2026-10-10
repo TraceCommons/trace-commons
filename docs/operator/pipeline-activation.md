@@ -1671,13 +1671,15 @@ A new pipeline receipt appends `main`'s `submitted` audit event after the
 receipt commits. The event holds the uploader's principal reference, as
 `main`'s event does. An admitted receipt's event has no status, and its audit
 row says `received`. A quarantined or rejected receipt's event has that
-status. A `submitted` event with no status is written only for a submission
-with a pipeline run: the database backfill after a restore writes one only
-in a process with a pipeline runtime, and refuses one of any other
-submission, as `main` did before. Each later file line of the tenant chains
-from a refused one, so a backfill that refuses one writes none of the
-tenant's later events either: run the restore backfill of a pipeline tenant
-in a process with a pipeline runtime. The audit row holds the privacy risk that
+status. A `submitted` event with no status is written only for a pipeline
+submission, which has no file record. The database backfill after a
+restore writes such an event, with the status `received` and the risk
+`unknown`, when its submission has no file record, so a receipt admitted
+after the backup, whose run the restore lost, is written too. It refuses
+one of a submission with a file record (a legacy submission), as `main` did
+before. Each later file line of the tenant chains from a refused one, so a
+backfill that refuses one writes none of the tenant's later events either.
+The audit row holds the privacy risk that
 the receipt stored. The
 privacy pass at Review can change the stored risk later. The row usually
 keeps the receipt's risk (a pass that ends before the route reads the risk
