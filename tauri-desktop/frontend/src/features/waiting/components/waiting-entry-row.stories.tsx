@@ -23,7 +23,7 @@ const readyEntry = {
   attestation: "attested" as const,
   attestation_copy: {
     state_line:
-      "This session carries a checkable copy of its last model call.",
+      "This trace carries a checkable copy of its last model call.",
     reason_line: null,
     tone: "clear" as const,
   },

@@ -144,8 +144,25 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
         try serve("status", as: DaemonData.Status.self)
     }
 
-    public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
-        let all = try serve("list_pending", as: DaemonData.PendingList.self).pending
+    public func listPending(
+        projectId: String?, filter: DaemonData.PendingFilter?, order: DaemonData.PendingOrder?
+    ) async throws -> [DaemonData.QueueEntry] {
+        var all = try serve("list_pending", as: DaemonData.PendingList.self).pending
+        if filter == .idleSessions {
+            // The recorded replies do not say which entries are idle; the
+            // set's own `idle_sessions.count` waiting entries stand in, so a
+            // preview of the filtered list shows as many rows as the card
+            // named. A fixture, not the daemon's rule.
+            let idle = try serve("status", as: DaemonData.Status.self).idleSessions?.count ?? 0
+            all = Array(all.filter { $0.state == "pending" && !$0.heldForReview }.prefix(idle))
+        }
+        if order == .suggested {
+            // Mission fit first, as the daemon sorts; ties keep queue order.
+            all = all.enumerated().sorted { a, b in
+                let (x, y) = (a.element.missionFit ?? 0, b.element.missionFit ?? 0)
+                return x != y ? x > y : a.offset < b.offset
+            }.map(\.element)
+        }
         guard let projectId else { return all }
         // The daemon knows a project from its policy (the `list_projects`
         // rows) and from the queue; anything else it refuses, as here.
@@ -155,6 +172,50 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
             throw DaemonDataError.daemon(code: "bad_params", message: "project-id-unrecognized")
         }
         return all.filter { $0.projectId == projectId }
+    }
+
+    // MARK: Nudges
+
+    /// Every nudge write this client answered, as `method params`, in
+    /// order. The sets are fixtures: none of them changes a reply.
+    public var nudgeCalls: [String] { lock.withLock { recordedNudgeCalls } }
+    private var recordedNudgeCalls: [String] = []
+
+    private func recordNudge(_ call: String) throws {
+        guard set != .coreDown else { throw DaemonDataError.unreachable }
+        lock.withLock { recordedNudgeCalls.append(call) }
+    }
+
+    public func nudgeOpened(_ kind: NudgeSurface.Kind) async throws {
+        try recordNudge("nudge_opened \(kind.rawValue)")
+    }
+
+    public func nudgeDecline(_ kind: NudgeSurface.Kind) async throws {
+        guard kind != .verdictsLanded else {
+            throw DaemonDataError.daemon(code: "bad_params", message: "nudge-kind-not-declinable")
+        }
+        try recordNudge("nudge_decline \(kind.rawValue)")
+    }
+
+    public func setSuggestionsEnabled(_ on: Bool) async throws {
+        try recordNudge("set_suggestions_enabled \(on)")
+    }
+
+    public func setMenuBarMarkEnabled(_ on: Bool) async throws {
+        try recordNudge("set_menu_bar_mark_enabled \(on)")
+    }
+
+    public func setNotificationsEnabled(_ on: Bool) async throws {
+        try recordNudge("set_notifications_enabled \(on)")
+    }
+
+    public func setNotifyKind(_ kind: String, on: Bool) async throws {
+        try recordNudge("set_notify_kind \(kind) \(on)")
+    }
+
+    public func dismissNotifyOffer(kind: String) async throws {
+        guard let key = NudgeSettings.offerMarker(kind: kind) else { throw NudgeSettings.noOfferForKind }
+        try recordNudge("set_settings \(key) false")
     }
 
     public func listKept() async throws -> [DaemonData.QueueEntry] {
@@ -234,8 +295,11 @@ public final class SampleDaemonClient: DaemonDataClient, @unchecked Sendable {
     /// Approves every pending entry of that folder in this set, except
     /// those held for a person (`heldForReview`), as the daemon's group
     /// selector does. A Manual Scrub check hold is approved with the rest.
-    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
-        let pending = try await listPending(projectId: projectId)
+    /// A `filter` narrows the folder as `listPending` does.
+    public func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse {
+        let pending = try await listPending(projectId: projectId, filter: filter, order: nil)
         let held = pending.filter(\.heldForReview).count
         let json = SampleDaemonData.approvedGroup(approved: pending.count - held, excludedHeld: held)
         return try decode(json, method: "approve", as: ApproveResponse.self)

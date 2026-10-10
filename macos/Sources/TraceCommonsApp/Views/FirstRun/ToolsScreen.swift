@@ -497,10 +497,9 @@ struct AddToolTile: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                // A refused folder: the failed request's red line.
                 if adding.refused {
-                    Text(ToolsScreenLayout.refusal(copy.tools))
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
+                    GlassAlert(ToolsScreenLayout.refusal(copy.tools))
                 }
             }
             .padding(.vertical, GlassTokens.Space.cardPaddingVertical)

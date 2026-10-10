@@ -71,12 +71,12 @@ struct ConsentSection: View {
                 group(SettingsLegacyWords.alwaysIncluded, alwaysOn, granted: granted)
                 group(SettingsLegacyWords.optionalEachOne, optional, granted: granted)
                 group(SettingsLegacyWords.credit, credit, granted: granted)
+                // A refused write, unboxed, under the ticks it is about
+                // (Ron, 2026-10-09).
                 if model.consentWriteRefused {
-                    GlassNotice(tone: .outside) {
-                        Text(ConsentScopeRows.refusalLine(
-                            settings: TCSourceChecks.settingsCopy()?.consentSaveFailed,
-                            screens: ConsentScopeRows.screens))
-                    }
+                    GlassAlert(ConsentScopeRows.refusalLine(
+                        settings: TCSourceChecks.settingsCopy()?.consentSaveFailed,
+                        screens: ConsentScopeRows.screens))
                 }
                 caption(SettingsLegacyWords.nothingPreselected)
             }

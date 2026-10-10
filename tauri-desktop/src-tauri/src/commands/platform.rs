@@ -309,7 +309,7 @@ fn picker_result(output: std::process::Output) -> Result<String, String> {
 pub(crate) async fn pick_directory(purpose: String) -> Result<String, String> {
     let prompt = match purpose.as_str() {
         "repository" => "Choose a Git repository",
-        "source_root" => "Choose a session folder",
+        "source_root" => "Choose a trace folder",
         _ => return Err("directory-picker-purpose-invalid".to_owned()),
     };
 

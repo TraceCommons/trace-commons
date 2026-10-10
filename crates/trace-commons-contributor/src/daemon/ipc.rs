@@ -213,6 +213,39 @@ pub const ERR_UNKNOWN_ENTRY_ID: &str = "unknown-entry-id";
 pub const ERR_BAD_VERDICT: &str = "outcome-invalid";
 /// `approve`'s `correction` was not a string.
 pub const ERR_BAD_CORRECTION: &str = "correction-invalid";
+/// `nudge_decline` / `nudge_opened` without a string `kind`.
+pub const ERR_NUDGE_KIND_REQUIRED: &str = "nudge-kind-required";
+/// A `kind` this daemon has no suggestion for. Refused rather than stored,
+/// so every ledger key is a known label.
+pub const ERR_NUDGE_KIND_UNRECOGNIZED: &str = "nudge-kind-unrecognized";
+/// A `subject` for a kind that takes none (no kind takes one yet).
+pub const ERR_NUDGE_SUBJECT_UNRECOGNIZED: &str = "nudge-subject-unrecognized";
+
+/// `list_pending` was given a `filter` this daemon does not know.
+pub const ERR_LIST_FILTER_UNRECOGNIZED: &str = "filter-unrecognized";
+
+/// `list_pending` was given a `filter` that is not a string.
+pub const ERR_LIST_FILTER_INVALID: &str = "filter-invalid";
+
+/// `list_pending` was given an `order` this daemon does not know.
+pub const ERR_LIST_ORDER_UNRECOGNIZED: &str = "order-unrecognized";
+
+/// `list_pending` was given an `order` that is not a string.
+pub const ERR_LIST_ORDER_INVALID: &str = "order-invalid";
+
+/// `list_pending {filter}`: nudge U4's idle filter, exactly the set
+/// `status.idle_sessions.count` counts. The kind's own label.
+const LIST_FILTER_IDLE_SESSIONS: &str = "idle_sessions";
+
+/// `list_pending {order}`: queue insertion order, the same as no `order`.
+const LIST_ORDER_PARAM_QUEUE: &str = "queue";
+
+/// `list_pending {order}`: the suggested order (nudge value addendum, 2.2;
+/// [`super::queue::sort_suggested`]).
+const LIST_ORDER_PARAM_SUGGESTED: &str = "suggested";
+/// `nudge_decline` for a kind with no "Not now": `verdicts_landed` is news,
+/// not an ask.
+pub const ERR_NUDGE_KIND_NOT_DECLINABLE: &str = "nudge-kind-not-declinable";
 /// `approve` carried a correction without a `partly` or `failed` outcome.
 ///
 /// The shells only show the field for those two verdicts, and the same rule
@@ -231,6 +264,10 @@ pub const ERR_CORRECTION_TOO_LONG: &str = "correction-too-long";
 /// and every one of them would carry it into the corpus as the
 /// contributor's own words.
 pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
+/// `approve {entry_id, filter}`. A filter narrows a group (`project_id` or
+/// `all`) to what a filtered list shows; one entry is already one entry, and
+/// a filter it could fail would only hide which of the two was meant.
+pub const ERR_FILTER_NEEDS_GROUP: &str = "filter-needs-group";
 /// `approve` while a "Never" contribution override is in force (#1208). The
 /// override promises nothing is queued or sent; clearing it lets the
 /// contributor approve again.
@@ -354,6 +391,12 @@ pub const METHODS: &[&str] = &[
     "dismiss",
     "arming_suggestion",
     "decline_arming",
+    "nudge_decline",
+    "nudge_opened",
+    "set_suggestions_enabled",
+    "set_menu_bar_mark_enabled",
+    "set_notifications_enabled",
+    "set_notify_kind",
     "enroll",
     "prepare_admission_session",
     "near_account_capabilities",
@@ -501,6 +544,14 @@ pub const DEV_DRY_RUN_LOCAL_METHODS: &[&str] = &[
     "project_automatic_copy",
     "arming_suggestion",
     "decline_arming",
+    // Nudge S3: each writes only the daemon state or settings file.
+    "nudge_decline",
+    "nudge_opened",
+    "set_suggestions_enabled",
+    // Nudge A2: each writes only the settings file, through `set_settings`.
+    "set_menu_bar_mark_enabled",
+    "set_notifications_enabled",
+    "set_notify_kind",
     // `auto_upload` is refused inside these two; the other modes only stop
     // sends.
     "set_project_mode",
@@ -570,6 +621,123 @@ pub const EVENT_INFERENCE_CALL_ADDED: &str = "inference_call_added";
 /// `{}`: a pulse to re-read `insights_glance`, carrying no figure. See
 /// `insights_glance::publish_usage_changed`.
 pub const EVENT_USAGE_CHANGED: &str = "usage_changed";
+/// Verdict news landed (nudge U2): `refresh_history` found submissions that
+/// newly reached accepted, held for privacy review or final credit, against
+/// the daemon's own high-water mark. Counts only: `{newly_accepted,
+/// newly_held, newly_final}`. Always followed by `status_changed`.
+pub const EVENT_HISTORY_CHANGED: &str = "history_changed";
+
+/// A standalone re-engagement notification (nudge design section 5, "Knowing
+/// a standalone will render"). Opt-in: written only to a connection whose
+/// `subscribe` named it in `accepts`, so an older shell, which sends no
+/// `accepts`, never receives a frame it cannot draw.
+pub const EVENT_REENGAGE_DUE: &str = "reengage_due";
+
+/// Events a subscriber receives only after naming them in `subscribe`'s
+/// `accepts`. Every other event goes to every subscriber, as it always has.
+pub const OPT_IN_EVENTS: &[&str] = &[EVENT_REENGAGE_DUE];
+
+/// Whether `event` is withheld from a subscriber that did not accept it.
+pub fn event_is_opt_in(event: &str) -> bool {
+    OPT_IN_EVENTS.contains(&event)
+}
+
+/// `subscribe` carried an `accepts` that is not an array of strings.
+pub const ERR_SUBSCRIBE_ACCEPTS_INVALID: &str = "subscribe-accepts-invalid";
+
+/// `subscribe`'s optional `accepts`: which [`OPT_IN_EVENTS`] this
+/// subscriber can render.
+///
+/// `Ok(None)` when `params` has no `accepts` (or it is `null`), which is
+/// every shell written before it existed: such a subscriber receives no
+/// opt-in event, exactly as today. Names this daemon does not know are
+/// dropped rather than refused, so a newer shell can declare a later event
+/// to an older daemon; ordinary event names are dropped too, since every
+/// subscriber already receives them. Anything other than an array of
+/// strings is refused, fail closed.
+fn subscribe_accepts(params: &serde_json::Value) -> Result<Option<Vec<&'static str>>, ()> {
+    let raw = match params.get("accepts") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(raw)) => raw,
+        Some(_) => return Err(()),
+    };
+    let mut accepted = Vec::new();
+    for name in raw {
+        let name = name.as_str().ok_or(())?;
+        if let Some(known) = OPT_IN_EVENTS.iter().find(|e| **e == name) {
+            if !accepted.contains(known) {
+                accepted.push(*known);
+            }
+        }
+    }
+    Ok(Some(accepted))
+}
+
+/// Whether `accepts` is a value `subscribe` takes as its `accepts`: an
+/// array of strings (names this build does not know are fine). A host-side
+/// caller (the FFI's `tc_subscribe_with_accepts`) checks with this before it
+/// subscribes, so a refusal is reported the same way on every path.
+pub fn subscribe_accepts_valid(accepts: &serde_json::Value) -> bool {
+    subscribe_accepts(&serde_json::json!({ "accepts": accepts })).is_ok()
+}
+
+/// Live socket subscribers per opt-in event they accepted. Shared between
+/// [`DaemonShared`] and every [`RendererDeclaration`], which is what lets a
+/// declaration retract itself when its connection ends.
+#[derive(Default)]
+pub(crate) struct RendererCounts(Mutex<std::collections::BTreeMap<&'static str, usize>>);
+
+impl RendererCounts {
+    fn count(&self, event: &str) -> usize {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(event)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+/// One subscriber's `accepts`, counted for as long as it lives. Dropped
+/// when the subscriber ends, however it ends, or when the same connection
+/// subscribes again, so the count can never outlive the subscriber.
+pub struct RendererDeclaration {
+    counts: Arc<RendererCounts>,
+    events: Vec<&'static str>,
+}
+
+impl RendererDeclaration {
+    fn new(counts: &Arc<RendererCounts>, events: Vec<&'static str>) -> Self {
+        let mut map = counts.0.lock().unwrap_or_else(|p| p.into_inner());
+        for event in &events {
+            *map.entry(event).or_insert(0) += 1;
+        }
+        drop(map);
+        Self {
+            counts: Arc::clone(counts),
+            events,
+        }
+    }
+
+    /// Whether this subscriber declared `event`.
+    pub fn accepts(&self, event: &str) -> bool {
+        self.events.contains(&event)
+    }
+}
+
+impl Drop for RendererDeclaration {
+    fn drop(&mut self) {
+        let mut map = self.counts.0.lock().unwrap_or_else(|p| p.into_inner());
+        for event in &self.events {
+            if let Some(n) = map.get_mut(event) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    map.remove(event);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Request {
@@ -713,6 +881,20 @@ pub struct DaemonShared {
     /// long poll makes it most likely to arrive.
     pub shutdown_signal: Arc<Notify>,
     pub events: broadcast::Sender<Event>,
+    /// Live socket subscribers per opt-in event they declared in
+    /// `subscribe`'s `accepts`; see [`Self::has_renderer`]. In-process
+    /// subscribers (the FFI's `tc_subscribe` without a socket) never count
+    /// and never receive an opt-in event.
+    pub(crate) renderers: Arc<RendererCounts>,
+    /// The parts of `status` the clock alone can move, as the last daemon
+    /// tick read them; `None` until the first tick. See
+    /// [`Self::publish_time_driven_status`].
+    time_driven_status: Mutex<Option<serde_json::Value>>,
+    /// The estimate table readers were last told is in force: the table and
+    /// its basis as [`EstimateTableSlot::in_force`] gave them. Starts as the
+    /// built-in table, which the slot starts as. A leaf lock. See
+    /// [`Self::publish_estimate_in_force_change`].
+    estimate_in_force: Mutex<EstimateInForce>,
     /// The daemon-wide bound on concurrent preview work.
     ///
     /// `Arc` rather than a plain field because the worker pool outlives any
@@ -839,6 +1021,208 @@ pub struct DaemonShared {
     /// `insights_counter_pass` setting is off (owner decision D4, open). See
     /// `daemon::insights_week`.
     pub(crate) insights_counter: super::insights_week::CounterPass,
+    /// The contribution-mission catalogue behind `list_pending`'s
+    /// `mission_fit`. In memory only and `None` until something writes it,
+    /// which in production nothing does until Z7/Z8's server catalogue
+    /// exists; see [`super::mission_matching::MissionCatalogueSlot`]. A leaf
+    /// lock: never held while any other lock here is taken.
+    pub(crate) mission_catalogue: Mutex<Option<super::mission_matching::MissionCatalogueSlot>>,
+    /// The calibration table behind `credit_estimate` on `list_pending` rows
+    /// and on `status` (nudge value addendum, 4.6). Starts as the protocol's
+    /// built-in table (OWNER DECISION E2). The table is public and not
+    /// account-scoped, so `unenroll` leaves it. A leaf lock: read by cloning
+    /// before any other lock here is taken.
+    pub(crate) estimate_table: Mutex<EstimateTableSlot>,
+    /// Previews being built outside [`Self::previews`]: the preview sheet,
+    /// a card and a witness review, each counted for as long as it builds
+    /// (see [`Self::preview_build_started`]). With the scheduler's own
+    /// queue it answers [`Self::preview_building`].
+    preview_builds: std::sync::atomic::AtomicUsize,
+    /// Waiting entries the local-estimate backfill tried and could not
+    /// give features (their session gone or unreadable), so a pass does not
+    /// spend its bound on them again. In memory only: a restart tries them
+    /// once more.
+    pub(crate) backfill_tried: Mutex<std::collections::HashSet<Uuid>>,
+}
+
+/// Counts one preview build on [`DaemonShared`] for as long as it lives.
+pub(crate) struct PreviewBuildGuard<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl Drop for PreviewBuildGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `credit_estimate.basis` while the built-in table is in force.
+pub const ESTIMATE_BASIS_BUILT_IN: &str = "built_in";
+/// `credit_estimate.basis` while a fetched, accepted table is in force.
+pub const ESTIMATE_BASIS_PUBLISHED: &str = "published";
+
+/// What readers render with: the table in force and its basis, without the
+/// receipt time a re-fetch renews.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EstimateInForce {
+    table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+    basis: &'static str,
+}
+
+impl EstimateInForce {
+    pub(crate) fn of(slot: EstimateTableSlot) -> Self {
+        Self {
+            table: slot.table,
+            basis: slot.basis,
+        }
+    }
+}
+
+/// The calibration table in force and where it came from.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EstimateTableSlot {
+    pub table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+    /// [`ESTIMATE_BASIS_BUILT_IN`] or [`ESTIMATE_BASIS_PUBLISHED`].
+    pub basis: &'static str,
+    /// When a fetched table was last accepted; `None` for the built-in one.
+    /// What [`Self::in_force`] ages against.
+    pub received_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl EstimateTableSlot {
+    /// The protocol's built-in one-tier table (OWNER DECISION E2).
+    #[must_use]
+    pub fn built_in() -> Self {
+        Self {
+            table: trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+            basis: ESTIMATE_BASIS_BUILT_IN,
+            received_at: None,
+        }
+    }
+
+    /// The table to render with at `now`: this one, unless it is a fetched
+    /// table older than `ESTIMATE_TABLE_MAX_AGE` (OWNER DECISION E11), or a
+    /// fetched one with no receipt time, in which case the built-in table.
+    /// Never a stale fetched table.
+    #[must_use]
+    pub fn in_force(self, now: chrono::DateTime<Utc>) -> Self {
+        if self.basis == ESTIMATE_BASIS_BUILT_IN {
+            return self;
+        }
+        let fresh = self.received_at.is_some_and(|received| {
+            now.signed_duration_since(received)
+                < crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE
+        });
+        if fresh { self } else { Self::built_in() }
+    }
+
+    /// Apply one scheduled fetch's outcome (see
+    /// [`crate::credit_estimate_table::TableFetchEffect`]): an accepted table
+    /// replaces this one, a refused one brings the built-in table back, and
+    /// anything else leaves this slot as it is.
+    pub fn apply_fetch(
+        &mut self,
+        outcome: Result<
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable,
+            crate::credit_estimate_table::EstimateTableClientError,
+        >,
+        now: chrono::DateTime<Utc>,
+    ) {
+        use crate::credit_estimate_table::TableFetchEffect;
+        match (TableFetchEffect::of(&outcome), outcome) {
+            (TableFetchEffect::Replace, Ok(table)) => {
+                *self = Self {
+                    table,
+                    basis: ESTIMATE_BASIS_PUBLISHED,
+                    received_at: Some(now),
+                };
+            }
+            (TableFetchEffect::FallBack, _) => *self = Self::built_in(),
+            _ => {}
+        }
+    }
+}
+
+/// The fewest tiers a table needs before an estimate is drawn. A one-tier
+/// band is the same for every session, so it tells a contributor nothing
+/// about the one in front of them. OWNER DECISION 2026-10-08.
+pub const ESTIMATE_MIN_DRAWN_TIERS: usize = 2;
+
+/// Whether shells draw estimates made under this slot's table, and whether
+/// core copy carries an estimate clause: only a published table with at
+/// least [`ESTIMATE_MIN_DRAWN_TIERS`] tiers. On the wire as `drawn`; the
+/// estimate itself stays on the wire either way.
+#[must_use]
+pub fn estimate_is_drawn(slot: &EstimateTableSlot) -> bool {
+    slot.basis == ESTIMATE_BASIS_PUBLISHED && slot.table.tier_count() >= ESTIMATE_MIN_DRAWN_TIERS
+}
+
+/// The local estimate for one queue entry, or `None` (unknown, never 0).
+/// The one computation behind both a row's `credit_estimate` and its
+/// suggested-order tier, so the tier shown and the tier sorted on agree.
+#[must_use]
+pub fn local_credit_estimate_for(
+    e: &super::queue::QueueEntry,
+    slot: &EstimateTableSlot,
+) -> Option<trace_commons_protocol::local_credit_estimate::LocalCreditEstimate> {
+    // Never on an entry on its way or delivered: its figure is history's,
+    // or nothing (nudge value addendum, 4.7).
+    let sent = matches!(
+        e.state,
+        super::queue::QueueState::Uploading | super::queue::QueueState::Uploaded
+    ) || e.submission_id.is_some();
+    if sent {
+        return None;
+    }
+    let features = e.estimate_features.as_ref()?;
+    trace_commons_protocol::local_credit_estimate::estimate(features, &slot.table)
+}
+
+/// `credit_estimate` for one queue entry, or `None`, which a caller leaves
+/// out of the row (unknown, never 0).
+#[must_use]
+pub fn credit_estimate_value(
+    e: &super::queue::QueueEntry,
+    slot: &EstimateTableSlot,
+) -> Option<serde_json::Value> {
+    let estimate = local_credit_estimate_for(e, slot)?;
+    let mut value = serde_json::to_value(&estimate).ok()?;
+    value["basis"] = serde_json::Value::from(slot.basis);
+    value["drawn"] = serde_json::Value::from(estimate_is_drawn(slot));
+    Some(value)
+}
+
+/// `credit_estimate` summed over `subjects`, or `None` while none of them
+/// has an estimate.
+#[must_use]
+pub fn credit_estimate_sum(
+    subjects: &[&super::queue::QueueEntry],
+    slot: &EstimateTableSlot,
+) -> Option<serde_json::Value> {
+    // Sum of band ends over the subjects with an estimate (OWNER DECISION
+    // E8): wider than the band of the sum, the conservative direction. A
+    // subject without one is counted out of `known`, never summed as 0.
+    let mut low = 0.0;
+    let mut high = 0.0;
+    let mut known: usize = 0;
+    for e in subjects {
+        let Some(estimate) = credit_estimate_value(e, slot) else {
+            continue;
+        };
+        let (Some(l), Some(h)) = (estimate["low"].as_f64(), estimate["high"].as_f64()) else {
+            continue;
+        };
+        low += l;
+        high += h;
+        known += 1;
+    }
+    (known >= 1).then(|| {
+        serde_json::json!({
+            "low": low,
+            "high": high,
+            "known": known,
+            "calibration": slot.table.calibration_label(),
+            "drawn": estimate_is_drawn(slot),
+        })
+    })
 }
 
 /// `status.routing.state`: the contributor never declared a proxy.
@@ -943,13 +1327,18 @@ impl DaemonShared {
             settings.cloud_storage_unavailable = true;
             Ok::<_, anyhow::Error>(settings)
         })?;
-        if settings.scrub_check_defaulted_on_upgrade
+        if (settings.scrub_check_defaulted_on_upgrade
+            || settings.verdicts_offer_pending
+            || settings.idle_offer_pending)
             && store
                 .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)?
                 .is_none()
         {
             // Save provenance before marking the policy migration done; a
             // restart must not mistake a legacy settings-less install for fresh.
+            // The notification offers rest on the same kind of evidence (a
+            // policy or state file an older build wrote), and a new install
+            // has neither, so it still writes nothing here.
             settings.save(&store)?;
         }
         if policy.record_scrub_check_upgrade(
@@ -970,6 +1359,7 @@ impl DaemonShared {
             derived: false,
         });
         let (events, _) = broadcast::channel(256);
+        let renderers = Arc::new(RendererCounts::default());
         let paused = state.paused;
         let pin_store = store.clone();
         let managed = Mutex::new(super::managed::ManagedService::open(&store));
@@ -990,6 +1380,9 @@ impl DaemonShared {
             shutdown: AtomicBool::new(false),
             shutdown_signal: Arc::new(Notify::new()),
             events,
+            renderers,
+            time_driven_status: Mutex::new(None),
+            estimate_in_force: Mutex::new(EstimateInForce::of(EstimateTableSlot::built_in())),
             previews: Arc::new(PreviewScheduler::default()),
             routing,
             private_inference_endpoint: Mutex::new(None),
@@ -1033,6 +1426,10 @@ impl DaemonShared {
             native_identity: Mutex::new(Default::default()),
             skill_loop: Mutex::new(super::skill_loop::SkillLoopState::default()),
             insights_counter,
+            mission_catalogue: Mutex::new(None),
+            estimate_table: Mutex::new(EstimateTableSlot::built_in()),
+            preview_builds: std::sync::atomic::AtomicUsize::new(0),
+            backfill_tried: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -1719,8 +2116,60 @@ impl DaemonShared {
         });
     }
 
-    fn logged_in(&self) -> bool {
+    /// Whether at least one live socket subscriber accepts `event`.
+    ///
+    /// The attention arbiter asks this before it publishes a standalone
+    /// notification: every standalone kind renders through
+    /// [`EVENT_REENGAGE_DUE`], so it passes that name. While this is false
+    /// the item stays deferred (`no_renderer`) and spends no budget,
+    /// because no attached shell would draw it.
+    pub fn has_renderer(&self, event: &str) -> bool {
+        self.renderer_count(event) > 0
+    }
+
+    /// How many live subscribers accept `event`.
+    pub(crate) fn renderer_count(&self, event: &str) -> usize {
+        self.renderers.count(event)
+    }
+
+    /// Declare a subscriber outside the socket (the FFI's in-process
+    /// `tc_subscribe_with_accepts`) as accepting `accepts`, parsed exactly
+    /// as `subscribe`'s `accepts` is: unknown names are ignored, a value
+    /// that is not an array of strings is refused. The returned declaration
+    /// counts toward [`Self::has_renderer`] until it is dropped, so the
+    /// caller holds it for exactly as long as it delivers events.
+    pub fn declare_renderer(
+        &self,
+        accepts: &serde_json::Value,
+    ) -> Result<RendererDeclaration, &'static str> {
+        let params = serde_json::json!({ "accepts": accepts });
+        match subscribe_accepts(&params) {
+            Ok(events) => Ok(RendererDeclaration::new(
+                &self.renderers,
+                events.unwrap_or_default(),
+            )),
+            Err(()) => Err(ERR_SUBSCRIBE_ACCEPTS_INVALID),
+        }
+    }
+
+    pub(crate) fn logged_in(&self) -> bool {
         super::uploader::enrollment_is_live(&self.store)
+    }
+
+    /// Count a preview built outside the scheduler until the guard drops.
+    pub(crate) fn preview_build_started(&self) -> PreviewBuildGuard<'_> {
+        self.preview_builds
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        PreviewBuildGuard(&self.preview_builds)
+    }
+
+    /// Whether any preview is building or waiting to, through the scheduler
+    /// or directly.
+    pub(crate) fn preview_building(&self) -> bool {
+        self.preview_builds
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+            || self.previews.is_building()
     }
 
     /// Whether the daemon is currently paused, accounting for a timed pause
@@ -1803,9 +2252,107 @@ impl DaemonShared {
         }
     }
 
+    /// What `status.nudge` reads besides the queue and the gates: the
+    /// suggestion ledger, the suggestions switch and the queue TTL. Each is
+    /// taken in its own short lock, state then settings, and released before
+    /// returning, so `status_value` can call this before its policy and
+    /// queue section without nesting either under them.
+    pub(crate) fn nudge_snapshot(&self) -> NudgeSnapshot {
+        let (ledger, last_history_poll_at, verdicts_pending) = {
+            let state = self.state.lock().expect("state lock");
+            (
+                state.nudges.clone(),
+                state.last_history_poll_at,
+                state.verdicts_pending.clone(),
+            )
+        };
+        let settings = self.settings.lock().expect("settings lock");
+        NudgeSnapshot {
+            ledger,
+            suggestions_enabled: settings.suggestions_enabled,
+            queue_ttl_days: settings.queue_ttl_days,
+            last_history_poll_at,
+            history_poll_secs: settings.history_poll_secs,
+            verdicts_pending,
+            menu_bar_mark_enabled: settings.menu_bar_mark_enabled,
+            notify_idle_sessions: settings.notify.idle_sessions,
+        }
+    }
+
+    /// Publish `status_changed` when what `status` says has moved since the
+    /// last daemon tick, for the changes nothing else announces because no
+    /// request or pass made them: the clock made them. An idle threshold
+    /// crossed (`status.idle_sessions`, the halo), a "Not now" lapsing, the
+    /// news mark ageing past `NEWS_MARK_TTL`, and the history poll going
+    /// stale all move `status.nudge` or `status.idle_sessions` with time
+    /// alone, as a lapsed timed pause moves `paused` (see
+    /// [`Self::is_paused`]).
+    ///
+    /// Compares those two objects with the previous tick's. The first tick
+    /// records them and publishes nothing; a tick that finds them unchanged
+    /// publishes nothing. A change some other path already announced is
+    /// announced once more at the next tick, which costs a shell one
+    /// idempotent `status` read.
+    pub(crate) fn publish_time_driven_status(&self, now: chrono::DateTime<Utc>) {
+        let status = self.status_value_at(now);
+        let view = serde_json::json!({
+            "nudge": status.get("nudge"),
+            "idle_sessions": status.get("idle_sessions"),
+        });
+        let changed = {
+            let mut last = self
+                .time_driven_status
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = last.as_ref().is_some_and(|before| *before != view);
+            *last = Some(view);
+            changed
+        };
+        if changed {
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
+    /// Publish `queue_changed` and `status_changed` when the estimate table
+    /// in force at `now` is not the one readers were last told about, or
+    /// not `before` (what was in force just ahead of a fetch). Every
+    /// `credit_estimate` on `list_pending` and on `status` renders under the
+    /// table in force, so its change is a change to both.
+    ///
+    /// Called on every daemon tick with no `before`, which is what announces
+    /// a fetched table ageing past `ESTIMATE_TABLE_MAX_AGE`: nothing fetched,
+    /// the clock alone moved readers to the built-in table. Called after a
+    /// fetch with `before`, which announces a table re-fetched after it
+    /// expired, though the slot itself holds the same table as before.
+    pub(crate) fn publish_estimate_in_force_change(
+        &self,
+        now: chrono::DateTime<Utc>,
+        before: Option<EstimateInForce>,
+    ) {
+        let slot = self.estimate_table.lock().expect("estimate lock").clone();
+        let view = EstimateInForce::of(slot.in_force(now));
+        let changed = {
+            let mut last = self
+                .estimate_in_force
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let changed = *last != view || before.is_some_and(|before| before != view);
+            *last = view;
+            changed
+        };
+        if changed {
+            self.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+            self.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+        }
+    }
+
     /// The tray's whole world in one object.
     pub fn status_value(&self) -> serde_json::Value {
-        let now = Utc::now();
+        self.status_value_at(Utc::now())
+    }
+
+    /// [`Self::status_value`] as of `now`.
+    pub(crate) fn status_value_at(&self, now: chrono::DateTime<Utc>) -> serde_json::Value {
         // Taken before the queue lock below, and released with it, because
         // `daily_budget` takes the queue, state, and settings locks itself.
         let budget = self.daily_budget(now);
@@ -1828,6 +2375,29 @@ impl DaemonShared {
         let witness_capacity = self.witness_capacity();
         // Snapshot settings without nesting its lock under policy or queue.
         let scrub_check = self.settings.lock().expect("settings lock").scrub_check;
+        // Nudge: the suggestion ledger and the switches it reads, each in
+        // its own short lock, before the policy and queue section below.
+        let nudge_snapshot = self.nudge_snapshot();
+        // Read once, here, rather than inside the object below: `is_paused`
+        // takes the state lock, and both feed the nudge gates as well.
+        let paused = self.is_paused(now);
+        let logged_in = self.logged_in();
+        // Mission fit (nudge value addendum, 1.3): the live catalogue, the
+        // read gates and the cwd-cache facts, read before the policy and
+        // queue section below, each under its own lock. `CacheOnly`:
+        // `status` never looks at a folder (OWNER DECISION V4). `None` --
+        // no live catalogue -- leaves both `mission_fit` fields absent.
+        let mission_join = super::mission_matching::MissionJoin::read(
+            self,
+            now,
+            super::mission_matching::Probe::CacheOnly,
+        );
+        // Credit estimate (nudge value addendum, 4.6): the table in force,
+        // cloned out of its leaf lock before the policy and queue section.
+        // The table in force at `now`: an expired fetched table reads as
+        // the built-in one (OWNER DECISION E11).
+        let slot = self.estimate_table.lock().expect("estimate lock").clone();
+        let estimate_table = slot.in_force(now);
         // Policy, then queue: the order every method above follows. Both
         // counts below come from this one queue guard, so `decisions_owed`
         // and `queue_depth` can never describe two different queues. The
@@ -1835,6 +2405,70 @@ impl DaemonShared {
         let policy = self.policy.lock().expect("policy lock");
         let queue = self.queue.lock().expect("queue lock");
         let decisions_owed = super::queue::decisions_owed(&queue, &policy, scrub_check);
+        // Same guards as `decisions_owed`, and the same function
+        // `list_projects` reports, so the two answers always agree.
+        let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
+        // How many of `subjects` fit at least one matched mission: a count,
+        // or `None` while no catalogue is live. Never a mission id.
+        let fitting = |subjects: &[&super::queue::QueueEntry]| -> Option<usize> {
+            mission_join
+                .as_ref()
+                .map(|join| subjects.iter().filter(|e| join.fit(&policy, e) > 0).count())
+        };
+        let backlog = super::queue::unpurposed_entries(&queue, &policy);
+        let backlog_mission_fit = fitting(&backlog);
+        let backlog_credit_estimate = credit_estimate_sum(&backlog, &estimate_table);
+        // Policy only, under the guard already held: whether the arming
+        // offer would be drawn right now, which hides the backlog nudge.
+        let arming_offer_present = policy.arming_suggestion(now).is_some();
+        // Nudge U4, under the same guards: the one shared
+        // `queue::idle_candidates`, which `list_pending {filter:
+        // "idle_sessions"}` also reads. Off (and absent) below the queue TTL
+        // the idle window needs.
+        let idle_window = super::nudge::idle_window(nudge_snapshot.queue_ttl_days);
+        let (
+            idle_sessions,
+            idle_candidate_count,
+            idle_mission_fit,
+            idle_credit_estimate,
+            idle_tools,
+        ) = match idle_window {
+            Some(window) => {
+                let candidates =
+                    super::queue::idle_candidates(&queue, &policy, now, window.idle_days);
+                let mission_fit = fitting(&candidates);
+                let credit_estimate = credit_estimate_sum(&candidates, &estimate_table);
+                (
+                    Some(idle_sessions_value(
+                        &candidates,
+                        window,
+                        mission_fit,
+                        credit_estimate.clone(),
+                    )),
+                    candidates.len(),
+                    mission_fit,
+                    credit_estimate,
+                    batch_text_tools(&candidates),
+                )
+            }
+            None => (None, 0, None, None, Vec::new()),
+        };
+        // The batches the rendered words describe (`status.nudge.text`),
+        // from the same counts the fields above report.
+        let idle_batch = crate::nudge_render::Batch {
+            count: idle_candidate_count as u64,
+            tools: idle_tools,
+            idle_days: idle_window.map_or(0, |w| w.idle_days as u32),
+            mission_fit: idle_mission_fit.map(|m| m as u64),
+            estimate: idle_credit_estimate.as_ref().and_then(estimate_sum_of),
+        };
+        let backlog_batch = crate::nudge_render::Batch {
+            count: backlog.len() as u64,
+            tools: Vec::new(),
+            idle_days: 0,
+            mission_fit: backlog_mission_fit.map(|m| m as u64),
+            estimate: backlog_credit_estimate.as_ref().and_then(estimate_sum_of),
+        };
         let contribution_override = contribution_override_value(&policy);
         let contribution_mode = contribution_mode_value(&policy, &queue);
         let contribution_mode_partial =
@@ -1842,10 +2476,97 @@ impl DaemonShared {
         drop(policy);
         let health = self.health.lock().expect("health lock");
         let cfg = self.store.load_config().ok().flatten();
-        #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+        let consent_hold = crate::config::consent_hold(cfg.as_ref());
+        // One set of inputs for the lead and the mark (nudge A3), so the
+        // two can never read different gates, counts or news.
+        let mark_inputs = super::nudge::MarkInputs {
+            lead: super::nudge::LeadInputs {
+                paused,
+                consent_hold: consent_hold.is_some(),
+                enrolled: logged_in,
+                // The health that turns the strip to attention, plus a
+                // reached daily cap: either way nothing is going out.
+                healthy: health.last_error_label.is_none() && !budget.blocked(),
+                suggestions_enabled: nudge_snapshot.suggestions_enabled,
+                arming_offer_present,
+                unpurposed_traces: Some(unpurposed_traces),
+                queue_ttl_days: nudge_snapshot.queue_ttl_days,
+                last_history_poll_at: nudge_snapshot.last_history_poll_at,
+                history_poll_secs: nudge_snapshot.history_poll_secs,
+                verdicts_pending: nudge_snapshot.verdicts_pending,
+                idle_candidates: idle_candidate_count,
+            },
+            decisions_owed: Some(decisions_owed),
+            menu_bar_mark_enabled: nudge_snapshot.menu_bar_mark_enabled,
+            notify_idle_sessions: nudge_snapshot.notify_idle_sessions,
+        };
+        let lead = super::nudge::lead(&mark_inputs.lead, &nudge_snapshot.ledger, now);
+        let mark = super::nudge::mark(&mark_inputs, &nudge_snapshot.ledger, now);
+        let mut nudge = nudge_value(&lead, &mark);
+        // The words for the leading card and the lit mark, composed in core
+        // (nudge_render) so a shell draws them and composes nothing.
+        let card = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => {
+                Some(crate::nudge_render::idle_card(&idle_batch))
+            }
+            Some(super::nudge::NudgeKind::ReviewBacklog) => {
+                Some(crate::nudge_render::backlog_card(&backlog_batch))
+            }
+            Some(super::nudge::NudgeKind::VerdictsLanded) => lead.verdicts.map(|v| {
+                crate::nudge_render::verdicts_card(&render_verdicts(
+                    v.accepted,
+                    v.held,
+                    v.credit_final_tenths,
+                    v.since,
+                ))
+            }),
+            None => None,
+        };
+        if let Some(card) = card {
+            nudge["text"] = serde_json::to_value(card).unwrap_or_default();
+        }
+        let mark_text = match mark.state {
+            super::nudge::MarkState::News => mark_inputs.lead.verdicts_pending.as_ref().map(|d| {
+                crate::nudge_render::mark_news_text(&render_verdicts(
+                    d.newly_accepted,
+                    d.newly_held,
+                    d.credit_final_tenths(),
+                    d.since,
+                ))
+            }),
+            super::nudge::MarkState::Ready => {
+                Some(crate::nudge_render::mark_ready_text(&idle_batch))
+            }
+            _ => None,
+        };
+        if let Some(words) = mark_text {
+            nudge["mark_text"] = serde_json::to_value(words).unwrap_or_default();
+        }
+        // Additive (nudge value addendum, 1.3). Read after the lead is
+        // chosen and never fed into it (OWNER DECISION V5): the count over
+        // the leading kind's own subjects, present only while that kind is
+        // idle sessions or the review backlog and a catalogue is live.
+        let lead_mission_fit = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => idle_mission_fit,
+            Some(super::nudge::NudgeKind::ReviewBacklog) => backlog_mission_fit,
+            _ => None,
+        };
+        if let Some(fit) = lead_mission_fit {
+            nudge["mission_fit"] = serde_json::Value::from(fit);
+        }
+        // The same rule for the credit estimate (OWNER DECISION E8): the
+        // leading kind's own subjects, and never an input to the lead.
+        let lead_credit_estimate = match lead.lead {
+            Some(super::nudge::NudgeKind::IdleSessions) => idle_credit_estimate,
+            Some(super::nudge::NudgeKind::ReviewBacklog) => backlog_credit_estimate,
+            _ => None,
+        };
+        if let Some(estimate) = lead_credit_estimate {
+            nudge["credit_estimate"] = estimate;
+        }
         let mut status = serde_json::json!({
             "schema_version": IPC_SCHEMA,
-            "logged_in": self.logged_in(),
+            "logged_in": logged_in,
             "account_scope": account_scope,
             "tenant_id": cfg.as_ref().map(|c| c.tenant_id.clone()),
             "consent_scopes": cfg.as_ref().map(|c| c.consent_scopes.clone()).unwrap_or_default(),
@@ -1853,8 +2574,8 @@ impl DaemonShared {
             // under the enrollment because its scopes were saved by enrollment
             // and never chosen; `null` otherwise. Label only. See
             // `config::consent_hold`.
-            "consent_hold": crate::config::consent_hold(cfg.as_ref()),
-            "paused": self.is_paused(now),
+            "consent_hold": consent_hold,
+            "paused": paused,
             "queue_depth": queue.pending().len(),
             // Additive (K6). The badge's exact count: `Pending` entries that
             // need a decision from this person. Unlike `queue_depth`, this
@@ -1865,6 +2586,16 @@ impl DaemonShared {
             // See `queue::decisions_owed`. `queue_depth` is kept unchanged
             // for compatibility; do not derive it from this field.
             "decisions_owed": decisions_owed,
+            // Additive (nudge U1). The count `list_projects` carries as
+            // `unpurposed_traces`, from the same `queue::unpurposed_traces`:
+            // previewed `Pending` entries in folders set to Ask me. Every one
+            // is also in `decisions_owed`; never a badge number of its own.
+            "unpurposed_traces": unpurposed_traces,
+            // Additive (nudge S3). Which in-app suggestion leads, if any:
+            // `{state, lead, count?, cooldown_until?}`, labels, a count and
+            // a time only. See `nudge::lead` and the v1_1 doc's
+            // "`status.nudge`".
+            "nudge": nudge,
             "next_digest_at": self.next_digest_at(now),
             "health": {
                 "last_error_label": health.last_error_label,
@@ -1939,6 +2670,14 @@ impl DaemonShared {
             // `ContributionModeCopy.auto_partial` under its label.
             "contribution_mode_partial": contribution_mode_partial,
         });
+        // Additive (nudge U4). `{count, tools, threshold_days}`: how many
+        // waiting Ask-me sessions nobody has written to for the idle
+        // threshold, the display names of the tools they came from, and the
+        // threshold. Counts and display names only. Absent, never `null`,
+        // while the kind is off (a queue TTL below 4 days).
+        if let Some(idle) = idle_sessions {
+            status["idle_sessions"] = idle;
+        }
         // K2 (#1173): debug builds only, so the app shows the dry-run notice
         // from what this daemon is doing rather than parsing the
         // environment itself. A release build never names the field.
@@ -2776,7 +3515,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                 "events": [
                     EVENT_SNAPSHOT, EVENT_QUEUE_CHANGED, EVENT_STATUS_CHANGED,
                     EVENT_DIGEST_DUE, EVENT_RESYNC_REQUIRED, EVENT_INFERENCE_CALL_ADDED,
-                    "managed_changed", EVENT_USAGE_CHANGED,
+                    "managed_changed", EVENT_USAGE_CHANGED, EVENT_HISTORY_CHANGED,
                 ],
                 "max_line_bytes": MAX_LINE_BYTES,
             }),
@@ -2850,12 +3589,35 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
                     }
                 }
             };
-            policy.decline_arming(&key, Utc::now());
+            let now = Utc::now();
+            let offered_before = policy.arming_suggestion(now).is_some();
+            policy.decline_arming(&key, now);
+            let offered_after = policy.arming_suggestion(now).is_some();
             match policy.save(&shared.store) {
-                Ok(()) => Response::ok(req.id, serde_json::json!({ "declined": true })),
+                Ok(()) => {
+                    drop(policy);
+                    // The arming offer hides U1 in `status.nudge`, so its
+                    // going away is a status change. An offer that moved to
+                    // another folder changes nothing there and stays silent.
+                    if offered_before != offered_after {
+                        shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+                    }
+                    Response::ok(req.id, serde_json::json!({ "declined": true }))
+                }
                 Err(e) => Response::err(req.id, ERR_UNAVAILABLE, &e.to_string()),
             }
         }
+        // Nudge S3: the in-app suggestion's own actions and its switch.
+        "nudge_decline" => handle_nudge_stamp(shared, req, NudgeStamp::Declined),
+        "nudge_opened" => handle_nudge_stamp(shared, req, NudgeStamp::Opened),
+        "set_suggestions_enabled" => handle_set_suggestions_enabled(shared, req),
+        "set_menu_bar_mark_enabled" => {
+            handle_set_bool_setting(shared, req, "menu_bar_mark_enabled")
+        }
+        "set_notifications_enabled" => {
+            handle_set_bool_setting(shared, req, "notifications_enabled")
+        }
+        "set_notify_kind" => handle_set_notify_kind(shared, req),
         "set_project_mode" => handle_set_project_mode(shared, req),
         "set_contribution_override" => handle_set_contribution_override(shared, req),
         "clear_contribution_override" => handle_clear_contribution_override(shared, req),
@@ -2948,7 +3710,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "list_audit" => handle_list_audit(shared, req),
         // Resolved outcomes only. Pending review holds and approved/uploading
         // entries are still waiting, and must not appear in the shells'
-        // "Sessions no longer waiting" group.
+        // "Traces no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -3067,8 +3829,19 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "preview_request" => handle_preview_request(shared, req),
         "preview_visible" => handle_preview_visible(shared, req),
         "preview_cancel" => handle_preview_cancel(shared, req),
-        // subscribe is handled by the connection loop, which owns the stream.
-        "subscribe" => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+        // subscribe is handled by the connection loop, which owns the stream;
+        // this validates `accepts` for both dispatchers and echoes the opt-in
+        // events this daemon recognized, only when the request named any, so
+        // a request without `accepts` is answered exactly as before it existed.
+        // `handle_local` empties the echo: nothing registers in-process.
+        "subscribe" => match subscribe_accepts(&req.params) {
+            Err(()) => Response::err(req.id, ERR_BAD_PARAMS, ERR_SUBSCRIBE_ACCEPTS_INVALID),
+            Ok(None) => Response::ok(req.id, serde_json::json!({ "subscribed": true })),
+            Ok(Some(accepted)) => Response::ok(
+                req.id,
+                serde_json::json!({ "subscribed": true, "accepts": accepted }),
+            ),
+        },
         // Reading a public profile back is a local cache read -- there is no
         // server read-back to make, see `daemon::profile` -- so unlike
         // claiming and withdrawing a handle it is complete here.
@@ -3193,6 +3966,16 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
     // config file, and holding the queue across that would put a file read
     // in front of every other queue caller.
     let admission_evidence = shared.admission_evidence();
+    // How many matched contribution missions each pending entry fits, worked
+    // out before any lock below is taken: it reads the history file and
+    // may look at folder roots, neither of which belongs under the queue
+    // lock. `None` -- no live catalogue -- leaves every row without the
+    // field, which reads as unknown, never as zero.
+    let mission_fit = super::mission_matching::pending_mission_fit(shared, Utc::now());
+    // The estimate table in force, cloned out of its leaf lock before the
+    // policy and queue locks below.
+    let slot = shared.estimate_table.lock().expect("estimate lock").clone();
+    let estimate_table = slot.in_force(Utc::now());
     // K5: an optional `project_id`, for Customize's past-session picker,
     // which lists one folder's waiting sessions at a time. Matched by the id
     // `entry_value` publishes, and refused rather than answered with an empty
@@ -3213,12 +3996,93 @@ fn handle_list_pending(shared: &DaemonShared, req: &Request) -> Response {
         }
         Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, "project_id-invalid"),
     };
+    // Nudge U4: an optional `filter`. `idle_sessions` lists exactly what
+    // `status.idle_sessions.count` counts, from the same
+    // `queue::idle_candidates`, so the Traces card's Review can never show a
+    // different set from the one it named. Unknown is refused, never
+    // answered with an empty list. Absent is every pending entry, as before.
+    let idle_filter = match req.params.get("filter") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(f)) if f == LIST_FILTER_IDLE_SESSIONS => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_INVALID),
+    };
+    // Nudge value addendum, 2.1: an optional `order`. Absent, `null` or
+    // `"queue"` is queue insertion order, exactly as before; `"suggested"`
+    // sorts what the filters selected. Unknown is refused, never answered in
+    // some other order.
+    let suggested = match req.params.get("order") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(o)) if o == LIST_ORDER_PARAM_QUEUE => false,
+        Some(serde_json::Value::String(o)) if o == LIST_ORDER_PARAM_SUGGESTED => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_ORDER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_ORDER_INVALID),
+    };
+    // Settings first, in its own short lock, then policy and queue: the
+    // order `status_value` takes them in.
+    let idle_window = idle_filter
+        .then(|| {
+            let ttl = shared
+                .settings
+                .lock()
+                .expect("settings lock")
+                .queue_ttl_days;
+            super::nudge::idle_window(ttl)
+        })
+        .flatten();
+    let policy = idle_filter.then(|| shared.policy.lock().expect("policy lock"));
     let queue = shared.queue.lock().expect("queue lock");
-    let entries: Vec<serde_json::Value> = queue
-        .pending()
-        .iter()
+    let selected: Vec<&super::queue::QueueEntry> = match (&policy, idle_window) {
+        (Some(policy), Some(window)) => {
+            super::queue::idle_candidates(&queue, policy, Utc::now(), window.idle_days)
+        }
+        // The kind is off below the TTL it needs: nothing is idle.
+        (Some(_), None) => Vec::new(),
+        (None, _) => queue.pending(),
+    };
+    // Filter first, sort second.
+    let mut selected: Vec<&super::queue::QueueEntry> = selected
+        .into_iter()
         .filter(|e| project_filter.as_deref().is_none_or(|k| e.project_key == k))
-        .map(|e| entry_value(e, admission_evidence))
+        .collect();
+    if suggested {
+        let tier_of = |e: &super::queue::QueueEntry| {
+            local_credit_estimate_for(e, &estimate_table).and_then(|estimate| estimate.tier)
+        };
+        super::queue::sort_suggested(
+            &mut selected,
+            &super::queue::SuggestedOrderInputs {
+                // An entry minted after the fit was counted is missing from
+                // the map while the catalogue is live: unknown, not "fits
+                // nothing" (`SUGGESTED_ORDER_UNKNOWN_FIT_RANK`).
+                mission_fit: mission_fit.as_ref(),
+                // A one-tier table carries no ordering information.
+                estimate_tier: (estimate_table.table.tier_count() > 1)
+                    .then_some(&tier_of as &dyn Fn(&super::queue::QueueEntry) -> _),
+            },
+        );
+    }
+    let entries: Vec<serde_json::Value> = selected
+        .into_iter()
+        .map(|e| {
+            // Inserted after `entry_value` returns, so its signature and its
+            // other callers stay as they are: every other rendering of an
+            // entry omits the field, which reads as unknown.
+            let mut value = entry_value(e, admission_evidence);
+            if let Some(fit) = mission_fit.as_ref().and_then(|fits| fits.get(&e.entry_id)) {
+                value["mission_fit"] = serde_json::json!(fit);
+            }
+            // Nudge value addendum, 4.6: the same pattern. Absent without
+            // features, without an estimate, or once the entry is sent.
+            if let Some(estimate) = credit_estimate_value(e, &estimate_table) {
+                value["credit_estimate"] = estimate;
+            }
+            value
+        })
         .collect();
     Response::ok(req.id, serde_json::json!({ "pending": entries }))
 }
@@ -3641,36 +4505,9 @@ fn handle_list_projects(shared: &DaemonShared, req: &Request) -> Response {
             )
         }))
         .collect();
-    // K7's upsell: "27 scrubbed sessions are sitting on this Mac under
-    // folders set to Ask me. None has been decided." Three conditions,
-    // all required:
-    //
-    // - `Pending`, i.e. undecided -- `queue.pending()` already filters this.
-    //   An `Approved`, `Uploaded`, `Refused`, `Expired` or `Superseded`
-    //   entry has already been decided, one way or another.
-    // - The project's mode resolves to `NotifyOnly` ("Ask me"), never
-    //   `AutoUpload` ("armed") or `Ignore`. Armed is excluded on the
-    //   project's resolved mode rather than the entry's own
-    //   `approved_unattended` flag, because a gate-held armed session is
-    //   `Pending` with nothing decided about it yet either -- see
-    //   `policy::resolve` and the design's note that "gate-held armed
-    //   sessions stay Pending". Counting those into this upsell would tell a
-    //   contributor to go decide about a folder they already armed.
-    // - Previewed at least once (`previewed_envelope_digest.is_some()`) --
-    //   "scrubbed", in the design's word. An entry nobody has opened a
-    //   preview for has not been through the redaction pass this count is
-    //   about, and including it would inflate "27" with sessions no
-    //   preview-then-decide flow has touched.
-    //
-    // This is not K6's decisions-owed badge: its copy promises previewed
-    // Ask-me sessions only, while the badge also includes unpreviewed and
-    // armed-but-human-held sessions. Keep the two contracts distinct.
-    let unpurposed_traces = queue
-        .pending()
-        .iter()
-        .filter(|e| policy.resolve(&e.project_key) == ProjectMode::NotifyOnly)
-        .filter(|e| e.previewed_envelope_digest.is_some())
-        .count();
+    // K7's suggestion. See `queue::unpurposed_traces`, which `status` shares
+    // so the two can never disagree.
+    let unpurposed_traces = super::queue::unpurposed_traces(&queue, &policy);
     Response::ok(
         req.id,
         serde_json::json!({ "projects": projects, "unpurposed_traces": unpurposed_traces }),
@@ -4708,6 +5545,283 @@ fn handle_list_audit(shared: &DaemonShared, req: &Request) -> Response {
     }
 }
 
+/// What [`DaemonShared::nudge_snapshot`] takes before the policy and queue
+/// section of `status_value`.
+pub(crate) struct NudgeSnapshot {
+    pub ledger: std::collections::BTreeMap<String, super::nudge::NudgeLedger>,
+    pub suggestions_enabled: bool,
+    pub queue_ttl_days: i64,
+    /// U2: when history was last read back, the poll interval that ages
+    /// it, and the verdicts landed and not yet acknowledged.
+    pub last_history_poll_at: Option<chrono::DateTime<Utc>>,
+    pub history_poll_secs: u64,
+    pub verdicts_pending: Option<super::nudge::VerdictDelta>,
+    /// A3: the mark's own switch, and the idle-session kind's switch, which
+    /// the halo also obeys.
+    pub menu_bar_mark_enabled: bool,
+    pub notify_idle_sessions: bool,
+}
+
+/// The display names of the tools a batch came from, deduplicated and
+/// sorted. A source with no display name is left unnamed. This is the
+/// wire's `status.idle_sessions.tools`; the words take
+/// [`batch_text_tools`].
+pub(crate) fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+    let tools: std::collections::BTreeSet<&'static str> = candidates
+        .iter()
+        .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
+        .collect();
+    tools.into_iter().map(str::to_string).collect()
+}
+
+/// The tools a batch's words name ([`crate::nudge_render::Batch::tools`]):
+/// [`batch_tools`] when every source in the batch has a display name, and
+/// none otherwise, so the words read without a tool rather than credit
+/// the named ones with an unnamed source's sessions.
+pub(crate) fn batch_text_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+    let all_named = candidates
+        .iter()
+        .all(|e| super::inference_map::tool_display_name(e.displayed_source()).is_some());
+    if all_named {
+        batch_tools(candidates)
+    } else {
+        Vec::new()
+    }
+}
+
+/// A `credit_estimate` sum as the renderer reads it.
+fn estimate_sum_of(value: &serde_json::Value) -> Option<crate::nudge_render::EstimateSum> {
+    Some(crate::nudge_render::EstimateSum {
+        low: value.get("low")?.as_f64()?,
+        high: value.get("high")?.as_f64()?,
+        known: value.get("known")?.as_u64()?,
+        drawn: value.get("drawn")?.as_bool()?,
+    })
+}
+
+/// Verdict news as the renderer reads it, with the date the news began in
+/// this Mac's local time.
+pub(crate) fn render_verdicts(
+    accepted: u32,
+    held: u32,
+    credit_final_tenths: Option<u64>,
+    since: chrono::DateTime<Utc>,
+) -> crate::nudge_render::Verdicts {
+    crate::nudge_render::Verdicts {
+        accepted,
+        held,
+        credit_final_tenths,
+        since: since.with_timezone(&chrono::Local).date_naive(),
+    }
+}
+
+/// `status.idle_sessions` on the wire: how many candidates, the display
+/// names of the tools they came from (distinct, in alphabetical order; a
+/// source the tool table has no name for is left out, never shown as its
+/// raw id), and the threshold in days. Never an id, a path, a folder label
+/// or a session's own age.
+fn idle_sessions_value(
+    candidates: &[&super::queue::QueueEntry],
+    window: super::nudge::IdleWindow,
+    mission_fit: Option<usize>,
+    credit_estimate: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let tools = batch_tools(candidates);
+    let mut value = serde_json::json!({
+        "count": candidates.len(),
+        "tools": tools,
+        "threshold_days": window.idle_days,
+    });
+    // Additive (nudge value addendum, 1.3): how many candidates fit at
+    // least one matched mission. Absent, never 0, while no catalogue is
+    // live (OWNER DECISION V1).
+    if let Some(fit) = mission_fit {
+        value["mission_fit"] = serde_json::Value::from(fit);
+    }
+    // Additive (nudge value addendum, 4.6): summed band ends and `known`,
+    // present only while at least one candidate has an estimate.
+    if let Some(estimate) = credit_estimate {
+        value["credit_estimate"] = estimate;
+    }
+    value
+}
+
+/// `status.nudge` on the wire: `state` and `lead` always (`lead` is `null`
+/// unless `state` is `armed`), `count` only with a lead, `cooldown_until`
+/// only while a "Not now" silences one. `mark` and `mark_kinds` always
+/// (nudge A3): the menu-bar icon state and the kinds that lit it. Labels,
+/// a count and a time only.
+fn nudge_value(lead: &super::nudge::NudgeLead, mark: &super::nudge::Mark) -> serde_json::Value {
+    let mut value = serde_json::json!({
+        "state": lead.state.label(),
+        "lead": lead.lead.map(super::nudge::NudgeKind::label),
+        "mark": mark.state.label(),
+        "mark_kinds": mark
+            .kinds
+            .iter()
+            .map(|k| k.label())
+            .collect::<Vec<_>>(),
+    });
+    if let Some(count) = lead.count {
+        value["count"] = serde_json::Value::from(count);
+    }
+    if let Some(until) = lead.cooldown_until {
+        value["cooldown_until"] = serde_json::json!(until);
+    }
+    // U2's breakdown: counts, the time the news began, and the final credit
+    // to one decimal when it is not zero.
+    if let Some(v) = lead.verdicts {
+        value["accepted"] = serde_json::Value::from(v.accepted);
+        value["held"] = serde_json::Value::from(v.held);
+        value["final"] = serde_json::Value::from(v.final_credit);
+        value["since"] = serde_json::json!(v.since);
+        if let Some(tenths) = v.credit_final_tenths {
+            value["credit_final"] = serde_json::json!(tenths as f64 / 10.0);
+        }
+    }
+    value
+}
+
+/// Which ledger stamp a nudge request writes.
+#[derive(Debug, Clone, Copy)]
+enum NudgeStamp {
+    /// `nudge_decline`: the in-app "Not now".
+    Declined,
+    /// `nudge_opened`: the nudge's own action (a card's Review, the panel
+    /// row). Never sent for merely being shown.
+    Opened,
+}
+
+/// `nudge_decline {kind, subject?}` and `nudge_opened {kind, subject?}`.
+///
+/// Shaped like `decline_arming`: validate, stamp, persist, then publish
+/// `status_changed` so every shell redraws. A kind this daemon does not know
+/// is refused rather than stored, so a ledger key is always a known label.
+/// No kind takes a subject yet, so any subject is refused; a later kind that
+/// does names its opaque ids here. Logs nothing.
+fn handle_nudge_stamp(shared: &DaemonShared, req: &Request, stamp: NudgeStamp) -> Response {
+    let Some(label) = req.params.get("kind").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_REQUIRED);
+    };
+    let Some(kind) = super::nudge::NudgeKind::parse(label) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_UNRECOGNIZED);
+    };
+    if req.params.get("subject").is_some_and(|v| !v.is_null()) {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_SUBJECT_UNRECOGNIZED);
+    }
+    if matches!(stamp, NudgeStamp::Declined) && !kind.declinable() {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_NUDGE_KIND_NOT_DECLINABLE);
+    }
+    let key = super::nudge::ledger_key(kind, None);
+    let now = Utc::now();
+    let mut state = shared.state.lock().expect("state lock");
+    let before = state.nudges.get(&key).cloned();
+    let pending_before = state.verdicts_pending.clone();
+    let entry = state.nudges.entry(key.clone()).or_default();
+    match stamp {
+        NudgeStamp::Declined => entry.declined_at = Some(now),
+        NudgeStamp::Opened => entry.opened_at = Some(now),
+    }
+    // U2's own action acknowledges the news by clearing it. The verdict
+    // marks already hold every verdict it named, so only a verdict a later
+    // poll finds is news again.
+    if matches!(stamp, NudgeStamp::Opened) && kind == super::nudge::NudgeKind::VerdictsLanded {
+        state.verdicts_pending = None;
+    }
+    if state.save(&shared.store).is_err() {
+        // Fail closed: a stamp that did not reach disk is not kept in
+        // memory either, so a restart cannot disagree with this answer.
+        match before {
+            Some(previous) => {
+                state.nudges.insert(key, previous);
+            }
+            None => {
+                state.nudges.remove(&key);
+            }
+        }
+        state.verdicts_pending = pending_before;
+        return Response::err(req.id, ERR_UNAVAILABLE, "state-write-failed");
+    }
+    drop(state);
+    shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+    let answer = match stamp {
+        NudgeStamp::Declined => serde_json::json!({ "declined": true }),
+        NudgeStamp::Opened => serde_json::json!({ "opened": true }),
+    };
+    Response::ok(req.id, answer)
+}
+
+/// `set_suggestions_enabled {on}`: the in-app suggestions switch. Writes
+/// through `set_settings`, so the file is saved by the one path that keeps
+/// stored credentials intact, and that path publishes `status_changed`.
+fn handle_set_suggestions_enabled(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ "suggestions_enabled": on }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ "suggestions_enabled": on }))
+}
+
+/// Nudge A2: `set_menu_bar_mark_enabled {on}` and
+/// `set_notifications_enabled {on}`. Each is one boolean setting, written
+/// through `set_settings` exactly as `handle_set_suggestions_enabled` does,
+/// so the file is saved by the one path that keeps stored credentials intact
+/// and that path publishes `status_changed` when the value changes.
+fn handle_set_bool_setting(shared: &DaemonShared, req: &Request, key: &'static str) -> Response {
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ key: on }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ key: on }))
+}
+
+/// Nudge A2: `set_notify_kind {kind, on}`: one notification kind's switch,
+/// written as `set_settings {"notify": {kind: on}}`. `kind` is one of
+/// `settings::notify_kind_labels` -- the digest or an arbiter kind label --
+/// checked here first so a refusal names the request's own parameter.
+/// Answering `verdicts_landed` or `idle_sessions` ends that kind's one-time
+/// offer (see `settings::apply_notify_object`).
+fn handle_set_notify_kind(shared: &DaemonShared, req: &Request) -> Response {
+    let Some(kind) = req.params.get("kind").and_then(|v| v.as_str()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "notify-kind-required");
+    };
+    let Some(kind) = crate::daemon::settings::notify_kind_labels()
+        .into_iter()
+        .find(|label| *label == kind)
+    else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "notify-kind-unrecognized");
+    };
+    let Some(on) = req.params.get("on").and_then(|v| v.as_bool()) else {
+        return Response::err(req.id, ERR_BAD_PARAMS, "on-required");
+    };
+    let write = Request {
+        id: req.id,
+        method: "set_settings".to_string(),
+        params: serde_json::json!({ "notify": { kind: on } }),
+    };
+    let response = handle_set_settings(shared, &write);
+    if response.error.is_some() {
+        return response;
+    }
+    Response::ok(req.id, serde_json::json!({ "kind": kind, "on": on }))
+}
+
 fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let Ok(locks) = crate::daemon::nearai_credential::session::coordination(shared.store.dir())
     else {
@@ -4726,6 +5840,8 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
     let private_inference_before = settings.private_inference;
     let capture_before = settings.token_capture_enabled;
     let scrub_check_before = settings.scrub_check;
+    let suggestions_before = settings.suggestions_enabled;
+    let attention_before = attention_settings(&settings);
     // `apply_settings_object` is the same validation
     // `tc_daemon_start_with_settings` (the C ABI's pre-start
     // settings override) uses, so there is one definition of "a
@@ -4774,6 +5890,7 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             let manual = super::settings::ScrubCheck::Manual;
             let switched_to_manual = settings.scrub_check == manual && scrub_check_before != manual;
             let mut value = redacted_settings(&settings);
+            let attention_after = attention_settings(&settings);
             drop(settings);
             // The switch to the Manual Scrub check (K4 of #1118) returns
             // every unsent approval made on the contributor's behalf to
@@ -4798,11 +5915,34 @@ fn handle_set_settings(shared: &DaemonShared, req: &Request) -> Response {
             // person without changing a queue row. Switching back can remove
             // that obligation too. Neither transition may leave badges stale.
             shared.publish_if_decisions_owed_changed(decisions_owed_before);
+            // `status.nudge` reads the suggestions switch, so a change to it
+            // is a status change whichever request made it.
+            // Nudge A2: so are the mark, the master, the per-kind switches
+            // and the one-time offers.
+            if value["suggestions_enabled"].as_bool() != Some(suggestions_before)
+                || attention_after != attention_before
+            {
+                shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            }
             add_admission_setting(shared, &mut value);
             Response::ok(req.id, value)
         }
         Err(label) => Response::err(req.id, ERR_BAD_PARAMS, label),
     }
+}
+
+/// The settings `status.nudge`'s mark and the arbiter read, compared before
+/// and after a `set_settings` write so a change publishes `status_changed`.
+fn attention_settings(
+    settings: &crate::daemon::settings::DaemonSettings,
+) -> (bool, bool, crate::daemon::settings::NotifyKinds, bool, bool) {
+    (
+        settings.menu_bar_mark_enabled,
+        settings.notifications_enabled,
+        settings.notify.clone(),
+        settings.verdicts_offer_pending,
+        settings.idle_offer_pending,
+    )
 }
 
 /// `set_settings`, plus the one thing it cannot do synchronously: start or
@@ -5066,6 +6206,21 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
     };
+    // Nudge U4: an optional `filter`, read exactly as `list_pending` reads
+    // it. `idle_sessions` narrows a group to `queue::idle_candidates`, the
+    // set the Traces list shows under the idle card's Review, so a folder's
+    // Submit sends what is drawn under it and nothing the filter hid.
+    let idle_filter = match req.params.get("filter") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(f)) if f == LIST_FILTER_IDLE_SESSIONS => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_INVALID),
+    };
+    if idle_filter && !all && req.params.get("project_id").is_none() {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_FILTER_NEEDS_GROUP);
+    }
     if correction.is_some() {
         if !matches!(verdict.as_deref(), Some("partly") | Some("failed")) {
             return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_VERDICT);
@@ -5109,11 +6264,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         .unwrap_or_default();
     // The approval instant is taken by `approve_as_a_person`, under the
     // lock that approves; see there.
-    let approval_hold_secs = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .approval_hold_secs;
+    let (approval_hold_secs, queue_ttl_days) = {
+        let settings = shared.settings.lock().expect("settings lock");
+        (settings.approval_hold_secs, settings.queue_ttl_days)
+    };
+    // The idle window the filter reads, taken from settings before policy
+    // and queue are locked, in the order `list_pending` takes them. `None`
+    // below the TTL the kind needs: nothing is idle, so nothing is selected.
+    let idle_days = idle_filter
+        .then(|| super::nudge::idle_window(queue_ttl_days).map(|w| w.idle_days))
+        .flatten();
     // `None`, not `Some("")`, when there is no readable config:
     // every call site expresses "unknown" the same way, and the
     // uploader treats it as "re-ask" -- fail-closed.
@@ -5165,13 +6325,36 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // from the key the daemon itself holds, never from the caller's string
     // -- the same rule `set_project_mode` follows, and the reason
     // `daemon-audit.jsonl` cannot be injected into.
+    // What a group selector chooses from: every pending entry, or under the
+    // idle filter only the idle ones. Lock order is policy before queue.
+    fn candidates<'q>(
+        policy: &super::policy::ProjectPolicy,
+        queue: &'q super::queue::Queue,
+        idle_filter: bool,
+        idle_days: Option<i64>,
+    ) -> Vec<&'q super::queue::QueueEntry> {
+        if !idle_filter {
+            return queue.pending();
+        }
+        match idle_days {
+            Some(days) => super::queue::idle_candidates(queue, policy, Utc::now(), days),
+            None => Vec::new(),
+        }
+    }
     let (ids, project_audit_label): (Vec<Uuid>, Option<String>) = if all {
+        let policy = shared.policy.lock().expect("policy lock");
         let queue = shared.queue.lock().expect("queue lock");
         // `all` is the largest group there is and carries the same hole for
         // the same reason. Filtering it here as well as the project path is
         // deliberate: leaving it out would keep the defect alive behind a
         // different button.
-        let (ids, excluded, held) = group_selection(queue.pending().iter().copied(), group_filters);
+        let (ids, excluded, held) = group_selection(
+            candidates(&policy, &queue, idle_filter, idle_days)
+                .iter()
+                .copied(),
+            group_filters,
+        );
+        drop(policy);
         excluded_ineligible = excluded;
         excluded_held = held;
         (ids, None)
@@ -5200,8 +6383,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // Only `Pending`: an entry already approved has had its terms
         // fixed, and a project-wide call must not silently re-pin them.
         let (ids, excluded, held) = group_selection(
-            queue
-                .pending()
+            candidates(&policy, &queue, idle_filter, idle_days)
                 .iter()
                 .copied()
                 .filter(|e| e.project_key == key),
@@ -5924,6 +7106,9 @@ async fn handle_witness_preview_request_inner(
     } else {
         None
     };
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     let build = super::preview::build_witnessed_preview(
         &shared.store,
         &cfg,
@@ -6060,6 +7245,9 @@ async fn handle_preview(shared: &DaemonShared, req: &Request) -> Response {
         let s = shared.settings.lock().expect("settings lock");
         s.ironwire_attested_bodies
     };
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     match super::preview::build_preview_card(
         cfg.as_ref(),
         near_ai,
@@ -6319,6 +7507,9 @@ async fn build_and_pin_preview(
         );
         return Ok(built);
     }
+    // Counted while it builds, so the local-estimate backfill stays out of
+    // its way (OWNER DECISION E13).
+    let _building = shared.preview_build_started();
     let (summary, body, envelope) = super::preview::build_preview_with_correction(
         &shared.store,
         cfg,
@@ -7077,7 +8268,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // `*_root_configured` stays true only for a source pointed at a
         // folder. A source declared OFF is answered but has no folder, so
         // reporting it as configured would tell a settings screen to print
-        // "sessions folder set" about an agent the contributor said they do
+        // "traces folder set" about an agent the contributor said they do
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");
@@ -7243,6 +8434,10 @@ where
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut subscription: Option<broadcast::Receiver<Event>> = None;
+    // This connection's `accepts`. `None` -- never subscribed, or subscribed
+    // without `accepts` -- withholds every opt-in event. Dropped with the
+    // connection, which retracts it from `DaemonShared::has_renderer`.
+    let mut declaration: Option<RendererDeclaration> = None;
     let mut line = String::new();
 
     loop {
@@ -7274,6 +8469,16 @@ where
                     // Snapshot first, so an application never has to race the
                     // event stream against a separate list call.
                     subscription = Some(shared.events.subscribe());
+                    // Declared after the receiver exists, so nothing the
+                    // arbiter publishes on the strength of this declaration
+                    // can precede the receiver. A repeat subscribe replaces
+                    // the previous declaration rather than adding to it.
+                    declaration = match subscribe_accepts(&req.params) {
+                        Ok(Some(accepted)) if !accepted.is_empty() => {
+                            Some(RendererDeclaration::new(&shared.renderers, accepted))
+                        }
+                        _ => None,
+                    };
                     let snap = Event {
                         event: EVENT_SNAPSHOT.to_string(),
                         data: shared.snapshot_value(),
@@ -7289,7 +8494,13 @@ where
                 }
             } => {
                 match event {
-                    Ok(ev) => write_json(&mut write_half, &ev).await?,
+                    Ok(ev) => {
+                        let withheld = event_is_opt_in(&ev.event)
+                            && !declaration.as_ref().is_some_and(|d| d.accepts(&ev.event));
+                        if !withheld {
+                            write_json(&mut write_half, &ev).await?;
+                        }
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let ev = Event {
                             event: EVENT_RESYNC_REQUIRED.to_string(),
@@ -7324,13 +8535,25 @@ where
 /// real dispatcher, rather than special-casing individual methods here, is
 /// what guarantees a CLI caller and a socket caller can never get different
 /// answers to the same request.
+///
+/// One exception to "the same answer": `subscribe`. Only the connection
+/// loop owns a stream and registers a renderer declaration, so an
+/// in-process caller (the C ABI's `tc_call` among them) that names
+/// `accepts` is told it accepted nothing -- `accepts: []` -- rather than
+/// echoed events it will never be sent.
 pub fn handle_local(shared: &DaemonShared, method: &str, params: serde_json::Value) -> Response {
     let req = Request {
         id: 0,
         method: method.to_string(),
         params,
     };
-    block_on_ipc(shared, &req)
+    let mut resp = block_on_ipc(shared, &req);
+    if req.method == "subscribe" {
+        if let Some(accepts) = resp.result.as_mut().and_then(|r| r.get_mut("accepts")) {
+            *accepts = serde_json::json!([]);
+        }
+    }
+    resp
 }
 
 /// Run `handle_request_async` to completion from a synchronous caller.
@@ -10027,6 +11250,116 @@ mod tests {
         );
     }
 
+    /// An old install without a settings file whose folders are all Ask me
+    /// has no Scrub check provenance to save, but its notification offers
+    /// must still reach disk before startup marks the policy migrated, or
+    /// the next start reads it as a new install.
+    #[test]
+    fn startup_persists_the_notify_offers_of_an_old_install_without_a_settings_file() {
+        for mode in [ProjectMode::AutoUpload, ProjectMode::NotifyOnly] {
+            let s = shared();
+            {
+                let mut policy = s.policy.lock().unwrap();
+                policy.set_mode("/tmp/legacy", mode, Utc::now()).unwrap();
+                policy.scrub_check_upgrade_recorded = false;
+                policy.save(&s.store).unwrap();
+            }
+            DaemonShared::load(s.store.clone()).unwrap();
+            let restarted = DaemonShared::load(s.store.clone()).unwrap();
+            let settings = restarted.settings.lock().unwrap();
+            assert_eq!(
+                settings.notify,
+                super::super::settings::NotifyKinds::upgraded(),
+                "{mode:?}"
+            );
+            assert!(
+                settings.verdicts_offer_pending && settings.idle_offer_pending,
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// Kristi's #1300 review, finding 2: an Ask me install that ran a build
+    /// after #1162 has its policy marked migrated and no settings file.
+    /// Startup still treats it as existing and saves the offers, so the new
+    /// kinds never come on for it unasked.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_migrated_install_without_a_settings_file() {
+        let s = shared();
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode("/tmp/legacy", ProjectMode::NotifyOnly, Utc::now())
+                .unwrap();
+            assert!(policy.scrub_check_upgrade_recorded);
+            let mut value = serde_json::to_value(&*policy).unwrap();
+            value.as_object_mut().unwrap().remove("notify_kinds_known");
+            s.store
+                .write_daemon_file(
+                    crate::config::DAEMON_PROJECTS_FILE,
+                    value.to_string().as_bytes(),
+                )
+                .unwrap();
+        }
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
+    }
+
+    /// Kristi's #1300 review, finding 2: an older install that only ever
+    /// watched has no policy file, only the state file its daemon wrote.
+    /// Startup saves its offers, and the next start still reads them.
+    #[test]
+    fn startup_persists_the_notify_offers_of_a_watch_only_install_without_a_settings_file() {
+        let s = shared();
+        let mut value = serde_json::to_value(super::super::state::DaemonState::new()).unwrap();
+        value.as_object_mut().unwrap().remove("notify_kinds_known");
+        s.store
+            .write_daemon_file(
+                crate::config::DAEMON_STATE_FILE,
+                value.to_string().as_bytes(),
+            )
+            .unwrap();
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_some()
+        );
+        let restarted = DaemonShared::load(s.store.clone()).unwrap();
+        let settings = restarted.settings.lock().unwrap();
+        assert_eq!(
+            settings.notify,
+            super::super::settings::NotifyKinds::upgraded()
+        );
+        assert!(settings.verdicts_offer_pending && settings.idle_offer_pending);
+    }
+
+    /// A new install's startup writes no settings file on its own account.
+    #[test]
+    fn startup_of_a_new_install_writes_no_settings_file() {
+        let s = shared();
+        DaemonShared::load(s.store.clone()).unwrap();
+        assert!(
+            s.store
+                .read_daemon_file(crate::config::DAEMON_SETTINGS_FILE)
+                .unwrap()
+                .is_none()
+        );
+    }
+
     #[test]
     fn startup_announces_an_old_armed_install_without_a_settings_file() {
         let s = shared();
@@ -10753,7 +12086,7 @@ mod tests {
         );
     }
 
-    /// K7's upsell: "27 scrubbed sessions are sitting on this Mac under
+    /// K7's suggestion: "27 scrubbed sessions are sitting on this Mac under
     /// folders set to Ask me. None has been decided." Three entries, each
     /// failing exactly one of the three conditions the count requires, so a
     /// broken filter shows up as a wrong number rather than a coincidence:
@@ -10793,6 +12126,68 @@ mod tests {
             .result
             .unwrap();
         assert_eq!(result["unpurposed_traces"], 1, "{result}");
+    }
+
+    /// Nudge U1 reads `unpurposed_traces` from `status`, and Ron's cards
+    /// read it from `list_projects`; one shared `queue::unpurposed_traces`
+    /// keeps the two from ever disagreeing. Never (`ignore`) and armed
+    /// folders contribute 0 even when previewed, and previewing -- which
+    /// is what moves this count -- leaves `decisions_owed` where it was.
+    #[test]
+    fn status_unpurposed_traces_matches_list_projects_and_leaves_decisions_owed_alone() {
+        let s = shared();
+        let ask_project = "/tmp/askproj-status";
+        let armed_project = "/tmp/armedproj-status";
+        let never_project = "/tmp/neverproj-status";
+        {
+            let mut policy = s.policy.lock().unwrap();
+            policy
+                .set_mode(armed_project, ProjectMode::AutoUpload, Utc::now())
+                .unwrap();
+            policy
+                .set_mode(never_project, ProjectMode::Ignore, Utc::now())
+                .unwrap();
+        }
+        let ask_previewed = seed_entry(&s, ask_project);
+        let _ask_unpreviewed = seed_entry(&s, ask_project);
+        let armed_previewed = seed_entry(&s, armed_project);
+        let never_previewed = seed_entry(&s, never_project);
+
+        let status_of = |s: &DaemonShared| {
+            handle_request(s, &req("status", serde_json::json!({})))
+                .result
+                .expect("status answers")
+        };
+        let before = status_of(&s);
+        assert_eq!(before["unpurposed_traces"], 0, "{before}");
+        // The two Ask-me entries; the armed one sends on its own under the
+        // default Automatic scrub check, and Never is never owed.
+        assert_eq!(before["decisions_owed"], 2, "{before}");
+
+        {
+            let mut queue = s.queue.lock().unwrap();
+            for (id, digest) in [
+                (ask_previewed, "sha256:a"),
+                (armed_previewed, "sha256:b"),
+                (never_previewed, "sha256:c"),
+            ] {
+                assert!(queue.record_previewed_envelope(id, digest, None, None));
+            }
+        }
+
+        let after = status_of(&s);
+        let listed = handle_request(&s, &req("list_projects", serde_json::json!({})))
+            .result
+            .unwrap();
+        assert_eq!(after["unpurposed_traces"], 1, "{after}");
+        assert_eq!(
+            after["unpurposed_traces"], listed["unpurposed_traces"],
+            "status and list_projects must agree"
+        );
+        assert_eq!(
+            after["decisions_owed"], before["decisions_owed"],
+            "previewing must not move the badge"
+        );
     }
 
     /// K11: a project's `list_projects` row names the tools that produced
@@ -12209,6 +13604,35 @@ mod tests {
             "exactly one path, and it is project_path: {body}"
         );
         assert!(body.contains("secret-client-project"));
+    }
+
+    /// U4a: when a session was last written is local-only, like `path`.
+    /// Every queue entry reaches the wire through `entry_value` -- the
+    /// `list_pending` rows, the `snapshot` event, the per-entry events -- so
+    /// pinning this shape pins them all. Only a count derived from the field
+    /// may ever leave the daemon.
+    #[test]
+    fn a_queue_entry_on_the_wire_carries_no_last_write() {
+        use crate::daemon::queue::{QueueEntry, entry_id_for};
+        let e = QueueEntry {
+            entry_id: entry_id_for("sha256:aa"),
+            session_hash: "sha256:aa".into(),
+            source: "claude-code".into(),
+            project_key: "/Users/z/code/proj".into(),
+            project_label: "proj".into(),
+            path: "/Users/z/.claude/projects/x/s.jsonl".into(),
+            size_bytes: 10,
+            discovered_at: "2026-08-08T12:00:00Z".parse().unwrap(),
+            last_modified_at: Some("2001-02-03T04:05:06Z".parse().unwrap()),
+            ..Default::default()
+        };
+        for evidence in [None, Some(false), Some(true)] {
+            let body = serde_json::to_string(&entry_value(&e, evidence)).unwrap();
+            assert!(
+                !body.contains("last_modified_at") && !body.contains("2001-02-03"),
+                "the last write leaked to the wire: {body}"
+            );
+        }
     }
 
     /// K9: `list_pending` carries the queued title, and says `null` rather
@@ -15229,7 +16653,7 @@ mod tests {
             src,
             "pub async fn handle_request_async(shared",
         ));
-        assert_eq!(sync.len(), 76, "synchronous dispatcher arms: {sync:?}");
+        assert_eq!(sync.len(), 82, "synchronous dispatcher arms: {sync:?}");
         assert_eq!(asy.len(), 67, "asynchronous dispatcher arms: {asy:?}");
 
         let dispatched: std::collections::BTreeSet<String> = sync.union(&asy).cloned().collect();
@@ -16594,5 +18018,2469 @@ mod tests {
         cfg.consent_scopes_chosen = None;
         s.store.save_config(&cfg).unwrap();
         assert!(s.status_value()["consent_hold"].is_null());
+    }
+
+    /// A4 (nudge design section 5, "Knowing a standalone will render"):
+    /// `subscribe` takes an optional `accepts`, and only a subscriber that
+    /// named an opt-in event ever receives it or counts as its renderer.
+    mod subscribe_accepts {
+        use super::*;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        type Client = (
+            BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+            tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            tokio::task::JoinHandle<Result<()>>,
+        );
+
+        fn connect(shared: &Arc<DaemonShared>) -> Client {
+            let (client, server) = tokio::io::duplex(1 << 20);
+            let task = tokio::spawn(serve_connection(server, Arc::clone(shared)));
+            let (r, w) = tokio::io::split(client);
+            (BufReader::new(r), w, task)
+        }
+
+        async fn send(w: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>, v: serde_json::Value) {
+            let mut line = serde_json::to_vec(&v).unwrap();
+            line.push(b'\n');
+            w.write_all(&line).await.unwrap();
+            w.flush().await.unwrap();
+        }
+
+        async fn frame(
+            r: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        ) -> serde_json::Value {
+            let mut line = String::new();
+            tokio::time::timeout(std::time::Duration::from_secs(10), r.read_line(&mut line))
+                .await
+                .expect("no frame within the timeout")
+                .unwrap();
+            serde_json::from_str(line.trim()).unwrap()
+        }
+
+        /// Subscribe and consume the response and the snapshot; returns the
+        /// response.
+        async fn subscribe(
+            client: &mut Client,
+            params: Option<serde_json::Value>,
+        ) -> serde_json::Value {
+            let mut req = serde_json::json!({ "id": 1, "method": "subscribe" });
+            if let Some(p) = params {
+                req["params"] = p;
+            }
+            send(&mut client.1, req).await;
+            let resp = frame(&mut client.0).await;
+            if resp.get("error").is_none() {
+                assert_eq!(frame(&mut client.0).await["event"], EVENT_SNAPSHOT);
+            }
+            resp
+        }
+
+        fn reengage() -> serde_json::Value {
+            serde_json::json!({ "kind": "idle_sessions" })
+        }
+
+        #[tokio::test]
+        async fn a_subscriber_without_accepts_never_receives_reengage_due() {
+            let shared = Arc::new(shared());
+            for params in [
+                None,
+                Some(serde_json::json!({})),
+                Some(serde_json::json!({ "accepts": [] })),
+            ] {
+                let mut c = connect(&shared);
+                let resp = subscribe(&mut c, params).await;
+                assert_eq!(resp["result"]["subscribed"], true);
+                assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+                shared.publish(EVENT_REENGAGE_DUE, reengage());
+                shared.publish(EVENT_QUEUE_CHANGED, serde_json::json!({}));
+                // The very next frame is the delta that followed it: the
+                // opt-in event was never written to this connection.
+                assert_eq!(frame(&mut c.0).await["event"], EVENT_QUEUE_CHANGED);
+            }
+        }
+
+        #[tokio::test]
+        async fn a_subscriber_that_accepts_reengage_due_receives_it_and_counts() {
+            let shared = Arc::new(shared());
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            let mut c = connect(&shared);
+            let resp = subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["reengage_due"] })),
+            )
+            .await;
+            assert_eq!(resp["result"]["subscribed"], true);
+            assert_eq!(
+                resp["result"]["accepts"],
+                serde_json::json!(["reengage_due"])
+            );
+            assert!(shared.has_renderer(EVENT_REENGAGE_DUE));
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            let ev = frame(&mut c.0).await;
+            assert_eq!(ev["event"], EVENT_REENGAGE_DUE);
+            assert_eq!(ev["data"], reengage());
+        }
+
+        /// An in-process caller (`handle_local`, which the C ABI's `tc_call`
+        /// uses) has no stream and registers no renderer, so it is told it
+        /// accepted nothing, while the socket answer above still echoes the
+        /// declaration.
+        #[test]
+        fn a_local_subscribe_echoes_no_accepted_events() {
+            let shared = shared();
+            let resp = handle_local(
+                &shared,
+                "subscribe",
+                serde_json::json!({ "accepts": ["reengage_due"] }),
+            );
+            let result = resp.result.expect("subscribe answers");
+            assert_eq!(result["subscribed"], true);
+            assert_eq!(result["accepts"], serde_json::json!([]));
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            let bare = handle_local(&shared, "subscribe", serde_json::json!({}));
+            assert_eq!(
+                bare.result.expect("subscribe answers"),
+                serde_json::json!({ "subscribed": true }),
+                "a request without accepts is answered as before"
+            );
+        }
+
+        #[tokio::test]
+        async fn disconnect_drops_the_count() {
+            let shared = Arc::new(shared());
+            let mut a = connect(&shared);
+            let mut b = connect(&shared);
+            let accepts = serde_json::json!({ "accepts": ["reengage_due"] });
+            subscribe(&mut a, Some(accepts.clone())).await;
+            subscribe(&mut b, Some(accepts)).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 2);
+
+            drop(a.0);
+            drop(a.1);
+            a.2.await.unwrap().unwrap();
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            assert!(shared.has_renderer(EVENT_REENGAGE_DUE));
+
+            drop(b.0);
+            drop(b.1);
+            b.2.await.unwrap().unwrap();
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 0);
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+        }
+
+        /// A second `subscribe` on the same connection replaces the first
+        /// declaration rather than adding to it.
+        #[tokio::test]
+        async fn resubscribing_without_accepts_withdraws_the_declaration() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            let accepts = serde_json::json!({ "accepts": ["reengage_due"] });
+            subscribe(&mut c, Some(accepts.clone())).await;
+            subscribe(&mut c, Some(accepts)).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            subscribe(&mut c, None).await;
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 0);
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            shared.publish(EVENT_STATUS_CHANGED, serde_json::json!({}));
+            assert_eq!(frame(&mut c.0).await["event"], EVENT_STATUS_CHANGED);
+        }
+
+        /// Names this daemon does not know are ignored, so a newer shell
+        /// can declare a later event without being refused; they are not
+        /// echoed back, so the shell can tell what this daemon will send.
+        #[tokio::test]
+        async fn unknown_accepted_names_are_ignored_and_not_echoed() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            let resp = subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["some_future_event", "queue_changed"] })),
+            )
+            .await;
+            assert_eq!(resp["result"]["subscribed"], true);
+            assert_eq!(resp["result"]["accepts"], serde_json::json!([]));
+            assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+            assert!(!shared.has_renderer("some_future_event"));
+        }
+
+        /// A malformed `accepts` is refused, fail closed, on both
+        /// dispatchers, and leaves no declaration behind.
+        #[tokio::test]
+        async fn a_malformed_accepts_is_refused_and_counts_nothing() {
+            let shared = Arc::new(shared());
+            for bad in [
+                serde_json::json!({ "accepts": "reengage_due" }),
+                serde_json::json!({ "accepts": [1] }),
+                serde_json::json!({ "accepts": ["reengage_due", null] }),
+            ] {
+                let mut c = connect(&shared);
+                let resp = subscribe(&mut c, Some(bad.clone())).await;
+                assert_eq!(resp["error"]["code"], ERR_BAD_PARAMS);
+                assert_eq!(resp["error"]["message"], ERR_SUBSCRIBE_ACCEPTS_INVALID);
+                assert!(!shared.has_renderer(EVENT_REENGAGE_DUE));
+
+                let req = Request {
+                    id: 7,
+                    method: "subscribe".into(),
+                    params: bad,
+                };
+                let sync = handle_request(&shared, &req);
+                assert_eq!(sync.error.unwrap().message, ERR_SUBSCRIBE_ACCEPTS_INVALID);
+            }
+        }
+
+        /// A refused repeat `subscribe` leaves the connection's earlier
+        /// declaration exactly as it was.
+        #[tokio::test]
+        async fn a_refused_resubscribe_keeps_the_earlier_declaration() {
+            let shared = Arc::new(shared());
+            let mut c = connect(&shared);
+            subscribe(
+                &mut c,
+                Some(serde_json::json!({ "accepts": ["reengage_due"] })),
+            )
+            .await;
+            let resp = subscribe(&mut c, Some(serde_json::json!({ "accepts": [1] }))).await;
+            assert_eq!(resp["error"]["message"], ERR_SUBSCRIBE_ACCEPTS_INVALID);
+            assert_eq!(shared.renderer_count(EVENT_REENGAGE_DUE), 1);
+            shared.publish(EVENT_REENGAGE_DUE, reengage());
+            assert_eq!(frame(&mut c.0).await["event"], EVENT_REENGAGE_DUE);
+        }
+
+        #[test]
+        fn opt_in_events_are_exactly_reengage_due() {
+            assert_eq!(OPT_IN_EVENTS, &[EVENT_REENGAGE_DUE]);
+            assert!(event_is_opt_in(EVENT_REENGAGE_DUE));
+            assert!(!event_is_opt_in(EVENT_QUEUE_CHANGED));
+            assert!(!event_is_opt_in(EVENT_DIGEST_DUE));
+        }
+    }
+
+    /// Nudge S3: `status.nudge`, `nudge_decline`, `nudge_opened` and
+    /// `set_suggestions_enabled`.
+    mod nudges {
+        use super::*;
+        use crate::daemon::nudge::{
+            NUDGE_BACKLOG_THRESHOLD, NudgeKind, decline_cooldown, ledger_key,
+        };
+
+        const ASK: &str = "/tmp/nudge-ask";
+
+        /// A live enrollment: config with chosen scopes and a device key, so
+        /// `status.logged_in` is true, that has read history back just now,
+        /// so U2 is readable (not `unknown`).
+        fn live() -> DaemonShared {
+            let s = enrolled_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&s.store).unwrap();
+            assert!(s.logged_in());
+            s.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
+            s
+        }
+
+        /// Verdicts landed and unacknowledged, as `refresh_history` leaves
+        /// them.
+        fn land_verdicts(s: &DaemonShared, accepted: u32, held: u32, at: chrono::DateTime<Utc>) {
+            s.state.lock().unwrap().verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+                newly_accepted: accepted,
+                newly_held: held,
+                newly_final: 0,
+                credit_final_delta: 0.0,
+                since: at,
+                newest_at: at,
+                submissions: Default::default(),
+            });
+        }
+
+        /// U2 on `status.nudge`: the lead, a total count, the breakdown and
+        /// `since`, and `credit_final` only when the final credit is not
+        /// zero; never a label or an id.
+        #[test]
+        fn landed_verdicts_lead_on_status_with_counts_only() {
+            let s = live();
+            let at = Utc::now() - chrono::Duration::hours(1);
+            land_verdicts(&s, 2, 1, at);
+            let nudge = nudge_of(&s);
+            let since: chrono::DateTime<Utc> =
+                serde_json::from_value(nudge["since"].clone()).unwrap();
+            assert_eq!(since, at);
+            let mut keys: Vec<&str> = nudge
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "accepted",
+                    "count",
+                    "final",
+                    "held",
+                    "lead",
+                    "mark",
+                    "mark_kinds",
+                    "mark_text",
+                    "since",
+                    "state",
+                    "text"
+                ],
+                "{nudge}"
+            );
+            assert_eq!(nudge["state"], "armed");
+            assert_eq!(nudge["lead"], "verdicts_landed");
+            assert_eq!(nudge["count"], 3);
+            assert_eq!(nudge["accepted"], 2);
+            assert_eq!(nudge["held"], 1);
+            assert_eq!(nudge["final"], 0);
+            assert!(nudge.get("credit_final").is_none(), "no figure: {nudge}");
+
+            // A final credit figure is on the wire to one decimal.
+            s.state.lock().unwrap().verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+                newly_accepted: 2,
+                newly_held: 1,
+                newly_final: 2,
+                credit_final_delta: 4.25,
+                since: at,
+                newest_at: at,
+                submissions: Default::default(),
+            });
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["final"], 2);
+            assert_eq!(nudge["credit_final"], serde_json::json!(4.3));
+
+            // The backlog leads first, and the breakdown goes with U2.
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "review_backlog");
+            assert!(nudge.get("accepted").is_none(), "{nudge}");
+        }
+
+        /// A stale or missing history poll reads `unknown`, whatever is
+        /// pending.
+        #[test]
+        fn a_stale_history_poll_reads_unknown() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            s.state.lock().unwrap().last_history_poll_at =
+                Some(Utc::now() - chrono::Duration::days(1));
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({
+                    "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": []
+                })
+            );
+            s.state.lock().unwrap().last_history_poll_at = None;
+            assert_eq!(nudge_of(&s)["state"], "unknown");
+        }
+
+        /// `nudge_opened {verdicts_landed}` clears the news, persists, and
+        /// publishes `status_changed`.
+        #[test]
+        fn opening_verdicts_acknowledges_and_clears_them() {
+            let s = live();
+            let at = Utc::now() - chrono::Duration::minutes(10);
+            land_verdicts(&s, 1, 1, at);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("opened answers"),
+                serde_json::json!({"opened": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({
+                    "state": "none", "lead": null, "mark": "none", "mark_kinds": []
+                })
+            );
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert_eq!(reloaded.verdicts_pending, None);
+            assert!(
+                reloaded.nudges[&ledger_key(NudgeKind::VerdictsLanded, None)]
+                    .opened_at
+                    .is_some()
+            );
+        }
+
+        /// U2 is news, not an ask: it has no "Not now", and a decline of it
+        /// is refused by label and writes nothing.
+        #[test]
+        fn verdicts_cannot_be_declined() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_NUDGE_KIND_NOT_DECLINABLE);
+            assert!(!saw_status_changed(&mut rx));
+            assert!(s.state.lock().unwrap().nudges.is_empty());
+            assert_eq!(nudge_of(&s)["lead"], "verdicts_landed");
+        }
+
+        /// `hello` advertises the new event.
+        #[test]
+        fn hello_lists_history_changed() {
+            let s = live();
+            let hello = handle_request(&s, &req("hello", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert!(
+                hello["events"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e == EVENT_HISTORY_CHANGED),
+                "{hello}"
+            );
+        }
+
+        /// `n` previewed, undecided entries in an Ask-me folder.
+        fn seed_backlog(s: &DaemonShared, n: usize) {
+            for i in 0..n {
+                let id = seed_entry(s, ASK);
+                let digest = format!("sha256:nudge{i}");
+                assert!(
+                    s.queue
+                        .lock()
+                        .unwrap()
+                        .record_previewed_envelope(id, &digest, None, None)
+                );
+            }
+        }
+
+        fn status_of(s: &DaemonShared) -> serde_json::Value {
+            handle_request(s, &req("status", serde_json::json!({})))
+                .result
+                .expect("status answers")
+        }
+
+        fn nudge_of(s: &DaemonShared) -> serde_json::Value {
+            let status = status_of(s);
+            assert!(status.get("nudge").is_some(), "{status}");
+            status["nudge"].clone()
+        }
+
+        fn saw_status_changed(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> bool {
+            let mut saw = false;
+            while let Ok(event) = rx.try_recv() {
+                saw |= event.event == EVENT_STATUS_CHANGED;
+            }
+            saw
+        }
+
+        #[test]
+        fn a_backlog_at_the_threshold_leads_with_review_backlog() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let status = status_of(&s);
+            let nudge = &status["nudge"];
+            assert_eq!(nudge["state"], "armed", "{status}");
+            assert_eq!(nudge["lead"], "review_backlog");
+            assert_eq!(nudge["count"], NUDGE_BACKLOG_THRESHOLD);
+            assert_eq!(nudge["count"], status["unpurposed_traces"]);
+            assert!(nudge.get("cooldown_until").is_none(), "{nudge}");
+            // The suggestion is not a decision: the badge does not move.
+            assert_eq!(status["decisions_owed"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        #[test]
+        fn below_the_threshold_nothing_leads_and_nothing_is_counted() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD - 1);
+            assert_eq!(
+                nudge_of(&s),
+                serde_json::json!({
+                    "state": "none", "lead": null, "mark": "none", "mark_kinds": []
+                }),
+            );
+        }
+
+        /// Paused, consent-held or signed out: `none`. Unhealthy: `unknown`.
+        /// Never `armed`, and never a count.
+        #[test]
+        fn closed_gates_never_arm() {
+            let paused = live();
+            seed_backlog(&paused, NUDGE_BACKLOG_THRESHOLD);
+            paused.paused.store(true, Ordering::Relaxed);
+            paused.state.lock().unwrap().paused = true;
+            assert_eq!(nudge_of(&paused)["state"], "none");
+
+            let held = unchosen_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&held.store).unwrap();
+            seed_backlog(&held, NUDGE_BACKLOG_THRESHOLD);
+            assert!(!status_of(&held)["consent_hold"].is_null());
+            assert_eq!(nudge_of(&held)["state"], "none");
+
+            let signed_out = shared();
+            seed_backlog(&signed_out, NUDGE_BACKLOG_THRESHOLD);
+            assert_eq!(status_of(&signed_out)["logged_in"], false);
+            assert_eq!(nudge_of(&signed_out)["state"], "none");
+
+            let unhealthy = live();
+            seed_backlog(&unhealthy, NUDGE_BACKLOG_THRESHOLD);
+            unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(
+                nudge_of(&unhealthy),
+                serde_json::json!({
+                    "state": "unknown", "lead": null, "mark": "unknown", "mark_kinds": []
+                }),
+            );
+        }
+
+        /// Spec section 3: U1 is hidden while `arming_suggestion` returns
+        /// an offer.
+        #[test]
+        fn the_backlog_is_hidden_while_the_arming_offer_is_present() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            {
+                let mut policy = s.policy.lock().unwrap();
+                for _ in 0..crate::daemon::policy::ARMING_SUGGESTION_THRESHOLD {
+                    policy.record_contribution(ASK);
+                }
+            }
+            let offer = handle_request(&s, &req("arming_suggestion", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert!(offer.get("project_id").is_some(), "{offer}");
+            assert_eq!(nudge_of(&s)["state"], "none");
+        }
+
+        /// Declining the arming offer un-hides U1, so `status.nudge` changes
+        /// and every shell must be told to redraw.
+        #[test]
+        fn declining_the_arming_offer_publishes_the_backlog_it_uncovers() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            {
+                let mut policy = s.policy.lock().unwrap();
+                for _ in 0..crate::daemon::policy::ARMING_SUGGESTION_THRESHOLD {
+                    policy.record_contribution(ASK);
+                }
+            }
+            let offer = handle_request(&s, &req("arming_suggestion", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(nudge_of(&s)["state"], "none");
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "decline_arming",
+                    serde_json::json!({"project_id": offer["project_id"]}),
+                ),
+            );
+            assert_eq!(r.result.unwrap()["declined"], true);
+            assert_eq!(nudge_of(&s)["lead"], "review_backlog");
+            assert!(
+                saw_status_changed(&mut rx),
+                "the uncovered lead is published"
+            );
+        }
+
+        #[test]
+        fn not_now_silences_the_backlog_persists_and_publishes() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("decline answers"),
+                serde_json::json!({"declined": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["state"], "none", "{nudge}");
+            assert!(nudge["lead"].is_null());
+            assert!(nudge.get("count").is_none(), "{nudge}");
+            let until: chrono::DateTime<Utc> =
+                serde_json::from_value(nudge["cooldown_until"].clone()).unwrap();
+            let declined = s.state.lock().unwrap().nudges
+                [&ledger_key(NudgeKind::ReviewBacklog, None)]
+                .declined_at
+                .unwrap();
+            assert_eq!(until, declined + decline_cooldown(14));
+
+            // Persisted: a restarted daemon still honours it.
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert_eq!(
+                reloaded.nudges[&ledger_key(NudgeKind::ReviewBacklog, None)].declined_at,
+                Some(declined)
+            );
+            // And it never moved the badge.
+            assert_eq!(status_of(&s)["decisions_owed"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        #[test]
+        fn opening_stamps_the_ledger_and_leaves_the_lead_alone() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("opened answers"),
+                serde_json::json!({"opened": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let ledger = DaemonState::load(&s.store).unwrap().nudges;
+            let entry = &ledger[&ledger_key(NudgeKind::ReviewBacklog, None)];
+            assert!(entry.opened_at.is_some());
+            assert!(entry.declined_at.is_none());
+            // U1 resolves by fact, not by click: opening does not retire it.
+            assert_eq!(nudge_of(&s)["state"], "armed");
+        }
+
+        /// Unknown kinds, a subject no kind takes, and a missing kind are
+        /// refused by label, and nothing is written or published.
+        #[test]
+        fn decline_and_opened_refuse_what_they_do_not_know() {
+            let s = live();
+            let mut rx = s.events.subscribe();
+            for method in ["nudge_decline", "nudge_opened"] {
+                for (params, label) in [
+                    (serde_json::json!({}), "nudge-kind-required"),
+                    (serde_json::json!({"kind": 3}), "nudge-kind-required"),
+                    (
+                        serde_json::json!({"kind": "/Users/x/proj"}),
+                        "nudge-kind-unrecognized",
+                    ),
+                    (
+                        serde_json::json!({"kind": "review_backlog", "subject": "p1"}),
+                        "nudge-subject-unrecognized",
+                    ),
+                ] {
+                    let r = handle_request(&s, &req(method, params.clone()));
+                    let err = r.error.expect("refused");
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method} {params}");
+                    assert_eq!(err.message, label, "{method} {params}");
+                }
+            }
+            assert!(!saw_status_changed(&mut rx));
+            assert!(s.state.lock().unwrap().nudges.is_empty());
+        }
+
+        #[test]
+        fn suggestions_off_leads_nothing_persists_and_publishes() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": false})),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"suggestions_enabled": false})
+            );
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(nudge_of(&s)["state"], "none");
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["suggestions_enabled"], false);
+            assert!(
+                !crate::daemon::settings::DaemonSettings::load(&s.store)
+                    .unwrap()
+                    .suggestions_enabled
+            );
+
+            // Back on through `set_settings`: the same switch, and the same
+            // event, by either route.
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_settings",
+                    serde_json::json!({"suggestions_enabled": true}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(nudge_of(&s)["state"], "armed");
+
+            let bad = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": "no"})),
+            );
+            assert_eq!(bad.error.expect("refused").message, "on-required");
+        }
+
+        /// Nudge A2: the mark and master switches, each a boolean, each
+        /// persisted through `set_settings` and reported by `get_settings`,
+        /// and each publishing `status_changed` when it changes (the mark
+        /// reads them) -- and nothing when it does not.
+        #[test]
+        fn the_mark_and_master_switches_persist_and_publish() {
+            for (method, key) in [
+                ("set_menu_bar_mark_enabled", "menu_bar_mark_enabled"),
+                ("set_notifications_enabled", "notifications_enabled"),
+            ] {
+                let s = live();
+                let mut rx = s.events.subscribe();
+                let r = handle_request(&s, &req(method, serde_json::json!({"on": false})));
+                assert_eq!(
+                    r.result.expect("set answers"),
+                    serde_json::json!({ key: false }),
+                    "{method}"
+                );
+                assert!(saw_status_changed(&mut rx), "{method}");
+                let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                    .result
+                    .unwrap();
+                assert_eq!(settings[key], false, "{method}");
+                let stored = serde_json::to_value(
+                    crate::daemon::settings::DaemonSettings::load(&s.store).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(stored[key], false, "{method}: persisted");
+
+                // The same value again changes nothing and says nothing.
+                let r = handle_request(&s, &req(method, serde_json::json!({"on": false})));
+                assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                assert!(!saw_status_changed(&mut rx), "{method}: unchanged");
+
+                // Back on through `set_settings`: the same switch.
+                let r = handle_request(&s, &req("set_settings", serde_json::json!({ key: true })));
+                assert!(r.error.is_none(), "{method}: {:?}", r.error);
+                assert!(saw_status_changed(&mut rx), "{method}");
+
+                for bad in [serde_json::json!({}), serde_json::json!({"on": "no"})] {
+                    let r = handle_request(&s, &req(method, bad.clone()));
+                    let err = r.error.expect("refused");
+                    assert_eq!(err.code, ERR_BAD_PARAMS, "{method} {bad}");
+                    assert_eq!(err.message, "on-required", "{method} {bad}");
+                }
+                assert!(
+                    !saw_status_changed(&mut rx),
+                    "{method}: a refusal publishes nothing"
+                );
+            }
+        }
+
+        /// Nudge A2: `set_notify_kind {kind, on}` takes the digest or an
+        /// arbiter kind label, writes `notify.<kind>`, ends that kind's
+        /// one-time offer, and publishes `status_changed`. An unknown kind,
+        /// a missing kind or a non-boolean `on` is refused and writes nothing.
+        #[test]
+        fn set_notify_kind_writes_one_kind_and_ends_its_offer() {
+            let s = live();
+            {
+                let mut settings = s.settings.lock().unwrap();
+                settings.verdicts_offer_pending = true;
+                settings.idle_offer_pending = true;
+                settings.save(&s.store).unwrap();
+            }
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "verdicts_landed", "on": true}),
+                ),
+            );
+            assert_eq!(
+                r.result.expect("set answers"),
+                serde_json::json!({"kind": "verdicts_landed", "on": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let stored = crate::daemon::settings::DaemonSettings::load(&s.store).unwrap();
+            assert!(stored.notify.verdicts_landed);
+            assert!(!stored.verdicts_offer_pending, "the person answered");
+            assert!(stored.idle_offer_pending, "the other offer stays");
+            let settings = handle_request(&s, &req("get_settings", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(settings["notify"]["verdicts_landed"], true);
+
+            for label in crate::daemon::settings::notify_kind_labels() {
+                let r = handle_request(
+                    &s,
+                    &req(
+                        "set_notify_kind",
+                        serde_json::json!({"kind": label, "on": false}),
+                    ),
+                );
+                assert!(r.error.is_none(), "{label}: {:?}", r.error);
+                assert_eq!(
+                    s.settings.lock().unwrap().notify.get(label),
+                    Some(false),
+                    "{label}"
+                );
+            }
+            let _ = saw_status_changed(&mut rx);
+
+            let before = s.settings.lock().unwrap().clone();
+            for (params, label) in [
+                (
+                    serde_json::json!({"kind": "future_kind", "on": true}),
+                    "notify-kind-unrecognized",
+                ),
+                (serde_json::json!({"on": true}), "notify-kind-required"),
+                (
+                    serde_json::json!({"kind": 7, "on": true}),
+                    "notify-kind-required",
+                ),
+                (
+                    serde_json::json!({"kind": "digest", "on": "yes"}),
+                    "on-required",
+                ),
+            ] {
+                let r = handle_request(&s, &req("set_notify_kind", params.clone()));
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS, "{params}");
+                assert_eq!(err.message, label, "{params}");
+            }
+            assert_eq!(
+                *s.settings.lock().unwrap(),
+                before,
+                "a refusal writes nothing"
+            );
+            assert!(!saw_status_changed(&mut rx));
+        }
+
+        /// Lock order: the ledger and the settings it reads are snapshotted
+        /// in their own short locks before the policy and queue section,
+        /// never inside it. Two pins: the snapshot takes neither the policy
+        /// nor the queue lock (it finishes while another thread holds both),
+        /// and `status_value` calls it before it takes the policy lock.
+        #[test]
+        fn the_nudge_snapshot_is_taken_before_the_policy_and_queue_section() {
+            let s = std::sync::Arc::new(live());
+            let policy = s.policy.lock().unwrap();
+            let queue = s.queue.lock().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let worker = {
+                let s = std::sync::Arc::clone(&s);
+                std::thread::spawn(move || {
+                    let _ = s.nudge_snapshot();
+                    let _ = tx.send(());
+                })
+            };
+            let finished = rx.recv_timeout(std::time::Duration::from_secs(30));
+            drop(queue);
+            drop(policy);
+            worker.join().unwrap();
+            assert!(
+                finished.is_ok(),
+                "nudge_snapshot must not take the policy or queue lock"
+            );
+
+            let source = include_str!("ipc.rs");
+            let body = source
+                .split("pub(crate) fn status_value_at(&self")
+                .nth(1)
+                .expect("status_value_at exists");
+            let snapshot = body.find("self.nudge_snapshot()").expect("snapshot taken");
+            let policy_lock = body
+                .find("let policy = self.policy.lock()")
+                .expect("policy section");
+            assert!(
+                snapshot < policy_lock,
+                "snapshot must precede the policy lock"
+            );
+        }
+
+        // ---- U4: idle sessions ----
+
+        /// One waiting entry in `project_key` from `source`, last written
+        /// `days` days ago.
+        fn seed_idle(s: &DaemonShared, project_key: &str, source: &str, days: i64) -> uuid::Uuid {
+            let entry_id = uuid::Uuid::new_v4();
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: source.to_string(),
+                        project_key: project_key.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(project_key),
+                        path: std::path::PathBuf::from(format!("/tmp/idle-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: Utc::now() - chrono::Duration::days(days),
+                        last_modified_at: Some(Utc::now() - chrono::Duration::days(days)),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id
+        }
+
+        fn list_idle(s: &DaemonShared) -> Vec<String> {
+            let r = handle_request(
+                s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "idle_sessions"}),
+                ),
+            );
+            r.result.expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["entry_id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        /// U4 leads on `status.nudge`, and `status.idle_sessions` carries
+        /// the count, the tools' display names (an unknown source left
+        /// unnamed) and the threshold: no id, no path, no folder label.
+        #[test]
+        fn idle_sessions_lead_and_report_counts_and_tool_names_only() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let a = seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_TRAJECTORY, 6);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "armed", "{status}");
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["count"], 3);
+            assert_eq!(
+                status["idle_sessions"],
+                serde_json::json!({
+                    "count": 3,
+                    "tools": ["Claude Code", "Codex"],
+                    "threshold_days": crate::daemon::nudge::IDLE_DAYS,
+                })
+            );
+            let text = status["idle_sessions"].to_string();
+            assert!(!text.contains(ASK), "{text}");
+            assert!(!text.contains(&a.to_string()), "{text}");
+            assert!(!text.contains("nudge-ask"), "{text}");
+        }
+
+        /// A batch holding a source the tool table cannot name names no
+        /// tool in its words, even beside named ones: "3 traces from Claude
+        /// Code and Codex" would credit two tools with a third's session.
+        /// The wire's `tools` still lists the names it has.
+        #[test]
+        fn a_batch_with_an_unnamed_source_names_no_tool_in_its_words() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_TRAJECTORY, 6);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert_eq!(
+                status["idle_sessions"]["tools"],
+                serde_json::json!(["Claude Code", "Codex"])
+            );
+            let title = status["nudge"]["text"]["title"].as_str().unwrap();
+            assert_eq!(
+                title,
+                format!(
+                    "3 traces have been idle for {} or more",
+                    crate::nudge_copy::days_phrase(crate::daemon::nudge::IDLE_DAYS as u32)
+                )
+            );
+        }
+
+        /// Core composes the leading card's words (`status.nudge.text`)
+        /// and, while the mark is lit, the mark's (`status.nudge.mark_text`).
+        /// Shells draw these and compose nothing. Absent with no lead, and
+        /// absent while the mark is dark.
+        #[test]
+        fn status_nudge_carries_the_rendered_words() {
+            use crate::nudge_render::{Batch, backlog_card, idle_card, mark_ready_text};
+            let s = live();
+            let nudge = nudge_of(&s);
+            assert!(nudge.get("text").is_none(), "{nudge}");
+            assert!(nudge.get("mark_text").is_none(), "{nudge}");
+
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "review_backlog", "{nudge}");
+            let want = backlog_card(&Batch {
+                count: NUDGE_BACKLOG_THRESHOLD as u64,
+                tools: vec![],
+                idle_days: 0,
+                mission_fit: None,
+                estimate: None,
+            });
+            assert_eq!(nudge["text"], serde_json::to_value(&want).unwrap());
+
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["lead"], "idle_sessions", "{nudge}");
+            let batch = Batch {
+                count: 2,
+                tools: vec!["Claude Code".into(), "Codex".into()],
+                idle_days: crate::daemon::nudge::IDLE_DAYS as u32,
+                mission_fit: None,
+                estimate: None,
+            };
+            assert_eq!(
+                nudge["text"],
+                serde_json::to_value(idle_card(&batch)).unwrap()
+            );
+            assert_eq!(nudge["mark"], "ready", "{nudge}");
+            assert_eq!(
+                nudge["mark_text"],
+                serde_json::to_value(mark_ready_text(&batch)).unwrap()
+            );
+        }
+
+        /// Verdict news renders its card and the news mark's words, with
+        /// the date the news began in local time.
+        #[test]
+        fn verdict_news_carries_the_rendered_words() {
+            use crate::nudge_render::{Verdicts, mark_news_text, verdicts_card};
+            let s = live();
+            let at = Utc::now() - chrono::Duration::hours(1);
+            land_verdicts(&s, 2, 1, at);
+            let nudge = nudge_of(&s);
+            let v = Verdicts {
+                accepted: 2,
+                held: 1,
+                credit_final_tenths: None,
+                since: at.with_timezone(&chrono::Local).date_naive(),
+            };
+            assert_eq!(
+                nudge["text"],
+                serde_json::to_value(verdicts_card(&v)).unwrap()
+            );
+            assert_eq!(nudge["mark"], "news", "{nudge}");
+            assert_eq!(
+                nudge["mark_text"],
+                serde_json::to_value(mark_news_text(&v)).unwrap()
+            );
+        }
+
+        /// The card filter and the status count come from one function:
+        /// `list_pending {filter: "idle_sessions"}` lists exactly the
+        /// candidates `status.idle_sessions.count` counts.
+        #[test]
+        fn the_idle_filter_lists_exactly_what_status_counts() {
+            let s = live();
+            let never = "/tmp/nudge-never";
+            s.policy
+                .lock()
+                .unwrap()
+                .set_mode(
+                    never,
+                    crate::daemon::policy::ProjectMode::Ignore,
+                    Utc::now(),
+                )
+                .unwrap();
+            let idle_a = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 3);
+            let idle_b = seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 9);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 1);
+            seed_idle(&s, never, crate::source::SOURCE_CLAUDE_CODE, 9);
+            seed_entry(&s, ASK);
+            let listed = list_idle(&s);
+            let status = status_of(&s);
+            assert_eq!(
+                status["idle_sessions"]["count"].as_u64().unwrap() as usize,
+                listed.len(),
+                "{status}"
+            );
+            let mut want = vec![idle_a.to_string(), idle_b.to_string()];
+            want.sort();
+            let mut got = listed;
+            got.sort();
+            assert_eq!(got, want);
+            // Absent filter: every pending entry, as before.
+            let all = handle_request(&s, &req("list_pending", serde_json::json!({})))
+                .result
+                .unwrap();
+            assert_eq!(all["pending"].as_array().unwrap().len(), 5);
+        }
+
+        /// A folder's Submit under the idle filter selects what the filtered
+        /// list shows and nothing it hid: `approve {project_id, filter}`
+        /// reads the same `queue::idle_candidates`. Observed on `skipped`,
+        /// as `a_project_approve_selects_only_what_can_be_sent` is: these
+        /// seeds have no session file, so every selected entry lands there.
+        #[tokio::test]
+        async fn a_filtered_folder_approve_selects_only_the_idle_traces() {
+            let s = live();
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 9);
+            let recent = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 1);
+            let listed = list_idle(&s);
+            assert_eq!(listed, vec![idle.to_string()]);
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "approve",
+                    serde_json::json!({"project_id": project_id_for(ASK), "filter": "idle_sessions"}),
+                ),
+            )
+            .await;
+            let result = r.result.expect("approve answers");
+            let selected: Vec<&serde_json::Value> = result["skipped"]
+                .as_array()
+                .expect("a skipped list")
+                .iter()
+                .map(|e| &e["entry_id"])
+                .collect();
+            assert_eq!(selected, vec![&serde_json::json!(idle)], "{result}");
+            assert!(
+                s.queue.lock().unwrap().get(recent).is_some(),
+                "the trace the filter hid is still waiting"
+            );
+        }
+
+        /// A filter narrows a group; on one entry it is refused by label.
+        #[tokio::test]
+        async fn a_filter_on_one_entry_is_refused() {
+            let s = live();
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 9);
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "approve",
+                    serde_json::json!({"entry_id": idle, "filter": "idle_sessions"}),
+                ),
+            )
+            .await;
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_FILTER_NEEDS_GROUP);
+        }
+
+        /// The filter is spelled as the kind's own label, so a filter and a
+        /// ledger key can never drift apart.
+        #[test]
+        fn the_idle_filter_is_the_kind_label() {
+            assert_eq!(LIST_FILTER_IDLE_SESSIONS, NudgeKind::IdleSessions.label());
+        }
+
+        /// An unknown filter is refused by label, never answered with an
+        /// empty list a shell would read as "nothing idle".
+        #[test]
+        fn an_unknown_list_filter_is_refused() {
+            let s = live();
+            for (filter, label) in [
+                (serde_json::json!("stale"), ERR_LIST_FILTER_UNRECOGNIZED),
+                (serde_json::json!(3), ERR_LIST_FILTER_INVALID),
+            ] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({"filter": filter})),
+                );
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, label);
+            }
+        }
+
+        /// Below a 4-day queue TTL the kind is off: `status.idle_sessions`
+        /// is absent (never `null`), nothing leads for it, and the filter
+        /// lists nothing.
+        #[test]
+        fn a_short_queue_ttl_turns_idle_sessions_off() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 30);
+            s.settings.lock().unwrap().queue_ttl_days = 3;
+            let status = status_of(&s);
+            assert!(status.get("idle_sessions").is_none(), "{status}");
+            assert_ne!(status["nudge"]["lead"], "idle_sessions");
+            assert!(list_idle(&s).is_empty());
+        }
+
+        /// Gates close U4's lead, but the fact is still reported: like
+        /// `unpurposed_traces`, `status.idle_sessions` is a count.
+        #[test]
+        fn a_paused_daemon_reports_idle_sessions_but_leads_nothing() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["count"], 1);
+        }
+
+        // ---- mission fit on status (nudge value addendum, section 1.3) ----
+
+        /// Claude Code on and Codex off, and every waiting entry recorded in
+        /// the cwd cache under its own adapter, so matching reads the same
+        /// sessions the queue holds.
+        fn see_every_pending_entry(s: &DaemonShared) {
+            {
+                let mut settings = s.settings.lock().unwrap();
+                settings.claude_source = Some(crate::daemon::settings::SourceDeclaration::Watch {
+                    path: std::path::PathBuf::from("/tmp/nudge-claude-root"),
+                });
+                settings.codex_source = Some(crate::daemon::settings::SourceDeclaration::Off);
+            }
+            let seen: Vec<(String, String, String)> = s
+                .queue
+                .lock()
+                .unwrap()
+                .pending()
+                .into_iter()
+                .map(|e| {
+                    (
+                        e.path.to_string_lossy().to_string(),
+                        e.source.clone(),
+                        e.project_key.clone(),
+                    )
+                })
+                .collect();
+            let mut state = s.state.lock().unwrap();
+            for (path, source, project_key) in seen {
+                state.cwd_cache.insert(
+                    path,
+                    crate::daemon::state::CwdCacheEntry {
+                        size_bytes: 1,
+                        modified_at: Utc::now(),
+                        cwd: Some(project_key.clone()),
+                        project_key: Some(project_key),
+                        tool: Some(source.clone()),
+                        adapter: Some(source),
+                    },
+                );
+            }
+        }
+
+        fn receive_missions(s: &DaemonShared, missions: serde_json::Value) {
+            crate::daemon::mission_matching::receive_catalogue(
+                &s.mission_catalogue,
+                &serde_json::json!({"schema_version": 1, "missions": missions}),
+                Utc::now(),
+            )
+            .unwrap();
+        }
+
+        fn claude_mission() -> serde_json::Value {
+            serde_json::json!([{"mission_id": "claude", "criteria": {"tools": ["claude-code"]}}])
+        }
+
+        /// `list_pending {filter: idle_sessions}` rows whose `mission_fit`
+        /// is above zero.
+        fn idle_rows_fitting(s: &DaemonShared) -> usize {
+            let r = handle_request(
+                s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "idle_sessions"}),
+                ),
+            );
+            r.result.expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["mission_fit"].as_u64().is_some_and(|n| n > 0))
+                .count()
+        }
+
+        /// No live catalogue: neither `idle_sessions` nor `nudge` names a
+        /// `mission_fit`, absent rather than 0 (OWNER DECISION V1).
+        #[test]
+        fn status_mission_fit_is_absent_without_a_live_catalogue() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert!(status["idle_sessions"].get("mission_fit").is_none());
+            assert!(status["nudge"].get("mission_fit").is_none());
+        }
+
+        /// A live catalogue with no missions is a known zero on both.
+        #[test]
+        fn status_mission_fit_is_zero_for_a_live_empty_catalogue() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(&s, serde_json::json!([]));
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["mission_fit"], 0, "{status}");
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["mission_fit"], 0);
+        }
+
+        /// `status.idle_sessions.mission_fit` counts exactly the idle-filter
+        /// rows `list_pending` gives a `mission_fit` above zero, and the
+        /// leading idle nudge carries the same count. A Codex session (its
+        /// adapter off) is idle but fits nothing.
+        #[test]
+        fn status_idle_mission_fit_matches_the_idle_filter_rows() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 6);
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 7);
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let rows = idle_rows_fitting(&s);
+            assert_eq!(rows, 2);
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["count"], 3, "{status}");
+            assert_eq!(status["idle_sessions"]["mission_fit"], rows);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["mission_fit"], rows);
+            assert!(!status.to_string().contains("\"claude\""), "{status}");
+        }
+
+        /// A leading backlog nudge counts its own subjects: the previewed
+        /// Ask me entries `unpurposed_traces` counts.
+        #[test]
+        fn status_nudge_mission_fit_counts_the_backlog_when_it_leads() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            // A pending entry that is not previewed: outside the backlog.
+            seed_entry(&s, ASK);
+            see_every_pending_entry(&s);
+            receive_missions(&s, serde_json::json!([{"mission_id": "any"}]));
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "review_backlog", "{status}");
+            assert_eq!(status["nudge"]["mission_fit"], NUDGE_BACKLOG_THRESHOLD);
+        }
+
+        /// Gates close the lead, so `nudge` carries no `mission_fit`; the
+        /// idle fact, like its count, is still reported.
+        #[test]
+        fn a_paused_daemon_reports_idle_mission_fit_but_no_nudge_fit() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["mission_fit"], 1);
+            assert!(status["nudge"].get("mission_fit").is_none());
+        }
+
+        /// OWNER DECISION V4: `status` never looks at a folder. Until
+        /// `list_pending` has, an idle session in a Rust folder fits no
+        /// language mission; afterwards the cached answer is used.
+        #[test]
+        fn status_reads_only_the_folder_languages_list_pending_cached() {
+            let s = live();
+            let work = tempfile::tempdir().unwrap();
+            std::fs::write(work.path().join("Cargo.toml"), "").unwrap();
+            let folder = work.path().to_str().unwrap().to_string();
+            seed_idle(&s, &folder, crate::source::SOURCE_CLAUDE_CODE, 5);
+            see_every_pending_entry(&s);
+            receive_missions(
+                &s,
+                serde_json::json!([{"mission_id": "rust", "criteria": {"languages": ["rust"]}}]),
+            );
+            assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 0);
+            assert_eq!(idle_rows_fitting(&s), 1);
+            assert_eq!(status_of(&s)["idle_sessions"]["mission_fit"], 1);
+        }
+
+        // ---- credit estimate (nudge value addendum, section 4.6) ----
+
+        /// Features of a session whose only content is `text`.
+        fn features_of(
+            text: &str,
+        ) -> trace_commons_protocol::local_credit_estimate::LocalEstimateFeatures {
+            crate::daemon::queue::estimate_features_of(&crate::source::SessionTranscript {
+                events: vec![crate::source::SessionEvent {
+                    kind: crate::source::SessionEventKind::User,
+                    content: Some(text.to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+        }
+
+        /// An idle waiting entry, like `seed_idle`, carrying features.
+        fn seed_idle_estimated(s: &DaemonShared, days: i64) -> uuid::Uuid {
+            let entry_id = uuid::Uuid::new_v4();
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: crate::source::SOURCE_CLAUDE_CODE.to_string(),
+                        project_key: ASK.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(ASK),
+                        path: std::path::PathBuf::from(format!("/tmp/idle-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: Utc::now() - chrono::Duration::days(days),
+                        last_modified_at: Some(Utc::now() - chrono::Duration::days(days)),
+                        estimate_features: Some(features_of("add a rate limiter")),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id
+        }
+
+        fn list_rows(s: &DaemonShared, params: serde_json::Value) -> Vec<serde_json::Value> {
+            handle_request(s, &req("list_pending", params))
+                .result
+                .expect("list answers")["pending"]
+                .as_array()
+                .unwrap()
+                .clone()
+        }
+
+        /// The built-in table's band, rounded out to the display step:
+        /// 1.27 to 2.90 shows as 1.0 to 3.0.
+        const BUILT_IN_LOW: f64 = 1.0;
+        const BUILT_IN_HIGH: f64 = 3.0;
+
+        /// A row with features carries the built-in band, its calibration
+        /// label and basis, and no tier (one-tier table). A row without
+        /// features carries no `credit_estimate` at all, never 0.
+        #[test]
+        fn list_pending_renders_the_estimate_only_for_entries_with_features() {
+            let s = live();
+            let with = seed_idle_estimated(&s, 1);
+            let without = seed_entry(&s, ASK);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows.len(), 2);
+            let row = |id: uuid::Uuid| {
+                rows.iter()
+                    .find(|r| r["entry_id"] == id.to_string())
+                    .unwrap()
+                    .clone()
+            };
+            let estimate = row(with)["credit_estimate"].clone();
+            assert_eq!(
+                estimate,
+                serde_json::json!({
+                    "low": BUILT_IN_LOW,
+                    "high": BUILT_IN_HIGH,
+                    "calibration": "lef1.t1/cq3",
+                    "basis": ESTIMATE_BASIS_BUILT_IN,
+                    "drawn": false,
+                }),
+                "{estimate}"
+            );
+            assert!(row(without).get("credit_estimate").is_none());
+            // The features themselves never reach the wire.
+            for r in &rows {
+                assert!(r.get("estimate_features").is_none(), "{r}");
+            }
+        }
+
+        /// Features with no content give no estimate rather than a 0 band.
+        #[test]
+        fn an_entry_with_empty_features_has_no_estimate() {
+            let entry = crate::daemon::queue::QueueEntry {
+                estimate_features: Some(features_of("")),
+                ..Default::default()
+            };
+            assert_eq!(
+                credit_estimate_value(&entry, &EstimateTableSlot::built_in()),
+                None
+            );
+        }
+
+        fn fetched_table() -> trace_commons_protocol::local_credit_estimate::LocalEstimateTable {
+            let mut table =
+                trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in();
+            table.version = "t9".to_string();
+            table
+        }
+
+        /// A published two-tier table: the band a shell may draw.
+        fn tiered_table() -> trace_commons_protocol::local_credit_estimate::LocalEstimateTable {
+            use trace_commons_protocol::local_credit_estimate::EstimateBand;
+            let mut table = fetched_table();
+            table.cut_offs = vec![0.5];
+            table.bands = vec![
+                EstimateBand {
+                    low: 1.0,
+                    high: 2.0,
+                },
+                EstimateBand {
+                    low: 2.0,
+                    high: 3.5,
+                },
+            ];
+            assert_eq!(table.validate(), Ok(()));
+            table
+        }
+
+        /// OWNER DECISION 2026-10-08: the estimate is drawn only under a
+        /// published table with two or more tiers. The built-in band, and a
+        /// published one-tier band, say the same thing about every session,
+        /// so they stay on the wire with `drawn: false` and nothing draws
+        /// them. Row and status agree.
+        #[test]
+        fn the_estimate_is_drawn_only_under_a_published_tiered_table() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let drawn = |s: &DaemonShared| {
+                let rows = list_rows(s, serde_json::json!({}));
+                let status = status_of(s);
+                (
+                    rows[0]["credit_estimate"]["drawn"].clone(),
+                    status["idle_sessions"]["credit_estimate"]["drawn"].clone(),
+                )
+            };
+            let no = (serde_json::json!(false), serde_json::json!(false));
+            assert_eq!(drawn(&s), no, "built-in");
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), Utc::now());
+            assert_eq!(drawn(&s), no, "published, one tier");
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(tiered_table()), Utc::now());
+            assert_eq!(
+                drawn(&s),
+                (serde_json::json!(true), serde_json::json!(true)),
+                "published, two tiers"
+            );
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert!(
+                rows[0]["credit_estimate"].get("tier").is_some(),
+                "{}",
+                rows[0]
+            );
+        }
+
+        /// An accepted fetch replaces the table in force and marks it
+        /// published; a refused one brings the built-in table back, never
+        /// the stale fetched one; a 404 or a network failure keeps what is
+        /// in force (OWNER DECISION E11).
+        #[test]
+        fn a_fetch_replaces_falls_back_or_keeps_the_table() {
+            use crate::credit_estimate_table::EstimateTableClientError as E;
+            let at = chrono::Utc::now();
+            let mut slot = EstimateTableSlot::built_in();
+            slot.apply_fetch(Ok(fetched_table()), at);
+            assert_eq!(slot.basis, ESTIMATE_BASIS_PUBLISHED);
+            assert_eq!(slot.table, fetched_table());
+            assert_eq!(slot.received_at, Some(at));
+
+            for kept in [
+                E::NotFound,
+                E::Unavailable,
+                E::HostNotAllowed,
+                E::EndpointInvalid,
+            ] {
+                let mut kept_slot = slot.clone();
+                kept_slot.apply_fetch(Err(kept), at + chrono::Duration::hours(24));
+                assert_eq!(kept_slot, slot, "{kept:?}");
+            }
+            for refused in [E::Refused, E::ResponseTooLarge] {
+                let mut fallen = slot.clone();
+                fallen.apply_fetch(Err(refused), at + chrono::Duration::hours(24));
+                assert_eq!(fallen, EstimateTableSlot::built_in(), "{refused:?}");
+            }
+        }
+
+        /// A fetched table older than `ESTIMATE_TABLE_MAX_AGE` is not in
+        /// force: the built-in table is, never the stale one. The built-in
+        /// table never expires.
+        #[test]
+        fn an_expired_fetched_table_falls_back_to_the_built_in_table() {
+            use crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE;
+            let at = chrono::Utc::now();
+            let mut slot = EstimateTableSlot::built_in();
+            slot.apply_fetch(Ok(fetched_table()), at);
+            let fresh = at + ESTIMATE_TABLE_MAX_AGE - chrono::Duration::seconds(1);
+            assert_eq!(slot.clone().in_force(fresh), slot);
+            let stale = at + ESTIMATE_TABLE_MAX_AGE;
+            assert_eq!(slot.clone().in_force(stale), EstimateTableSlot::built_in());
+            let built_in = EstimateTableSlot::built_in();
+            assert_eq!(
+                built_in.clone().in_force(at + chrono::Duration::days(3650)),
+                built_in
+            );
+            // A published slot with no receipt time is not trusted as fresh.
+            let undated = EstimateTableSlot {
+                basis: ESTIMATE_BASIS_PUBLISHED,
+                ..EstimateTableSlot::built_in()
+            };
+            assert_eq!(undated.in_force(at), EstimateTableSlot::built_in());
+        }
+
+        /// `list_pending` renders under the table in force, so an expired
+        /// fetched table shows the built-in band and basis.
+        #[test]
+        fn list_pending_renders_under_the_table_in_force() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let long_ago = Utc::now()
+                - crate::credit_estimate_table::ESTIMATE_TABLE_MAX_AGE
+                - chrono::Duration::hours(1);
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), long_ago);
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["credit_estimate"]["basis"], ESTIMATE_BASIS_BUILT_IN);
+            assert_eq!(rows[0]["credit_estimate"]["calibration"], "lef1.t1/cq3");
+            assert_eq!(
+                status_of(&s)["idle_sessions"]["credit_estimate"]["calibration"],
+                "lef1.t1/cq3"
+            );
+
+            // The same table received a moment ago is in force.
+            s.estimate_table
+                .lock()
+                .unwrap()
+                .apply_fetch(Ok(fetched_table()), Utc::now());
+            let rows = list_rows(&s, serde_json::json!({}));
+            assert_eq!(
+                rows[0]["credit_estimate"]["basis"],
+                ESTIMATE_BASIS_PUBLISHED
+            );
+            assert_eq!(rows[0]["credit_estimate"]["calibration"], "lef1.t9/cq3");
+        }
+
+        /// Once an entry is on its way or delivered, its figure is
+        /// history's or nothing, never the estimate (section 4.7).
+        #[test]
+        fn an_uploading_or_uploaded_entry_has_no_estimate() {
+            let slot = EstimateTableSlot::built_in();
+            let pending = crate::daemon::queue::QueueEntry {
+                estimate_features: Some(features_of("add a rate limiter")),
+                ..Default::default()
+            };
+            let estimate = credit_estimate_value(&pending, &slot).expect("pending has one");
+            assert!(estimate["low"].as_f64().unwrap() > 0.0, "{estimate}");
+            for state in [QueueState::Uploading, QueueState::Uploaded] {
+                let sent = crate::daemon::queue::QueueEntry {
+                    state,
+                    ..pending.clone()
+                };
+                assert_eq!(credit_estimate_value(&sent, &slot), None, "{state:?}");
+            }
+            let with_submission = crate::daemon::queue::QueueEntry {
+                submission_id: Some(uuid::Uuid::new_v4()),
+                ..pending
+            };
+            assert_eq!(credit_estimate_value(&with_submission, &slot), None);
+        }
+
+        /// No candidate has features: neither `idle_sessions` nor `nudge`
+        /// names a `credit_estimate`, absent rather than 0.
+        #[test]
+        fn status_credit_estimate_is_absent_without_features() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert!(status["idle_sessions"].get("credit_estimate").is_none());
+            assert!(status["nudge"].get("credit_estimate").is_none());
+        }
+
+        /// `known` counts only the candidates with an estimate; the band
+        /// ends are summed over those alone, and the unknown one adds
+        /// nothing, never a 0. The leading idle nudge carries the same
+        /// aggregate, and the sum equals the idle-filter rows' own bands.
+        #[test]
+        fn status_credit_estimate_sums_only_the_known_candidates() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            seed_idle_estimated(&s, 6);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 7);
+            let status = status_of(&s);
+            assert_eq!(status["idle_sessions"]["count"], 3, "{status}");
+            let want = serde_json::json!({
+                "low": 2.0 * BUILT_IN_LOW,
+                "high": 2.0 * BUILT_IN_HIGH,
+                "known": 2,
+                "calibration": "lef1.t1/cq3",
+                "drawn": false,
+            });
+            assert_eq!(status["idle_sessions"]["credit_estimate"], want);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions");
+            assert_eq!(status["nudge"]["credit_estimate"], want);
+
+            let rows = list_rows(&s, serde_json::json!({"filter": "idle_sessions"}));
+            let estimates: Vec<&serde_json::Value> = rows
+                .iter()
+                .filter_map(|r| r.get("credit_estimate"))
+                .collect();
+            assert_eq!(estimates.len(), 2);
+            let sum =
+                |key: &str| -> f64 { estimates.iter().map(|e| e[key].as_f64().unwrap()).sum() };
+            assert_eq!(sum("low"), want["low"].as_f64().unwrap());
+            assert_eq!(sum("high"), want["high"].as_f64().unwrap());
+        }
+
+        /// A leading backlog nudge sums its own subjects: the previewed Ask
+        /// me entries `unpurposed_traces` counts.
+        #[test]
+        fn status_nudge_credit_estimate_sums_the_backlog_when_it_leads() {
+            let s = live();
+            for i in 0..NUDGE_BACKLOG_THRESHOLD {
+                let id = seed_idle_estimated(&s, 0);
+                assert!(s.queue.lock().unwrap().record_previewed_envelope(
+                    id,
+                    &format!("sha256:est{i}"),
+                    None,
+                    None
+                ));
+            }
+            // A pending entry that is not previewed: outside the backlog.
+            seed_idle_estimated(&s, 0);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "review_backlog", "{status}");
+            let n = NUDGE_BACKLOG_THRESHOLD as f64;
+            assert_eq!(
+                status["nudge"]["credit_estimate"],
+                serde_json::json!({
+                    "low": n * BUILT_IN_LOW,
+                    "high": n * BUILT_IN_HIGH,
+                    "known": NUDGE_BACKLOG_THRESHOLD,
+                    "calibration": "lef1.t1/cq3",
+                    "drawn": false,
+                })
+            );
+        }
+
+        /// Gates close the lead, so `nudge` carries no `credit_estimate`;
+        /// the idle fact is still reported.
+        #[test]
+        fn a_paused_daemon_reports_the_idle_estimate_but_no_nudge_estimate() {
+            let s = live();
+            seed_idle_estimated(&s, 5);
+            let paused = handle_request(&s, &req("pause", serde_json::json!({})));
+            assert!(paused.error.is_none(), "{:?}", paused.error);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["state"], "none", "{status}");
+            assert_eq!(status["idle_sessions"]["credit_estimate"]["known"], 1);
+            assert!(status["nudge"].get("credit_estimate").is_none());
+        }
+
+        /// The estimate is read only by `list_pending` and `status`: no
+        /// history, audit, notification or credit-summing module names it
+        /// (section 4.7), and `status` takes the table before the policy
+        /// lock, like the mission join.
+        #[test]
+        fn the_estimate_stays_out_of_history_audit_and_logs() {
+            for (name, source) in [
+                ("history.rs", include_str!("history.rs")),
+                ("audit.rs", include_str!("audit.rs")),
+                ("notify.rs", include_str!("notify.rs")),
+                ("commons_credit.rs", include_str!("commons_credit.rs")),
+                ("nudge.rs", include_str!("nudge.rs")),
+                ("attention.rs", include_str!("attention.rs")),
+            ] {
+                for word in ["estimate_features", "credit_estimate", "estimate_table"] {
+                    assert!(!source.contains(word), "{name} names {word}");
+                }
+            }
+            let source = include_str!("ipc.rs");
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            for line in production.lines() {
+                let logs = [
+                    "tracing::",
+                    "info!(",
+                    "warn!(",
+                    "debug!(",
+                    "error!(",
+                    "audit",
+                ]
+                .iter()
+                .any(|m| line.contains(m));
+                if logs {
+                    assert!(
+                        !line.contains("estimate"),
+                        "a log or audit line names the estimate: {line}"
+                    );
+                }
+            }
+            let body = source
+                .split("pub fn status_value(&self)")
+                .nth(1)
+                .expect("status_value exists");
+            let table = body
+                .find("self.estimate_table.lock()")
+                .expect("status reads the table slot");
+            let policy_lock = body
+                .find("let policy = self.policy.lock()")
+                .expect("policy section");
+            assert!(table < policy_lock, "the table must be read before policy");
+        }
+
+        /// `nudge_decline {idle_sessions}` is the in-app "Not now": it
+        /// silences U4 and U1 together and persists. `nudge_opened` is
+        /// accepted and does not retire U4, which retires by fact.
+        #[test]
+        fn idle_sessions_take_a_not_now_shared_with_the_backlog() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+
+            let opened = handle_request(
+                &s,
+                &req("nudge_opened", serde_json::json!({"kind": "idle_sessions"})),
+            );
+            assert!(opened.error.is_none(), "{:?}", opened.error);
+            assert_eq!(nudge_of(&s)["lead"], "idle_sessions");
+
+            let mut rx = s.events.subscribe();
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+            );
+            assert_eq!(
+                declined.result.expect("declined"),
+                serde_json::json!({"declined": true})
+            );
+            assert!(saw_status_changed(&mut rx));
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["state"], "none", "{nudge}");
+            assert_eq!(nudge["lead"], serde_json::Value::Null);
+            assert!(nudge.get("cooldown_until").is_some(), "{nudge}");
+            let reloaded = DaemonState::load(&s.store).unwrap();
+            assert!(
+                reloaded.nudges[&ledger_key(NudgeKind::IdleSessions, None)]
+                    .declined_at
+                    .is_some()
+            );
+        }
+
+        // ---- Time-driven status changes ----
+
+        fn status_changes(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> usize {
+            let mut n = 0;
+            while let Ok(event) = rx.try_recv() {
+                n += usize::from(event.event == EVENT_STATUS_CHANGED);
+            }
+            n
+        }
+
+        /// A history poll at `at`, as `record_history_poll` stamps it, so a
+        /// later tick reads history as fresh and only the change under test
+        /// moves `status`.
+        fn polled_at(s: &DaemonShared, at: chrono::DateTime<Utc>) {
+            s.state.lock().unwrap().last_history_poll_at = Some(at);
+        }
+
+        /// The first tick only records what `status` says; a tick that finds
+        /// it unchanged publishes nothing.
+        #[test]
+        fn an_unchanged_tick_publishes_no_status_changed() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            land_verdicts(&s, 1, 0, Utc::now() - chrono::Duration::hours(1));
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            let mut rx = s.events.subscribe();
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_changes(&mut rx), 0, "the first tick only records");
+            s.publish_time_driven_status(t0 + chrono::Duration::minutes(1));
+            s.publish_time_driven_status(t0 + chrono::Duration::minutes(2));
+            assert_eq!(status_changes(&mut rx), 0);
+        }
+
+        /// The history poll going stale turns `status.nudge` to `unknown`.
+        #[test]
+        fn a_history_poll_going_stale_publishes_status_changed_once() {
+            let s = live();
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            let poll_secs = s.settings.lock().unwrap().history_poll_secs as i64;
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["nudge"]["state"], "none");
+            let mut rx = s.events.subscribe();
+            let stale = t0 + chrono::Duration::seconds(poll_secs * 3);
+            s.publish_time_driven_status(stale);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(stale + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// A "Not now" lapsing puts the backlog suggestion back.
+        #[test]
+        fn a_lapsed_not_now_publishes_status_changed_once() {
+            let s = live();
+            seed_backlog(&s, NUDGE_BACKLOG_THRESHOLD);
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+            );
+            assert!(declined.error.is_none(), "{:?}", declined.error);
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            let mut rx = s.events.subscribe();
+            let ttl = s.settings.lock().unwrap().queue_ttl_days;
+            let lapsed = t0 + decline_cooldown(ttl) + chrono::Duration::minutes(1);
+            polled_at(&s, lapsed);
+            s.publish_time_driven_status(lapsed);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(lapsed + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// The news mark ageing past `NEWS_MARK_TTL` goes dark.
+        #[test]
+        fn the_news_mark_ageing_out_publishes_status_changed_once() {
+            let s = live();
+            let t0 = Utc::now();
+            land_verdicts(&s, 1, 0, t0 - chrono::Duration::hours(1));
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["nudge"]["mark"], "news");
+            let mut rx = s.events.subscribe();
+            let aged = t0 + crate::daemon::nudge::NEWS_MARK_TTL;
+            polled_at(&s, aged);
+            s.publish_time_driven_status(aged);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(aged + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        /// A session crossing the idle threshold becomes an idle candidate.
+        #[test]
+        fn an_idle_threshold_crossed_publishes_status_changed_once() {
+            let s = live();
+            seed_idle(
+                &s,
+                ASK,
+                crate::source::SOURCE_CLAUDE_CODE,
+                crate::daemon::nudge::IDLE_DAYS - 1,
+            );
+            let t0 = Utc::now();
+            polled_at(&s, t0);
+            s.publish_time_driven_status(t0);
+            assert_eq!(status_of(&s)["idle_sessions"]["count"], 0);
+            let mut rx = s.events.subscribe();
+            let crossed = t0 + chrono::Duration::days(1) + chrono::Duration::minutes(1);
+            polled_at(&s, crossed);
+            s.publish_time_driven_status(crossed);
+            assert_eq!(status_changes(&mut rx), 1);
+            s.publish_time_driven_status(crossed + chrono::Duration::minutes(1));
+            assert_eq!(status_changes(&mut rx), 0, "and only once");
+        }
+
+        // ---- A3: the news mark and the halo ----
+
+        fn mark_of(s: &DaemonShared) -> (serde_json::Value, serde_json::Value) {
+            let nudge = nudge_of(s);
+            (nudge["mark"].clone(), nudge["mark_kinds"].clone())
+        }
+
+        /// Verdict news with nothing owed lights `news`, with its kind.
+        #[test]
+        fn verdict_news_with_nothing_owed_lights_the_news_mark() {
+            let s = live();
+            land_verdicts(&s, 2, 1, Utc::now() - chrono::Duration::hours(1));
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 0, "{status}");
+            assert_eq!(status["nudge"]["mark"], "news", "{status}");
+            assert_eq!(
+                status["nudge"]["mark_kinds"],
+                serde_json::json!(["verdicts_landed"])
+            );
+        }
+
+        /// While a decision is owed the badge takes the slot: never `news`.
+        #[test]
+        fn news_is_never_reported_while_decisions_are_owed() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            seed_entry(&s, ASK);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["nudge"]["mark"], "none", "{status}");
+        }
+
+        /// Paused, consent-held, signed out and unhealthy daemons never
+        /// report `news` or `ready`.
+        #[test]
+        fn closed_gates_light_no_mark() {
+            let at = Utc::now() - chrono::Duration::hours(1);
+
+            let paused = live();
+            land_verdicts(&paused, 1, 0, at);
+            assert!(
+                handle_request(&paused, &req("pause", serde_json::json!({})))
+                    .error
+                    .is_none()
+            );
+            assert_eq!(mark_of(&paused).0, "none");
+
+            let held = unchosen_shared();
+            crate::identity::DeviceIdentity::load_or_generate(&held.store).unwrap();
+            held.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
+            land_verdicts(&held, 1, 0, at);
+            assert_eq!(mark_of(&held).0, "none");
+
+            let signed_out = shared();
+            signed_out.state.lock().unwrap().last_history_poll_at = Some(Utc::now());
+            land_verdicts(&signed_out, 1, 0, at);
+            assert_eq!(mark_of(&signed_out).0, "none");
+
+            let unhealthy = live();
+            land_verdicts(&unhealthy, 1, 0, at);
+            unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(mark_of(&unhealthy).0, "unknown");
+
+            let idle_unhealthy = live();
+            seed_idle(&idle_unhealthy, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            idle_unhealthy.health.lock().unwrap().fail(
+                crate::daemon::health::LABEL_NEAR_AI_NOTICE_PENDING,
+                Utc::now(),
+            );
+            assert_eq!(mark_of(&idle_unhealthy).0, "unknown");
+        }
+
+        /// The mark clears only through `nudge_opened {verdicts_landed}`:
+        /// every other suggestion request, a switch on a notification kind,
+        /// and plain reads leave it lit. The suggestions switch hides it
+        /// while off but clears nothing: switched back on, the same news
+        /// shows again.
+        #[test]
+        fn only_opening_the_verdicts_clears_the_news_mark() {
+            let s = live();
+            land_verdicts(&s, 1, 1, Utc::now() - chrono::Duration::hours(1));
+            let others = [
+                ("status", serde_json::json!({})),
+                ("list_pending", serde_json::json!({})),
+                ("list_history", serde_json::json!({})),
+                ("get_settings", serde_json::json!({})),
+                ("nudge_opened", serde_json::json!({"kind": "idle_sessions"})),
+                (
+                    "nudge_opened",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "review_backlog"}),
+                ),
+                (
+                    "nudge_decline",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+                (
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "verdicts_landed", "on": false}),
+                ),
+                (
+                    "set_notifications_enabled",
+                    serde_json::json!({"on": false}),
+                ),
+            ];
+            let lit = (
+                serde_json::json!("news"),
+                serde_json::json!(["verdicts_landed"]),
+            );
+            for (method, params) in others {
+                let _ = handle_request(&s, &req(method, params.clone()));
+                assert_eq!(mark_of(&s), lit, "{method} {params}");
+            }
+            let _ = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": false})),
+            );
+            assert_eq!(mark_of(&s).0, serde_json::json!("none"));
+            let _ = handle_request(
+                &s,
+                &req("set_suggestions_enabled", serde_json::json!({"on": true})),
+            );
+            assert_eq!(mark_of(&s), lit, "suggestions back on");
+            let opened = handle_request(
+                &s,
+                &req(
+                    "nudge_opened",
+                    serde_json::json!({"kind": "verdicts_landed"}),
+                ),
+            );
+            assert!(opened.error.is_none(), "{:?}", opened.error);
+            assert_eq!(
+                mark_of(&s),
+                (serde_json::json!("none"), serde_json::json!([]))
+            );
+        }
+
+        /// The news ages out `NEWS_MARK_TTL` after its newest verdict; the
+        /// card stays.
+        #[test]
+        fn the_news_mark_ages_out() {
+            let s = live();
+            land_verdicts(
+                &s,
+                1,
+                0,
+                Utc::now() - crate::daemon::nudge::NEWS_MARK_TTL - chrono::Duration::minutes(1),
+            );
+            let nudge = nudge_of(&s);
+            assert_eq!(nudge["mark"], "none", "{nudge}");
+            assert_eq!(nudge["lead"], "verdicts_landed", "{nudge}");
+        }
+
+        /// Its own switch turns the mark off, and publishes
+        /// `status_changed`.
+        #[test]
+        fn the_mark_switch_turns_the_mark_off() {
+            let s = live();
+            land_verdicts(&s, 1, 0, Utc::now());
+            let mut rx = s.events.subscribe();
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_menu_bar_mark_enabled",
+                    serde_json::json!({"on": false}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert!(saw_status_changed(&mut rx));
+            assert_eq!(
+                mark_of(&s),
+                (serde_json::json!("none"), serde_json::json!([]))
+            );
+        }
+
+        /// Idle candidates under a lit badge report `ready`; muting the
+        /// idle-session kind or a "Not now" clears it, and so does the
+        /// candidate set emptying.
+        #[test]
+        fn idle_candidates_draw_the_halo_until_muted_declined_or_decided() {
+            let s = live();
+            s.settings.lock().unwrap().notify.idle_sessions = true;
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 4);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["nudge"]["mark"], "ready", "{status}");
+            assert_eq!(
+                status["nudge"]["mark_kinds"],
+                serde_json::json!(["idle_sessions"])
+            );
+
+            // Muted.
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "idle_sessions", "on": false}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert_eq!(mark_of(&s).0, "none");
+            let r = handle_request(
+                &s,
+                &req(
+                    "set_notify_kind",
+                    serde_json::json!({"kind": "idle_sessions", "on": true}),
+                ),
+            );
+            assert!(r.error.is_none(), "{:?}", r.error);
+            assert_eq!(mark_of(&s).0, "ready");
+
+            // The candidate set empties (the idle session is dismissed)
+            // while another session, not idle, is still owed.
+            seed_entry(&s, ASK);
+            let dismissed = handle_request(
+                &s,
+                &req("dismiss", serde_json::json!({"entry_id": idle.to_string()})),
+            );
+            assert!(dismissed.error.is_none(), "{:?}", dismissed.error);
+            let status = status_of(&s);
+            assert_eq!(status["decisions_owed"], 1, "{status}");
+            assert_eq!(status["idle_sessions"]["count"], 0, "{status}");
+            assert_eq!(status["nudge"]["mark"], "none", "{status}");
+
+            // A fresh candidate, then the in-app "Not now".
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 5);
+            assert_eq!(mark_of(&s).0, "ready");
+            let declined = handle_request(
+                &s,
+                &req(
+                    "nudge_decline",
+                    serde_json::json!({"kind": "idle_sessions"}),
+                ),
+            );
+            assert!(declined.error.is_none(), "{:?}", declined.error);
+            assert_eq!(mark_of(&s).0, "none");
+        }
+
+        // ---- list_pending {order} (nudge value addendum, 2.1-2.2) ----
+
+        /// A waiting entry for the order tests: `turns` prompts (`None`: no
+        /// recorded shape), last written `minutes` ago, and features of
+        /// `text` (`None`: no features, so no estimate).
+        fn seed_ordered(
+            s: &DaemonShared,
+            source: &str,
+            turns: Option<u32>,
+            minutes: i64,
+            text: Option<&str>,
+        ) -> String {
+            let entry_id = uuid::Uuid::new_v4();
+            let written = Utc::now() - chrono::Duration::minutes(minutes);
+            s.queue
+                .lock()
+                .unwrap()
+                .upsert(
+                    crate::daemon::queue::QueueEntry {
+                        entry_id,
+                        session_hash: format!("sha256:{entry_id}"),
+                        source: source.to_string(),
+                        project_key: ASK.to_string(),
+                        project_label: crate::daemon::policy::project_label_for(ASK),
+                        path: std::path::PathBuf::from(format!("/tmp/order-{entry_id}.jsonl")),
+                        size_bytes: 1,
+                        discovered_at: written,
+                        last_modified_at: Some(written),
+                        shape: turns.map(|user_turns| crate::daemon::queue::SessionShape {
+                            user_turns,
+                            ..Default::default()
+                        }),
+                        estimate_features: text.map(features_of),
+                        ..Default::default()
+                    },
+                    500,
+                )
+                .unwrap();
+            entry_id.to_string()
+        }
+
+        fn row_ids(rows: &[serde_json::Value]) -> Vec<String> {
+            rows.iter()
+                .map(|r| r["entry_id"].as_str().unwrap().to_string())
+                .collect()
+        }
+
+        /// A seeded three-tier table: the score is ln(1 + content bytes)
+        /// plus half of min(user messages, 20), cut at 4.0 and 6.0. One
+        /// user message of 3 bytes is lower, of 200 middle, of 2000 higher.
+        fn use_three_tier_table(s: &DaemonShared) {
+            let table =
+                trace_commons_protocol::local_credit_estimate::LocalEstimateTable::from_value(
+                    &serde_json::json!({
+                        "schema_version": 1,
+                        "features_version": "lef1",
+                        "version": "t7",
+                        "credit_quality_calibration": "cq3",
+                        "bytes_per_token": 4,
+                        "chunk_target_tokens": 2048,
+                        "chunk_cap": 16,
+                        "weights": [
+                            {"term": "ln_content_bytes", "weight": 1.0},
+                            {"term": "user_messages_capped", "weight": 0.5}
+                        ],
+                        "cut_offs": [4.0, 6.0],
+                        "bands": [
+                            {"low": 0.9, "high": 1.9},
+                            {"low": 1.3, "high": 2.4},
+                            {"low": 1.8, "high": 3.1}
+                        ]
+                    }),
+                )
+                .unwrap();
+            *s.estimate_table.lock().unwrap() = EstimateTableSlot {
+                table,
+                basis: ESTIMATE_BASIS_PUBLISHED,
+                received_at: Some(Utc::now()),
+            };
+        }
+
+        const LOWER_TEXT: &str = "abc";
+        fn middle_text() -> String {
+            "m".repeat(200)
+        }
+        fn higher_text() -> String {
+            "h".repeat(2000)
+        }
+
+        /// `order` absent, `null` and `"queue"` are today's list, byte for
+        /// byte.
+        #[test]
+        fn order_queue_null_and_absent_are_the_same_list() {
+            let s = live();
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(0), 1, None);
+            seed_ordered(
+                &s,
+                crate::source::SOURCE_CLAUDE_CODE,
+                Some(9),
+                50,
+                Some("x"),
+            );
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, None, 5, None);
+            let absent = handle_request(&s, &req("list_pending", serde_json::json!({})));
+            let absent = serde_json::to_string(&absent.result.unwrap()).unwrap();
+            for order in [serde_json::Value::Null, serde_json::json!("queue")] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({ "order": order })),
+                );
+                assert_eq!(serde_json::to_string(&r.result.unwrap()).unwrap(), absent);
+            }
+        }
+
+        /// An unknown order is refused by label, never answered with some
+        /// other order.
+        #[test]
+        fn an_unknown_list_order_is_refused() {
+            let s = live();
+            for (order, label) in [
+                (serde_json::json!("best"), ERR_LIST_ORDER_UNRECOGNIZED),
+                (serde_json::json!(1), ERR_LIST_ORDER_INVALID),
+                (serde_json::json!(["suggested"]), ERR_LIST_ORDER_INVALID),
+            ] {
+                let r = handle_request(
+                    &s,
+                    &req("list_pending", serde_json::json!({ "order": order })),
+                );
+                let err = r.error.expect("refused");
+                assert_eq!(err.code, ERR_BAD_PARAMS);
+                assert_eq!(err.message, label);
+            }
+            assert_eq!(ERR_LIST_ORDER_UNRECOGNIZED, "order-unrecognized");
+            assert_eq!(ERR_LIST_ORDER_INVALID, "order-invalid");
+        }
+
+        /// With the built-in (one-tier) table the suggested order is
+        /// revision 1's: no catalogue, so turns bucket, then newest first,
+        /// then insertion. The same entries under a three-tier table order
+        /// differently, so the built-in table really skips the tier step.
+        #[test]
+        fn the_built_in_table_gives_the_revision_one_order() {
+            let s = live();
+            let cc = crate::source::SOURCE_CLAUDE_CODE;
+            let higher = higher_text();
+            let middle = middle_text();
+            let thin_new = seed_ordered(&s, cc, Some(0), 1, Some(&higher));
+            let rich_old = seed_ordered(&s, cc, Some(5), 90, Some(LOWER_TEXT));
+            let no_shape = seed_ordered(&s, cc, None, 2, Some(&middle));
+            let some_new = seed_ordered(&s, cc, Some(2), 3, None);
+            let rich_new = seed_ordered(&s, cc, Some(3), 10, Some(&middle));
+            let some_old = seed_ordered(&s, cc, Some(1), 60, Some(LOWER_TEXT));
+            let suggested = serde_json::json!({"order": "suggested"});
+            let got = row_ids(&list_rows(&s, suggested.clone()));
+            let revision_one = vec![
+                rich_new.clone(),
+                rich_old.clone(),
+                some_new.clone(),
+                some_old.clone(),
+                thin_new.clone(),
+                no_shape.clone(),
+            ];
+            assert_eq!(got, revision_one);
+            // The rows themselves are the queue order's rows, reordered.
+            let queue_rows = list_rows(&s, serde_json::json!({}));
+            let suggested_rows = list_rows(&s, suggested.clone());
+            for r in &suggested_rows {
+                assert!(queue_rows.contains(r), "{r}");
+            }
+            assert_eq!(queue_rows.len(), suggested_rows.len());
+
+            use_three_tier_table(&s);
+            let tiered = row_ids(&list_rows(&s, suggested));
+            assert_ne!(tiered, revision_one);
+            // Higher first; middle and unknown (some_new) together by turns
+            // then recency; lower last.
+            assert_eq!(
+                tiered,
+                vec![thin_new, rich_new, some_new, no_shape, rich_old, some_old]
+            );
+        }
+
+        /// Under a three-tier table an entry without an estimate is not
+        /// ranked as lower: it sits with the middle tier, above a lower one
+        /// that is newer and more substantive.
+        #[test]
+        fn an_unknown_estimate_is_not_ranked_as_lower() {
+            let s = live();
+            let cc = crate::source::SOURCE_CLAUDE_CODE;
+            use_three_tier_table(&s);
+            let lower = seed_ordered(&s, cc, Some(9), 1, Some(LOWER_TEXT));
+            let unknown = seed_ordered(&s, cc, Some(0), 99, None);
+            let rows = list_rows(&s, serde_json::json!({"order": "suggested"}));
+            assert!(rows[1]["credit_estimate"]["tier"] == "lower", "{rows:?}");
+            assert!(rows[0].get("credit_estimate").is_none());
+            assert_eq!(row_ids(&rows), vec![unknown, lower]);
+        }
+
+        /// A live catalogue puts the fitting entry first, ahead of a newer,
+        /// more substantive one that fits nothing.
+        #[test]
+        fn mission_fit_leads_the_suggested_order() {
+            let s = live();
+            let no_fit = seed_ordered(&s, crate::source::SOURCE_CODEX, Some(9), 1, None);
+            let fits = seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(0), 99, None);
+            let suggested = serde_json::json!({"order": "suggested"});
+            assert_eq!(
+                row_ids(&list_rows(&s, suggested.clone())),
+                vec![no_fit.clone(), fits.clone()]
+            );
+            see_every_pending_entry(&s);
+            receive_missions(&s, claude_mission());
+            let rows = list_rows(&s, suggested);
+            assert_eq!(rows[0]["mission_fit"], 1, "{rows:?}");
+            assert_eq!(rows[1]["mission_fit"], 0, "{rows:?}");
+            assert_eq!(row_ids(&rows), vec![fits, no_fit]);
+        }
+
+        /// Filter and project first, sort second: the suggested list holds
+        /// exactly the entries the filter selects.
+        #[test]
+        fn the_order_applies_after_the_filter() {
+            let s = live();
+            let idle_old = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 30);
+            let idle_new = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 10);
+            seed_ordered(&s, crate::source::SOURCE_CLAUDE_CODE, Some(9), 1, None);
+            let rows = list_rows(
+                &s,
+                serde_json::json!({"filter": "idle_sessions", "order": "suggested"}),
+            );
+            assert_eq!(
+                row_ids(&rows),
+                vec![idle_new.to_string(), idle_old.to_string()]
+            );
+            let unknown_filter = handle_request(
+                &s,
+                &req(
+                    "list_pending",
+                    serde_json::json!({"filter": "stale", "order": "suggested"}),
+                ),
+            );
+            assert_eq!(
+                unknown_filter.error.expect("refused").message,
+                ERR_LIST_FILTER_UNRECOGNIZED
+            );
+        }
     }
 }

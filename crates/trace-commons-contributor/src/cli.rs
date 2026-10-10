@@ -220,6 +220,15 @@ enum Command {
     },
     /// Print local identity (no network)
     Whoami,
+    /// Dev-only: compare the local credit estimate with the credit this
+    /// machine's scored sessions were given. Reads local files only and
+    /// sends nothing; prints aggregate counts.
+    #[command(hide = true)]
+    EstimateCheck {
+        /// A local estimate table file to check instead of the built-in one
+        #[arg(long)]
+        table: Option<PathBuf>,
+    },
     /// Check for a newer release, verify it, and install it
     ///
     /// Refuses anything it cannot verify: the manifest signature, the
@@ -631,6 +640,18 @@ async fn dispatch(cli: Cli) -> anyhow::Result<()> {
             .await
         }
         Command::Whoami => commands::whoami(&store, cli.json),
+        Command::EstimateCheck { table } => {
+            let table = crate::credit_estimate_check::table_from(table.as_deref())?;
+            let report = crate::credit_estimate_check::run(&store, &table)?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for line in crate::credit_estimate_check::render(&report) {
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
         Command::Update { stage_only } => commands::update(&store, stage_only, cli.json).await,
         Command::Logout { yes } => commands::logout(&store, yes),
         Command::Unenroll { yes } => commands::unenroll(&store, yes, cli.json),

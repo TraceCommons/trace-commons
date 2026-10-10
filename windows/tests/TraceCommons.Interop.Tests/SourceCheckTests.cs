@@ -37,15 +37,15 @@ public class SourceCheckTests
     [Fact]
     public void EachSourceModeGetsItsOwnSentence()
     {
-        Assert.Equal("Claude Code sessions folder set", Line(SourceChecks.Claude, "watch"));
+        Assert.Equal("Claude Code traces folder set", Line(SourceChecks.Claude, "watch"));
         Assert.Equal(
-            "Claude Code sessions read from the usual place",
+            "Claude Code traces read from the usual place",
             Line(SourceChecks.Claude, "unset"));
         Assert.Equal(
-            "Claude Code marked not used, so nothing is opened for it. Previously queued sessions are not removed",
+            "Claude Code marked not used, so nothing is opened for it. Previously queued traces are not removed",
             Line(SourceChecks.Claude, "off"));
         Assert.Equal(
-            "Codex marked not used, so nothing is opened for it. Previously queued sessions are not removed",
+            "Codex marked not used, so nothing is opened for it. Previously queued traces are not removed",
             Line(SourceChecks.Codex, "off"));
     }
 
@@ -61,10 +61,10 @@ public class SourceCheckTests
     [Fact]
     public void ClineGetsItsOwnThreeSentencesAcrossTheAbi()
     {
-        Assert.Equal("Cline sessions folder set", Line("cline", "watch"));
+        Assert.Equal("Cline traces folder set", Line("cline", "watch"));
         Assert.Equal("Cline is not set up, so nothing is opened for it", Line("cline", "unset"));
         Assert.Equal(
-            "Cline marked not used, so nothing is opened for it. Previously queued sessions are not removed",
+            "Cline marked not used, so nothing is opened for it. Previously queued traces are not removed",
             Line("cline", "off"));
     }
 
@@ -160,7 +160,7 @@ public class SourceCheckTests
         // two false-branch facts apart, are gone from this shell.
         foreach (string forbidden in new[]
         {
-            "sessions folder set",
+            "traces folder set",
             "usual place",
             "ClaudeRootConfigured",
             "CodexRootConfigured",

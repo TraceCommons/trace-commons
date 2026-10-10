@@ -422,6 +422,22 @@ final class DaemonDataContractWireTests: XCTestCase {
         ])
     }
 
+    /// A folder approve under the idle filter names the filter, so the
+    /// daemon selects only what the filtered list showed (Ron's #1303
+    /// review, item 1); without one it sends none.
+    func testAFilteredFolderApproveSendsTheFilter() async throws {
+        let transport = FakeTransport { _, _ in
+            #"{"id":0,"result":{"approved":1,"hold_secs":30,"hold_until":null,"flagged":0,"redactions":{},"skipped":[],"excluded_held":0,"excluded_ineligible":0}}"#
+        }
+        let client = LiveDaemonClient(transport: transport)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: nil, filter: .idleSessions)
+        _ = try await client.approveFolder(projectId: "proj_1", verdict: nil, filter: nil)
+        XCTAssertEqual(transport.calls.map(\.params), [
+            #"{"filter":"idle_sessions","project_id":"proj_1"}"#,
+            #"{"project_id":"proj_1"}"#,
+        ])
+    }
+
     func testSampleFolderApproveLeavesHeldSessionsOut() async throws {
         let client = SampleDaemonClient(.heldSessions)
         let pending = try await client.listPending(projectId: nil)

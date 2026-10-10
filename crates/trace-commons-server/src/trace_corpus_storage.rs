@@ -2243,6 +2243,17 @@ impl DedupSignalRow {
     }
 }
 
+/// One decision row's identifiers and time, newest first, as the credit
+/// estimate eval enumerates them (through the narrow `trace_gate_driver`
+/// pool, no tenant GUC, every column granted by V45).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateDecisionKeyRow {
+    pub tenant_id: String,
+    pub submission_id: Uuid,
+    pub decision_id: Uuid,
+    pub decided_at: DateTime<Utc>,
+}
+
 /// One decision row as the dedup re-derivation pass enumerates it (through
 /// the narrow `trace_gate_driver` pool, no tenant GUC, every column granted
 /// by V45 and V57). Carries what the pass needs to decide whether to reuse

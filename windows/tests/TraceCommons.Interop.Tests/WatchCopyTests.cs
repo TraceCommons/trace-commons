@@ -70,7 +70,7 @@ public class WatchCopyTests
     {
         string shown = WatchCopy.LabelFor(true, "unknown-project");
 
-        Assert.Equal("Sessions with no project", shown);
+        Assert.Equal("Traces with no project", shown);
         Assert.DoesNotContain("unknown-project", shown, System.StringComparison.Ordinal);
     }
 

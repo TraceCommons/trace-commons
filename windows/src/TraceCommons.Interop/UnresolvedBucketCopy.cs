@@ -22,7 +22,7 @@ public static class UnresolvedBucketCopy
     /// deliberately returns the constant rather than degrade to something that
     /// might carry a path. A slug is not a project name, so it is not shown.
     /// </summary>
-    public const string Label = "Sessions with no project";
+    public const string Label = "Traces with no project";
 
     /// <summary>
     /// Why it can never be armed.

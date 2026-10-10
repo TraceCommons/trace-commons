@@ -35,6 +35,38 @@ final class HomeStore {
     /// History rows read at once: the page, not the whole record.
     static let historyLimit = 100
 
+    /// The verdict news card, in the daemon's words; nil when there is no
+    /// news to show on History.
+    var verdictsCard: NudgeSurface.Card? { NudgeSurface.card(status?.nudge, on: .history) }
+    /// A nudge request in flight.
+    private(set) var nudgeBusy = false
+    /// The last nudge request the core refused, until the next one.
+    private(set) var nudgeError: DaemonDataError?
+
+    /// A card button. See history acknowledges the news (`nudge_opened`);
+    /// History is already open, so nothing else moves. The card then reads
+    /// as the daemon says.
+    func perform(_ intent: NudgeSurface.Intent) async {
+        guard !nudgeBusy else { return }
+        let mine = generation
+        nudgeBusy = true
+        defer { if mine == generation { nudgeBusy = false } }
+        nudgeError = nil
+        guard let client else {
+            nudgeError = .unreachable
+            return
+        }
+        do {
+            try await NudgeSurface.send(NudgeSurface.effect(intent), through: client)
+        } catch {
+            guard mine == generation else { return }
+            nudgeError = error as? DaemonDataError ?? .undecodable(method: "nudge_opened")
+            return
+        }
+        guard mine == generation else { return }
+        await loadStatus()
+    }
+
     /// The app's live client (`AppModel.daemonData`), attached by the
     /// window when the daemon starts; nil while it is not running.
     private(set) var client: (any DaemonDataClient)?
@@ -64,6 +96,8 @@ final class HomeStore {
         credit = nil
         missions = nil
         failures = [:]
+        nudgeBusy = false
+        nudgeError = nil
     }
 
     /// Loads, then follows the event stream for as long as the calling task
@@ -80,7 +114,7 @@ final class HomeStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
-            case .digestDue, .previewReady, .inferenceCallAdded, .usageChanged, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .usageChanged, .unknown:
                 break
             }
         }

@@ -4773,6 +4773,13 @@ class ActivityMissionInventoryTests(unittest.TestCase):
         for path in ("/v1/activity-missions-extra", "/v1/activity-missions/status", "/v1/activity-missions/"):
             self.assertIsNone(self.inventory.classify_route(path), path)
 
+    def test_the_credit_estimate_table_is_a_public_catalogue(self):
+        """The local credit estimate table is public, non-personal data a
+        client fetches before it has an account, like the mission catalogue."""
+        self.assertEqual(self.inventory.classify_route("/v1/credit-estimate/table"), ("EXP-004", "CRD-004"))
+        for path in ("/v1/credit-estimate", "/v1/credit-estimate/table/extra", "/v1/credit-estimate/tables"):
+            self.assertIsNone(self.inventory.classify_route(path), path)
+
     def test_new_catalogue_is_in_inventory_and_unknown_interfaces_still_fail_closed(self):
         inventory = self.inventory.build_inventory()
         catalogue = [row for row in inventory["routes"] if row["path"] == "/v1/activity-missions"]

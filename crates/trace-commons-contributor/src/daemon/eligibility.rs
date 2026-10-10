@@ -103,6 +103,22 @@ pub fn armed_settle_elapsed(modified_at: DateTime<Utc>, now: DateTime<Utc>) -> b
     now.signed_duration_since(modified_at) >= Duration::seconds(ARMED_SETTLE_SECS)
 }
 
+/// When a session was last written, from what a caller outside the poll has
+/// to hand: the `SessionRef`'s `group_modified_at` (the group's newest write,
+/// `None` for a single-file source) and the session file's own mtime.
+///
+/// The later of the two. Each is a lower bound on the true last write -- the
+/// group's was read at discovery, the file's may be read after it -- so the
+/// later one is the closer. `None` only when neither could be read, which a
+/// reader of `QueueEntry::last_modified_at` takes as "just discovered", never
+/// as idle.
+pub fn last_write(
+    group_modified_at: Option<DateTime<Utc>>,
+    file_modified: Option<std::time::SystemTime>,
+) -> Option<DateTime<Utc>> {
+    group_modified_at.max(file_modified.map(DateTime::<Utc>::from))
+}
+
 /// Decide whether `obs` should be offered for upload.
 ///
 /// `previous_size` is the size recorded at the previous poll; `prior` is what
@@ -169,6 +185,40 @@ mod tests {
             size_bytes: size,
             modified_at: at(modified),
         }
+    }
+
+    /// U4a: the last write a superseded offer records is the later of the
+    /// group's newest write and the file's own mtime -- each is a lower
+    /// bound on the true last write -- and unknown only when both are.
+    #[test]
+    fn last_write_is_the_later_of_the_group_and_the_file() {
+        let file = |t: &str| Some(std::time::SystemTime::from(at(t)));
+        assert_eq!(
+            last_write(
+                Some(at("2026-08-08T12:00:00Z")),
+                file("2026-08-08T10:00:00Z")
+            ),
+            Some(at("2026-08-08T12:00:00Z")),
+            "a subagent written after the parent is the group's last write"
+        );
+        assert_eq!(
+            last_write(
+                Some(at("2026-08-08T10:00:00Z")),
+                file("2026-08-08T12:00:00Z")
+            ),
+            Some(at("2026-08-08T12:00:00Z")),
+            "a parent written after discovery is not older than its group"
+        );
+        assert_eq!(
+            last_write(None, file("2026-08-08T12:00:00Z")),
+            Some(at("2026-08-08T12:00:00Z")),
+            "a single-file source is its file"
+        );
+        assert_eq!(
+            last_write(Some(at("2026-08-08T12:00:00Z")), None),
+            Some(at("2026-08-08T12:00:00Z"))
+        );
+        assert_eq!(last_write(None, None), None);
     }
 
     fn uploaded(size: u64, count: u32) -> PriorUpload {

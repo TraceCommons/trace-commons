@@ -794,7 +794,7 @@ fn no_pinned_core_sentence_is_a_swift_literal() {
 
 /// A core sentence that carries a `{name}` placeholder is pinned with a
 /// [`HOLE`] in its place, the way the scanner reads a Swift interpolation.
-/// Pinned with the braces, `"Include every past session in \(folder)"`
+/// Pinned with the braces, `"Include every past trace in \(folder)"`
 /// would never match it.
 #[test]
 fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
@@ -808,7 +808,7 @@ fn a_placeholder_sentence_is_pinned_the_way_swift_interpolates_it() {
         braced.is_empty(),
         "pinned sentences still carry a brace placeholder: {braced:?}"
     );
-    let probe = swift_literals(r#"let t = "Include every past session in \(folder)""#);
+    let probe = swift_literals(r#"let t = "Include every past trace in \(folder)""#);
     assert!(
         pinned.iter().any(|(_, sentence)| fragments(sentence)
             .iter()

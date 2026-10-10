@@ -38,7 +38,7 @@
       "second_look_lines": [
         "No personal details matched, only file paths or nothing at all; that is why this one waits.",
         "Something here looks like an email, phone number or key that was not matched; that is why this one waits.",
-        "Trimmed to fit the upload limit, so part of this session is not in what would be sent. That is why this one waits."
+        "Trimmed to fit the upload limit, so part of this trace is not in what would be sent. That is why this one waits."
       ]
     },
     {

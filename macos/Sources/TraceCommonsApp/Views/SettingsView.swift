@@ -45,8 +45,10 @@ enum SettingsLegacyWords {
     static func sessionFinishedAfter(_ secs: Int) -> String {
         fill(words?.sessionFinishedAfter, ["seconds": String(secs)])
     }
+    /// The core's singular at one hour, so it never reads "every 1 hours".
     static func atMostOneNotification(_ hours: Int) -> String {
-        fill(words?.atMostOneNotification, ["hours": String(hours)])
+        fill(hours == 1 ? words?.atMostOneNotificationOne : words?.atMostOneNotification,
+             ["hours": String(hours)])
     }
     static func undecidedDropped(_ days: Int) -> String {
         fill(words?.undecidedDropped, ["days": String(days)])

@@ -63,8 +63,8 @@ public sealed class QueueGroupViewModel
 
     /// <summary>The folder row's count text, e.g. "3 sessions".</summary>
     public string CountText => _group.Count == 1
-        ? "1 session"
-        : string.Format(CultureInfo.CurrentCulture, "{0} sessions", _group.Count);
+        ? "1 trace"
+        : string.Format(CultureInfo.CurrentCulture, "{0} traces", _group.Count);
 
     /// <summary>
     /// Whether the folder row offers "Submit all". True at every count,

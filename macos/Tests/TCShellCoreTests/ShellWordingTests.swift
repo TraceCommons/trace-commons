@@ -58,7 +58,10 @@ final class ShellWordingTests: XCTestCase {
         // Lowered from 10 at R15: `QueueStateCopy` (8 sentences, no caller) was
         // deleted; the 2 left are the on-hold fallback's.
         "TraceCommonsApp/HealthCopy.swift": 2,
-        "TraceCommonsApp/Notifier.swift": 2,
+        // Lowered from 2: the digest posts the core's `digest_due.text`
+        // unchanged, and its buttons are the core's; the counts' fallback
+        // for a daemon that sends no text is what is left.
+        "TraceCommonsApp/Notifier.swift": 1,
         "TraceCommonsApp/SelfTest.swift": 14,
 
         // The SwiftUI views, which carry their own labels and help text.
