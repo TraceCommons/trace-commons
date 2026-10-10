@@ -7320,25 +7320,26 @@ async fn score_shadow_credit_decision(
     }
 }
 
-/// Stage 3, 2026-10-09: of two submissions with the same content, `main`
-/// shows the second as a duplicate with 0.0 pending ("This trace duplicates
-/// an earlier submission under your account and earns no separate
-/// credit."), from its driver's `skipped_duplicate` row. A compatibility run
-/// under `main`'s duplicate controls reads the same: its gate decision row
-/// is withheld as `skipped_duplicate` with no credit quality, so the status
-/// shows no pending credit and the duplicate line, and no `NoveltyUtility`
-/// credit. The first submission keeps its gate figure.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn compatibility_status_shows_a_duplicate_as_mains_does() {
-    let Some(runtime) = runtime_backend(4).await else {
-        return;
-    };
+/// The submission-status documents, under file or database contributor
+/// reads, of two compatibility runs of the same content by one contributor,
+/// the second after the first, on a runtime paying `delta_microcredits` of
+/// `NoveltyUtility` credit under `controls`: the first run's shadow credit
+/// decision, and the two documents.
+async fn duplicate_pair_status_documents(
+    tenant_label: &str,
+    delta_microcredits: u64,
+    controls: PipelineDuplicateControls,
+) -> Option<(
+    StorageTraceGateCreditDecisionRow,
+    Vec<(bool, serde_json::Value, serde_json::Value)>,
+)> {
+    let runtime = runtime_backend(4).await?;
     account_owner_backend()
         .await
         .expect("the same variable runtime_backend read is set");
     let suffix = Uuid::new_v4().simple().to_string();
-    let tenant = format!("tenant-compat-dup-{suffix}");
-    let token = format!("token-compat-dup-{suffix}");
+    let tenant = format!("tenant-{tenant_label}-{suffix}");
+    let token = format!("token-{tenant_label}-{suffix}");
     let mut tokens = BTreeMap::new();
     insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
     let dir = tempfile::tempdir().expect("temp dir");
@@ -7347,7 +7348,7 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
         runtime.clone(),
         &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
         IsolatedPipelineIndex::new(),
-        2_500_000,
+        delta_microcredits,
         Arc::new(PassThroughPipelinePrivacyBoundary),
         vec![RecordingSettlementAdapter::new(
             InstrumentId::trace_credit(),
@@ -7357,7 +7358,7 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
         None,
         PipelineNoveltyUtilityChecks {
             issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
-            duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT),
+            duplicate_controls: Some(controls),
             ..PipelineNoveltyUtilityChecks::default()
         },
     );
@@ -7368,84 +7369,203 @@ async fn compatibility_status_shows_a_duplicate_as_mains_does() {
     second_envelope.trace_id = Uuid::new_v4();
     let first = completed_run_of(&service, &tenant, &principal, &first_envelope).await;
     let second = completed_run_of(&service, &tenant, &principal, &second_envelope).await;
-    let first_quality = score_shadow_credit_decision(&runtime, &tenant, &first)
-        .await
-        .credit_quality_micros
-        .expect("a compatibility Score records a shadow credit quality");
+    let first_shadow = score_shadow_credit_decision(&runtime, &tenant, &first).await;
 
-    let mut state = test_state_with_options(
-        dir.path().to_path_buf(),
-        Some(mains_database().await),
-        Some(artifacts.clone()),
-        true,
-        true,
-        false,
-        false,
-    );
-    let state_mut = Arc::make_mut(&mut state);
-    state_mut.tokens = Arc::new(tokens.clone());
-    state_mut.pipeline_service = Some(service.clone());
-    state_mut.pipeline_activation = routing_store(&runtime);
-    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
-    state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
-    let (status, documents) = route_request(
-        state,
-        "POST",
-        "/v1/contributors/me/submission-status",
-        auth_headers(&token),
-        Some(serde_json::json!({
-            "submission_ids": [first.submission_id, second.submission_id]
-        })),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{documents}");
-    let documents = documents.as_array().expect("a document list").clone();
-    let document_of = |submission_id: Uuid| {
-        documents
-            .iter()
-            .find(|document| document["submission_id"] == submission_id.to_string())
-            .unwrap_or_else(|| panic!("a document for {submission_id}: {documents:?}"))
-            .clone()
-    };
-    let first_document = document_of(first.submission_id);
-    let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
-    assert!(
-        (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs() < 1e-4,
-        "{first_document}"
-    );
+    let mut documents = Vec::new();
+    for database_reads in [true, false] {
+        let mut state = test_state_with_options(
+            dir.path().to_path_buf(),
+            Some(mains_database().await),
+            Some(artifacts.clone()),
+            database_reads,
+            database_reads,
+            false,
+            false,
+        );
+        let state_mut = Arc::make_mut(&mut state);
+        state_mut.tokens = Arc::new(tokens.clone());
+        state_mut.pipeline_service = Some(service.clone());
+        state_mut.pipeline_activation = routing_store(&runtime);
+        state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+        state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+        let (status, response) = route_request(
+            state,
+            "POST",
+            "/v1/contributors/me/submission-status",
+            auth_headers(&token),
+            Some(serde_json::json!({
+                "submission_ids": [first.submission_id, second.submission_id]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        let response = response.as_array().expect("a document list").clone();
+        let document_of = |submission_id: Uuid| {
+            response
+                .iter()
+                .find(|document| document["submission_id"] == submission_id.to_string())
+                .unwrap_or_else(|| panic!("a document for {submission_id}: {response:?}"))
+                .clone()
+        };
+        documents.push((
+            database_reads,
+            document_of(first.submission_id),
+            document_of(second.submission_id),
+        ));
+    }
+    Some((first_shadow, documents))
+}
 
-    let document = document_of(second.submission_id);
-    assert_eq!(document["status"], "accepted", "{document}");
-    assert_eq!(
-        document["credit_points_pending"].as_f64(),
-        Some(0.0),
-        "{document}"
-    );
-    let explanation = document["explanation"]
+const DUPLICATE_STATUS_LINE: &str = "This trace duplicates an earlier submission under your \
+                                     account and earns no separate credit.";
+
+fn explanation_lines(document: &serde_json::Value) -> Vec<String> {
+    document["explanation"]
         .as_array()
         .expect("explanation lines")
         .iter()
         .map(|line| line.as_str().unwrap().to_string())
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// The first of the pair keeps its gate figure, round(10 * q, 2), with the
+/// gate's basis line; the second is `accepted` with 0.0 pending and `main`'s
+/// duplicate line, whichever read mode serves the contributor.
+fn assert_duplicate_pair_reads_as_mains(
+    first_shadow: &StorageTraceGateCreditDecisionRow,
+    documents: &[(bool, serde_json::Value, serde_json::Value)],
+) {
+    let first_quality = first_shadow
+        .credit_quality_micros
+        .expect("a compatibility Score records a shadow credit quality");
+    let expected_basis = gate_credit_basis_line(first_shadow);
     assert!(
-        explanation.contains(
-            &"This trace duplicates an earlier submission under your account and earns no \
-              separate credit."
-                .to_string()
-        ),
-        "{explanation:?}"
+        expected_basis.starts_with("Credit reflects the gate's scoring (calibration V"),
+        "{expected_basis}"
     );
-    // No NoveltyUtility credit: the status omits a zero ledger figure, and
-    // the Trace Credit leg is withheld under main's label.
-    assert!(document.get("credit_points_ledger").is_none(), "{document}");
-    assert_eq!(
-        document["pipeline"]["instruments"][0]["internal_settlement_state"], "withheld",
-        "{document}"
-    );
-    assert_eq!(
-        document["pipeline"]["instruments"][0]["reason_label"], "skipped_duplicate",
-        "{document}"
-    );
+    for (database_reads, first_document, second_document) in documents {
+        let mode = if *database_reads { "database" } else { "file" };
+        let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+        assert!(
+            (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs()
+                < 1e-4,
+            "{mode} reads: {first_document}"
+        );
+        let first_explanation = explanation_lines(first_document);
+        assert!(
+            first_explanation.contains(&expected_basis),
+            "{mode} reads: {first_explanation:?}"
+        );
+        assert!(
+            !first_explanation
+                .iter()
+                .any(|line| line == DUPLICATE_STATUS_LINE),
+            "{mode} reads: {first_explanation:?}"
+        );
+
+        assert_eq!(
+            second_document["status"], "accepted",
+            "{mode} reads: {second_document}"
+        );
+        assert_eq!(
+            second_document["credit_points_pending"].as_f64(),
+            Some(0.0),
+            "{mode} reads: {second_document}"
+        );
+        let second_explanation = explanation_lines(second_document);
+        assert!(
+            second_explanation
+                .iter()
+                .any(|line| line == DUPLICATE_STATUS_LINE),
+            "{mode} reads: {second_document}"
+        );
+        assert!(
+            !second_explanation
+                .iter()
+                .any(|line| line.starts_with("Credit reflects the gate's scoring")),
+            "{mode} reads: {second_document}"
+        );
+    }
+}
+
+/// Stage 3, 2026-10-09: of two submissions with the same content, `main`
+/// shows the second as a duplicate with 0.0 pending ("This trace duplicates
+/// an earlier submission under your account and earns no separate
+/// credit."), from its driver's `skipped_duplicate` row. A compatibility run
+/// under `main`'s duplicate controls reads the same: its gate decision row
+/// is withheld as `skipped_duplicate` with no credit quality, so the status
+/// shows no pending credit and the duplicate line, and no `NoveltyUtility`
+/// credit. The first submission keeps its gate figure. Under database and
+/// file contributor reads alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_duplicate_as_mains_does() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-dup",
+        2_500_000,
+        PipelineDuplicateControls::MAIN_DEFAULT,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
+    for (database_reads, _, document) in &documents {
+        let mode = if *database_reads { "database" } else { "file" };
+        // No NoveltyUtility credit: the status omits a zero ledger figure,
+        // and the Trace Credit leg is withheld under main's label.
+        assert!(
+            document.get("credit_points_ledger").is_none(),
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["pipeline"]["instruments"][0]["internal_settlement_state"], "withheld",
+            "{mode} reads: {document}"
+        );
+        assert_eq!(
+            document["pipeline"]["instruments"][0]["reason_label"], "skipped_duplicate",
+            "{mode} reads: {document}"
+        );
+    }
+}
+
+/// Stage 3, 2026-10-10: the pilot pays no `NoveltyUtility` delta, so a
+/// compatibility run has no Trace Credit leg to carry `main`'s duplicate
+/// label. The status still reads the run's gate decision row, withheld as
+/// `skipped_duplicate` with no credit quality: the duplicate shows 0.0 and
+/// the duplicate line, not the Score's shadow credit quality, and the first
+/// submission keeps its gate figure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_duplicate_as_mains_does_with_no_delta() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-dup-zero",
+        0,
+        PipelineDuplicateControls::MAIN_DEFAULT,
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
+}
+
+/// `main`'s canonical-hash cache, with no `NoveltyUtility` delta: with the
+/// skip-duplicate knob off, the second submission's gate decision row is
+/// `cached` with no credit quality, and its status reads as a duplicate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_cached_duplicate_as_mains_does_with_no_delta() {
+    let Some((first_shadow, documents)) = duplicate_pair_status_documents(
+        "compat-cached-zero",
+        0,
+        PipelineDuplicateControls {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+        },
+    )
+    .await
+    else {
+        return;
+    };
+    assert_duplicate_pair_reads_as_mains(&first_shadow, &documents);
 }
 
 /// Ruling T15-7: a compatibility run's contributor status reads as `main`'s

@@ -17302,7 +17302,9 @@ fn pipeline_status_for_protocol(status: &PipelineContributorStatus) -> TracePipe
 }
 
 /// Ruling T15-7: the gate decision `main`'s status reads its credit figure
-/// and explanation from, for a compatibility run whose Score has committed:
+/// and explanation from, for a compatibility run whose Score has committed
+/// and whose Settle has not yet written the run's gate decision row (the
+/// row, once written, is read in its place):
 /// the shadow credit quality and coverage the Score evidence recorded, and,
 /// when one of `main`'s credit checks withheld the Trace Credit leg, its
 /// label as the decision's `credit_withheld_reason`, as on `main` (Ruling
@@ -17336,9 +17338,11 @@ fn compatibility_credit_decision(
 /// reads come from files, and the pipeline writes no file record), keyed by
 /// submission id: each
 /// built as `main` builds it, from the submission row the pipeline wrote,
-/// the credit events of those submissions, and the run's gate-equivalent
-/// decision (`compatibility_credit_decision`), with the pipeline block.
-/// One submission read and one credit-event read serve every run. A
+/// the credit events of those submissions, and the run's gate decision row
+/// (the one Settle wrote), or, before Settle has written it, the run's
+/// gate-equivalent decision (`compatibility_credit_decision`), with the
+/// pipeline block. One submission read, one credit-event read, and one
+/// gate-decision read serve every run. A
 /// submission missing from the result -- no database, a submission `main`'s
 /// document does not describe (a `received` one), or one the caller may not
 /// see -- falls back to the pipeline's own document at the caller.
@@ -17383,6 +17387,13 @@ async fn compatibility_statuses_from_database(
         )
         .await?,
     );
+    // Stage 3, 2026-10-10: the run's stored gate decision row is the
+    // credit figure's source, as on `main`'s own path in the status route.
+    // Settle writes it under `main`'s duplicate short-circuits, so a
+    // duplicate's row carries its label and no credit quality, which the
+    // Score evidence cannot show (with no `NoveltyUtility` delta there is no
+    // Trace Credit leg to carry the label either).
+    let stored_decisions = gate_credit_decisions_for_records(state, &records).await?;
     let pipeline_by_submission = pipelines
         .iter()
         .map(|pipeline| (pipeline.submission_id, *pipeline))
@@ -17392,12 +17403,14 @@ async fn compatibility_statuses_from_database(
         let Some(pipeline) = pipeline_by_submission.get(&record.submission_id) else {
             continue;
         };
-        let decision = compatibility_credit_decision(pipeline);
+        let derived_decision = compatibility_credit_decision(pipeline);
         let mut status = submission_status_from_record(
             record,
             &credit_events,
             state.near_settlement_mode,
-            decision.as_ref(),
+            stored_decisions
+                .get(&record.submission_id)
+                .or(derived_decision.as_ref()),
         );
         status.pipeline = Some(pipeline_status_for_protocol(pipeline));
         documents.insert(record.submission_id, status);
