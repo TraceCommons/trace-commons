@@ -885,7 +885,7 @@ rolled back to.
 
 ### After a deploy: the qualification is read again for each new upload
 
-A deploy changes the code revision and changes no routing row. So each process
+A deploy of a new code revision changes no routing row. So each process
 checks one term of the gate again, for each new upload of a tenant whose row
 says `pipeline`: the tenant's active bundle must have a qualification row for
 the revision that the process was built from.
