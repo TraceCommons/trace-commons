@@ -57,7 +57,7 @@ final class NudgeSettingsSectionTests: XCTestCase {
         XCTAssertNil(store.writeError)
     }
 
-    /// Turn on writes the kind on, which also ends its offer; No thanks
+    /// Enable writes the kind on, which also ends its offer; No thanks
     /// only clears the offer's marker.
     func test_anOfferIsAnsweredWithOneWrite() async {
         let client = SampleDaemonClient(.normalDay)
