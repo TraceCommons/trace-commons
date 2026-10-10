@@ -547,6 +547,12 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipe
 - [ ] **Step 4: Run green**: Step 2's command plus `quarantined_rejection_same_dispatch_commits_after_the_pass` and Task 6's tests (`-- escalated quarantined_run --test-threads=1`).
 - [ ] **Step 5: Commit** `Commit a reviewer's decision on an escalated run`.
 
+Recorded while implementing Task 7:
+- The server rejection is `PipelineService::commit_privacy_pass_rejection`. Its `PhaseResult` goes through `ReviewOutput::rejected` (the contract's own shape check) before `commit_review(run, .., None, None)`. The refusal re-raise that the Review arm did inline (bare safe labels) is factored into `review_commit_refusal`, which both paths use.
+- `commit_review` writes the two approval columns with `CASE WHEN privacy_pass_outcome = 'escalated' THEN $n ELSE <column> END`, so a `pass_approval` passed for a run whose pass did not escalate is ignored rather than tripping `pipeline_runs_privacy_pass_approval_shape`; it is also ignored on a rejection. The Review arm passes the current assessment only when the pass escalated. The stored reasons are the assessment's `resolved_quarantine_reasons` as `record_review_assessment` stored them (sorted, deduplicated).
+- `quarantined_run_escalated_to_high_is_held_for_both_reasons` (Task 6) gains the Q2 assertion for an Admission-quarantined escalated run: both columns set, reasons `["privacy_pass_review_required", "privacy_review_required"]`.
+- Red run: `escalated_rejection_ends_the_run_rejected` failed with the run `Pending` at Score (approved); `escalated_approval_links_the_assessment` failed on a NULL `privacy_pass_approval_assessment_hash`; `quarantined_rejection_same_dispatch_commits_after_the_pass` passed (regression pin). The tests use the rule id literal, so they compiled before the constant existed.
+
 ### Task 8: Classifier failure: charged retry, legacy backoff, terminal label, pass timeout, status
 
 **Files:** VP:5048-5101 `mark_retry`; VP:10880-10925 (routing); pass timeout (P8) beside VP:775-790 and the service builder; RT:5710-5760; HTTP:7051-7061 and the section at HTTP:7551-7598; ING:17406-17422 `main_status_for_pipeline` (Q1).

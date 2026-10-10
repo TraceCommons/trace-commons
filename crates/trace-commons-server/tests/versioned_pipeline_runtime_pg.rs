@@ -1968,7 +1968,7 @@ async fn outcomes_are_immutable_and_tenant_scoped() {
     // `pipeline_runs_approved_content_shape`); there is no generic phase
     // commit.
     store
-        .commit_review(&claimed, stored, None)
+        .commit_review(&claimed, stored, None, None)
         .await
         .expect("commit the rejected Review outcome");
 
@@ -8668,7 +8668,9 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
         evaluation: serde_json::json!({}),
     };
 
-    let result = store.commit_review(&claimed, outcome, Some(approved)).await;
+    let result = store
+        .commit_review(&claimed, outcome, Some(approved), None)
+        .await;
     let error = result.expect_err("commit_review must refuse an inoperable submission");
     assert!(
         error
@@ -10767,7 +10769,7 @@ async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
         evaluation: serde_json::json!({}),
     };
     let reviewed = store
-        .commit_review(&claimed_review, review_outcome, Some(approved))
+        .commit_review(&claimed_review, review_outcome, Some(approved), None)
         .await
         .expect("commit review");
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
@@ -11027,7 +11029,7 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
         evaluation: serde_json::json!({}),
     };
     let reviewed = store
-        .commit_review(&claimed_b, outcome_b, Some(approved_b))
+        .commit_review(&claimed_b, outcome_b, Some(approved_b), None)
         .await
         .expect("worker B commits Review");
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
@@ -11063,7 +11065,7 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
         evaluation: serde_json::json!({}),
     };
     let stale = store
-        .commit_review(&claimed_a, outcome_a, Some(approved_a))
+        .commit_review(&claimed_a, outcome_a, Some(approved_a), None)
         .await
         .expect_err("worker A's commit must be refused as stale");
     assert!(
@@ -26960,7 +26962,7 @@ async fn a_review_rejection_that_finds_a_staged_attempt_row_is_refused() {
     .unwrap();
     let stored = StoredPhaseResult::from_result(Phase::Review, output.result()).unwrap();
     let error = store
-        .commit_review(&claimed, stored, None)
+        .commit_review(&claimed, stored, None, None)
         .await
         .expect_err("a rejection that would move a staged row is refused");
     assert!(
@@ -39555,7 +39557,7 @@ async fn a_policy_suspended_during_a_phase_cannot_commit_it() {
         .unwrap();
         let stored = StoredPhaseResult::from_result(Phase::Review, rejected.result()).unwrap();
         let refused = store
-            .commit_review(&claimed, stored, None)
+            .commit_review(&claimed, stored, None, None)
             .await
             .expect_err("a suspended Review policy cannot commit");
         assert!(
@@ -46331,7 +46333,9 @@ async fn approval_without_a_pass_is_refused() {
                 evidence: serde_json::json!({}),
                 evaluation: serde_json::json!({}),
             };
-            store.commit_review(&claimed, outcome, Some(approved)).await
+            store
+                .commit_review(&claimed, outcome, Some(approved), None)
+                .await
         }
     };
     let approved_refs = |run: PipelineRunRecord| {
@@ -46873,6 +46877,18 @@ async fn quarantined_run_escalated_to_high_is_held_for_both_reasons() {
         evidence.human_assessment_hash.as_deref(),
         Some(assessment.evidence_hash.as_str())
     );
+    // Task 7 (Q2): the approval is also linked on the pass record.
+    assert_eq!(
+        reviewed.privacy_pass_approval_assessment_hash.as_deref(),
+        Some(assessment.evidence_hash.as_str())
+    );
+    assert_eq!(
+        reviewed.privacy_pass_approval_resolved_reasons,
+        Some(vec![
+            PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL.to_string(),
+            "privacy_review_required".to_string(),
+        ])
+    );
 }
 
 /// Task 6, critique 1 (2) and P9: on a run received before V117 (no pass
@@ -47089,4 +47105,252 @@ async fn cleared_consent_flag_only_run_goes_straight_to_review() {
     );
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
     assert_eq!(boundary.calls(), 1);
+}
+
+// Task 7 (Q2): a reviewer's decision on a run the privacy pass escalated.
+
+/// The run's committed Review outcome, decoded: its decision and its rule id.
+async fn review_decision_and_rule(
+    service: &PipelineService,
+    tenant: &str,
+    run_id: uuid::Uuid,
+) -> (ReviewDecision, String) {
+    let outcome = service
+        .store()
+        .list_outcomes(tenant, run_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("a Review outcome is recorded");
+    let decision: ReviewDecision =
+        serde_json::from_value(outcome.decision).expect("Review decision decodes");
+    let evaluation: ReviewEvaluation =
+        serde_json::from_value(outcome.evaluation).expect("Review evaluation decodes");
+    (decision, evaluation.rule_id)
+}
+
+/// Task 7 (Q2, spec correction 3): `MinimalReviewPolicy` ignores a human
+/// assessment on an Admission-admitted run, so a reviewer's rejection of a
+/// run the pass escalated is committed by the server, under its own rule
+/// id, on the pass output; the policy is never called and the classifier
+/// is not called again.
+#[tokio::test]
+async fn escalated_rejection_ends_the_run_rejected() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "escalated-reject", ResidualPiiRisk::Low).await;
+    assert_eq!(created.admission_decision, "admit");
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let claim = claim_for_review(&service, &tenant, created.run_id, '1').await;
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    let assessment = service
+        .store()
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason.clone(), vec![])
+        .await
+        .expect("the rejection is recorded");
+
+    let ended = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the rejection");
+    assert_eq!(ended.state, PipelineRunState::Complete, "{ended:?}");
+    assert_eq!(ended.next_phase, None);
+    assert!(ended.approved_object_ref_id.is_none());
+    assert!(ended.approved_revision_id.is_none());
+    assert!(ended.privacy_pass_approval_assessment_hash.is_none());
+    assert!(ended.privacy_pass_approval_resolved_reasons.is_none());
+    assert_eq!(boundary.calls(), 1, "the recorded pass is never re-run");
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "rejected"
+    );
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        1
+    );
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert_eq!(decision, ReviewDecision::Rejected { reason });
+    assert_eq!(
+        rule_id, "privacy_pass_human_review_rejected_v1",
+        "the server, not the policy, committed the rejection"
+    );
+    let evidence = review_evidence(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        held.privacy_pass_content_hash.as_deref(),
+        Some(evidence.source_content_hash.as_str()),
+        "the rejection names the pass output it was made on"
+    );
+    assert_eq!(evidence.result_content_hash, evidence.source_content_hash);
+    assert!(!evidence.content_changed);
+    assert_eq!(
+        evidence.human_assessment_hash.as_deref(),
+        Some(assessment.evidence_hash.as_str())
+    );
+    assert!(evidence.resolved_quarantine_reasons.is_empty());
+}
+
+/// Task 7 (Q2): the approval of an escalated run records the approving
+/// assessment's `evidence_hash` and resolved reasons on the pass record, in
+/// the approval's own transaction; a run the pass cleared keeps both NULL.
+#[tokio::test]
+async fn escalated_approval_links_the_assessment() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) = submit_at_risk(&service, "escalated-link", ResidualPiiRisk::Low).await;
+    let held = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass");
+    assert_held_by_the_pass(&service, &tenant, &held).await;
+    let claim = claim_for_review(&service, &tenant, created.run_id, '2').await;
+    let pass_reason = ReasonCode::new(PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL).unwrap();
+    let assessment = service
+        .store()
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            pass_reason.clone(),
+            vec![pass_reason],
+        )
+        .await
+        .expect("the approval is recorded");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the approval");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    assert_eq!(
+        reviewed.privacy_pass_approval_assessment_hash.as_deref(),
+        Some(assessment.evidence_hash.as_str())
+    );
+    assert_eq!(
+        reviewed.privacy_pass_approval_resolved_reasons,
+        Some(vec![
+            PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL.to_string()
+        ])
+    );
+    let stored = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.privacy_pass_approval_assessment_hash,
+        reviewed.privacy_pass_approval_assessment_hash
+    );
+    assert_eq!(
+        stored.privacy_pass_approval_resolved_reasons,
+        reviewed.privacy_pass_approval_resolved_reasons
+    );
+    // The approved outcome itself is the bundle policy's.
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert!(matches!(decision, ReviewDecision::Approved { .. }));
+    assert_eq!(rule_id, "minimal_review_passthrough_v1");
+
+    // A run the pass cleared is approved with no link.
+    let quiet = EscalatingBoundary::new(Vec::new(), None);
+    let dir = tempfile::tempdir().unwrap();
+    let cleared_service =
+        privacy_pass_test_service(backend.clone(), artifact_store(&dir), quiet, None).await;
+    let (tenant, created) =
+        submit_at_risk(&cleared_service, "cleared-no-link", ResidualPiiRisk::Low).await;
+    let reviewed = cleared_service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs");
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    assert_eq!(reviewed.next_phase, Some(Phase::Score));
+    assert!(reviewed.privacy_pass_approval_assessment_hash.is_none());
+    assert!(reviewed.privacy_pass_approval_resolved_reasons.is_none());
+}
+
+/// Task 7 (critique 4, regression pin of Task 4's `moved == 1` rule): on a
+/// run received before V117 that Admission quarantined and a reviewer
+/// already rejected, one dispatch runs the pass (recording it and
+/// committing its staged row) and then commits the policy's rejection,
+/// without `pipeline_attempt_artifact_missing`.
+#[tokio::test]
+async fn quarantined_rejection_same_dispatch_commits_after_the_pass() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), None);
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "quarantine-reject-pass", ResidualPiiRisk::Medium).await;
+    assert_eq!(created.admission_decision, "quarantine");
+    mark_received_before_v117(&tenant, created.run_id).await;
+    let claim = claim_for_review(&service, &tenant, created.run_id, '3').await;
+    let reason = ReasonCode::new("reviewer_declined").unwrap();
+    service
+        .store()
+        .record_review_assessment(&claim, ReviewRecommendation::Reject, reason.clone(), vec![])
+        .await
+        .expect("the rejection is recorded before any pass");
+
+    let ended = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and the policy");
+    assert_eq!(boundary.calls(), 1);
+    assert_eq!(ended.state, PipelineRunState::Complete, "{ended:?}");
+    assert_eq!(ended.next_phase, None);
+    assert!(ended.privacy_pass_object_ref_id.is_some());
+    assert_eq!(
+        ended.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "rejected"
+    );
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert_eq!(decision, ReviewDecision::Rejected { reason });
+    assert_eq!(rule_id, "human_review_rejected_v1");
+    let rows = privacy_pass_attempt_rows(&backend, &tenant, created.run_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].2, "committed");
 }

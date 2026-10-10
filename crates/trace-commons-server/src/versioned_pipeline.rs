@@ -19,9 +19,9 @@ use trace_commons_gate_api::pipeline::{
     InstrumentAwards, InstrumentId, InstrumentSettlement, InstrumentSettlementProgress,
     Microcredits, PIPELINE_OUTCOME_SCHEMA_ID, PIPELINE_OUTCOME_SCHEMA_VERSION, Phase, PhaseResult,
     PolicyError, PolicyRef, PrivacyRisk, ReasonCode, ReviewDecision, ReviewEvaluation,
-    ReviewEvidence, ReviewInput, ReviewRecommendation, SchemaRef, ScoreDecision, ScoreEvaluation,
-    ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision, SettleEvaluation,
-    SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
+    ReviewEvidence, ReviewInput, ReviewOutput, ReviewRecommendation, SchemaRef, ScoreDecision,
+    ScoreEvaluation, ScoreEvidence, ScoreInput, SealedIndexCommand, SettleDecision,
+    SettleEvaluation, SettleEvidence, SettleInput, TenantStorageRef, UnverifiedScoreDecision,
 };
 use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
@@ -301,6 +301,12 @@ pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
 /// reason, and a reason an approving assessment must resolve. Distinct from
 /// Admission's `privacy_review_required`.
 pub const PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL: &str = "privacy_pass_review_required";
+/// Rule id of a Review rejection the server commits itself: a reviewer's
+/// Reject of an Admission-admitted run the privacy pass escalated (Q2).
+/// `MinimalReviewPolicy` ignores a human assessment when Admission
+/// admitted, so the policy would approve such a run; the server never calls
+/// it and records the rejection under this rule id instead.
+pub const PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID: &str = "privacy_pass_human_review_rejected_v1";
 /// The ceiling on one privacy pass classifier call. A call that has not
 /// returned by then is a classifier failure
 /// (`privacy_classification_failed`).
@@ -2545,11 +2551,19 @@ impl PgPipelineStore {
     /// the CHECK `pipeline_runs_privacy_pass_before_approval` backs it. The
     /// derived record names the privacy pass object as its input when a pass
     /// is recorded, since that is the object whose hash it stores.
+    ///
+    /// `pass_approval` is the human assessment that approved a run the
+    /// privacy pass escalated (Q2). On an approval of such a run its
+    /// `evidence_hash` and resolved reasons are written to the run's
+    /// `privacy_pass_approval_*` columns in this transaction, so the approved
+    /// outcome is linked to the human decision. It is ignored on a rejection
+    /// and on a run whose pass did not escalate (both columns stay NULL).
     pub async fn commit_review(
         &self,
         run: &PipelineRunRecord,
         outcome: StoredPhaseResult,
         approved: Option<ApprovedRevision>,
+        pass_approval: Option<&HumanReviewAssessment>,
     ) -> Result<PipelineRunRecord, DatabaseError> {
         if outcome.phase != Phase::Review || run.next_phase != Some(Phase::Review) {
             return Err(DatabaseError::Constraint(
@@ -2695,6 +2709,27 @@ impl PgPipelineStore {
         } else {
             PipelineRunState::Pending
         };
+        // Q2: the approving assessment of an escalated run, linked on the
+        // pass record. Only on an approval; the UPDATE writes it only when
+        // the recorded pass escalated (`privacy_pass_outcome = 'escalated'`,
+        // which `pipeline_runs_privacy_pass_approval_shape` also requires).
+        let (pass_approval_hash, pass_approval_reasons) =
+            match pass_approval.filter(|_| approved.is_some()) {
+                Some(assessment) => {
+                    let reasons: Vec<&str> = assessment
+                        .resolved_quarantine_reasons
+                        .iter()
+                        .map(ReasonCode::as_str)
+                        .collect();
+                    let reasons = serde_json::to_value(reasons).map_err(|_| {
+                        DatabaseError::Serialization(
+                            "privacy pass approval reasons encode failed".to_string(),
+                        )
+                    })?;
+                    (Some(assessment.evidence_hash.clone()), Some(reasons))
+                }
+                None => (None, None),
+            };
         // Critique 0: an approval of a run that needs a privacy pass
         // requires one recorded. `ensure_current_lease` already passed under
         // the run lock, so no row here means the pass is missing; the
@@ -2710,6 +2745,12 @@ impl PgPipelineStore {
                      approved_revision_id = $5,
                      approved_object_ref_id = $6,
                      approved_content_hash = $7,
+                     privacy_pass_approval_assessment_hash = CASE
+                         WHEN privacy_pass_outcome = 'escalated' THEN $9::text
+                         ELSE privacy_pass_approval_assessment_hash END,
+                     privacy_pass_approval_resolved_reasons = CASE
+                         WHEN privacy_pass_outcome = 'escalated' THEN $10::jsonb
+                         ELSE privacy_pass_approval_resolved_reasons END,
                      lease_token = NULL, lease_expires_at = NULL,
                      next_attempt_at = NOW(), phase_started_at = NOW(), updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
@@ -2726,6 +2767,8 @@ impl PgPipelineStore {
                     &approved_object_ref_id,
                     &approved_content_hash,
                     &lease_token,
+                    &pass_approval_hash,
+                    &pass_approval_reasons,
                 ],
             )
             .await?
@@ -7582,6 +7625,24 @@ async fn reset_failed_index_invalidations_on_tx(
     Ok(reset)
 }
 
+/// A refused Review commit as the dispatch re-raises it. The store's
+/// `Display` prefixes every `Constraint` error ("Constraint violation:
+/// ..."), which would not match the safe-label allowlist verbatim (the same
+/// reason `commit_score_phase` re-raises `settlement_adapter_missing` bare);
+/// the safe refusals are re-raised as their bare labels.
+fn review_commit_refusal(error: DatabaseError) -> anyhow::Error {
+    match error {
+        DatabaseError::Constraint(label)
+            if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
+                || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
+                || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
+        {
+            anyhow::anyhow!(label)
+        }
+        error => error.into(),
+    }
+}
+
 /// Whether a failed phase commit certainly committed nothing: the store
 /// refused it (a `Constraint` label -- a stale lease,
 /// `settlement_adapter_missing`, `submission_inoperable` -- or another
@@ -11938,6 +11999,25 @@ impl PipelineService {
                     }
                 }
                 let human_assessment = stored_assessment.map(|stored| stored.assessment);
+                let escalated = run.privacy_pass_outcome == Some(PrivacyPassOutcome::Escalated);
+                // Q2, spec correction 3: `MinimalReviewPolicy` ignores the
+                // assessment when Admission admitted, so it would approve an
+                // escalated run a reviewer rejected. The server commits that
+                // rejection itself, on the pass output, and never calls the
+                // policy. An Admission-quarantined escalated run goes through
+                // the policy, which rejects it as it does today.
+                if escalated && admission == AdmissionDecision::Admit {
+                    if let Some(assessment) = human_assessment.as_ref().filter(|assessment| {
+                        assessment.recommendation == ReviewRecommendation::Reject
+                    }) {
+                        return self
+                            .commit_privacy_pass_rejection(run, source_content_hash, assessment)
+                            .await;
+                    }
+                }
+                // Q2: the assessment that approves an escalated run is
+                // linked on the pass record by `commit_review`.
+                let pass_approval = human_assessment.clone().filter(|_| escalated);
                 let output = bundle
                     .review
                     .execute(&ReviewInput {
@@ -12019,6 +12099,7 @@ impl PipelineService {
                         run,
                         StoredPhaseResult::from_result(Phase::Review, &result)?,
                         approved,
+                        pass_approval.as_ref(),
                     )
                     .await;
                 let updated = match commit_result {
@@ -12039,22 +12120,7 @@ impl PipelineService {
                             )
                             .await;
                         }
-                        // The store's `Display` prefixes every `Constraint`
-                        // error ("Constraint violation: ..."), which would not
-                        // match the safe-label allowlist verbatim (the same
-                        // reason `commit_score_phase` re-raises
-                        // `settlement_adapter_missing` bare); re-raise the
-                        // inoperable refusal the same way.
-                        return Err(match error {
-                            DatabaseError::Constraint(label)
-                                if label == PIPELINE_SUBMISSION_INOPERABLE_LABEL
-                                    || label == PIPELINE_ATTEMPT_ARTIFACT_MISSING_LABEL
-                                    || label == PIPELINE_POLICY_NOT_RUNNABLE_LABEL =>
-                            {
-                                anyhow::anyhow!(label)
-                            }
-                            error => error.into(),
-                        });
+                        return Err(review_commit_refusal(error));
                     }
                 };
                 self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
@@ -12063,6 +12129,55 @@ impl PipelineService {
             Phase::Score => self.commit_score_phase(run, bundle).await,
             Phase::Settle => self.complete_settle_phase(run, bundle).await,
         }
+    }
+
+    /// Commits a reviewer's rejection of an Admission-admitted run the
+    /// privacy pass escalated (Q2), without calling the Review policy. The
+    /// result mirrors `MinimalReviewPolicy`'s human rejection: it names the
+    /// pass output it was made on (`source_content_hash`, the pass content
+    /// hash), the assessment's `evidence_hash` and reason, and the server's
+    /// rule id, `PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID`. `commit_review`
+    /// then rejects the submission and completes the run; no object was
+    /// written, so a refused commit has nothing to delete.
+    async fn commit_privacy_pass_rejection(
+        &self,
+        run: &PipelineRunRecord,
+        source_content_hash: String,
+        assessment: &HumanReviewAssessment,
+    ) -> anyhow::Result<PipelineRunRecord> {
+        let result = PhaseResult {
+            decision: ReviewDecision::Rejected {
+                reason: assessment.reason.clone(),
+            },
+            evidence: ReviewEvidence {
+                result_content_hash: source_content_hash.clone(),
+                source_content_hash,
+                content_changed: false,
+                worker_identity: None,
+                transformation_metadata_hash: None,
+                human_assessment_hash: Some(assessment.evidence_hash.clone()),
+                resolved_quarantine_reasons: Vec::new(),
+            },
+            evaluation: ReviewEvaluation {
+                rule_id: PIPELINE_PRIVACY_PASS_REJECTED_RULE_ID.to_string(),
+            },
+        };
+        // The contract's own check of a rejection's shape.
+        let (result, _) = ReviewOutput::rejected(result)
+            .map_err(|_| anyhow::anyhow!("review_output_invalid"))?
+            .into_parts();
+        let updated = self
+            .store
+            .commit_review(
+                run,
+                StoredPhaseResult::from_result(Phase::Review, &result)?,
+                None,
+                None,
+            )
+            .await
+            .map_err(review_commit_refusal)?;
+        self.inject_crash(PipelineCrashPoint::AfterReviewCommit)?;
+        Ok(updated)
     }
 
     /// Runs Score over the approved bytes, stores the exact index command
