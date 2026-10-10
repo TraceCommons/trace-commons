@@ -134,8 +134,20 @@ struct NudgeSettingsSection: View {
     @EnvironmentObject private var model: AppModel
     @State private var store = NudgeSettingsStore(client: nil)
 
+    /// Where the `get_settings` read stands, in the shared Settings terms:
+    /// the spinner while it is in flight, the core's failure line with a
+    /// retry once it failed or the core is down.
+    private var settingsRead: SettingsRead {
+        SettingsRead.resolve(answered: store.settings != nil, failed: store.readError != nil, startup: model.startup)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            // The daemon has not answered: its state, never a switch read
+            // from a default.
+            if store.settings == nil {
+                SettingsReadNotice(settingsRead, retry: reload)
+            }
             ForEach(store.rows, id: \.id) { row in
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                     Toggle(row.label, isOn: Binding(
@@ -158,7 +170,9 @@ struct NudgeSettingsSection: View {
                     .foregroundStyle(GlassColor.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let error = store.writeError ?? store.readError, let line = MonitorWords.table?.line(for: error) {
+            // A refused switch write, under the switches it is about. A
+            // failed read is the notice above.
+            if let error = store.writeError, let line = MonitorWords.table?.line(for: error) {
                 GlassAlert(line)
             }
         }
@@ -166,6 +180,10 @@ struct NudgeSettingsSection: View {
             store.attach(model.daemonData)
             await store.load()
         }
+    }
+
+    private func reload() {
+        Task { await store.load() }
     }
 
     /// A finer switch sits under the broader one it follows.
