@@ -33,6 +33,7 @@ use trace_commons_gate_api::{
     IdentifiedEmbedder, IdentifiedIndexReader, IdentifiedIndexWriter, IdentifiedPerplexityScorer,
 };
 
+use crate::versioned_pipeline_blocking::run_score_evaluation;
 use crate::versioned_pipeline_compat::{
     COMPATIBILITY_ADMISSION_IMPLEMENTATION, COMPATIBILITY_REVIEW_IMPLEMENTATION,
     COMPATIBILITY_SCORE_IMPLEMENTATION, COMPATIBILITY_SETTLE_IMPLEMENTATION,
@@ -355,11 +356,13 @@ fn settle_invalid<E>(_: E) -> PolicyError {
 impl ScorePolicy for FixedScorePolicy {
     /// The embedder and the index reader are synchronous, so the evaluation
     /// runs on the blocking pool, never on a runtime worker (Zaki review 1,
-    /// round 2, N-6), as the compatibility Score's does.
+    /// round 2, N-6), as the compatibility Score's does, and under the
+    /// pipeline's bound on Score evaluations (#1140,
+    /// `run_score_evaluation`).
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let policy = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+        run_score_evaluation(move || policy.evaluate(&input))
             .await
             .map_err(|_| PolicyError::permanent("score_task_failed").expect("static label"))?
     }
@@ -965,6 +968,134 @@ mod tests {
         assert_eq!(
             evidence.embedding_artifact_hash.as_deref(),
             Some(command.content_hash().unwrap().as_str())
+        );
+    }
+
+    /// An embedder that sleeps on every call, as a CPU-bound local model
+    /// holds its thread, and records how many calls ran at once.
+    struct SleepingEmbedder {
+        sleep: std::time::Duration,
+        entered: AtomicUsize,
+        calls: AtomicUsize,
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+    impl SleepingEmbedder {
+        fn new(sleep: std::time::Duration) -> Self {
+            Self {
+                sleep,
+                entered: AtomicUsize::new(0),
+                calls: AtomicUsize::new(0),
+                in_flight: AtomicUsize::new(0),
+                max_in_flight: AtomicUsize::new(0),
+            }
+        }
+    }
+    impl Embedder for SleepingEmbedder {
+        fn embed(&self, plaintext: &[u8]) -> anyhow::Result<Vec<f32>> {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(self.sleep);
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            ReferenceEmbedder::new().embed(plaintext)
+        }
+    }
+    impl IdentifiedEmbedder for SleepingEmbedder {
+        fn dependency_identity(&self) -> &str {
+            "sleeping_embedder_test_only"
+        }
+        fn model_id(&self) -> &str {
+            "sleeping-embedder-v1"
+        }
+        fn content_descriptor(&self) -> Vec<u8> {
+            b"sleeping-v1".to_vec()
+        }
+    }
+
+    fn sleeping_bundle(embedder: Arc<SleepingEmbedder>) -> MinimalPolicyBundle {
+        let scorer = Arc::new(ReferencePerplexityScorer::new());
+        let package =
+            MinimalPolicyBundle::minimal_package(&config(true), scorer.as_ref(), embedder.as_ref())
+                .unwrap();
+        MinimalPolicyBundle::from_package_with_runtime(
+            package,
+            scorer,
+            embedder,
+            IsolatedPipelineIndex::new(),
+        )
+        .unwrap()
+    }
+
+    /// #1140: the pipeline worker shares ingest's runtime with HTTP, so a
+    /// Score whose embedder holds its thread must not hold a runtime
+    /// thread. On a current-thread runtime -- one thread, as a saturated
+    /// pilot runtime effectively is -- an HTTP request served by that
+    /// runtime completes while the embedder is still sleeping. Were the
+    /// embed run inline in `execute`, the first await below would hand the
+    /// only thread to the Score, and nothing would run until every chunk
+    /// was embedded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_slow_embed_leaves_the_runtime_free_to_serve_http() {
+        use tower::ServiceExt;
+        let embedder = Arc::new(SleepingEmbedder::new(std::time::Duration::from_millis(750)));
+        let bundle = sleeping_bundle(embedder.clone());
+        let health = axum::Router::new().route("/health", axum::routing::get(|| async { "ok" }));
+
+        let started = std::time::Instant::now();
+        let bytes = vec![b'x'; 600]; // three 256-byte chunks: 2.25 s of embedding
+        let score = tokio::spawn(async move { bundle.score.execute(&score_input(&bytes)).await });
+        // Wait, on this runtime, until the first embed is under way.
+        while embedder.entered.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        }
+        let response = health
+            .oneshot(
+                axum::http::Request::get("/health")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        // Counted, not timed: no embed has returned yet, so the request was
+        // served while the first one still held its thread.
+        assert_eq!(
+            embedder.calls.load(Ordering::SeqCst),
+            0,
+            "the health request was served while the first embed still ran"
+        );
+        let output = score.await.unwrap().unwrap();
+        assert_eq!(output.index_command().unwrap().entries().len(), 3);
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), 3);
+    }
+
+    /// #1140: a burst of Score evaluations takes at most
+    /// `PIPELINE_SCORE_EVALUATION_CONCURRENCY` blocking threads at once;
+    /// the rest wait for a permit on the runtime, where waiting costs
+    /// nothing, instead of each taking a thread of the shared blocking
+    /// pool. Every evaluation still completes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_burst_of_scores_is_bounded_on_the_blocking_pool() {
+        use crate::versioned_pipeline_blocking::PIPELINE_SCORE_EVALUATION_CONCURRENCY;
+        let embedder = Arc::new(SleepingEmbedder::new(std::time::Duration::from_millis(50)));
+        let bundle = sleeping_bundle(embedder.clone());
+        let burst = PIPELINE_SCORE_EVALUATION_CONCURRENCY * 3;
+        let mut scores = tokio::task::JoinSet::new();
+        for _ in 0..burst {
+            let score = bundle.score.clone();
+            scores.spawn(async move { score.execute(&score_input(&[b'x'; 100])).await });
+        }
+        while let Some(joined) = scores.join_next().await {
+            joined.unwrap().unwrap();
+        }
+        assert_eq!(embedder.calls.load(Ordering::SeqCst), burst);
+        let max = embedder.max_in_flight.load(Ordering::SeqCst);
+        assert!(
+            (1..=PIPELINE_SCORE_EVALUATION_CONCURRENCY).contains(&max),
+            "{max} Score evaluations held blocking threads at once"
         );
     }
 

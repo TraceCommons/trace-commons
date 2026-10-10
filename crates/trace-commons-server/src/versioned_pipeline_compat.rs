@@ -369,12 +369,13 @@ impl ScorePolicy for CompatibilityScorePolicy {
     /// production scorer makes network calls (the NEAR AI scorer uses a
     /// blocking HTTP client), so the whole evaluation runs on the blocking
     /// pool, never on a runtime worker, as `main` runs the same scorer class
-    /// (Zaki review 1, round 2, N-6). A task that panicked or was cancelled
-    /// is `score_task_failed`.
+    /// (Zaki review 1, round 2, N-6), under the pipeline's bound on Score
+    /// evaluations (#1140, `run_score_evaluation`). A task that panicked or
+    /// was cancelled is `score_task_failed`.
     async fn execute(&self, input: &ScoreInput) -> Result<ScoreOutput, PolicyError> {
         let policy = self.clone();
         let input = input.clone();
-        tokio::task::spawn_blocking(move || policy.evaluate(&input))
+        crate::versioned_pipeline_blocking::run_score_evaluation(move || policy.evaluate(&input))
             .await
             .map_err(|_| permanent("score_task_failed"))?
     }
