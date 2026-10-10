@@ -664,13 +664,20 @@ The drill keeps its one pending run (RESTORE:2141-2143, 2401-2416, 2553; `pipeli
 - [ ] **Step 2: Run the drill** (the seed and resume tests are `#[ignore]`d, RESTORE:2008 and :2281, and run only through `pipeline.py`, which passes `ignored=True`; a plain `cargo test ... restore` executes none of them):
 
 ```bash
-python3 scripts/operator/pipeline.py restore-drill --postgres-admin-url postgres://$USER@127.0.0.1:5432/postgres
-RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest production_restore_drill_resumes_once -- --ignored --test-threads=1
+python3 scripts/operator/pipeline.py restore-drill   # container mode; or --postgres-admin-url postgres://trace@127.0.0.1:5432/postgres if the cluster has a `trace` role
+# each against its own fresh admission_test_* database; drop it and its _pilot sibling afterwards
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest production_restore_drill_resumes_once_over_doubles -- --ignored --exact tests::pipeline_restore_pg_tests::production_restore_drill_resumes_once_over_doubles
+RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest production_restore_drill_resumes_once_without_credit_over_doubles -- --ignored --test-threads=1
 python3 scripts/operator/test_pipeline_tooling.py
 ```
 
   Expected: `PipelineRestoreOK: ... pending_runs_resumed=1 duplicate_effects=0`, and the drill's "executed nothing" guard does not fire. Then confirm the seed's fingerprint text contains a non-empty pass hash for both runs (print it once from the seed test, or query `pipeline_runs` in the scratch database), so the new fields are not all empty strings. This coverage runs in the non-required `pipeline qualification and restore` CI job (ci.yml:845-848).
 - [ ] **Step 3: Commit** `Fingerprint the privacy pass record in the restore drill`.
+
+Recorded while implementing Task 11:
+- `--postgres-admin-url` requires the user name `trace` on `127.0.0.1` (`scripts/operator/pipeline_tooling/environment.py:371-372`); a URL with any other role fails `pipeline_tooling_admin_url_invalid`. On a cluster without a `trace` role, run `python3 scripts/operator/pipeline.py restore-drill` with no admin URL, which uses its own docker container.
+- The cargo filter `production_restore_drill_resumes_once` matches two ignored tests (`..._over_doubles` and `..._without_credit_over_doubles`), each of which writes the drill's fixed tenants and recreates `<db>_pilot`. Run each by its full name against its own fresh `admission_test_*` database, then drop both it and its `_pilot` sibling.
+- After the drill, `pipeline_runs` in the `_pilot` database shows every seeded run with `privacy_pass_required = t`, a non-NULL `privacy_pass_object_ref_id`, a `sha256:` content hash and outcome `cleared`, so the new fingerprint fields are not empty strings.
 
 ### Task 12: Gate (no commit)
 
@@ -687,7 +694,7 @@ RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --test versioned_pipe
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest -- --test-threads=1
 RUSTFLAGS="-D warnings" cargo test -p trace-commons-server --bin trace-commons-ingest compatibility_bundle_through_http_with_review_privacy_withdrawal_and_export   # CI requires "1 passed"
 python3 scripts/operator/test_pipeline_tooling.py
-python3 scripts/operator/pipeline.py qualify --postgres-admin-url postgres://$USER@127.0.0.1:5432/postgres
+python3 scripts/operator/pipeline.py qualify   # container mode; --postgres-admin-url needs user `trace` on 127.0.0.1 (see Task 11)
 grep -rn "\.rescrub(" crates/ | wc -l    # 0
 ```
 

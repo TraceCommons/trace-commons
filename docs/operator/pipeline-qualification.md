@@ -149,7 +149,10 @@ directory and compare every file byte for byte; check the restored
 database before anything resumes; resume the pending run against the
 restored database and artifacts, and require it to reach the same
 settlement legs and Trace Credit ledger event the seed produced, with no
-duplicate effect.
+duplicate effect. The database fingerprint covers each run's privacy pass
+record (its object ref, content hash, outcome and `privacy_pass_required`),
+so a restore that dropped the pass record fails
+`restore_database_fingerprint_mismatch`.
 
 A production package whose `NoveltyUtility` delta is `0` (the pilot's
 `TRACE_COMMONS_NOVELTY_UTILITY_CREDIT_POINTS_DELTA=0`) awards nothing, so no
