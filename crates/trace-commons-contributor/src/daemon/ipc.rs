@@ -5533,11 +5533,6 @@ pub(crate) struct NudgeSnapshot {
     pub notify_idle_sessions: bool,
 }
 
-/// `status.idle_sessions` on the wire: how many candidates, the display
-/// names of the tools they came from (distinct, in alphabetical order; a
-/// source the tool table has no name for is left out, never shown as its
-/// raw id), and the threshold in days. Never an id, a path, a folder label
-/// or a session's own age.
 /// The display names of the tools a batch came from, deduplicated and
 /// sorted. A source with no display name is left unnamed.
 pub(crate) fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
@@ -5574,6 +5569,11 @@ pub(crate) fn render_verdicts(
     }
 }
 
+/// `status.idle_sessions` on the wire: how many candidates, the display
+/// names of the tools they came from (distinct, in alphabetical order; a
+/// source the tool table has no name for is left out, never shown as its
+/// raw id), and the threshold in days. Never an id, a path, a folder label
+/// or a session's own age.
 fn idle_sessions_value(
     candidates: &[&super::queue::QueueEntry],
     window: super::nudge::IdleWindow,
