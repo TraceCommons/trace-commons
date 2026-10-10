@@ -9816,8 +9816,10 @@ impl PipelineService {
     /// contract rules out.
     ///
     /// Returns whether this call recorded a result: `false` when another
-    /// claim recorded one first, or took the row over once this claim's
-    /// lease had passed. Each step checks out its own pooled connection and
+    /// claim recorded one first, took the row over once this claim's lease
+    /// had passed, or a late index write reopened the row while this claim
+    /// held it (issue #1233; the next claim removes the revision again).
+    /// Each step checks out its own pooled connection and
     /// returns it before the next, and none is held across the index call.
     async fn process_claimed_index_invalidation(
         &self,

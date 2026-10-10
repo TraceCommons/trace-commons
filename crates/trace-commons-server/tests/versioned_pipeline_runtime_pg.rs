@@ -10031,6 +10031,77 @@ async fn a_claim_taken_before_a_reopen_does_not_complete_the_invalidation() {
     assert_eq!(state, "pending");
 }
 
+/// Issue #1233: the reopen a late index write makes
+/// (`reopen_index_invalidation_after_late_write`). A run with no
+/// invalidation has nothing to reopen. On a `pending` invalidation that a
+/// claim holds, the reopen moves `next_attempt_at` past the claim's lease
+/// end, never earlier, so that claim cannot complete the row and the row
+/// stays `pending` for the next claim.
+#[tokio::test]
+async fn a_late_write_reopens_a_claimed_invalidation_past_the_claims_token() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidation-reopen-claimed-{}", uuid::Uuid::new_v4());
+    let settled = settled_included_run(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    assert!(
+        !store
+            .reopen_index_invalidation_after_late_write(&tenant, settled.run_id)
+            .await
+            .unwrap(),
+        "a run with no invalidation has nothing to reopen"
+    );
+    service
+        .withdraw_submission(&tenant, settled.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let claims = store
+        .claim_due_index_invalidations(&tenant, 10, chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1, "the withdrawal's invalidation is claimed");
+    assert!(
+        store
+            .reopen_index_invalidation_after_late_write(&tenant, settled.run_id)
+            .await
+            .unwrap(),
+        "the late write reopens the claimed invalidation"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let due: chrono::DateTime<chrono::Utc> = tx
+        .query_one(
+            "SELECT next_attempt_at FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert!(
+        due > claims[0].lease_expires_at,
+        "the reopen moves the row past the claim's token, never earlier: {due} vs {}",
+        claims[0].lease_expires_at
+    );
+    assert!(
+        !store.complete_index_invalidation(&claims[0]).await.unwrap(),
+        "the claim taken before the reopen does not complete the invalidation"
+    );
+    let (_, state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(state, "pending");
+}
+
 /// Multi-lens review L4-1 and L4-6(a): `claim_next`'s sweep of expired,
 /// exhausted leases skips a run row another transaction holds (it locks in
 /// run id order, `SKIP LOCKED`), so a claim never waits behind it, and a
