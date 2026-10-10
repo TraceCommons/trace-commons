@@ -508,26 +508,192 @@ public enum GlassBarSlide: Sendable, Equatable {
 /// The map's field (#1146 `--tc-map-fill`): `radial-gradient(80% 60% at
 /// 50% 55%, mapFieldInner, mapFieldOuter)`, an ellipse 80% of the field's
 /// width and 60% of its height across each radius, its centre a little
-/// below the middle.
+/// below the middle. Over it, the NEAR AI mark tiled small and faint, fading
+/// out toward the edges, and lit softly around the pointer while it is over
+/// the map (owner, 2026-10-10). The marks are drawn on the veil, never as a
+/// fill of their own, so the flat theme's desktop still shows through.
 public struct GlassMapField: View {
-    public init() {}
+    /// The pointer over the map, in the field's coordinates; nil while it
+    /// is elsewhere. `GlassMapStage` tracks it.
+    private let pointer: CGPoint?
+
+    public init(pointer: CGPoint? = nil) {
+        self.pointer = pointer
+    }
 
     /// The ellipse's radii as fractions of the field, and its centre.
     static let radii = CGSize(width: 0.8, height: 0.6)
     static let center = UnitPoint(x: 0.5, y: 0.55)
 
     public var body: some View {
-        GeometryReader { proxy in
-            let size = proxy.size
-            EllipticalGradient(
-                colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
-                center: .center, startRadiusFraction: 0, endRadiusFraction: 0.5)
-                .frame(width: size.width * Self.radii.width * 2, height: size.height * Self.radii.height * 2)
-                .position(x: size.width * Self.center.x, y: size.height * Self.center.y)
+        ZStack {
+            GeometryReader { proxy in
+                let size = proxy.size
+                EllipticalGradient(
+                    colors: [GlassTokens.Color.mapFieldInner.color, GlassTokens.Color.mapFieldOuter.color],
+                    center: .center, startRadiusFraction: 0, endRadiusFraction: 0.5)
+                    .frame(width: size.width * Self.radii.width * 2, height: size.height * Self.radii.height * 2)
+                    .position(x: size.width * Self.center.x, y: size.height * Self.center.y)
+            }
+            .background(GlassTokens.Color.mapFieldOuter.color)
+            ZStack {
+                GlassMapMarkTile()
+                GlassMapMarkGlow(pointer: pointer)
+            }
+            .mask(GlassMapMarks.fade)
+            GlassMapLight(pointer: pointer)
         }
-        .background(GlassTokens.Color.mapFieldOuter.color)
         .clipped()
+        .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+}
+
+/// The map with its field, tracking the pointer so the field can light the
+/// marks under it. The pointer lives here rather than in the window, so a
+/// move redraws the light and nothing else: `content` is built once by the
+/// caller and not rebuilt on every move.
+public struct GlassMapStage<Content: View>: View {
+    private let alignment: Alignment
+    private let content: Content
+    @State private var pointer: CGPoint?
+
+    public init(alignment: Alignment = .center, @ViewBuilder content: () -> Content) {
+        self.alignment = alignment
+        self.content = content()
+    }
+
+    public var body: some View {
+        ZStack(alignment: alignment) {
+            GlassMapField(pointer: pointer)
+            content
+        }
+        .onContinuousHover { phase in
+            switch phase {
+            case .active(let location): pointer = location
+            case .ended: pointer = nil
+            }
+        }
+    }
+}
+
+/// The mark tile's measures and the light's falloff. Pure, so the layout
+/// is tested.
+enum GlassMapMarks {
+    /// The tile's cell: two marks to a cell, on its diagonal, so rows
+    /// stagger.
+    static let pitch: CGFloat = 18
+    /// A mark's width and height.
+    static let size: CGFloat = 4.2
+    /// The marks at rest: white over the dark field, black over the light.
+    static let ink = GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08))
+    /// The marks at the centre of the light.
+    static let litInk = GlassRGBA(0xFFFFFF, alpha: 0.42, light: GlassRGBA(0x000000, alpha: 0.3))
+    /// The light itself, a soft white bloom under the pointer.
+    static let bloom = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0xFFFFFF, alpha: 0.4))
+    /// How far the light reaches from the pointer.
+    static let reach: CGFloat = 140
+
+    /// The tile fades out toward the field's edges, so it never crowds the
+    /// pane's frame: full in the middle, 85% halfway, gone at the edge.
+    static var fade: EllipticalGradient {
+        EllipticalGradient(
+            stops: [
+                .init(color: .white, location: 0),
+                .init(color: .white.opacity(0.85), location: 0.55),
+                .init(color: .clear, location: 1),
+            ],
+            center: UnitPoint(x: 0.5, y: 0.52), startRadiusFraction: 0, endRadiusFraction: 0.62)
+    }
+
+    /// Every mark's top-left corner in a field of `size`, from the cells
+    /// that touch `rect` (the whole field when nil).
+    static func origins(in size: CGSize, near rect: CGRect? = nil) -> [CGPoint] {
+        let area = (rect ?? CGRect(origin: .zero, size: size)).intersection(CGRect(origin: .zero, size: size))
+        guard !area.isNull, area.width > 0, area.height > 0 else { return [] }
+        let columns = Int((area.minX / pitch).rounded(.down)) ... Int((area.maxX / pitch).rounded(.down))
+        let rows = Int((area.minY / pitch).rounded(.down)) ... Int((area.maxY / pitch).rounded(.down))
+        var result: [CGPoint] = []
+        for row in rows {
+            for column in columns {
+                let cell = CGPoint(x: CGFloat(column) * pitch, y: CGFloat(row) * pitch)
+                for quarter: CGFloat in [0.25, 0.75] {
+                    let offset: CGFloat = pitch * quarter - Self.size / 2
+                    result.append(CGPoint(x: cell.x + offset, y: cell.y + offset))
+                }
+            }
+        }
+        return result
+    }
+
+    /// How lit a mark is at `distance` from the pointer: 1 under it, easing
+    /// to 0 at `reach`.
+    static func light(distance: CGFloat) -> Double {
+        guard distance < reach else { return 0 }
+        let t = 1 - Double(distance / reach) * Double(distance / reach)
+        return t * t
+    }
+}
+
+/// The marks at rest. No inputs, so a pointer move never redraws it.
+private struct GlassMapMarkTile: View {
+    var body: some View {
+        Canvas { context, size in
+            var marks = Path()
+            for origin in GlassMapMarks.origins(in: size) {
+                if let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) { marks.addPath(mark) }
+            }
+            context.fill(marks, with: .color(GlassMapMarks.ink.color))
+        }
+    }
+}
+
+/// The marks near the pointer, brightened by the light. It keeps the last
+/// point while it fades, so the light dims where it was rather than
+/// vanishing.
+private struct GlassMapMarkGlow: View {
+    let pointer: CGPoint?
+    @State private var last: CGPoint?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Canvas { context, size in
+            guard let point = pointer ?? last else { return }
+            let reach = GlassMapMarks.reach
+            let near = CGRect(x: point.x - reach, y: point.y - reach, width: reach * 2, height: reach * 2)
+            let half = GlassMapMarks.size / 2
+            for origin in GlassMapMarks.origins(in: size, near: near) {
+                let distance = hypot(origin.x + half - point.x, origin.y + half - point.y)
+                let lit = GlassMapMarks.light(distance: distance)
+                guard lit > 0, let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) else { continue }
+                context.fill(mark, with: .color(GlassMapMarks.litInk.color.opacity(lit)))
+            }
+        }
+        .opacity(pointer == nil ? 0 : 1)
+        .animation(GlassMotion.fast(reduceMotion), value: pointer == nil)
+        .onChange(of: pointer) { _, new in if let new { last = new } }
+    }
+}
+
+/// The soft bloom under the pointer, over the marks and the veil.
+private struct GlassMapLight: View {
+    let pointer: CGPoint?
+    @State private var last: CGPoint?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Canvas { context, _ in
+            guard let point = pointer ?? last else { return }
+            let reach = GlassMapMarks.reach
+            let bloom = GlassMapMarks.bloom.color
+            context.fill(
+                Path(ellipseIn: CGRect(x: point.x - reach, y: point.y - reach, width: reach * 2, height: reach * 2)),
+                with: .radialGradient(
+                    Gradient(colors: [bloom, bloom.opacity(0)]), center: point, startRadius: 0, endRadius: reach))
+        }
+        .opacity(pointer == nil ? 0 : 1)
+        .animation(GlassMotion.fast(reduceMotion), value: pointer == nil)
+        .onChange(of: pointer) { _, new in if let new { last = new } }
     }
 }
 

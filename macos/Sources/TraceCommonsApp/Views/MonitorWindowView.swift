@@ -806,8 +806,7 @@ private struct MonitorMapPane: View {
         // glass on glass; R14).
         // #1146's map field and map edge, its view tabs 14pt in.
         GlassPane(padding: 0, isContent: true, edge: GlassTokens.Shadow.mapEdge) {
-            ZStack(alignment: .topTrailing) {
-                GlassMapField()
+            GlassMapStage(alignment: .topTrailing) {
                 map
                 GlassFloatingGroup {
                     GlassSegmentedTabs(MonitorWords.table?.shell.mapViewsLabel ?? "", selection: $mapTab, segments: segments, floating: true)
