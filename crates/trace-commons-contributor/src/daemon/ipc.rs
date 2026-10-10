@@ -2421,7 +2421,7 @@ impl DaemonShared {
                     candidates.len(),
                     mission_fit,
                     credit_estimate,
-                    batch_tools(&candidates),
+                    batch_text_tools(&candidates),
                 )
             }
             None => (None, 0, None, None, Vec::new()),
@@ -5534,13 +5534,30 @@ pub(crate) struct NudgeSnapshot {
 }
 
 /// The display names of the tools a batch came from, deduplicated and
-/// sorted. A source with no display name is left unnamed.
+/// sorted. A source with no display name is left unnamed. This is the
+/// wire's `status.idle_sessions.tools`; the words take
+/// [`batch_text_tools`].
 pub(crate) fn batch_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
     let tools: std::collections::BTreeSet<&'static str> = candidates
         .iter()
         .filter_map(|e| super::inference_map::tool_display_name(e.displayed_source()))
         .collect();
     tools.into_iter().map(str::to_string).collect()
+}
+
+/// The tools a batch's words name ([`crate::nudge_render::Batch::tools`]):
+/// [`batch_tools`] when every source in the batch has a display name, and
+/// none otherwise, so the words read without a tool rather than credit
+/// the named ones with an unnamed source's sessions.
+pub(crate) fn batch_text_tools(candidates: &[&super::queue::QueueEntry]) -> Vec<String> {
+    let all_named = candidates
+        .iter()
+        .all(|e| super::inference_map::tool_display_name(e.displayed_source()).is_some());
+    if all_named {
+        batch_tools(candidates)
+    } else {
+        Vec::new()
+    }
 }
 
 /// A `credit_estimate` sum as the renderer reads it.
@@ -18892,6 +18909,32 @@ mod tests {
             assert!(!text.contains(ASK), "{text}");
             assert!(!text.contains(&a.to_string()), "{text}");
             assert!(!text.contains("nudge-ask"), "{text}");
+        }
+
+        /// A batch holding a source the tool table cannot name names no
+        /// tool in its words, even beside named ones: "3 traces from Claude
+        /// Code and Codex" would credit two tools with a third's session.
+        /// The wire's `tools` still lists the names it has.
+        #[test]
+        fn a_batch_with_an_unnamed_source_names_no_tool_in_its_words() {
+            let s = live();
+            seed_idle(&s, ASK, crate::source::SOURCE_CODEX, 4);
+            seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 5);
+            seed_idle(&s, ASK, crate::source::SOURCE_TRAJECTORY, 6);
+            let status = status_of(&s);
+            assert_eq!(status["nudge"]["lead"], "idle_sessions", "{status}");
+            assert_eq!(
+                status["idle_sessions"]["tools"],
+                serde_json::json!(["Claude Code", "Codex"])
+            );
+            let title = status["nudge"]["text"]["title"].as_str().unwrap();
+            assert_eq!(
+                title,
+                format!(
+                    "3 traces have been idle for {} or more",
+                    crate::nudge_copy::days_phrase(crate::daemon::nudge::IDLE_DAYS as u32)
+                )
+            );
         }
 
         /// Core composes the leading card's words (`status.nudge.text`)

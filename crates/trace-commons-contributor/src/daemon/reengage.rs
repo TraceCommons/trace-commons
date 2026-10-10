@@ -163,7 +163,7 @@ fn prepare(shared: &DaemonShared, now: DateTime<Utc>) -> Prepared {
                 ids: fresh.iter().map(|e| e.entry_id).collect(),
                 batch: Batch {
                     count: fresh.len() as u64,
-                    tools: ipc::batch_tools(&fresh),
+                    tools: ipc::batch_text_tools(&fresh),
                     idle_days: window.idle_days as u32,
                     mission_fit,
                     estimate: None,

@@ -102,6 +102,11 @@ pub const NUDGE_PANEL_IDLE_ONE: &str = "A trace has been idle for {days} or more
 pub const NUDGE_IDLE_TITLE: &str = "{n} traces from {tool} have been idle for {days} or more";
 /// [`NUDGE_IDLE_TITLE`] for one. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_TITLE_ONE: &str = "1 trace from {tool} has been idle for {days} or more";
+/// [`NUDGE_IDLE_TITLE`] when the batch's words can name no tool: some
+/// source in it has no display name. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_IDLE_TITLE_NO_TOOL: &str = "{n} traces have been idle for {days} or more";
+/// [`NUDGE_IDLE_TITLE_NO_TOOL`] for one. DRAFT, NEEDS APPROVAL.
+pub const NUDGE_IDLE_TITLE_NO_TOOL_ONE: &str = "1 trace has been idle for {days} or more";
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_IDLE_BODY: &str = "They look finished. Nothing is sent until you decide on each one, \
      and keeping one on this computer is just as good an answer.";
@@ -132,6 +137,14 @@ pub const NOTIFY_IDLE_BODY_ALTERNATIVE_ONE: &str =
 pub const NOTIFY_IDLE_BODY: &str = NOTIFY_IDLE_BODY_ALTERNATIVE;
 /// [`NOTIFY_IDLE_BODY`] for one.
 pub const NOTIFY_IDLE_BODY_ONE: &str = NOTIFY_IDLE_BODY_ALTERNATIVE_ONE;
+/// [`NOTIFY_IDLE_BODY`] without its tool, as [`NUDGE_IDLE_TITLE_NO_TOOL`].
+/// A test holds it to the pick with " from {tool}" removed. DRAFT, NEEDS
+/// APPROVAL.
+pub const NOTIFY_IDLE_BODY_NO_TOOL: &str =
+    "{n} traces have been idle for {days} or more. Review them to send or keep.";
+/// [`NOTIFY_IDLE_BODY_NO_TOOL`] for one. DRAFT, NEEDS APPROVAL.
+pub const NOTIFY_IDLE_BODY_NO_TOOL_ONE: &str =
+    "1 trace has been idle for {days} or more. Review it to send or keep.";
 /// DRAFT, NEEDS APPROVAL.
 pub const NOTIFY_ACTION_REVIEW_IDLE: &str = "Review";
 /// Folded into a due digest after its first sentence, never a separate
@@ -141,6 +154,11 @@ pub const DIGEST_IDLE_SENTENCE: &str =
 /// [`DIGEST_IDLE_SENTENCE`] for one. DRAFT, NEEDS APPROVAL.
 pub const DIGEST_IDLE_SENTENCE_ONE: &str =
     "1 of them, from {tool}, has been idle for {days} or more.";
+/// [`DIGEST_IDLE_SENTENCE`] without its tool, as
+/// [`NUDGE_IDLE_TITLE_NO_TOOL`]. DRAFT, NEEDS APPROVAL.
+pub const DIGEST_IDLE_SENTENCE_NO_TOOL: &str = "{n} of them have been idle for {days} or more.";
+/// [`DIGEST_IDLE_SENTENCE_NO_TOOL`] for one. DRAFT, NEEDS APPROVAL.
+pub const DIGEST_IDLE_SENTENCE_NO_TOOL_ONE: &str = "1 of them has been idle for {days} or more.";
 /// Appended to the badge's accessibility sentence. DRAFT, NEEDS APPROVAL.
 pub const MARK_A11Y_IDLE: &str = "{n} of them have been idle for {days} or more.";
 /// [`MARK_A11Y_IDLE`] for one. DRAFT, NEEDS APPROVAL.
@@ -386,8 +404,10 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NUDGE_PANEL_BACKLOG", "NUDGE_PANEL_BACKLOG_ONE"),
     ("NUDGE_PANEL_IDLE", "NUDGE_PANEL_IDLE_ONE"),
     ("NUDGE_IDLE_TITLE", "NUDGE_IDLE_TITLE_ONE"),
+    ("NUDGE_IDLE_TITLE_NO_TOOL", "NUDGE_IDLE_TITLE_NO_TOOL_ONE"),
     ("NUDGE_IDLE_BODY", "NUDGE_IDLE_BODY_ONE"),
     ("NOTIFY_IDLE_BODY", "NOTIFY_IDLE_BODY_ONE"),
+    ("NOTIFY_IDLE_BODY_NO_TOOL", "NOTIFY_IDLE_BODY_NO_TOOL_ONE"),
     (
         "NOTIFY_IDLE_BODY_OWNER_DRAFT",
         "NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE",
@@ -397,6 +417,10 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
         "NOTIFY_IDLE_BODY_ALTERNATIVE_ONE",
     ),
     ("DIGEST_IDLE_SENTENCE", "DIGEST_IDLE_SENTENCE_ONE"),
+    (
+        "DIGEST_IDLE_SENTENCE_NO_TOOL",
+        "DIGEST_IDLE_SENTENCE_NO_TOOL_ONE",
+    ),
     ("MARK_A11Y_IDLE", "MARK_A11Y_IDLE_ONE"),
     ("NOTIFY_VERDICTS_BODY", "NOTIFY_VERDICTS_BODY_ONE"),
     (
@@ -456,11 +480,15 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_PANEL_IDLE_ONE", NUDGE_PANEL_IDLE_ONE),
     ("NUDGE_IDLE_TITLE", NUDGE_IDLE_TITLE),
     ("NUDGE_IDLE_TITLE_ONE", NUDGE_IDLE_TITLE_ONE),
+    ("NUDGE_IDLE_TITLE_NO_TOOL", NUDGE_IDLE_TITLE_NO_TOOL),
+    ("NUDGE_IDLE_TITLE_NO_TOOL_ONE", NUDGE_IDLE_TITLE_NO_TOOL_ONE),
     ("NUDGE_IDLE_BODY", NUDGE_IDLE_BODY),
     ("NUDGE_IDLE_BODY_ONE", NUDGE_IDLE_BODY_ONE),
     ("NUDGE_IDLE_REVIEW", NUDGE_IDLE_REVIEW),
     ("NOTIFY_IDLE_BODY", NOTIFY_IDLE_BODY),
     ("NOTIFY_IDLE_BODY_ONE", NOTIFY_IDLE_BODY_ONE),
+    ("NOTIFY_IDLE_BODY_NO_TOOL", NOTIFY_IDLE_BODY_NO_TOOL),
+    ("NOTIFY_IDLE_BODY_NO_TOOL_ONE", NOTIFY_IDLE_BODY_NO_TOOL_ONE),
     ("NOTIFY_IDLE_BODY_OWNER_DRAFT", NOTIFY_IDLE_BODY_OWNER_DRAFT),
     (
         "NOTIFY_IDLE_BODY_OWNER_DRAFT_ONE",
@@ -474,6 +502,11 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NOTIFY_ACTION_REVIEW_IDLE", NOTIFY_ACTION_REVIEW_IDLE),
     ("DIGEST_IDLE_SENTENCE", DIGEST_IDLE_SENTENCE),
     ("DIGEST_IDLE_SENTENCE_ONE", DIGEST_IDLE_SENTENCE_ONE),
+    ("DIGEST_IDLE_SENTENCE_NO_TOOL", DIGEST_IDLE_SENTENCE_NO_TOOL),
+    (
+        "DIGEST_IDLE_SENTENCE_NO_TOOL_ONE",
+        DIGEST_IDLE_SENTENCE_NO_TOOL_ONE,
+    ),
     ("MARK_A11Y_IDLE", MARK_A11Y_IDLE),
     ("MARK_A11Y_IDLE_ONE", MARK_A11Y_IDLE_ONE),
     ("MARK_TOOLTIP_IDLE", MARK_TOOLTIP_IDLE),
@@ -956,6 +989,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Each tool-free string is its tool-naming string with the tool
+    /// clause removed, word for word, so a rewording of one cannot leave
+    /// the other behind.
+    #[test]
+    fn tool_free_strings_follow_their_tool_naming_strings() {
+        let mut seen = 0;
+        for (key, text) in NUDGE_COPY {
+            let Some(base) = key
+                .split_once("_NO_TOOL")
+                .map(|(b, rest)| format!("{b}{rest}"))
+            else {
+                continue;
+            };
+            let stripped = text_of(&base)
+                .replace(", from {tool},", "")
+                .replace(" from {tool}", "");
+            assert!(!stripped.contains("{tool}"), "{base}");
+            assert_eq!(*text, stripped, "{key} drifted from {base}");
+            seen += 1;
+        }
+        assert_eq!(seen, 6);
     }
 
     /// Strings whose wording is the same for every count: no counted noun

@@ -1050,7 +1050,11 @@ current time (the clock went backwards) is not idle. Unlike
   distinct and in alphabetical order, naming a session by the source it
   declares (`declared_source`) before the adapter that stored it. A source
   the daemon has no display name for (for example `trajectory`) is counted
-  but not named, never shown as its raw id. Empty when `count` is 0.
+  but not named, never shown as its raw id. Empty when `count` is 0. When
+  any counted session's source has no display name, the daemon's words
+  (`nudge.text`, the idle notification and the digest's idle sentence)
+  name no tool at all, rather than credit the named tools with its
+  sessions; `tools` still lists the names it has.
 - **Absent, never `null`, while the kind is off**: when `queue_ttl_days` is
   below 4 there is no room to say anything before a session expires. A shell
   draws nothing for it then, and nothing when a daemon predating the field

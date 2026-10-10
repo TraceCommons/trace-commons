@@ -71,7 +71,10 @@ pub struct EstimateSum {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Batch {
     pub count: u64,
-    /// Tool display names, deduplicated, in a stable order.
+    /// Tool display names, deduplicated, in a stable order. Empty when the
+    /// words should name no tool: some source in the batch has no display
+    /// name, and naming only the others would credit them with its
+    /// sessions.
     pub tools: Vec<String>,
     /// The idle threshold in days. Unused by the backlog.
     pub idle_days: u32,
@@ -118,11 +121,13 @@ fn cap_tool(name: &str) -> String {
     name.chars().take(TOOL_NAME_MAX_CHARS).collect()
 }
 
-/// `{tool}`: one name, two joined, or "{k} tools".
+/// `{tool}`: one name, two joined, or "{k} tools". Empty for no tools,
+/// which no renderer places: a batch with no tool to name takes the
+/// `_NO_TOOL` templates instead (see [`names_tools`]).
 #[must_use]
 pub fn tool_phrase(tools: &[String]) -> String {
     match tools {
-        [] => fill(copy::TOOL_LIST_MANY, &[("k", "0")]),
+        [] => String::new(),
         [one] => cap_tool(one),
         [a, b] => fill(
             copy::TOOL_LIST_TWO,
@@ -208,6 +213,22 @@ fn action(id: &'static str, label: &str) -> Action {
     }
 }
 
+/// Whether a batch's words name its tools. A batch with none to name
+/// (`tools` empty: some source in it has no display name) reads without
+/// one, never "from 0 tools".
+fn names_tools(batch: &Batch) -> bool {
+    !batch.tools.is_empty()
+}
+
+/// `with_tool` when the batch names its tools, else `without`.
+fn by_tool(batch: &Batch, with_tool: &'static str, without: &'static str) -> &'static str {
+    if names_tools(batch) {
+        with_tool
+    } else {
+        without
+    }
+}
+
 /// The idle-sessions card (U4) and its panel row.
 #[must_use]
 pub fn idle_card(batch: &Batch) -> CardText {
@@ -220,7 +241,18 @@ pub fn idle_card(batch: &Batch) -> CardText {
     let one = |many, single| copy::pick(batch.count, many, single);
     CardText {
         title: fill(
-            one(copy::NUDGE_IDLE_TITLE, copy::NUDGE_IDLE_TITLE_ONE),
+            one(
+                by_tool(
+                    batch,
+                    copy::NUDGE_IDLE_TITLE,
+                    copy::NUDGE_IDLE_TITLE_NO_TOOL,
+                ),
+                by_tool(
+                    batch,
+                    copy::NUDGE_IDLE_TITLE_ONE,
+                    copy::NUDGE_IDLE_TITLE_NO_TOOL_ONE,
+                ),
+            ),
             &values,
         ),
         body: join(
@@ -400,8 +432,16 @@ pub fn idle_notification(batch: &Batch) -> NotificationText {
         body: fill(
             copy::pick(
                 batch.count,
-                copy::NOTIFY_IDLE_BODY,
-                copy::NOTIFY_IDLE_BODY_ONE,
+                by_tool(
+                    batch,
+                    copy::NOTIFY_IDLE_BODY,
+                    copy::NOTIFY_IDLE_BODY_NO_TOOL,
+                ),
+                by_tool(
+                    batch,
+                    copy::NOTIFY_IDLE_BODY_ONE,
+                    copy::NOTIFY_IDLE_BODY_NO_TOOL_ONE,
+                ),
             ),
             &[("n", &n), ("days", &days), ("tool", &tool)],
         ),
@@ -434,8 +474,16 @@ pub fn digest_idle_sentence(batch: &Batch) -> String {
     let sentence = fill(
         copy::pick(
             batch.count,
-            copy::DIGEST_IDLE_SENTENCE,
-            copy::DIGEST_IDLE_SENTENCE_ONE,
+            by_tool(
+                batch,
+                copy::DIGEST_IDLE_SENTENCE,
+                copy::DIGEST_IDLE_SENTENCE_NO_TOOL,
+            ),
+            by_tool(
+                batch,
+                copy::DIGEST_IDLE_SENTENCE_ONE,
+                copy::DIGEST_IDLE_SENTENCE_NO_TOOL_ONE,
+            ),
         ),
         &[("n", &n), ("days", &days), ("tool", &tool)],
     );
@@ -560,6 +608,50 @@ mod tests {
         card_filled(&one);
     }
 
+    /// A batch whose words can name no tool (every source unnamed, or some
+    /// of them) takes the tool-free templates: never "from 0 tools", and
+    /// never one named tool credited with the others' sessions.
+    #[test]
+    fn a_batch_with_no_named_tool_reads_without_one() {
+        let many = batch(2, &[], 3);
+        let one = batch(1, &[], 1);
+        assert_eq!(
+            idle_card(&many).title,
+            "2 traces have been idle for 3 days or more"
+        );
+        assert_eq!(
+            idle_card(&one).title,
+            "1 trace has been idle for 1 day or more"
+        );
+        assert_eq!(
+            idle_notification(&many).body,
+            "2 traces have been idle for 3 days or more. Review them to send or keep."
+        );
+        assert_eq!(
+            idle_notification(&one).body,
+            "1 trace has been idle for 1 day or more. Review it to send or keep."
+        );
+        assert_eq!(
+            digest_idle_sentence(&many),
+            "2 of them have been idle for 3 days or more."
+        );
+        assert_eq!(
+            digest_idle_sentence(&one),
+            "1 of them has been idle for 1 day or more."
+        );
+        for b in [many, one] {
+            for text in [
+                idle_card(&b).title,
+                idle_card(&b).panel_row,
+                idle_notification(&b).body,
+                digest_idle_sentence(&b),
+            ] {
+                assert!(!text.contains("tools") && !text.contains("from"), "{text}");
+                assert_filled(&text);
+            }
+        }
+    }
+
     #[test]
     fn tools_are_named_one_two_or_counted() {
         assert_eq!(tool_phrase(&["Codex".into()]), "Codex");
@@ -571,6 +663,7 @@ mod tests {
             tool_phrase(&["a".into(), "b".into(), "c".into()]),
             "3 tools"
         );
+        assert_eq!(tool_phrase(&[]), "", "never \"0 tools\"");
         let long = "x".repeat(200);
         assert_eq!(tool_phrase(&[long]).chars().count(), TOOL_NAME_MAX_CHARS);
     }
