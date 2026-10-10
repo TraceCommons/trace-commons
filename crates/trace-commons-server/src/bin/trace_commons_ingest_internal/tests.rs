@@ -98886,6 +98886,13 @@ mod pipeline_restore_pg_tests;
 #[path = "pipeline_activation_pg_tests.rs"]
 mod pipeline_activation_pg_tests;
 
+/// Pipeline default routing (spec 2026-10-10): the operator-armed mode that
+/// routes every tenant with no routing row to the pipeline. Nested here
+/// beside `pipeline_activation_pg_tests`, whose `pub(super)` route fixture it
+/// reuses.
+#[path = "pipeline_default_routing_pg_tests.rs"]
+mod pipeline_default_routing_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.
