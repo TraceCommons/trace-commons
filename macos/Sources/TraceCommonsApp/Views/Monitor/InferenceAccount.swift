@@ -175,10 +175,29 @@ struct PrivateAIPanelHeader: View {
                 }
             }
             Spacer(minLength: GlassTokens.Space.s4)
-            GlassRoundButton(Self.refreshName(refresh, title: title ?? eyebrow), systemImage: "arrow.clockwise",
-                             small: true, action: onRefresh)
+            RefreshIconButton(label: Self.refreshName(refresh, title: title ?? eyebrow), action: onRefresh)
                 .disabled(disabled)
         }
+    }
+}
+
+/// A bare refresh glyph, no pill around it (owner, 2026-10-10), named for
+/// assistive tech and in its tooltip.
+struct RefreshIconButton: View {
+    let label: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.clockwise")
+                .glassGlyph(13, weight: .medium)
+                .foregroundStyle(GlassColor.textSecondary)
+                .frame(width: GlassTokens.Size.control, height: GlassTokens.Size.control)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityLabel(label)
+        .help(label)
     }
 }
 

@@ -110,9 +110,8 @@ struct ManagedSessionsSection: View {
     /// The re-read icon (owner, 2026-10-10: an icon, not a link), named
     /// with the card's title for assistive tech.
     private var refreshLink: some View {
-        GlassRoundButton(
-            PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title")),
-            systemImage: "arrow.clockwise", small: true
+        RefreshIconButton(
+            label: PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title"))
         ) { model.refreshManagedSessions() }
         .disabled(model.managedBusy)
     }

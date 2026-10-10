@@ -133,7 +133,7 @@ struct SessionReviewCard: View {
 
     /// Loading or the read that failed; then what would leave this
     /// computer, the redaction summary, the surviving secret, the residual
-    /// risk, the gate statement, the consent scopes, eligibility, the
+    /// risk, the consent scopes, eligibility, the
     /// verdict and correction. The credential refusal is said under the
     /// buttons (`actions`).
     @ViewBuilder
@@ -188,9 +188,9 @@ struct SessionReviewCard: View {
             if let words, let risk = summary.residualRisk, !risk.isEmpty {
                 labelled(words.residualRisk, risk)
             }
-            if let consent {
-                caption(consent.gateStatement, tertiary: true)
-            }
+            // The gate statement is not repeated here (owner, 2026-10-10):
+            // the scrubbing caveat over the buttons says the same, and the
+            // Look inside sheet keeps the statement in full.
             if let scopes = summary.consentScopes, !scopes.isEmpty {
                 labelled(review.consentScopes, scopes.joined(separator: " · "), bold: false)
             }

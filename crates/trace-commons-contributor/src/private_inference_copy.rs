@@ -2128,7 +2128,7 @@ pub const PANEL_SETTINGS_TITLE: &str = "Private AI Settings";
 /// That card's sentence: what the section it opens is for.
 pub const PANEL_SETTINGS_BODY: &str = "Configure your Private AI settings and connections.";
 /// That card's button.
-pub const PANEL_SETTINGS_OPEN: &str = "Open settings";
+pub const PANEL_SETTINGS_OPEN: &str = "Open";
 /// The button's accessible name, which names the section it opens.
 pub const PANEL_SETTINGS_OPEN_ACCESSIBILITY: &str = "Open Private AI settings";
 /// The stat tile whose value is the credential's state line.

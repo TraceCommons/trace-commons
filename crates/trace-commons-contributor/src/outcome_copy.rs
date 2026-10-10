@@ -4,8 +4,7 @@ pub const VERDICT_QUESTION: &str = "Did this trace do what you asked?";
 pub const VERDICT_WORKED: &str = "Worked";
 pub const VERDICT_PARTLY: &str = "Partly";
 pub const VERDICT_FAILED: &str = "Failed";
-pub const VERDICT_CAPTION: &str =
-    "Optional. This is recorded as the trace outcome; the preview above does not show it.";
+pub const VERDICT_CAPTION: &str = "Optional. Recorded with the trace; not shown in the preview.";
 pub const CORRECTION_QUESTION: &str = "What did it get wrong?";
 pub const CORRECTION_PLACEHOLDER: &str = "Optional";
 pub const CORRECTION_CAPTION: &str = "Stored exactly as you write it. Unlike the rest of the trace, a correction is not scrubbed here or on the server -- so leave out anything you would not want in the corpus: someone else's personal information, employer-confidential material, or anything you are not free to share.";
