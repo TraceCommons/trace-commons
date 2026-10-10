@@ -648,6 +648,12 @@ grep -n "privacy_classification_failed\|privacy_review_required\|privacy_pass_re
   `test_pipeline_tooling.py` compares the manifest digest to the live file (`scripts/operator/test_pipeline_tooling.py:3508`), so it passes after the edit. No required check is added, so the counts in pipeline-qualification.md (:69-135) do not move.
 - [ ] **Step 3: Commit** `Document the Review-start privacy pass`.
 
+Recorded while implementing Task 10:
+- The rollback steps are a sub-section of the new pass section in pipeline-activation.md ("Rolling back below the privacy pass"), and deployment.md's V117 section and its binary-rollback paragraph link to it. The steps are ordered count, suspend (or stop the workers), then drain the staged `privacy-pass` rows: while Review dispatches, new staged rows keep appearing, so draining first cannot reach zero for long.
+- The receipt refusal table gives `privacy_rescrub_failed` as `sha256:e83b025015f2fd2d2bd7eeed3c9f79d975764f4407902753a11d5ede2e703347` (`printf %s privacy_rescrub_failed | shasum -a 256`); the old `privacy_classification_failed` hash was pinned nowhere else in docs, scripts or crates.
+- Contracts: REV-005 is new (REV-004 is left as it was). RUN-004's two pass boundaries are appended as 12 and 13, not inserted, because plans and reports cite boundaries "1 through 5" and "6 through 11". The sibling scenario is SCN-016.
+- Manifest: the new ids are the real test names (RT as `versioned_pipeline_runtime_pg::`, HTTP as `trace_commons_ingest_internal::pipeline_http_pg_tests::`), added to the existing SUB-005, REV (now with REV-005) and RUN groups, plus an SCN-016 entry. `test_pipeline_tooling.py` stays green (153 tests) after the edit.
+
 ### Task 11: Restore drill fingerprints the pass record
 
 The drill keeps its one pending run (RESTORE:2141-2143, 2401-2416, 2553; `pipeline.py`:129, 830, 860; `promote.py`:957; the `test_pipeline_tooling.py` fixtures): none of them changes. After Task 5 both seeded runs pass Review through `PassThroughPipelinePrivacyBoundary` (RESTORE:1407), so both carry a pass record and a pass object, and the drill's generic object copy and artifact fingerprint already cover the object (`versioned_pipeline_remote_restore.rs:113-157`). This task only makes the database fingerprint name the pass record, so a restore that dropped it would be caught.

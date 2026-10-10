@@ -393,6 +393,11 @@ different tenant. Confirm the exact run counts.
 - Model-based substance and novelty valuation MUST NOT run in Admission.
 - Admission CAN read an index.
 - Admission MUST NOT modify an index or make another external write.
+
+The synchronous privacy-risk handling that Admission owns is the bounded,
+local kind: the deterministic redactor and the risk it derives. A network
+prose-PII classifier is neither bounded nor local; it runs in the server's
+privacy pass at the start of Review (REV-005), never in the receipt.
 - Admission evidence MUST identify each detector, index, and projection that
   affected its decision.
 - `Admit` and `Quarantine` MUST both continue to Review.
@@ -534,6 +539,10 @@ provides this PostgreSQL test.
 - Review MUST NOT collect more contributor-side data.
 - Review MUST identify the exact source artifact with
   `request_content_hash`.
+- Review's source artifact is the output of the server's privacy pass
+  (REV-005) over the stored contribution. The pass record MUST keep the hash
+  of the stored contribution the pass read, so the chain from
+  `request_content_hash` to the approved revision has no gap.
 - Review CAN query an index.
 - Review MUST NOT modify an index.
 
@@ -546,6 +555,9 @@ Review must fail before transformation or registry mutation.
 - An approved result MUST identify the approved registry revision.
 - The outcome MUST bind the source hash to the approved registry revision.
 - Review MUST store transformed encrypted content by content hash first.
+  The privacy pass's output is recorded by the hash of its plaintext; its
+  object key is per attempt, because every encryption uses a fresh salt and
+  nonce.
 - One transaction MUST commit its reference, registry revision, Review
   outcome, and Score transition.
 - A rejected trace MUST NOT enter the registry.
@@ -562,12 +574,24 @@ No state can show an approved revision without its Review outcome.
 - A lease MUST expire or support release.
 - A stale reviewer MUST NOT overwrite a committed decision.
 - Approve and reject actions MUST include a non-empty reason.
-- A decision MUST apply to an operable, quarantined trace only.
+- A decision MUST apply to an operable trace that Admission quarantined or
+  the privacy pass escalated, and only once its privacy pass is recorded.
 - Human action MUST become server-generated evidence for the bound Review
-  policy.
-- A reviewer MUST NOT commit a bundle-independent `ReviewDecision`.
-- Approval MUST show how each Admission quarantine reason was resolved.
-- The bound Review policy MUST produce the `ReviewDecision`.
+  policy. On an escalated trace that Admission admitted, it becomes the
+  evidence of the server's rejection (its `human_assessment_hash`), or, on
+  approval, the assessment hash and resolved reasons recorded on the pass
+  record.
+- A reviewer MUST NOT commit a bundle-independent `ReviewDecision`. The one
+  exception: the server, not the reviewer, commits the rejection of an
+  escalated trace that Admission admitted, under the rule
+  `privacy_pass_human_review_rejected_v1`.
+- Approval MUST show how each Admission quarantine reason was resolved, and
+  MUST also resolve `privacy_pass_review_required` when the privacy pass
+  escalated the trace.
+- The bound Review policy MUST produce the `ReviewDecision`, except the
+  server rejection above. Every approval is the bound policy's.
+- An assessment recorded before the privacy pass that escalates the trace
+  MUST NOT release it.
 - Review approval MUST NOT bypass a later required phase.
 
 **Acceptance:** Race two reviewers. Revoke and expire items during review.
@@ -583,6 +607,26 @@ not resolve every quarantine reason, approval must fail.
 
 **Acceptance:** Compare pass-through, transformed, rejected, missing-evidence,
 and retry fixtures.
+
+### REV-005: Server privacy pass
+
+- The server MUST run its privacy pass, the prose-PII classifier, on the
+  stored contribution before the bound Review policy runs.
+- A bundle MUST NOT be able to opt out of the pass.
+- The pass MUST store its output encrypted and record it on the run once.
+  A recorded pass MUST NOT run again.
+- A classifier failure MUST NOT fall back to the deterministic output or
+  to the stored source. It retries within Review's attempt budget and then
+  fails the run.
+- A pass whose risk is above the receipt-time risk MUST hold the trace for
+  a human review.
+- An approval of a run that requires a pass MUST be refused without one,
+  by the server and by the database.
+
+**Acceptance:** Fail and time out the classifier, crash before and after the
+pass record, lose the lease mid-pass, escalate an admitted and a quarantined
+trace, and approve a run with no pass. No Review policy runs on unscrubbed
+content, and each run records one pass.
 
 ## 9. Score contracts
 
@@ -831,6 +875,8 @@ System tests MUST inject a crash at these boundaries:
 9. After internal settlement and before Settle outcome commit.
 10. After Settle completion and before NEAR outbox submission.
 11. After external submission and before confirmation storage.
+12. After privacy-pass output storage and before the pass record commit.
+13. After the pass record commit and before the Review policy runs.
 
 Every case MUST converge without duplicate outcomes, credit, or index content.
 Repeated payout attempts MUST use one idempotency key. The adapter must accept
@@ -1641,6 +1687,24 @@ Expected results:
 - Defined review, scoring, index, and settlement behavior matches.
 - Each new result has complete bundle and outcome provenance.
 - Activation changes new runs only.
+
+#### SCN-016: Privacy pass escalation
+
+1. Submit a trace whose only PII is prose that the deterministic redactor
+   does not find.
+2. Confirm an Admission admit outcome at low risk.
+3. Run Review: the privacy pass finds the prose PII.
+4. Approve or reject it as a reviewer, resolving
+   `privacy_pass_review_required`.
+
+Expected results:
+
+- The receipt makes no classifier call.
+- The run is held for a human review, and the Review policy does not run
+  before the assessment.
+- A rejection ends the run under `privacy_pass_human_review_rejected_v1`.
+- An approval is linked to the pass record, and the approved revision
+  contains no prose PII.
 
 ## 22. Completion rule
 

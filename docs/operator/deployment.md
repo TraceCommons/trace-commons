@@ -679,7 +679,7 @@ the group does not exist; V90 creates it. The grants are these:
 
 | Table | Grant | Why |
 |---|---|---|
-| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, or its admission decision |
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash`; V117 adds the eight privacy-pass columns ([V117](#v117-the-privacy-pass-record)) | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, its admission decision, or `privacy_pass_required` |
 | `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
 | `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
 | `pipeline_active_bundles` | `SELECT, INSERT` here; V112 adds `UPDATE (bundle_id, selected_at)` | startup selects the default bundle for a tenant that has none; the receipt reads it. The activation gate switches a tenant to a qualified bundle with the V112 `UPDATE` ([V110 to V113](#v110-to-v113-activation-policy-interventions-the-activation-gate-and-the-rebuild-fence)); no other statement of the runtime updates the row, and the runtime holds no `DELETE` |
@@ -839,7 +839,11 @@ activation gate reads to decide whether a signed package is production
 qualified. V108 adds `pipeline_attempt_artifacts`, which stages the object
 each phase attempt writes -- Review's approved revision, and Score's index
 command and neighbour set -- before its phase commit, so the attempt sweep
-can delete the ones that never commit. Like V92 to V95, each grants
+can delete the ones that never commit. Since V117 the Review-start privacy
+pass's output is staged there too (`privacy-pass`), and V117 replaces two of
+V108's checks: the artifact check (`pipeline_attempt_artifacts_artifact_check`)
+and `pipeline_attempt_artifacts_approved_hash`, which now requires a hash on
+a `privacy-pass` row as on an `approved` one. Like V92 to V95, each grants
 `trace_ingest_runtime` what the pipeline code reads and writes there, and
 nothing broader, and each refuses to apply if the group does not exist:
 
@@ -1141,6 +1145,9 @@ these migrations' code, do these steps:
 See also "Run one build and one configuration" in "Scope lists and the routing
 row" of [pipeline-activation.md](pipeline-activation.md).
 
+A build from before V117 needs its own steps before you install it on a V117
+database, whatever its routing code: see [V117](#v117-the-privacy-pass-record).
+
 The drain report (`GET /v1/admin/pipeline/legacy-drain`) reads 16 tables through
 the ingest login. Two are pipeline tables that V92 and V110 grant
 (`pipeline_runs`, `pipeline_tenant_routing`). Three are covered by V90's grants
@@ -1182,6 +1189,51 @@ SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_receipt_ow
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_active_bundles', 'bundle_id', 'UPDATE');
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_bundle_policy_status', 'operational_status', 'UPDATE');
 SELECT has_table_privilege('<ingest runtime login>', 'public.pipeline_index_rebuild_fences', 'DELETE');
+```
+
+### V117: the privacy pass record
+
+V117 adds the Review-start privacy pass's record to `pipeline_runs`
+([pipeline-activation.md](pipeline-activation.md), "The privacy pass at the
+start of Review"). It adds no table, and changes no RLS policy: a column of
+an already forced table inherits its tenant policy.
+
+- Eight nullable columns: `privacy_pass_object_ref_id` (a deferred foreign
+  key to `trace_object_refs`), `privacy_pass_content_hash`,
+  `privacy_pass_source_hash`, `privacy_pass_residual_risk_basis`,
+  `privacy_pass_outcome` (`cleared` or `escalated`),
+  `privacy_pass_recorded_at`, and the two that link a human approval of an
+  escalated run to the pass, `privacy_pass_approval_assessment_hash` and
+  `privacy_pass_approval_resolved_reasons`. Checks keep the first six all
+  NULL or all set, and the two approval columns set together and only on an
+  escalated pass.
+- `privacy_pass_required BOOLEAN NOT NULL`: FALSE on every row that exists
+  when V117 applies, and TRUE by default for every run inserted after it, by
+  any binary. The check `pipeline_runs_privacy_pass_before_approval` refuses
+  an approved revision on a `privacy_pass_required` run that has no pass.
+- `pipeline_attempt_artifacts` accepts the `privacy-pass` artifact, with a
+  required hash (see "V107 and V108" above).
+
+| Table | Grant | Why |
+|---|---|---|
+| `pipeline_runs` | `UPDATE` on `privacy_pass_object_ref_id`, `privacy_pass_content_hash`, `privacy_pass_source_hash`, `privacy_pass_residual_risk_basis`, `privacy_pass_outcome`, `privacy_pass_recorded_at`, `privacy_pass_approval_assessment_hash`, `privacy_pass_approval_resolved_reasons` | the privacy pass records its result, and Review's approving commit links an escalated run's approval to it. No grant on `privacy_pass_required`: only the receipt's `INSERT` sets it, through the default |
+
+The pass also writes `privacy_risk`, `residual_risk_basis`, `redaction_counts`
+and `redaction_pipeline_version` on `trace_submissions`, which the runtime
+already updates through the table-wide grants it has held since V62 (the
+receipt and the phase commits write that row); V117 grants nothing there. Like V92 to V95, it refuses
+to apply if `trace_ingest_runtime` does not exist.
+
+A rollback to a binary from before V117 needs containment first:
+[pipeline-activation.md](pipeline-activation.md), "Rolling back below the
+privacy pass", gives the counts and the steps, and the count to take before
+deploying.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_object_ref_id', 'UPDATE');
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_approval_resolved_reasons', 'UPDATE');
 ```
 
 ### Build and install
