@@ -19272,6 +19272,41 @@ fn audit_mirror_normalization_rejects_submitted_metadata_status_drift() {
     );
 }
 
+/// The reconciliation leaves a risk mismatch of a pipeline submission out
+/// only when the run has a recorded privacy pass, or when the row is one the
+/// database backfill wrote (risk `unknown`). `main`'s own rows keep the
+/// comparison.
+#[test]
+fn reconciliation_leaves_out_only_the_risk_mismatches_a_pipeline_has_by_design() {
+    let (passed, waiting, legacy) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let pipeline_rows = PipelineReconciliationRows {
+        submission_ids: BTreeSet::from([passed, waiting]),
+        privacy_pass_submission_ids: BTreeSet::from([passed]),
+        ..PipelineReconciliationRows::default()
+    };
+    let mismatch =
+        |submission_id: Uuid, metadata_privacy_risk: &str| TraceDbAuditSubmissionMetadataMismatch {
+            audit_event_id: Uuid::new_v4(),
+            submission_id,
+            metadata_privacy_risk: metadata_privacy_risk.to_string(),
+            db_privacy_risk: "high".to_string(),
+        };
+    for (submission_id, row_risk, by_design) in [
+        (passed, "low", true),
+        (passed, "unknown", true),
+        (waiting, "low", false),
+        (waiting, "unknown", true),
+        (legacy, "low", false),
+        (legacy, "unknown", false),
+    ] {
+        assert_eq!(
+            pipeline_risk_differs_by_design(&mismatch(submission_id, row_risk), &pipeline_rows),
+            by_design,
+            "{row_risk}"
+        );
+    }
+}
+
 #[test]
 fn storage_audit_projection_rejects_cross_tenant_rows() {
     let event = StorageTraceAuditEventRecord {

@@ -14207,6 +14207,100 @@ async fn the_backfill_refuses_a_legacy_submitted_event_with_no_status() {
     );
 }
 
+/// The database backfill writes a pipeline submission's `submitted` row with
+/// the risk `unknown`: the pipeline has no file record to take the risk from.
+/// The audit table is insert-only, so that row can never agree with the
+/// stored risk, and the reconciliation leaves it out for a pipeline
+/// submission, also for a run with no recorded privacy pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconciliation_leaves_out_the_unknown_risk_of_a_backfilled_pipeline_row() {
+    let Some(mut fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    {
+        let runtime = fixture.runtime.clone();
+        let state = Arc::make_mut(&mut fixture.state);
+        state.pipeline_store = Some(Arc::new(PgPipelineStore::new(runtime.clone())));
+        state.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime)));
+    }
+    let tenant = fixture.tenant.clone();
+    let root = fixture.state.root.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    assert!(created.privacy_pass_recorded_at.is_none(), "{created:?}");
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+
+    // A file line with no database row, as after a database restore.
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.clone(),
+        submission_id: envelope.submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status: None,
+        actor_role: Some(TokenRole::Contributor),
+        actor_principal_ref: Some(caller.principal_ref.clone()),
+        reason: Some("auth_method=static_token".to_string()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    let event = chain_audit_event(&root, &tenant, event).expect("chain the event");
+    write_chained_audit_event(&root, &tenant, &event).expect("append the file line");
+    let report =
+        backfill_db_mirror_from_files(fixture.state.as_ref(), &caller, &[], &[], true, false)
+            .await
+            .expect("the backfill runs");
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event.event_id)
+        .unwrap_or_else(|| panic!("the event is backfilled: {report:?}"));
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        }
+    );
+
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(
+        report.db_audit_submission_metadata_mismatches.is_empty(),
+        "{:?}",
+        report.db_audit_submission_metadata_mismatches
+    );
+}
+
 /// An admitted receipt's event has no status; a receipt that Admission
 /// quarantines has the status `quarantined`, in the event and in the row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

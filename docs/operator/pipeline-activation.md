@@ -3003,7 +3003,9 @@ each comparison they would fail:
 - the privacy risk in a Submit audit row against the stored risk
   (`db_audit_submission_metadata_mismatches`), for a run whose privacy pass
   is recorded: the privacy pass rewrites the stored risk, and the row keeps
-  the receipt's. A run with no recorded pass keeps the comparison.
+  the receipt's. A run with no recorded pass keeps the comparison, but for a
+  row that the database backfill wrote: that row has the risk `unknown`,
+  because the pipeline has no file record to take the risk from.
 
 Each row is found through its pipeline run, not by its shape. `main`'s own
 rows keep every check: a legacy row with no file record is still a blocking
