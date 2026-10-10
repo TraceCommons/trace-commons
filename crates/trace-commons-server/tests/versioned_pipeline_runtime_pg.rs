@@ -8641,6 +8641,8 @@ async fn withdrawal_during_review_refuses_commit_and_stays_revoked() {
         content_hash: dependency_content_hash(&content),
         source_content_hash: dependency_content_hash(b"source-bytes-for-the-test"),
         worker_identity: "minimal_review_passthrough".to_string(),
+        canonical_summary: None,
+        canonical_summary_hash: None,
     };
 
     // The real withdrawal: revokes and purges the submission under the
@@ -10761,6 +10763,8 @@ async fn the_sweep_deletes_the_objects_a_refused_score_commit_left_stored() {
         content_hash: dependency_content_hash(&approved_bytes),
         source_content_hash: dependency_content_hash(b"source-bytes-for-score-refused-sweep"),
         worker_identity: "minimal_review_passthrough".to_string(),
+        canonical_summary: None,
+        canonical_summary_hash: None,
     };
     let review_outcome = StoredPhaseResult {
         phase: Phase::Review,
@@ -11021,6 +11025,8 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
         content_hash: dependency_content_hash(&content_b),
         source_content_hash: dependency_content_hash(b"source-bytes-for-stale-attempt-sweep"),
         worker_identity: "minimal_review_passthrough".to_string(),
+        canonical_summary: None,
+        canonical_summary_hash: None,
     };
     let outcome_b = StoredPhaseResult {
         phase: Phase::Review,
@@ -11057,6 +11063,8 @@ async fn a_committed_attempt_keeps_its_objects_and_a_stale_attempt_loses_them() 
         content_hash: dependency_content_hash(&content_a),
         source_content_hash: dependency_content_hash(b"source-bytes-for-stale-attempt-sweep-a"),
         worker_identity: "minimal_review_passthrough".to_string(),
+        canonical_summary: None,
+        canonical_summary_hash: None,
     };
     let outcome_a = StoredPhaseResult {
         phase: Phase::Review,
@@ -18977,6 +18985,24 @@ async fn checked_compatibility_service_over_adapter(
     authority: Arc<dyn PipelineAuthorityProvider>,
     trace_credit: Arc<dyn SettlementAdapter>,
 ) -> Arc<PipelineService> {
+    checked_compatibility_service_over_adapter_with(
+        backend,
+        dir,
+        authority,
+        trace_credit,
+        issuing_checks(),
+    )
+    .await
+}
+
+/// `checked_compatibility_service_over_adapter` under `checks`.
+async fn checked_compatibility_service_over_adapter_with(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    trace_credit: Arc<dyn SettlementAdapter>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
     let mut config = CompatibilityBundleConfig::local_reference();
     config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
     let scorer = Arc::new(ReferencePerplexityScorer::new());
@@ -19008,10 +19034,104 @@ async fn checked_compatibility_service_over_adapter(
         .with_authority(authority)
         .with_privacy(default_privacy_boundary())
         .with_unqualified_routing(true)
-        .with_novelty_utility_checks(issuing_checks())
+        .with_novelty_utility_checks(checks)
         .build()
         .expect("build pipeline service"),
     )
+}
+
+/// The duplicate verdict is decided once, before a leg is dispatched. B's
+/// Trace Credit leg is dispatched while the earlier same-content
+/// submission A has not passed Review, and its adapter answers
+/// `Unavailable`; A's Review then commits. B's retry must not re-decide
+/// the dispatched leg as a duplicate (which would fail it as
+/// `settlement_unreconciled` because of a neighbour's progress): it
+/// completes and pays, and B's gate decision row carries no duplicate
+/// label.
+#[tokio::test]
+async fn a_dispatched_leg_is_not_re_decided_as_a_duplicate() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let outage = Arc::new(OutageThenRecordingAdapter {
+        inner: RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ),
+        failures_left: AtomicUsize::new(0),
+    });
+    let service = checked_compatibility_service_over_adapter_with(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        CountingSettlementAdapter::new(outage.clone()),
+        PipelineNoveltyUtilityChecks {
+            duplicate_controls: Some(
+                trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+            ),
+            ..issuing_checks()
+        },
+    )
+    .await;
+    let tenant = format!("compat-dup-dispatched-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("the receipt creates a run")
+        };
+        runs.push(created);
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, b.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("B's {phase} runs"));
+    }
+    outage.fail_next_calls(1);
+    let first = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle runs");
+    assert_eq!(first.state, PipelineRunState::Retry);
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert!(leg.dispatched_at.is_some(), "{leg:?}");
+
+    service
+        .process_run(&tenant, a.run_id)
+        .await
+        .unwrap()
+        .expect("A's Review runs");
+    force_due(&backend, &tenant, b.run_id).await;
+    let second = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle runs again");
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        ("complete", None),
+        "{leg:?}"
+    );
+    assert!(leg.credit_event_id.is_some(), "{leg:?}");
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+    let rows = gate_decision_rows(&tenant, b.submission_id).await;
+    assert_eq!(rows[0].credit_withheld_reason, None, "{rows:?}");
 }
 
 /// poldsam P-1: a Trace Credit leg an earlier Settle attempt dispatched
@@ -44042,7 +44162,7 @@ async fn settle_gate_decision_row_is_idempotent_per_submission() {
 
     let mut client = backend.trace_pool_for_test().get().await.unwrap();
     let tx = tenant_tx(&mut client, &tenant).await;
-    let written = PgPipelineStore::write_pipeline_gate_decision_on_tx(&tx, &run)
+    let written = PgPipelineStore::write_pipeline_gate_decision_on_tx(&tx, &run, None)
         .await
         .expect("offering the same row again is a no-op");
     assert!(!written, "the row already exists, so nothing is written");
@@ -44098,7 +44218,7 @@ async fn stale_settle_writes_no_gate_decision_row() {
         .unwrap()
         .expect("the expired lease is reclaimed");
     let error = store
-        .commit_settle(&first, placeholder_settle_outcome(), "excluded")
+        .commit_settle(&first, placeholder_settle_outcome(), "excluded", None)
         .await
         .expect_err("a stale lease cannot commit Settle");
     assert!(
@@ -44142,7 +44262,7 @@ async fn suspended_settle_policy_writes_no_gate_decision_row() {
         .await
         .expect("suspend the Settle policy");
     let error = store
-        .commit_settle(&leased, placeholder_settle_outcome(), "excluded")
+        .commit_settle(&leased, placeholder_settle_outcome(), "excluded", None)
         .await
         .expect_err("a suspended Settle policy cannot commit");
     assert!(
@@ -44311,6 +44431,282 @@ async fn a_withheld_award_records_its_reason_on_the_gate_decision_row() {
         rows[0].credit_withheld_reason.as_deref(),
         Some(PIPELINE_NOVELTY_UTILITY_CREDIT_CHECK_ERROR_LABEL)
     );
+}
+
+/// `envelope`, with every event's content replaced by `text`: a trace whose
+/// canonical summary shares nothing with `envelope`'s but the summary's
+/// fixed lines.
+async fn envelope_with_text(submission_id: uuid::Uuid, text: &str) -> TraceContributionEnvelope {
+    let mut envelope = envelope(submission_id).await;
+    for event in &mut envelope.events {
+        event.redacted_content = Some(text.to_string());
+    }
+    envelope
+}
+
+/// A compatibility service applying `main`'s duplicate short-circuits under
+/// `controls`, with the pipeline's issuer and `delta` microcredits of
+/// `NoveltyUtility` award.
+async fn duplicate_controls_service(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    controls: trace_commons_server::versioned_pipeline::PipelineDuplicateControls,
+    delta: u64,
+) -> Arc<PipelineService> {
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = delta;
+    compatibility_test_service_with(
+        backend.clone(),
+        artifact_store(dir),
+        config,
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            duplicate_controls: Some(controls),
+            ..issuing_checks()
+        },
+    )
+    .await
+}
+
+/// `main`'s skip-duplicate short-circuit (stage 3, 2026-10-09): a second
+/// submission whose duplicate score against the tenant's earlier one is at
+/// or above the threshold gets a gate decision row withheld as
+/// `skipped_duplicate`, with no credit quality, where `main`'s driver
+/// records one and the contributor status shows no pending credit. The
+/// first submission's row keeps its credit quality, the Score evidence is
+/// unchanged, and the `NoveltyUtility` leg is withheld under the same label.
+#[tokio::test]
+async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = duplicate_controls_service(
+        &backend,
+        &dir,
+        trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+        CHECKED_DELTA_MICROCREDITS,
+    )
+    .await;
+    let tenant = format!("gate-row-dup-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let first = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    let second = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &model_training_envelope(uuid::Uuid::new_v4()).await,
+    )
+    .await;
+    assert_eq!(first.state, PipelineRunState::Complete, "{first:?}");
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+    let first_rows = gate_decision_rows(&tenant, first.submission_id).await;
+    assert_eq!(first_rows.len(), 1, "{first_rows:?}");
+    assert_eq!(first_rows[0].credit_withheld_reason, None);
+    assert!(
+        first_rows[0].credit_quality_micros.is_some(),
+        "{first_rows:?}"
+    );
+
+    let rows = gate_decision_rows(&tenant, second.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].credit_withheld_reason.as_deref(),
+        Some("skipped_duplicate")
+    );
+    assert_eq!(rows[0].credit_quality_micros, None);
+    assert_eq!(rows[0].credit_quality_calibration_version, None);
+    // The Score's own values stay on the row and in its evidence.
+    let evidence: ScoreEvidence = serde_json::from_value(
+        score_outcome_of(&service, &tenant, second.run_id)
+            .await
+            .evidence,
+    )
+    .unwrap();
+    assert!(evidence.credit_quality_micros.is_some(), "{evidence:?}");
+    assert_eq!(
+        Some(rows[0].perplexity_micros),
+        evidence
+            .perplexity_micros
+            .map(|v| i64::try_from(v).unwrap())
+    );
+
+    let leg = trace_credit_settlement(&service, &tenant, second.run_id).await;
+    assert_eq!(leg.last_error_label.as_deref(), Some("skipped_duplicate"));
+    assert_eq!(leg.credit_event_id, None);
+    let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
+    assert!(first_leg.credit_event_id.is_some(), "{first_leg:?}");
+}
+
+/// The duplicate verdict is decided once per run. B's Trace Credit leg is
+/// paid while the earlier same-content submission A has not passed Review,
+/// then B's Settle crashes before its commit. A's Review commits, and B's
+/// retry commits: its gate decision row must agree with the paid leg (no
+/// duplicate label, its credit quality kept), not re-decide B as a
+/// duplicate of A after B's credit event exists.
+#[tokio::test]
+async fn a_paid_leg_fixes_the_duplicate_verdict_across_a_settle_crash() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let service = Arc::new(
+        compatibility_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            config,
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks {
+                duplicate_controls: Some(
+                    trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+                ),
+                ..issuing_checks()
+            },
+            IsolatedPipelineIndex::new(),
+        )
+        .with_crash_point(PipelineCrashPoint::AfterInstrumentOperation)
+        .build()
+        .expect("build pipeline service"),
+    );
+    let tenant = format!("gate-row-dup-crash-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("receipt creates a run")
+        };
+        runs.push(created);
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, b.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("B's {phase} runs"));
+    }
+    let crash = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .expect_err("B's Settle crashes after its leg completes");
+    assert_eq!(crash.to_string(), INJECTED_PIPELINE_CRASH);
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.credit_event_id.is_some(), "B's leg is paid: {leg:?}");
+
+    service
+        .process_run(&tenant, a.run_id)
+        .await
+        .unwrap()
+        .expect("A's Review runs");
+    expire_lease(&backend, &tenant, b.run_id).await;
+    let completed = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle retries");
+    assert_eq!(completed.state, PipelineRunState::Complete, "{completed:?}");
+
+    let rows = gate_decision_rows(&tenant, b.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].credit_withheld_reason, None,
+        "the row agrees with B's paid leg: {rows:?}"
+    );
+    assert!(rows[0].credit_quality_micros.is_some(), "{rows:?}");
+}
+
+/// `main`'s canonical-hash cache: with the skip-duplicate knob off, a
+/// submission whose canonical summary hash matches an earlier submission's
+/// that already has a gate decision is recorded as `cached`, with no
+/// credit quality.
+#[tokio::test]
+async fn a_canonical_hash_match_records_cached_on_its_gate_row() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = duplicate_controls_service(
+        &backend,
+        &dir,
+        trace_commons_server::versioned_pipeline::PipelineDuplicateControls {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+        },
+        0,
+    )
+    .await;
+    let tenant = format!("gate-row-cached-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    let first = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let second = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+
+    let first_rows = gate_decision_rows(&tenant, first.submission_id).await;
+    assert_eq!(first_rows[0].credit_withheld_reason, None);
+    let rows = gate_decision_rows(&tenant, second.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].credit_withheld_reason.as_deref(), Some("cached"));
+    assert_eq!(rows[0].credit_quality_micros, None);
+}
+
+/// Neither short-circuit fires for a second submission unlike the first,
+/// nor for anything when the controls are not configured.
+#[tokio::test]
+async fn distinct_content_and_unconfigured_controls_withhold_nothing() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let service = duplicate_controls_service(
+        &backend,
+        &dir,
+        trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+        0,
+    )
+    .await;
+    let tenant = format!("gate-row-distinct-{}", uuid::Uuid::new_v4());
+    service.register_default_bundle(&tenant).await.unwrap();
+    submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    let other = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &envelope_with_text(
+            uuid::Uuid::new_v4(),
+            "Compile kernel module against vendored headers; linker reports unresolved symbols.",
+        )
+        .await,
+    )
+    .await;
+    let rows = gate_decision_rows(&tenant, other.submission_id).await;
+    assert_eq!(rows[0].credit_withheld_reason, None, "{rows:?}");
+    assert!(rows[0].credit_quality_micros.is_some(), "{rows:?}");
+
+    // `None`: neither rule, even for identical content.
+    let unconfigured = compatibility_row_service(&backend, &dir).await;
+    let tenant = format!("gate-row-unconfigured-{}", uuid::Uuid::new_v4());
+    submit_and_complete(&unconfigured, &tenant, RECEIPT_PRINCIPAL).await;
+    let again = submit_and_complete(&unconfigured, &tenant, RECEIPT_PRINCIPAL).await;
+    let rows = gate_decision_rows(&tenant, again.submission_id).await;
+    assert_eq!(rows[0].credit_withheld_reason, None, "{rows:?}");
 }
 
 /// Gives the submission's gate decision rows the dedup values a sweep would
@@ -46341,6 +46737,8 @@ async fn approval_without_a_pass_is_refused() {
                 content_hash: dependency_content_hash(&content),
                 source_content_hash: dependency_content_hash(b"source without a pass"),
                 worker_identity: "minimal_review_passthrough".to_string(),
+                canonical_summary: None,
+                canonical_summary_hash: None,
             };
             let outcome = StoredPhaseResult {
                 phase: Phase::Review,

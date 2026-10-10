@@ -2720,15 +2720,22 @@ What the row holds:
 
 - the Score evidence: perplexity, tail fraction, novelty, their peaks, the
   two pass flags, the nearest-neighbour hash, chunk counts, the index
-  cardinality, and the credit quality and its calibration version;
+  cardinality, and the credit quality and its calibration version (none for
+  a duplicate, below);
 - `gate_policy_version` = `pipeline:<bundle_id>` and `gate_version_hash` =
   the bundle's Score configuration hash;
 - `embedding_evidence_hash` = the sealed index command's hash, or the hash of
   `pipeline_no_index_command` when the Score sealed none;
 - `attestation_chain_hash` = the SHA-256 of the Score outcome's canonical
   JSON;
-- `credit_withheld_reason` = the Trace Credit leg's label when one of
-  `main`'s NoveltyUtility checks withheld the award.
+- `credit_withheld_reason` = `skipped_duplicate` or `cached` when one of
+  `main`'s driver duplicate short-circuits applies to the submission
+  (`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES` and
+  `..._SKIP_DUPLICATE_THRESHOLD_MICROS`, read for the pipeline whether or not
+  the driver is enabled; see the compatibility mapping spec), and then the
+  row holds no credit quality, so the contributor status shows the duplicate
+  line and 0.0 pending as on `main`; otherwise the Trace Credit leg's label
+  when one of `main`'s NoveltyUtility checks withheld the award.
 
 The vector entry and snapshot ids, the per-author columns and every column a
 sweep fills (dedup, contributor cap, correction, composite score) start

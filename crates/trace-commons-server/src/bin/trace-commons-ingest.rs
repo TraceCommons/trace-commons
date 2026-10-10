@@ -96,6 +96,11 @@ use trace_commons_server::redaction_witness::verification::{
 };
 use trace_commons_server::trace_authority::parse_storage_policy_values;
 use trace_commons_server::trace_session_identity::{canonical_source_session, session_digest};
+use trace_commons_server::trace_summary_similarity::{
+    TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION, TRACE_SIMILARITY_NEIGHBOR_THRESHOLD,
+    trace_redacted_summary_embedding, trace_summary_embedding_similarity,
+    trace_summary_similarity_score,
+};
 // The gate variables the production pipeline assembly shares with the
 // legacy gates, and under `near-ai-scorer` the one constructor of the NEAR AI
 // scorer and fastembed embedder (PR #1295 review round 2, Major 1).
@@ -272,10 +277,10 @@ use trace_commons_server::trace_score_attestation::{
 use trace_commons_server::versioned_pipeline::{
     AttemptSweepCursor, PIPELINE_LEASE_CONFIG_INVALID_LABEL, PIPELINE_POLICY_NOT_RUNNABLE_LABEL,
     PIPELINE_SUBMISSION_INOPERABLE_LABEL, PgPipelineStore, PipelineAdmissionLimits,
-    PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig, PipelineNearPayoutControls,
-    PipelineNearSettlementMode, PipelineNoveltyUtilityChecks, PipelineQuotaScope,
-    PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt, PipelineRetentionAction,
-    PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
+    PipelineDuplicateControls, PipelineFollowUps, PipelineIndexRebuildReport, PipelineLeaseConfig,
+    PipelineNearPayoutControls, PipelineNearSettlementMode, PipelineNoveltyUtilityChecks,
+    PipelineQuotaScope, PipelineReceiptRequest, PipelineReceiptResult, PipelineReplayReceipt,
+    PipelineRetentionAction, PipelineReviewClaim, PipelineReviewClaimOutcome, PipelineService,
     PipelineWithdrawalFollowUpState, PipelineWithdrawalOutcome, is_pipeline_artifact_wrapper,
     is_pipeline_score_object_ref,
 };
@@ -4025,6 +4030,11 @@ impl AppState {
             settlement_require_issuer_approval: credit_settlement_require_issuer_approval,
             settlement_require_rollout_smoke_ready: credit_settlement_require_rollout_smoke_ready,
             settlement_max_micros_per_account: credit_settlement_max_micros_per_account,
+            // `main`'s duplicate short-circuits, for a compatibility run's
+            // gate decision row and Trace Credit leg.
+            duplicate_controls: pipeline_duplicate_controls_from_env(
+                pipeline_runtime_assembler.is_some(),
+            )?,
         };
         // Zaki review 1, round 2, finding 2: `main`'s NEAR settlement mode and
         // adapter-auth requirement, resolved before the pipeline runtime is
@@ -7185,6 +7195,42 @@ fn parse_trace_benchmark_pipeline_scheduler_config_from_env()
     }))
 }
 
+/// The perplexity-scoring driver's two duplicate knobs
+/// (`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES`, default `true`, and
+/// `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS`,
+/// default `900000`, in `[0, 1000000]`), parsed once for the driver and the
+/// pipeline alike.
+fn parse_perplexity_driver_duplicate_controls_from_env() -> anyhow::Result<PipelineDuplicateControls>
+{
+    Ok(PipelineDuplicateControls {
+        skip_duplicates: parse_optional_scheduler_bool_env(
+            TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES,
+            true,
+        )?,
+        skip_duplicate_threshold_micros: parse_optional_scheduler_i64_env(
+            TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
+            TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
+            0,
+            1_000_000,
+        )?,
+    })
+}
+
+/// `main`'s duplicate short-circuits for an assembled pipeline runtime: the
+/// driver's knobs, read whether or not the driver itself is enabled,
+/// because a routed tenant's gate decision rows are the pipeline's, not the
+/// driver's. Read only when a runtime is assembled (Ruling F-I2): with no
+/// pipeline, a value `main` would refuse does not stop startup, and nothing
+/// reads the controls.
+fn pipeline_duplicate_controls_from_env(
+    pipeline_runtime_assembled: bool,
+) -> anyhow::Result<Option<PipelineDuplicateControls>> {
+    if !pipeline_runtime_assembled {
+        return Ok(None);
+    }
+    parse_perplexity_driver_duplicate_controls_from_env().map(Some)
+}
+
 /// Task 5: the in-process perplexity-scoring driver. Unlike the other
 /// schedulers in this file, it has no bearer-token gate — it drives
 /// `state.db_mirror`'s cross-tenant gate-driver enumeration directly, so
@@ -7214,14 +7260,10 @@ fn parse_perplexity_score_driver_config_from_env()
         1,
         1_000,
     )?;
-    let skip_duplicates =
-        parse_optional_scheduler_bool_env(TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES, true)?;
-    let skip_duplicate_threshold_micros = parse_optional_scheduler_i64_env(
-        TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS,
-        TRACE_PERPLEXITY_DRIVER_DEFAULT_SKIP_DUPLICATE_THRESHOLD_MICROS,
-        0,
-        1_000_000,
-    )?;
+    let PipelineDuplicateControls {
+        skip_duplicates,
+        skip_duplicate_threshold_micros,
+    } = parse_perplexity_driver_duplicate_controls_from_env()?;
     let backoff_base_seconds = parse_optional_scheduler_i64_env(
         TRACE_COMMONS_PERPLEXITY_DRIVER_BACKOFF_BASE_SECONDS,
         TRACE_PERPLEXITY_DRIVER_DEFAULT_BACKOFF_BASE_SECONDS,
@@ -63928,7 +63970,6 @@ const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_ALGORITHM: &str =
     "signed_hashing_vector_l2_normalized";
 const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_VERSION: &str =
     "trace_commons_vector_payload_embedding_v1";
-const TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TraceVectorPayloadArtifact {
@@ -68495,7 +68536,6 @@ fn trace_backfill_file_item_ref(path: &Path) -> String {
     }
 }
 
-const TRACE_SIMILARITY_NEIGHBOR_THRESHOLD: f32 = 0.25;
 const TRACE_SIMILARITY_MAX_NEIGHBORS: usize = 5;
 
 #[derive(Debug, Clone)]
@@ -68547,40 +68587,6 @@ fn nearest_trace_neighbors<'a>(
     neighbors
 }
 
-fn trace_summary_similarity_score(
-    target_summary: &str,
-    target_hash: &str,
-    candidate_summary: Option<&str>,
-    candidate_hash: Option<&str>,
-) -> f32 {
-    if candidate_hash.is_some_and(|hash| hash == target_hash) {
-        return 1.0;
-    }
-    let Some(candidate_summary) = candidate_summary else {
-        return 0.0;
-    };
-    let target_embedding = trace_redacted_summary_embedding(target_summary);
-    let candidate_embedding = trace_redacted_summary_embedding(candidate_summary);
-    trace_summary_embedding_similarity(&target_embedding, &candidate_embedding).max(
-        trace_summary_token_similarity(target_summary, candidate_summary),
-    )
-}
-
-fn trace_summary_token_similarity(left: &str, right: &str) -> f32 {
-    let left_tokens = trace_similarity_tokens(left);
-    let right_tokens = trace_similarity_tokens(right);
-    if left_tokens.is_empty() || right_tokens.is_empty() {
-        return 0.0;
-    }
-    let intersection = left_tokens.intersection(&right_tokens).count() as f32;
-    let union = left_tokens.union(&right_tokens).count() as f32;
-    if union == 0.0 {
-        0.0
-    } else {
-        (intersection / union).clamp(0.0, 1.0)
-    }
-}
-
 fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
     let mut input = String::new();
     input.push_str("canonical_summary:\n");
@@ -68598,37 +68604,6 @@ fn trace_vector_embedding_input(record: &StorageTraceDerivedRecord) -> String {
     input.push_str("\ncoverage_tags:\n");
     input.push_str(&record.coverage_tags.join(" "));
     input
-}
-
-fn trace_redacted_summary_embedding(input: &str) -> Vec<f32> {
-    let mut values = vec![0.0f32; TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION];
-    for token in trace_similarity_tokens(input) {
-        let digest = Sha256::digest(token.as_bytes());
-        let mut index_bytes = [0u8; 8];
-        index_bytes.copy_from_slice(&digest[..8]);
-        let index = (u64::from_le_bytes(index_bytes) as usize)
-            % TRACE_LOCAL_REDACTED_SUMMARY_EMBEDDING_DIMENSION;
-        let sign = if digest[8] & 1 == 0 { 1.0 } else { -1.0 };
-        values[index] += sign;
-    }
-    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in &mut values {
-            *value /= norm;
-        }
-    }
-    values
-}
-
-fn trace_summary_embedding_similarity(left: &[f32], right: &[f32]) -> f32 {
-    if left.is_empty() || right.is_empty() || left.len() != right.len() {
-        return 0.0;
-    }
-    left.iter()
-        .zip(right)
-        .map(|(left, right)| left * right)
-        .sum::<f32>()
-        .clamp(0.0, 1.0)
 }
 
 fn trace_redacted_summary_embedding_sha256(values: &[f32]) -> String {
@@ -68914,36 +68889,6 @@ fn trace_vector_payload_candidate_is_compatible(
             .embedding_values
             .iter()
             .all(|value| value.is_finite())
-}
-
-fn trace_similarity_tokens(input: &str) -> BTreeSet<String> {
-    const STOP_WORDS: &[&str] = &[
-        "and", "are", "for", "from", "that", "the", "this", "trace", "with",
-    ];
-
-    let mut tokens = BTreeSet::new();
-    let mut current = String::new();
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            current.push(ch.to_ascii_lowercase());
-        } else {
-            push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
-        }
-    }
-    push_trace_similarity_token(&mut tokens, &mut current, STOP_WORDS);
-    tokens
-}
-
-fn push_trace_similarity_token(
-    tokens: &mut BTreeSet<String>,
-    current: &mut String,
-    stop_words: &[&str],
-) {
-    if current.len() > 1 && !stop_words.contains(&current.as_str()) {
-        tokens.insert(std::mem::take(current));
-    } else {
-        current.clear();
-    }
 }
 
 fn build_derived_precheck(
