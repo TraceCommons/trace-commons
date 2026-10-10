@@ -11617,11 +11617,12 @@ impl PipelineService {
     /// outcome stored, per decision P1 (the byte wrapper) and the runtime
     /// plan's ruling A7. `evidence` is the same Score outcome's own
     /// evidence; `None` when Score proposed no command
-    /// (`embedding_artifact_hash` absent). Any failure -- a failed store
-    /// read (`index_command_unreadable`), a missing or malformed reference,
-    /// a decode failure, or a mismatch against the evidence or the run's
-    /// own recorded hash/revision (`index_command_invalid`) -- is a safe
-    /// label.
+    /// (`embedding_artifact_hash` absent). Any failure -- a store read that
+    /// fails for a reason other than integrity (`index_command_unreadable`),
+    /// or a missing or malformed reference, an integrity failure the store
+    /// reports, a decode failure, or a mismatch against the evidence or the
+    /// run's own recorded hash/revision (`index_command_invalid`) -- is a
+    /// safe label.
     pub async fn load_index_command(
         &self,
         run: &PipelineRunRecord,
@@ -11652,8 +11653,11 @@ impl PipelineService {
     /// Reads the index command a run committed at Score from its stored ref
     /// (`object_key#ciphertext_sha256`) and checks that it hashes to
     /// `command_hash` and names `revision_id`. A failed store call is the safe
-    /// label `index_command_unreadable`; any other failure is
-    /// `index_command_invalid`.
+    /// label `index_command_unreadable`, unless the store reports an
+    /// integrity failure (`is_trace_artifact_integrity_error`: the object
+    /// missing, corrupt, or bound to another tenant, kind or hash), which is
+    /// wrong content as each later check's failure is: `index_command_invalid`
+    /// (plan RB-D6: a wait cannot correct it).
     async fn read_index_command(
         &self,
         tenant_id: &str,
@@ -11684,7 +11688,13 @@ impl PipelineService {
             )
         })
         .await
-        .map_err(|_| anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL))?;
+        .map_err(|error| {
+            if crate::trace_artifact_store::is_trace_artifact_integrity_error(&error) {
+                anyhow::anyhow!("index_command_invalid")
+            } else {
+                anyhow::anyhow!(PIPELINE_INDEX_COMMAND_UNREADABLE_LABEL)
+            }
+        })?;
         let bytes = decode_pipeline_artifact_bytes(&wrapper)
             .map_err(|_| anyhow::anyhow!("index_command_invalid"))?;
         let command = serde_json::from_slice::<SealedIndexCommand>(&bytes)

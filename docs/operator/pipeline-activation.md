@@ -2079,14 +2079,17 @@ not the trace's fault:
   corrupt wrapped key answers through that same call, so on a cloud KMS
   that case waits uncharged too: the client cannot tell a refusal from an
   outage.
-  A failed store call of Settle's read of the stored index command is
-  charged under `index_command_unreadable`, with one hour between attempts.
+  A failed store call of Settle's read of the stored index command (an
+  outage, not an integrity failure) is charged under
+  `index_command_unreadable`, with one hour between attempts.
   The run fails about four hours after the first failure. Its open
   settlement legs are forfeited when the run fails.
   Correct the store within that time. The `work` list of the pipeline
   operational summary shows the run with the phase `settle`, the state
   `retry` and the reason label `index_command_unreadable`. A stored command
-  with wrong content keeps `index_command_invalid` and the short backoff.
+  with wrong content keeps `index_command_invalid` and the short backoff:
+  one the store reports missing, corrupt or bound to another tenant, and one
+  that is read but fails its checks.
 - `serialized_json_object_key_unavailable` and
   `pipeline_attempt_object_key_mismatch` (compatibility Score): the same
   rule, under the store's own label -- a store that cannot derive an object

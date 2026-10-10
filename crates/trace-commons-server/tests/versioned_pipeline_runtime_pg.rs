@@ -8336,9 +8336,12 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
 /// bound to another tenant, or bound to another run of the same tenant
 /// makes Settle fail closed, without completing the run or writing a Settle
-/// outcome. A failed store call (cases a to c) is `index_command_unreadable`;
-/// a command that is read but belongs to another run (case d) is
-/// `index_command_invalid`.
+/// outcome. Each is wrong content, which a wait cannot correct (plan RB-D6):
+/// an integrity failure the store reports (cases a to c) and a command that
+/// is read but belongs to another run (case d) are all
+/// `index_command_invalid`, with the short backoff. Only a store failure
+/// that is not an integrity failure is `index_command_unreadable`
+/// (`an_unreadable_settle_command_waits_an_hour_and_ends_the_run`).
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
     let Some(backend) = runtime_backend(4).await else {
@@ -8399,7 +8402,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::remove_file(&path).unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_invalid").await;
     }
 
     // (b) overwrite the file with other bytes.
@@ -8427,7 +8430,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_invalid").await;
     }
 
     // (c) point index_command_ref at another tenant's stored command.
@@ -8461,13 +8464,7 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(
-            &service,
-            &tenant_a,
-            run_a.run_id,
-            "index_command_unreadable",
-        )
-        .await;
+        assert_fails_closed(&service, &tenant_a, run_a.run_id, "index_command_invalid").await;
     }
 
     // (d) point it at another run's command of the same tenant.
@@ -30466,25 +30463,21 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
 }
 
 /// Multi-lens review C5, residual: a failed store call of Settle's read of
-/// the stored index command is charged as `index_command_unreadable`, one
-/// hour between attempts, so a store fault spans hours in which an operator
-/// can correct it. The run fails only after its last attempt, and its open
-/// legs are forfeited. (A command that is read but wrong keeps
-/// `index_command_invalid` and the short backoff:
-/// `stored_command_binding_failures_fail_closed`.)
+/// the stored index command (an outage, not an integrity failure) is charged
+/// as `index_command_unreadable`, one hour between attempts, so a store
+/// fault spans hours in which an operator can correct it. The run fails only
+/// after its last attempt, and its open legs are forfeited. (A command that
+/// is missing, corrupt, or read but wrong keeps `index_command_invalid` and
+/// the short backoff: `stored_command_binding_failures_fail_closed`.)
 #[tokio::test]
 async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let (service, _, _) = test_service(
-        backend.clone(),
-        artifact_store(&dir),
-        scored_config(true),
-        None,
-    )
-    .await;
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, _, _) =
+        test_service(backend.clone(), store.clone(), scored_config(true), None).await;
     let tenant = format!("unreadable-command-{}", uuid::Uuid::new_v4());
     let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
     let legs = service
@@ -30493,18 +30486,8 @@ async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
         .await
         .unwrap();
     assert!(!legs.is_empty(), "Score created the legs before Settle");
-    let (object_key, _) = run
-        .index_command_ref
-        .as_deref()
-        .unwrap()
-        .rsplit_once('#')
-        .unwrap();
-    std::fs::remove_file(artifact_file_path(
-        dir.path(),
-        pipeline_tenant_storage_ref(&tenant).as_str(),
-        object_key,
-    ))
-    .unwrap();
+    // The store's reads fail from here on, as in an outage.
+    store.set(true, false);
 
     let first = service
         .process_run(&tenant, run.run_id)
@@ -32586,6 +32569,56 @@ async fn index_rebuild_fails_closed_on_a_tampered_command() {
         0,
         "a fail-closed rebuild must write no entry from the tampered run"
     );
+}
+
+/// C5 residual (plan RB-D6): the rebuild reads each stored command through
+/// Settle's read, so it splits the same way. A store outage is
+/// `index_command_unreadable` (the route's `503`: a rerun helps once the
+/// store is back); a missing command object is an integrity failure,
+/// `index_command_invalid` (the route's `409`). Neither writes an entry.
+#[tokio::test]
+async fn index_rebuild_splits_a_store_outage_from_a_missing_command() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, index, _adapters) =
+        test_service(backend.clone(), store.clone(), minimal_config(true), None).await;
+    let tenant = format!("index-rebuild-unreadable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    store.set(true, false);
+    let rebuilt = IsolatedPipelineIndex::new();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a store outage fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    store.set(false, false);
+    let (object_key, _) = settled
+        .index_command_ref
+        .as_deref()
+        .unwrap()
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        tenant_ref.as_str(),
+        object_key,
+    ))
+    .unwrap();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a missing command fails the rebuild closed");
+    assert_eq!(error.to_string(), "index_command_invalid");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
 /// Task 8: a rebuild is strictly tenant-scoped -- run under tenant B's id, it
