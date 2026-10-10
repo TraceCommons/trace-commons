@@ -101,20 +101,34 @@ driver itself is enabled, and refuses an assembly that does not hold:
   canonical summary hash (on its submission row or a derived record) has a
   gate decision.
 
-The verdict is decided once per run. With a Trace Credit leg (a positive
-delta) it is decided by the leg's pre-dispatch check, before the leg can pay:
-a duplicate is withheld under its label, and a leg that check let through is
-never re-decided, so a neighbour's later progress cannot withhold a dispatched
-leg or label a paid one. The gate decision row reads the leg. With no leg (a
-zero delta) Settle decides it just before its commit and the commit records
-it.
+The verdict is decided once per run, when Settle first persists its
+selection, before the index write that selection arms and before any leg can
+pay. A duplicate's selection records index membership `Exclude` under its
+label, whatever the Settle policy chose, and the persisted selection is the
+only place the verdict is read from afterwards: the Trace Credit leg's
+pre-dispatch check, the gate decision row and the committed Settle decision
+all take it from there. Nothing re-decides it, so a neighbour's later
+progress cannot withhold a dispatched leg, label a paid one, or remove an
+indexed run. A selection an earlier server persisted, before this rule,
+carries no verdict and reads as no duplicate.
 
-A duplicate row keeps the Score values and the outcome hash, records the label
-as `credit_withheld_reason`, and holds no credit quality; the Trace Credit leg
-is withheld under the same label, since `main` emits no `NoveltyUtility` event
-for a submission it did not score. The Score evidence is unchanged.
+The verdict is a server runtime input (the duplicate controls), not bundle
+policy: the Settle policy and the bundle package, and so the package hash,
+are unchanged, and the server overrides only the membership its own
+selection records.
 
-Five differences from `main` follow:
+A duplicate is not indexed, as on `main`, whose driver records a duplicate
+without scoring or indexing it: its run ends `excluded` with no index write,
+so a later trace's novelty and the index cardinality are what they would be
+had the duplicate never arrived, and an index rebuild from the authoritative
+commands (which reads only `included` runs) reproduces the live index without
+it. A duplicate row keeps the Score values and the outcome hash, records the
+label as `credit_withheld_reason`, and holds no credit quality; the Trace
+Credit leg is withheld under the same label, since `main` emits no
+`NoveltyUtility` event for a submission it did not score. The Score evidence
+is unchanged.
+
+Four differences from `main` follow:
 
 1. Candidates are limited to submissions received earlier, so two runs
    settling in either order never withhold each other. `main`'s `cached` has
@@ -122,15 +136,13 @@ Five differences from `main` follow:
 2. A candidate counts only once its Review has committed, where `main` writes
    its derived record at submit, so an earlier duplicate still in quarantine
    is not seen.
-3. Index membership is unchanged: `main` never puts a skipped duplicate into
-   the vector index, and the pipeline still includes it.
-4. The direction is one-way. A later legacy submission is never `cached`
+3. The direction is one-way. A later legacy submission is never `cached`
    against an earlier pipeline one: `main`'s
    `find_gate_decision_by_canonical_hash` reads only
    `trace_submissions.canonical_summary_hash`, which stays NULL for a
    pipeline submission. Withdrawal tombstones, which read that column too,
    are unchanged.
-5. Legacy readers of derived records (`list_trace_derived_records`, the
+4. Legacy readers of derived records (`list_trace_derived_records`, the
    reviewer metadata views, the ranker export's summary-hash dedupe) now see
    a pipeline submission's canonical summary and hash. The ranker export
    collapses pipeline submissions with the same hash, as it collapses
