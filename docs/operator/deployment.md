@@ -797,7 +797,7 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
 | `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
-| `pipeline_runs` | `UPDATE (review_audit_pending_at)`, the column V118 adds | a Review commit and a review assessment set the marker; the worker clears it once it appended the review audit events |
+| `pipeline_runs` | `UPDATE (review_audit_pending_at)`, the column V118 adds | a Review commit, a review assessment, an escalated privacy pass and a failed privacy classification set the marker; the worker clears it once it appended the review audit events |
 | `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
@@ -1254,7 +1254,7 @@ the migrator before you install the binary, after V117. V118 locks
 tenants, the pipeline worker and `main`'s gate driver wait.
 
 A build from before V118 runs on a V118 database. A Review decision that it
-commits gets no audit event. An assessment that it records gets a second
+commits, a hold of the privacy pass and a failed privacy classification get no audit event. An assessment that it records gets a second
 `review_decision` event when a newer build commits its Review.
 
 Check before deploying:

@@ -26,15 +26,14 @@ The 11 tasks below are done as written. Then `main` moved by 9 commits, after th
 
 - **The migration is V118.** #1324 took V117 for the privacy pass record. Each `V117` in the text below means `migrations/V118__pipeline_review_audit_marker.sql` now. V118 applies after V117 and adds one more column to `pipeline_runs`.
 - **The receipt no longer runs the classifier (#1324).** It runs the deterministic redactor only. The classifier runs in a privacy pass at the start of Review, and that pass rewrites `trace_submissions.privacy_risk`. The `submitted` audit row of Task 7 keeps the risk of the receipt. `main`'s reconciliation therefore leaves the risk comparison out for a pipeline submission (the set of ruling F-M10), as it leaves out the other comparisons that a pipeline row would fail.
-- **Review has more paths (#1324).** A run that the pass escalates is held `awaiting_review` with `privacy_pass_review_required`; the server commits a reviewer's rejection of such a run itself; a classifier that keeps failing ends the run with `privacy_classification_failed`. The rejection goes through `commit_review`, so the marker of Task 8 is set and the worker appends its event. The hold and the failure commit no Review decision, so they get no audit event (see Known limits, the last item).
+- **Review has more paths (#1324).** A run that the pass escalates is held `awaiting_review` with `privacy_pass_review_required`; the server commits a reviewer's rejection of such a run itself; a classifier that keeps failing ends the run with `privacy_classification_failed`. The rejection goes through `commit_review`, so the marker of Task 8 is set and the worker appends its event. The hold and the failure commit no Review decision. Task 13 (owner decision of 2026-10-10) sets the marker for each, and the worker appends one `lifecycle_status_change` event with the status `quarantined`.
 - **A review claim needs the recorded pass (#1324).** The review audit tests of Task 8 start from a parked run.
 - **`main` found L1-2 again (#1324, plan question Q3).** Its test `legacy_readers_never_emit_a_pipeline_source` pins that `main`'s four jobs select a pipeline submission and are refused at the envelope read. It names the move onto `read_mains_reviewer_metadata_view` as a follow-up. Task 2 is that move. The test still passes, because its fixture has no pipeline store; only its comment changed.
 - **Settle decides duplicates (#1325).** A duplicate's NoveltyUtility leg is withheld. Tasks 6, 10 and 11 need no change: a withheld leg has no payout line.
 
 Known limits that this merge adds (they are also in the list "Known limits"):
 
-- A run that the privacy pass holds for a human, and a run that fails with `privacy_classification_failed`, change what the contributor sees to `quarantined` and get no audit event. `main`'s legacy path appends a `lifecycle_status_change` event for the equal states of its PII backstop. The pass record on `pipeline_runs` (`privacy_pass_outcome`, `privacy_pass_recorded_at`) is the record.
-- Such a run keeps the stored status `received`, so `main`'s `review_sla` and `urgent_reviews` do not count it. The pipeline review queue lists it.
+- A run that the privacy pass holds, or that fails with `privacy_classification_failed`, keeps the stored status `received`, so `main`'s `review_sla` and `urgent_reviews` do not count it. The pipeline review queue lists it.
 
 ## Questions for the owner (answered on 2026-10-09: each recommendation is accepted)
 
@@ -95,7 +94,6 @@ Each question has a recommendation. The plan is written for the recommended answ
 - A pipeline payout audit row whose append fails is lost (as on `main`).
 - L4-7: a follow-up that is lost to a process stop, for a withdrawal with no source session and a run with no index work and no export item, is not found by the recovery pass. The reconciler covers a version that has a source session.
 - A pipeline submission that Admission quarantined has the stored status `quarantined`, so `main`'s operational summary counts it in `review_sla` and, when it is old, in the gate `urgent_reviews`. The count is true, and the pipeline review routes clear it. #1185 does not name it, and this plan does not change it. Since #1324 a run that the privacy pass holds keeps the stored status `received` and is in no count of `main` (update of 2026-10-10).
-- Since #1324: the hold of the privacy pass (`privacy_pass_review_required`) and its failure (`privacy_classification_failed`) commit no Review decision and get no audit event; the pass record on `pipeline_runs` is the record (update of 2026-10-10).
 
 ---
 

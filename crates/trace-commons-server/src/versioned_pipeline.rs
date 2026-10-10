@@ -1454,7 +1454,9 @@ pub struct PipelineReviewAuditAssessment {
 
 /// A run with a review audit marker (`review_audit_pending_at`,
 /// `PgPipelineStore::list_pending_review_audits`): the Review outcome and
-/// the assessment whose audit events the worker may still have to append.
+/// the assessment whose audit events the worker may still have to append,
+/// and whether the privacy pass escalated the run or the run failed at its
+/// privacy classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineReviewAuditItem {
     pub run_id: Uuid,
@@ -1462,6 +1464,11 @@ pub struct PipelineReviewAuditItem {
     pub pending_at: DateTime<Utc>,
     pub outcome: Option<PipelineReviewAuditOutcome>,
     pub assessment: Option<PipelineReviewAuditAssessment>,
+    /// The privacy pass escalated the run (`privacy_pass_outcome = 'escalated'`):
+    /// the run is, or was, held for a human under `privacy_pass_review_required`.
+    pub privacy_pass_escalated: bool,
+    /// The run ended `failed` under `privacy_classification_failed`.
+    pub privacy_classification_failed: bool,
 }
 
 /// The result of `PipelineService::settle_internal_credit`: the Trace Credit
@@ -3049,6 +3056,8 @@ impl PgPipelineStore {
                 PIPELINE_SUBMISSION_INOPERABLE_LABEL.to_string(),
             ));
         }
+        // V118: an escalated pass sets the review audit marker, so the
+        // worker's review audit pass appends the hold's audit event.
         let Some(row) = tx
             .query_opt(
                 "UPDATE pipeline_runs
@@ -3058,6 +3067,8 @@ impl PgPipelineStore {
                      privacy_pass_residual_risk_basis = $7,
                      privacy_pass_outcome = $8,
                      privacy_pass_recorded_at = NOW(),
+                     review_audit_pending_at = CASE WHEN $8 = 'escalated'
+                         THEN clock_timestamp() ELSE review_audit_pending_at END,
                      updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2
                    AND next_phase = 'review'
@@ -4094,8 +4105,9 @@ impl PgPipelineStore {
 
     /// The runs of the tenant with a review audit marker, oldest marker
     /// first, at most `limit`: a Review decision or a human assessment
-    /// committed and its audit event is not known to be appended. The work
-    /// index (V118) holds only the marked runs.
+    /// committed, the privacy pass escalated the run, or the run failed at
+    /// its privacy classification, and its audit event is not known to be
+    /// appended. The work index (V118) holds only the marked runs.
     pub async fn list_pending_review_audits(
         &self,
         tenant_id: &str,
@@ -4108,7 +4120,11 @@ impl PgPipelineStore {
                 "SELECT p.run_id, p.submission_id, p.review_audit_pending_at,
                         o.outcome_id, o.decision ->> 'kind' AS decision_kind,
                         a.assessment_id, a.recommendation, a.reason_code,
-                        a.reviewer_principal_ref
+                        a.reviewer_principal_ref,
+                        p.privacy_pass_outcome IS NOT DISTINCT FROM 'escalated'
+                            AS privacy_pass_escalated,
+                        (p.state = 'failed' AND p.last_error_label IS NOT DISTINCT FROM $3)
+                            AS privacy_classification_failed
                    FROM pipeline_runs p
                    LEFT JOIN phase_outcomes o
                      ON o.tenant_id = p.tenant_id AND o.run_id = p.run_id
@@ -4118,7 +4134,11 @@ impl PgPipelineStore {
                   WHERE p.tenant_id = $1 AND p.review_audit_pending_at IS NOT NULL
                   ORDER BY p.review_audit_pending_at, p.run_id
                   LIMIT $2",
-                &[&tenant_id, &limit],
+                &[
+                    &tenant_id,
+                    &limit,
+                    &PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+                ],
             )
             .await?;
         tx.commit().await?;
@@ -4170,6 +4190,8 @@ impl PgPipelineStore {
                     pending_at: row.get("review_audit_pending_at"),
                     outcome,
                     assessment,
+                    privacy_pass_escalated: row.get("privacy_pass_escalated"),
+                    privacy_classification_failed: row.get("privacy_classification_failed"),
                 })
             })
             .collect()
@@ -6026,6 +6048,9 @@ impl PgPipelineStore {
         let privacy_delay_seconds = PIPELINE_PRIVACY_RETRY_BASE_SECONDS.saturating_mul(multiplier);
         let mut client = self.backend.trace_pool().get().await?;
         let tx = Self::tenant_transaction(&mut client, &run.tenant_id).await?;
+        // V118: a run that ends `failed` under the privacy label sets the
+        // review audit marker, so the worker's review audit pass appends the
+        // failure's audit event. A charged retry sets none.
         let row = tx
             .query_opt(
                 concat!(
@@ -6048,6 +6073,9 @@ impl PgPipelineStore {
                          WHEN attempt_count >= max_attempts AND NOT $8::boolean THEN $4
                          ELSE $3
                      END,
+                     review_audit_pending_at = CASE
+                         WHEN attempt_count >= max_attempts AND $8::boolean
+                         THEN clock_timestamp() ELSE review_audit_pending_at END,
                      updated_at = NOW()
                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'leased'
                    AND lease_token = $6 AND lease_expires_at > NOW()

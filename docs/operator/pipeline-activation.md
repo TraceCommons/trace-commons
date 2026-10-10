@@ -1997,15 +1997,19 @@ then has no row for that claim. The assessment is in
 
 The worker's review audit pass repairs a missed assessment event. The
 marker is `review_audit_pending_at` on `pipeline_runs` (V118). A Review
-commit and an assessment each set it. The pass runs in the step and at the
+commit, an assessment, an escalated privacy pass and a failed privacy
+classification each set it. The pass runs in the step and at the
 cadence of the credit audit events. It appends the assessment event with the
 id `assessment_id` when the log has none. The stored `reviewer_sha256:`
 reference then names the reviewer. The pass also appends one
 `lifecycle_status_change` event, with the actor `pipeline_worker`, for each
-Review commit. The hold of the privacy pass (`privacy_pass_review_required`)
-and its failure (`privacy_classification_failed`) commit no Review decision
-and get no event; the pass record on `pipeline_runs` is the record. The pass
-clears the marker once each event of the run exists. The time of an event is the time of the append. A decision from
+Review commit. It appends one more for a run that the privacy pass holds for
+a human (status `quarantined`, reason `privacy_pass_review_required`) and one
+for a run that ends with `privacy_classification_failed` (status
+`quarantined`, that reason). The transaction that records an escalated pass,
+and the one that ends the run, set the marker. The stored status of such a
+run stays `received`. The pass clears the marker once each event of the run
+exists. The time of an event is the time of the append. A decision from
 before V118 gets no event. A failed event keeps its marker and logs
 `pipeline_worker_review_audit_item_failed` with a hash of the run id. A
 failed pass logs `pipeline_worker_review_audit_failed`. A claim whose audit

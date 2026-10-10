@@ -1345,12 +1345,19 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 }
 
 /// The review audit events of the runs the tenant's review audit markers
-/// name (V118, `review_audit_pending_at`): a run's committed Review decision
-/// and its human assessment each get one audit event, and the marker is
-/// cleared once each event of the run exists. The assessment event comes
-/// first. Its id is the assessment's, so the route's own append and this
-/// repair of a missed one are the same event; the automatic Review's event
-/// takes the id of the Review `phase_outcomes` row. Each event is read by id
+/// name (V118, `review_audit_pending_at`): a run has up to four audit events
+/// (a hold, or a failure, of the privacy pass; the human assessment; the
+/// committed Review decision), and the marker is cleared once each event of
+/// the run exists. The order is the hold or the failure, the assessment, then
+/// the Review commit. The hold event (the privacy pass escalated the run) and
+/// the failure event (the run ended `failed` under
+/// `privacy_classification_failed`) are `lifecycle_status_change` events with
+/// the status `quarantined`; their ids derive from the run, with the labels
+/// `pipeline-privacy-pass-hold-audit` and
+/// `pipeline-privacy-classification-failed-audit`. The assessment event's id
+/// is the assessment's, so the route's own append and this repair of a missed
+/// one are the same event; the automatic Review's event takes the id of the
+/// Review `phase_outcomes` row. Each event is read by id
 /// and appended only when absent, so a pass that stopped before it cleared a
 /// marker finds the events again and only clears it. That holds only in the
 /// required order, the database row first and the file line second
@@ -1532,6 +1539,40 @@ async fn append_pipeline_review_audit_item(
     tenant_id: &str,
     item: &trace_commons_server::versioned_pipeline::PipelineReviewAuditItem,
 ) -> anyhow::Result<()> {
+    if item.privacy_pass_escalated {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-pass-hold-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline::PIPELINE_PRIVACY_PASS_REVIEW_REQUIRED_LABEL,
+            "pipeline privacy pass hold audit event",
+        )
+        .await?;
+    }
+    if item.privacy_classification_failed {
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-privacy-classification-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Quarantined,
+            trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
+            "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
     if let Some(assessment) = &item.assessment {
         if db
             .get_trace_audit_event_by_id(tenant_id, assessment.assessment_id)
@@ -1562,45 +1603,74 @@ async fn append_pipeline_review_audit_item(
         }
     }
     if let Some(outcome) = &item.outcome {
-        if db
-            .get_trace_audit_event_by_id(tenant_id, outcome.outcome_id)
-            .await?
-            .is_none()
-        {
-            let (status, _) = review_audit_status(outcome.approved)?;
-            let reason_label = if outcome.approved {
-                "pipeline_review_approved"
-            } else {
-                "pipeline_review_rejected"
-            };
-            let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
-            let mut event = TraceCommonsAuditEvent::lifecycle_status_change(
-                &actor,
-                LifecycleAuditActor::System,
-                item.submission_id,
-                status,
-                reason_label,
-            );
-            event.event_id = outcome.outcome_id;
-            append_audit_event_mirrored(
-                state,
-                &actor,
-                event,
-                AuditRowMirror {
-                    action: lifecycle_status_audit_action(status),
-                    metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
-                    object_ref_id: None,
-                    actor_role_label: Some("system"),
-                },
-                "pipeline review audit event",
-            )
-            .await?;
-        }
+        let (status, _) = review_audit_status(outcome.approved)?;
+        let reason_label = if outcome.approved {
+            "pipeline_review_approved"
+        } else {
+            "pipeline_review_rejected"
+        };
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            outcome.outcome_id,
+            status,
+            reason_label,
+            "pipeline review audit event",
+        )
+        .await?;
     }
     service
         .store()
         .clear_review_audit_pending(tenant_id, item)
         .await?;
+    Ok(())
+}
+
+/// Appends the system `lifecycle_status_change` event `event_id` of
+/// `submission_id`, with `status` and `reason_label`, when the database has no
+/// row of that id.
+#[allow(clippy::too_many_arguments)]
+async fn append_pipeline_lifecycle_audit_event(
+    state: &AppState,
+    db: &dyn Database,
+    tenant_id: &str,
+    submission_id: Uuid,
+    event_id: Uuid,
+    status: TraceCorpusStatus,
+    reason_label: &'static str,
+    context: &'static str,
+) -> anyhow::Result<()> {
+    if db
+        .get_trace_audit_event_by_id(tenant_id, event_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let actor = system_audit_tenant(tenant_id, PIPELINE_WORKER_AUDIT_ACTOR_REF);
+    let mut event = TraceCommonsAuditEvent::lifecycle_status_change(
+        &actor,
+        LifecycleAuditActor::System,
+        submission_id,
+        status,
+        reason_label,
+    );
+    event.event_id = event_id;
+    append_audit_event_mirrored(
+        state,
+        &actor,
+        event,
+        AuditRowMirror {
+            action: lifecycle_status_audit_action(status),
+            metadata: lifecycle_status_audit_metadata(status, Some(reason_label))?,
+            object_ref_id: None,
+            actor_role_label: Some("system"),
+        },
+        context,
+    )
+    .await?;
     Ok(())
 }
 

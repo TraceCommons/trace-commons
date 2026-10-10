@@ -14487,6 +14487,212 @@ async fn the_review_audit_pass_appends_nothing_when_the_mirror_is_not_required()
     assert!(review_audit_marker_is_set(&fixture, run.run_id).await);
 }
 
+/// Asserts that the pass appended exactly one `lifecycle_status_change`
+/// event of `submission_id` with `event_id`, status `quarantined` and the
+/// actor `pipeline_worker`, and that its database row is a `Review` row with
+/// the role `system` and `reason` as its reason code.
+async fn assert_one_quarantined_lifecycle_event(
+    fixture: &WithdrawalFixture,
+    submission_id: Uuid,
+    event_id: Uuid,
+    reason: &str,
+) {
+    let events = audit_file_events_of_kind(fixture, submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, event_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Quarantined));
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&fixture.tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == event_id)
+        .expect("the event has its database row");
+    assert_eq!(row.action, StorageTraceAuditAction::Review);
+    assert_eq!(row.actor_role, "system");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: "quarantined".to_string(),
+            resulting_status: StorageTraceCorpusStatus::Quarantined,
+            reason_code: Some(reason.to_string()),
+        }
+    );
+}
+
+/// A run that the Review-start privacy pass holds for a human (the pass
+/// escalates it) gets one `lifecycle_status_change` event, status
+/// `quarantined` and reason `privacy_pass_review_required`, as `main`'s PII
+/// backstop appends for the same state. The event id is derived from the run,
+/// the marker is cleared, a second pass over a marker set again adds none, and
+/// `main`'s audit verification finds no mismatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(EscalatingClassifierBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let held = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review runs the privacy pass")
+        .expect("the run was claimed");
+    assert_eq!(held.state, PipelineRunState::AwaitingReview, "{held:?}");
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let hold_id =
+        deterministic_trace_uuid_for("pipeline-privacy-pass-hold-audit", &tenant, created.run_id);
+    assert_one_quarantined_lifecycle_event(
+        &fixture,
+        envelope.submission_id,
+        hold_id,
+        "privacy_pass_review_required",
+    )
+    .await;
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change")
+            .len(),
+        1
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
+/// A run whose privacy classification fails until its attempts end (state
+/// `failed`, `privacy_classification_failed`) gets one
+/// `lifecycle_status_change` event, status `quarantined`, as `main`'s PII
+/// backstop appends for an exhausted classification. The marker is set only
+/// by the terminal attempt: the retries before it set none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_worker_appends_one_audit_event_for_a_failed_privacy_classification() {
+    let Some(fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(FailingPrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+
+    let mut run = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review meets the classifier outage")
+        .expect("the run was claimed");
+    assert_eq!(run.state, PipelineRunState::Retry, "{run:?}");
+    assert!(
+        !review_audit_marker_is_set(&fixture, created.run_id).await,
+        "a charged retry is not the end of the run"
+    );
+    while run.state == PipelineRunState::Retry {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        drop(client);
+        run = fixture
+            .service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the retry runs")
+            .expect("the run was claimed");
+    }
+    assert_eq!(run.state, PipelineRunState::Failed, "{run:?}");
+    assert_eq!(
+        run.last_error_label.as_deref(),
+        Some("privacy_classification_failed")
+    );
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let failed_id = deterministic_trace_uuid_for(
+        "pipeline-privacy-classification-failed-audit",
+        &tenant,
+        created.run_id,
+    );
+    assert_one_quarantined_lifecycle_event(
+        &fixture,
+        envelope.submission_id,
+        failed_id,
+        "privacy_classification_failed",
+    )
+    .await;
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    assert_audit_verification_is_clean(&fixture).await;
+}
+
 /// Task 6: a privacy boundary whose classifier half raises the envelope's
 /// residual risk to Medium and reports `FoundAndRemoved`, so the
 /// Review-start privacy pass escalates an Admission-admitted run (test
