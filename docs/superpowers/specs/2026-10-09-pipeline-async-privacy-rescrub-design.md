@@ -249,17 +249,23 @@ V117 also adds `privacy_pass_required`, FALSE on every existing run and TRUE
 by default from then on, and a CHECK that refuses an approved object on a
 run that requires the pass and has none. `commit_review` refuses the same
 approval with a safe label first. A binary that predates this change,
-rolled back onto a V117 database, therefore cannot approve unclassified
-content. It does not hold such a run, though: the old binary sees the
+rolled back onto a V117 database, therefore cannot approve a run that has
+no pass recorded. The CHECK sees only that a pass exists, not which object
+Review read, so it does not stop that binary approving a run whose pass is
+recorded but whose Review has not committed: the old Review reads the
+run's source, the deterministic envelope the classifier never saw, and
+approves it with any prose PII the pass removed. That binary does not hold
+a run that has no pass, either: it sees the
 CHECK violation as a raw, non-transient database error, charges it as
 `minimal_policy_failed` on its 50 ms doubling backoff, and the run uses up
 its five attempts in about a second and ends `failed` with
 `attempts_exhausted`, which is terminal. Every run received after V117 that
 reaches an approval at Review under the old binary is lost that way. A
 rollback below this revision must first suspend the Review policy of the
-affected bundles (an uncharged wait, `bundle_policy_not_runnable`) or stop
-the pipeline workers; the plan's Task 10 gives the count query and the
-runbook steps.
+affected bundles, which are those of every run at Review that requires a
+pass and has no approval, pass recorded or not (an uncharged wait,
+`bundle_policy_not_runnable`), or stop the pipeline workers; the plan's
+Task 10 gives the count query and the runbook steps.
 
 The submission row's `redaction_counts` and `redaction_pipeline_version`
 are updated from the pass. Its `redaction_hash` stays the deterministic

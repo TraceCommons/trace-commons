@@ -1752,7 +1752,10 @@ refuses a `privacy_pass_required` run that has no recorded pass, as
 `privacy_pass_missing`, and writes nothing. The CHECK
 `pipeline_runs_privacy_pass_before_approval` refuses any write that gives
 such a run an approved revision without a pass, which also stops a binary
-that lacks the commit's guard. A reviewer cannot list, claim or assess such
+that lacks the commit's guard from approving a run that has no pass. It
+does not stop such a binary approving a run whose pass is recorded: the
+CHECK sees only that a pass exists, not which object Review read ("Rolling
+back below the privacy pass"). A reviewer cannot list, claim or assess such
 a run until its pass is recorded.
 
 **Failure.** A classifier error or a classifier call past the timeout is
@@ -1795,7 +1798,7 @@ invalidation", "Retention of pipeline submissions").
 
 A binary from before this change (V116 code) on a V117 database reads every
 row the new binary writes: it reads run columns by name, and the pass ref
-uses an existing artifact kind. Two things need an operator first.
+uses an existing artifact kind. Three things need an operator first.
 
 - **Staged pass rows.** The old binary does not know the `privacy-pass`
   artifact. Its attempt sweep fails its whole pass with
@@ -1810,20 +1813,42 @@ uses an existing artifact kind. Two things need an operator first.
   after V117 that has no pass yet, and every Admission-quarantined one once
   it has an approving assessment. A receipt the old binary takes still gets
   `privacy_pass_required = TRUE` from the column default and reaches Review.
+- **Runs whose pass is recorded and whose Review has not committed.** The
+  old binary's Review reads the run's source, not the pass output, and
+  approves it. Since V117 the source is the receipt's deterministic
+  envelope, which the classifier never saw, so any prose PII the pass
+  removed is in the approved revision, in Score's input and in exports. The
+  CHECK does not refuse it: it requires only that a pass is recorded. The
+  old binary's review queue does not look at the pass either. Examples are
+  an Admission-quarantined run parked `awaiting_review` after its pass, an
+  escalated run a reviewer approved that is back in `pending`, and an
+  Admission-admitted run whose Review commit failed after its pass was
+  recorded (`retry` at Review).
 
 Before rolling back below this revision:
 
-1. With the new binary still running, count the exposed runs per tenant:
+1. With the new binary still running, count the exposed runs per tenant.
+   This is every run still at Review that needs a pass, with a pass
+   recorded or not: the second and third items above both concern it.
+   It also counts runs Review would reject, which is deliberate:
 
    ```sql
    SELECT count(*) FROM pipeline_runs
     WHERE next_phase = 'review' AND privacy_pass_required
-      AND privacy_pass_object_ref_id IS NULL;
+      AND approved_object_ref_id IS NULL;
+   ```
+
+   and list the bundles they are bound to:
+
+   ```sql
+   SELECT DISTINCT bundle_id FROM pipeline_runs
+    WHERE next_phase = 'review' AND privacy_pass_required
+      AND approved_object_ref_id IS NULL;
    ```
 
 2. Suspend the Review policy ("Suspend a policy": `phase` `review`,
-   `action` `suspend`) of every bundle that any of those runs is bound to,
-   and of the tenant's active bundle. A run under a suspended Review policy
+   `action` `suspend`) of every bundle that query lists, and of the
+   tenant's active bundle. A run under a suspended Review policy
    waits in `retry` with `bundle_policy_not_runnable`, uncharged. Or stop
    every process that runs the pipeline workers for the length of the
    rollback. `contain` is not a substitute: it refuses new receipts and does

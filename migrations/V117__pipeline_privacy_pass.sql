@@ -81,7 +81,12 @@ GRANT UPDATE (privacy_pass_object_ref_id, privacy_pass_content_hash,
 -- A run received from here on needs a privacy pass before Review may
 -- approve it. Existing rows are exempt (FALSE); the default then flips, so
 -- a receipt written by either binary gets TRUE, and an approval by a binary
--- that has no pass fails this CHECK instead of approving unclassified bytes.
+-- that has no pass fails this CHECK when the run has no pass recorded. The
+-- CHECK sees only that a pass exists, not which object Review read: a binary
+-- that has no pass, given a run whose pass is recorded but whose Review has
+-- not committed, approves the run's source (the deterministic envelope, not
+-- the pass output) and passes it. The operator runbook's rollback section
+-- contains those runs.
 -- The runtime is granted no UPDATE on the column: only the receipt's INSERT
 -- (through the default) sets it.
 ALTER TABLE pipeline_runs
