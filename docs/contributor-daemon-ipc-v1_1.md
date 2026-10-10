@@ -607,7 +607,7 @@ pins. No account token, device key or PKCE verifier is returned to native views.
 | `certificate_detail` | `entry_id` | held certificate claims and verification metadata | read-only; refuses entries without a witness pin and never returns raw artifact bytes |
 | `route_disclosure` | — | `route`, `witness`, `local_filter`, `receipts`, `attested_bodies` | read-only, no network; what leaves this machine, to whom, and what this client checked; see "`route_disclosure`" below |
 | `insights_glance` | `tz` (**required**: the shell's UTC offset in seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `stale`, `date`, `tools[]`, `coverage`, `context_tip` | additive; read-only, no network, dry-run local; Insights feed L, gated on the `insights_ledger_feed` setting (on by default; owner decision D3, settled 2026-10-09); see "`insights_glance`" below |
-| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
+| `insights_week` | `iso_week` (optional, `YYYY-Www`), `tz` (optional, seconds east) | `enabled`, `feed`, and while enabled `readable`, then `updated_at`, `sessions_stored`, `iso_week`, `week_start`, `comparable`, `unavailable`, `change_vs_last_week[]`, `rollup`, `routing_available`, `routing_unavailable`, `overview`, `patterns`, `history[]`, `recap_card_enabled` | additive; read-only, no network, dry-run local; Insights feed T, gated on the `insights_counter_pass` setting (owner decision D4, open); see "`insights_week`" below |
 | `preview` | `entry_id` | see below | summary only; the body is `preview_body` |
 | `preview_body` | `entry_id`, `offset` (optional), `limit` (optional), `body_digest` (required when `offset > 0`) | `chunk`, `next_offset`, `total_bytes`, `body_digest`, `envelope_digest`, `enrolled`, `max_chunk_bytes` | the redacted body, paged; see "`preview_body`" below |
 | `preview_turns` | `entry_id`, `body_digest` (**required**) | `entry_id`, `body_digest`, `envelope_digest`, `turn_count`, `turns[]`, `leaves_this_mac` | an index of turn boundaries **into the body `preview_body` returns**; the body itself is unchanged. See "`preview_turns`" and "`leaves_this_mac`" below |
@@ -4429,11 +4429,54 @@ or one that cannot be read, is stored as unknown, never as zero.
 131072 turns and 131072 tool calls (oldest last write first), and limited to
 sessions written in the last 13 weeks. Rows are keyed by a keyed digest of
 the harness and the session's address, and carry a keyed digest of the
-folder's project key (owner decision D7, open); no path, project key,
-message or session ID is stored in readable form. The digest key is the
+folder's project key (owner decision D7, open). Each row also carries a
+keyed digest of the one session ID the transcript records, under the same
+key, as the join key to the proxy ledger (owner decision D15, extended to
+feed T); a file that records none, or more than one, or cannot be read
+carries none. That digest is stored only: it never reaches an answer (the
+route tally it joins to does, as counts), and the week's overlap rule does
+not use it. No path, project key, message or
+session ID is stored in readable form. The store's schema is
+`trace_commons.insights_counter_rows.v2`; a v1 store still loads and the
+next pass writes it back as v2. Each of its rows whose session the watcher
+still finds is read once more for its session digest, even when its file is
+unchanged, within the same per-poll limits; a row whose session is no longer
+found keeps its counters and carries no session digest until it ages out.
+Any other schema reads as
+`store_unreadable` and the pass starts the store again. The digest key is the
 daemon's own, kept in the OS keychain (owner decision D16, open). `unenroll`
 removes the store, forgets the key, and turns `insights_counter_pass` off, so
 the next watcher tick does not rebuild the store under a new key.
+
+**Route tallies.** The same store keeps, per session, a tally of where its
+proxy calls went (owner question Q3, default taken): counts only, keyed by
+the same keyed session-ID digest under the same key (owner decision D15,
+extended). After each refresh of the proxy ledger the daemon folds the
+ledger's last 24 hours into it, each call once: calls per proof bucket
+(`verified`; `gateway_only`, `unattested`, `pending` or `unavailable`;
+`failed`; `outside`; no label), tokens per bucket (uncached input, cache
+reads, cache writes and output, normalized per facade as `insights_glance`
+reads them), calls whose tokens are unknown, and the latest call's time. A
+call is skipped when it has no ledger id, no or an empty session ID, or no
+single tool can be named for it; the tool is never guessed. The store keeps
+the highest ledger id folded and the latest start time folded, and a call is
+taken when its id is above the first or it started after the second. The
+proxy numbers calls as they finish, not as they start, so a long call can
+hold the highest id and leave the window first; the start time keeps the
+calls left in that window from counting twice, and keeps the calls of a
+proxy ledger that started over from being lost, whether their ids are below
+the old highest or have climbed past it. Only Claude Code and Codex calls are
+folded, the two tools the counter pass counts. `cost_usd`, backend and model names
+are never read into it (owner decision D5, open), and no session ID is
+stored. Calls whose tokens are unknown are kept per bucket, so the answer
+can mark exactly the token figures they leave unknown. Nothing is folded, and neither the ledger nor the store is read for
+it, unless both `insights_ledger_feed` (on by default, owner decision D3,
+settled 2026-10-09) and `insights_counter_pass` are on. A tally goes when its session is dropped
+for a Never folder, or, once no stored row matches it, when its last call is
+more than 13 weeks old; at most 2048 are kept, oldest last call first.
+`unenroll` removes them with the store. The answer joins each row to its
+session's tally by that digest, at answer time and inside the daemon; see
+`routing` below.
 
 `iso_week` is optional: a `YYYY-Www` string naming a real ISO week (for
 example `2026-W38`); absent or `null` is the week holding now. Anything else
@@ -4496,9 +4539,17 @@ sessions on disk. Otherwise:
     "codex_interval_tokens": null,
     "by_model": [ { "label": "claude-sonnet-4", "tokens": 1840220 } ],
     "sessions": [
-      { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [] }
+      { "source": "claude_code", "tokens": 912000, "state": "known", "reasons": [],
+        "cache_share": { "numerator": 801000, "denominator": 900000 },
+        "started_at": "2026-10-06T08:12:40+00:00",
+        "routing": { "category": "mixed", "reasons": [],
+                     "tokens": { "verified": 410200, "routed_unverified": 0,
+                                 "check_failed": 0, "outside": null, "unrecorded": 0 },
+                     "calls": 38, "calls_without_counts": 1 } }
     ]
-  }
+  },
+  "routing_available": true,
+  "routing_unavailable": null
 }
 ```
 
@@ -4524,8 +4575,57 @@ sessions on disk. Otherwise:
   from zero, only when both weeks are comparable and both figures are known;
   otherwise `permille` is `null` and `unavailable` is `below_coverage_floor`
   or `no_figure`.
-- `rollup.sessions[]` carries each session's figure and coverage, and no
-  reference to it.
+- `rollup.sessions[]` carries each session's figure and coverage, its
+  first recorded event's time and its route counts, and nothing else about
+  it: never a session ID, a digest of one, a path, a backend or model name, a
+  price or a title. `started_at` is the session's first recorded event (the
+  first transcript line carrying a `timestamp`, read when the row is
+  counted; never the file's last write), RFC 3339, or `null` when no line
+  carries one or the file was not read (owner question Q1, default taken:
+  a row may carry it, though it can be matched to a queue entry's
+  `started_at`). A shell must still not join Insights rows to queue entries.
+  The rows come in the order the counter pass made them (within one pass,
+  the most recently written file first; a re-read row moves to the end),
+  never the store's own order, which follows a keyed digest of each path
+  and so means nothing. A row carries no reference, so a shell that draws
+  them knows each by its place, and the order is stable from one answer to
+  the next while no row is re-read.
+- `routing` is where the session's proxy calls went, from its route tally
+  (above), or `null` on every row while `routing_available` is false.
+  `category` is one of, first match wins, every label from the proxy's
+  proof label and never a backend name: `unobserved` (no tally: older than
+  the ledger's window before the feed was on, a tool that sent no session
+  ID, a managed launch, an older proxy or no proxy; never "outside"),
+  `unrecorded` (no call carries a proof label), `outside` (every labelled
+  call `outside`; the only category that says the calls did not go through
+  the route), `mixed` (labelled calls both outside and through the route),
+  `check_failed` (all through the route, at least one `failed`),
+  `routed_verified` (all `verified`; only `verified` is proof), and
+  `routed_unverified` (all through the route, at least one `gateway_only`,
+  `unattested`, `pending` or `unavailable`; `gateway_only` names the relay,
+  not the model). `reasons` is `["some_calls_unrecorded"]` when some calls
+  carry a proof label and some do not (the category is the labelled
+  calls'), and `[]` otherwise. `tokens` is per bucket (`verified`,
+  `routed_unverified`, `check_failed`, `outside`, `unrecorded`): uncached
+  input, cache reads, cache writes and output as the proxy recorded them; a
+  bucket holding any call whose counters are unknown is `null`, never 0, and
+  a bucket with no calls is 0. `calls` is every call folded and
+  `calls_without_counts` those with unknown counters. For `unobserved`,
+  `tokens`, `calls` and `calls_without_counts` are all `null`. Proxy tokens
+  count each call, subagent calls under the parent's session, and are never
+  summed with or reconciled to the row's transcript `tokens`.
+- `routing_available` is whether rows carry `routing`. When it is false,
+  `routing_unavailable` says why: `ledger_feed_off` (the contributor
+  turned the `insights_ledger_feed` setting off; it is on by default,
+  owner decision D3, settled 2026-10-09; checked
+  first, and a tally folded while it was on is not shown) or `no_ledger`
+  (no proxy ledger is declared, so a stored tally may lack every call
+  since). When it is true, `routing_unavailable` is `null`. The answer reads
+  only the store, never the ledger.
+- `started_at`, `routing`, `routing_available` and `routing_unavailable`
+  are additive: a daemon that predates them omits all four. A shell reads
+  an absent `routing_available` as false and draws no route, and an absent
+  `started_at` as unknown.
 
 Four further fields are additive. A daemon that predates them omits them;
 the macOS window then cannot draw the week in the core's shapes, so it shows
@@ -5541,10 +5641,12 @@ decision D3, settled 2026-10-09: on by default, and the setting remains so
 a contributor can turn it off). It is the one gate on Insights reading the
 proxy ledger's token counters (feed L). While it is `false`, nothing reads
 the ledger for Insights: `insights_glance` answers `enabled: false` without
-touching the ledger, `inference_calls` rows carry no `tokens` key, and
-`usage_changed` is never published. A settings file without the key
-(written by any build before the key existed) loads it as `true`; a saved
-`false` stays off.
+touching the ledger, `inference_calls` rows carry no `tokens` key,
+`usage_changed` is never published, nothing is folded into the counter
+store's route tallies, and `insights_week` answers `routing_available:
+false` with `routing_unavailable: "ledger_feed_off"` and no row's `routing`.
+A settings file without the key (written by any build before the key
+existed) loads it as `true`; a saved `false` stays off.
 
 `insights_context_threshold` takes an integer from 1000 to 10000000 (tokens),
 or `null` to unset it; anything else is `settings-invalid-value`. **It has no

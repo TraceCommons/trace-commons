@@ -1,0 +1,628 @@
+{
+  "enabled": true,
+  "feed": "counter_pass",
+  "readable": true,
+  "updated_at": "2026-09-14T12:00:00+00:00",
+  "sessions_stored": 2,
+  "iso_week": "2026-W38",
+  "week_start": "2026-09-14",
+  "comparable": false,
+  "unavailable": "below_coverage_floor",
+  "change_vs_last_week": [
+    {
+      "source": "claude_code",
+      "permille": null,
+      "unavailable": "below_coverage_floor"
+    },
+    {
+      "source": "codex",
+      "permille": null,
+      "unavailable": "below_coverage_floor"
+    }
+  ],
+  "rollup": {
+    "feed": "counter_pass",
+    "week_start": "2026-09-14",
+    "coverage": {
+      "known": 0,
+      "partial": 2,
+      "unknown": 0,
+      "reasons": {
+        "codex_baseline_excluded": 1,
+        "some_turns_unknown": 1
+      }
+    },
+    "undated_sessions": 0,
+    "sources": [
+      {
+        "source": "claude_code",
+        "sessions": 1,
+        "tokens": 37235,
+        "largest_session_tokens": 37235,
+        "cache_share": {
+          "numerator": 24500,
+          "denominator": 37115
+        }
+      },
+      {
+        "source": "codex",
+        "sessions": 1,
+        "tokens": 110,
+        "largest_session_tokens": 110,
+        "cache_share": {
+          "numerator": 40,
+          "denominator": 80
+        }
+      }
+    ],
+    "by_day": [
+      {
+        "date": "2026-09-14",
+        "uncached": 15,
+        "cache_read": 24500,
+        "cache_write": 12600,
+        "output": 120
+      },
+      {
+        "date": "2026-09-15",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-16",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-17",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-18",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-19",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-20",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      }
+    ],
+    "codex_interval_tokens": 110,
+    "by_model": [
+      {
+        "label": "claude-fixture-model",
+        "tokens": 37235
+      }
+    ],
+    "sessions": [
+      {
+        "cache_share": {
+          "numerator": 24500,
+          "denominator": 37115
+        },
+        "source": "claude_code",
+        "tokens": 37235,
+        "state": "partial",
+        "reasons": [
+          "some_turns_unknown"
+        ],
+        "started_at": "2026-09-14T09:00:00+00:00",
+        "routing": {
+          "category": "unobserved",
+          "reasons": [],
+          "tokens": null,
+          "calls": null,
+          "calls_without_counts": null
+        }
+      },
+      {
+        "cache_share": {
+          "numerator": 40,
+          "denominator": 80
+        },
+        "source": "codex",
+        "tokens": 110,
+        "state": "partial",
+        "reasons": [
+          "codex_baseline_excluded"
+        ],
+        "started_at": "2026-09-14T09:00:00+00:00",
+        "routing": {
+          "category": "mixed",
+          "reasons": [],
+          "tokens": {
+            "verified": 110,
+            "routed_unverified": 0,
+            "check_failed": 0,
+            "outside": null,
+            "unrecorded": 0
+          },
+          "calls": 2,
+          "calls_without_counts": 1
+        }
+      }
+    ]
+  },
+  "routing_available": true,
+  "routing_unavailable": null,
+  "overview": {
+    "feed": "counter_pass",
+    "generation": 0,
+    "week_start": "2026-09-14",
+    "week_end": "2026-09-20",
+    "tz": 0,
+    "coverage": {
+      "known": 0,
+      "partial": 2,
+      "unknown": 0,
+      "reasons": {
+        "codex_baseline_excluded": 1,
+        "some_turns_unknown": 1
+      }
+    },
+    "undated_sessions": 0,
+    "sessions": 2,
+    "sources": [
+      {
+        "source": "claude_code",
+        "sessions": 1,
+        "tokens": 37235,
+        "cache_share": {
+          "numerator": 24500,
+          "denominator": 37115,
+          "permille": 660
+        },
+        "largest_session": {
+          "tokens": 37235
+        },
+        "change_permille": null,
+        "change": "below_coverage_floor",
+        "best": null,
+        "best_week": "below_coverage_floor"
+      },
+      {
+        "source": "codex",
+        "sessions": 1,
+        "tokens": 110,
+        "cache_share": {
+          "numerator": 40,
+          "denominator": 80,
+          "permille": 500
+        },
+        "largest_session": {
+          "tokens": 110
+        },
+        "change_permille": null,
+        "change": "below_coverage_floor",
+        "best": null,
+        "best_week": "below_coverage_floor"
+      }
+    ],
+    "by_day": [
+      {
+        "date": "2026-09-14",
+        "uncached": 15,
+        "cache_read": 24500,
+        "cache_write": 12600,
+        "output": 120
+      },
+      {
+        "date": "2026-09-15",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-16",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-17",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-18",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-19",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      },
+      {
+        "date": "2026-09-20",
+        "uncached": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "output": 0
+      }
+    ],
+    "codex_interval_tokens": 110,
+    "by_model": [
+      {
+        "label": "claude-fixture-model",
+        "tokens": 37235
+      }
+    ],
+    "by_tool": [
+      {
+        "source": "claude_code",
+        "tokens": 37235
+      },
+      {
+        "source": "codex",
+        "tokens": 110
+      }
+    ],
+    "by_project": "held_for_project_decision",
+    "weeks": [
+      "2026-09-14"
+    ]
+  },
+  "patterns": {
+    "feed": "counter_pass",
+    "generation": 0,
+    "week_start": "2026-09-14",
+    "week_end": "2026-09-20",
+    "tz": 0,
+    "coverage": {
+      "known": 0,
+      "partial": 2,
+      "unknown": 0,
+      "reasons": {
+        "codex_baseline_excluded": 1,
+        "some_turns_unknown": 1
+      }
+    },
+    "sessions": 2,
+    "claude_sessions": 1,
+    "claude_only": true,
+    "long_context_threshold": 200000,
+    "cards": [
+      {
+        "kind": "repeated_reads",
+        "tokens": 0,
+        "count": 0,
+        "files": 0,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "below_coverage_floor"
+      },
+      {
+        "kind": "retried_calls",
+        "tokens": 0,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "below_coverage_floor"
+      },
+      {
+        "kind": "edit_fail_edit",
+        "tokens": 0,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "estimate_from_result_size",
+        "inferred": true,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "below_coverage_floor"
+      },
+      {
+        "kind": "long_context",
+        "tokens": null,
+        "count": 0,
+        "files": null,
+        "sessions": 0,
+        "basis": "from_counters",
+        "inferred": false,
+        "weeks": [
+          {
+            "week_start": "2026-08-10",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-17",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-24",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-08-31",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-07",
+            "tokens": null
+          },
+          {
+            "week_start": "2026-09-14",
+            "tokens": null
+          }
+        ],
+        "change": null,
+        "change_unavailable": "below_coverage_floor"
+      }
+    ],
+    "reread_files": [],
+    "weeks": [
+      "2026-09-14"
+    ]
+  },
+  "history": [
+    {
+      "week_start": "2026-06-22",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-06-29",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-07-06",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-07-13",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-07-20",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-07-27",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-08-03",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-08-10",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-08-17",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-08-24",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-08-31",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-09-07",
+      "comparable": false,
+      "tokens": {},
+      "cache_share_permille": {},
+      "patterns": {},
+      "sessions": 0,
+      "pattern_counts": {},
+      "reread_files": null,
+      "past_threshold": null
+    },
+    {
+      "week_start": "2026-09-14",
+      "comparable": false,
+      "tokens": {
+        "claude_code": 37235,
+        "codex": 110
+      },
+      "cache_share_permille": {
+        "claude_code": 660,
+        "codex": 500
+      },
+      "patterns": {
+        "repeated_reads": 0,
+        "retried_calls": 0,
+        "edit_fail_edit": 0
+      },
+      "sessions": 2,
+      "pattern_counts": {
+        "repeated_reads": 0,
+        "retried_calls": 0,
+        "edit_fail_edit": 0,
+        "long_context": 0
+      },
+      "reread_files": 0,
+      "past_threshold": null
+    }
+  ],
+  "recap_card_enabled": true
+}

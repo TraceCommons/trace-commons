@@ -50,6 +50,7 @@ pub mod history;
 pub mod inference_connection;
 pub mod inference_map;
 pub mod insights_glance;
+pub(crate) mod insights_route_tally;
 pub mod insights_week;
 pub mod install;
 pub mod ipc;

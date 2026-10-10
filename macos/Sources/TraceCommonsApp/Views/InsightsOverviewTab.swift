@@ -2,6 +2,7 @@ import Charts
 import SwiftUI
 import TCBridge
 import TCDesign
+import TCShellCore
 
 /// Overview ("This week") over one feed at a time: the daemon's counter
 /// pass (feed T) when it sent a week, the saved snapshots (feed S)
@@ -49,6 +50,9 @@ struct InsightsOverviewTab: View {
                     }
                     if let inputs = model.inputs {
                         InsightsCardInputsView(inputs: inputs, snapshots: snapshots, copy: copy)
+                    }
+                    if let sessions = model.counterInputs {
+                        InsightsCounterSessionsView(sessions: sessions, copy: copy)
                     }
                     HStack(alignment: .top, spacing: GlassTokens.Space.s6) {
                         byDay(overview).frame(maxWidth: .infinity)
@@ -170,9 +174,10 @@ struct InsightsOverviewTab: View {
     private func card<Content: View>(_ name: String, _ inputs: String,
                                      @ViewBuilder content: () -> Content) -> some View {
         // A second press on the open card closes its drill-down. Feed T
-        // rows carry no session reference, so only the saved week drills.
+        // rows carry no session reference the core could look up, so under
+        // feed T only the Sessions card drills, from the daemon's rows.
         Button {
-            if model.inputs?.card == inputs { model.hideInputs() } else { model.showInputs(inputs) }
+            if model.openCard == inputs { model.hideInputs() } else { model.showInputs(inputs) }
         } label: {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 Text(text(name)).insightsNote()
@@ -182,7 +187,7 @@ struct InsightsOverviewTab: View {
             .insightsRowCard()
         }
         .buttonStyle(GlassPressStyle())
-        .disabled(model.counter != nil)
+        .disabled(!model.drills(inputs))
         .accessibilityHint(text("analytics_drill_title"))
     }
 
@@ -362,6 +367,79 @@ struct InsightsShareBar: View {
         }
         .frame(height: 6)
         .accessibilityHidden(true)
+    }
+}
+
+/// Feed T's "What makes up this number" for the Sessions card: each counted
+/// session by its first event and harness, its transcript tokens and
+/// coverage, and, while the daemon sends a route, where its calls went in
+/// proxy tokens. The two counts sit side by side and are never added
+/// together or reconciled; an unknown figure is the dash.
+struct InsightsCounterSessionsView: View {
+    let sessions: InsightsCounterSessions
+    let copy: [String: String]
+
+    private func text(_ key: String) -> String { copy[key] ?? "" }
+    private var routed: Bool { sessions.column == .shown }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            Text(text("analytics_drill_title")).insightsHeading()
+            GlassTableHead {
+                HStack {
+                    Text(text("analytics_drill_session")).frame(maxWidth: .infinity, alignment: .leading)
+                    Text(text("analytics_drill_tokens")).frame(width: 90, alignment: .trailing)
+                    Text(text("analytics_drill_coverage")).frame(width: 90, alignment: .leading)
+                    Text(text("analytics_drill_reason")).frame(maxWidth: .infinity, alignment: .leading)
+                    if routed {
+                        Text(text("analytics_drill_private")).frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            ForEach(sessions.rows) { row in
+                GlassTableRow {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading) {
+                            Text(InsightsOverviewWords.harness(row.session.source, copy: copy))
+                            Text(InsightsSessionsWords.counterLabel(row.session, copy: copy))
+                                .insightsCaption().lineLimit(1).truncationMode(.tail)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(InsightsOverviewWords.figure(row.session.tokens.flatMap { UInt64(exactly: $0) },
+                                                          copy: copy))
+                            .insightsMono().frame(width: 90, alignment: .trailing)
+                        Text(InsightsOverviewWords.state(row.session.state, copy: copy))
+                            .frame(width: 90, alignment: .leading)
+                        Text(row.session.reasons.map { InsightsOverviewWords.reason($0, copy: copy) }
+                            .joined(separator: " \u{b7} "))
+                            .insightsCaption().frame(maxWidth: .infinity, alignment: .leading)
+                        if routed { route(row.session.routing) }
+                    }
+                }
+            }
+            if routed {
+                Text(text("analytics_route_measure_note")).insightsCaption()
+            }
+            if let line = InsightsRouteWords.feedOffLine(sessions.column, copy: copy) {
+                Text(line).insightsCaption()
+            }
+        }
+        .textSelection(.enabled)
+        .insightsCard()
+    }
+
+    /// The category's word, then its split in proxy tokens and qualifiers.
+    private func route(_ routing: DaemonData.InsightsWeekRouting?) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s2) {
+            Text(InsightsRouteWords.category(routing, copy: copy))
+            if let split = InsightsRouteWords.split(routing, copy: copy) {
+                Text(split).insightsCaption()
+            }
+            ForEach(InsightsRouteWords.reasons(routing, copy: copy), id: \.self) { reason in
+                Text(reason).insightsCaption()
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

@@ -21,7 +21,7 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// How far back a refresh asks for. Generous relative to the daemon's cadence
 /// so a missed tick overlaps rather than gaps.
-const REFRESH_WINDOW_HOURS: i64 = 24;
+pub(crate) const REFRESH_WINDOW_HOURS: i64 = 24;
 
 /// Rows requested per page.
 const PAGE_LIMIT: usize = 1000;

@@ -1969,6 +1969,12 @@ extension DaemonData {
         public let history: CoreJSON?
         /// `insights_recap_card_enabled`, passed to `comparisons`.
         public let recapCardEnabled: Bool?
+        /// Whether `rollup.sessions[]` rows carry `routing`. Absent from a
+        /// daemon that predates it, which is read as false: no route drawn.
+        public let routingAvailable: Bool?
+        /// Why not, while `routingAvailable` is false: `ledger_feed_off`
+        /// (the contributor turned the ledger feed off) or `no_ledger`.
+        public let routingUnavailable: String?
 
         /// Enabled, readable, from the counter pass, and carrying a rollup and
         /// the core's Overview for it.
@@ -1985,6 +1991,8 @@ extension DaemonData {
             case isoWeek = "iso_week"
             case weekStart = "week_start"
             case changeVsLastWeek = "change_vs_last_week"
+            case routingAvailable = "routing_available"
+            case routingUnavailable = "routing_unavailable"
         }
     }
 
@@ -2162,10 +2170,58 @@ extension DaemonData {
         public let tokens: Int64
     }
 
+    /// One counted session. No reference to it crosses: no id, digest or
+    /// path.
     public struct InsightsWeekSession: Codable, Equatable, Sendable {
         public let source: String?
+        /// The transcript's count; `nil` is unknown, never zero.
         public let tokens: Int64?
         public let state: String
         public let reasons: [String]
+        /// The transcript's first recorded event, RFC 3339; `nil` when it
+        /// has none, or from a daemon that predates it.
+        public let startedAt: String?
+        /// Where its calls went, from the proxy's record; `nil` while
+        /// `routingAvailable` is not true.
+        public let routing: InsightsWeekRouting?
+
+        public enum CodingKeys: String, CodingKey {
+            case source, tokens, state, reasons, routing
+            case startedAt = "started_at"
+        }
+    }
+
+    /// A session's route. `category` is `unobserved`, `unrecorded`,
+    /// `outside`, `mixed`, `check_failed`, `routed_verified` or
+    /// `routed_unverified`; only `routed_verified` is proof. `unobserved`
+    /// (no proxy record) carries every figure `nil`. The tokens are the
+    /// proxy's own per-call count, never the transcript's.
+    public struct InsightsWeekRouting: Codable, Equatable, Sendable {
+        public let category: String
+        public let reasons: [String]?
+        public let tokens: InsightsWeekRouteTokens?
+        public let calls: Int64?
+        public let callsWithoutCounts: Int64?
+
+        public enum CodingKeys: String, CodingKey {
+            case category, reasons, tokens, calls
+            case callsWithoutCounts = "calls_without_counts"
+        }
+    }
+
+    /// Proxy tokens per bucket. A bucket holding any call with unknown
+    /// counters is `nil`, never zero; a bucket with no calls is a true 0.
+    public struct InsightsWeekRouteTokens: Codable, Equatable, Sendable {
+        public let verified: Int64?
+        public let routedUnverified: Int64?
+        public let checkFailed: Int64?
+        public let outside: Int64?
+        public let unrecorded: Int64?
+
+        public enum CodingKeys: String, CodingKey {
+            case verified, outside, unrecorded
+            case routedUnverified = "routed_unverified"
+            case checkFailed = "check_failed"
+        }
     }
 }

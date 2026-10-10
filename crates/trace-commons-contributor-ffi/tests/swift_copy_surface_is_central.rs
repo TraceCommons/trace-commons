@@ -1095,6 +1095,17 @@ const SURFACES: &[(&str, &str, &str, &str, &str)] = &[
         "TCBridge/TCInsights.swift",
         "tc_insights_call",
     ),
+    // Feed T's Sessions drill-down words where each counted session's calls
+    // went (`InsightsRouteWords`) with the daemon's route figures; the words
+    // are the core's analytics copy, read through the model's
+    // `tc_insights_call`.
+    (
+        "Insights session route words",
+        "TraceCommonsApp/Views/InsightsOverviewTab.swift",
+        "InsightsRouteWords.",
+        "TCBridge/TCInsights.swift",
+        "tc_insights_call",
+    ),
     // The Patterns tab fills the core's analytics words with the core's
     // pattern figures (`InsightsPatternsWords`), read through the model's
     // `tc_insights_call`.

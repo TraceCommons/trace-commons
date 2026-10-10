@@ -612,6 +612,11 @@ final class InsightsOverviewModel {
     /// the only week shown; the saved week is never mixed in.
     private(set) var counter: InsightsWeekOverview?
     private(set) var inputs: InsightsCardInputs?
+    /// Feed T's counted sessions, held for the Sessions card's drill-down.
+    private var counterSessions: InsightsCounterSessions?
+    /// Feed T's Sessions drill-down while it is open: the daemon's rows, not
+    /// the core's, since they carry no reference the core could look up.
+    private(set) var counterInputs: InsightsCounterSessions?
     /// The week asked for; `nil` is the current week.
     private(set) var requestedWeek: String?
 
@@ -623,33 +628,51 @@ final class InsightsOverviewModel {
     /// The week on screen: feed T when the daemon sent one, feed S otherwise.
     var shown: InsightsWeekOverview? { counter ?? overview }
 
-    /// Show the daemon's week, or `nil` to go back to the saved week. The
-    /// saved week's drill-down closes either way.
-    func showCounter(_ week: InsightsWeekOverview?) {
-        counter = week; inputs = nil
+    /// Show the daemon's week and its counted sessions, or `nil` to go back
+    /// to the saved week. Any open drill-down closes either way.
+    func showCounter(_ week: InsightsWeekOverview?, sessions: InsightsCounterSessions? = nil) {
+        counter = week; counterSessions = week == nil ? nil : sessions
+        inputs = nil; counterInputs = nil
     }
 
+    /// Whether `card` opens a drill-down in the week on screen. Under feed T
+    /// only the Sessions card does, from the daemon's own rows.
+    func drills(_ card: String) -> Bool {
+        counter == nil || (card == "sessions" && counterSessions != nil)
+    }
+
+    /// The card whose drill-down is open, either feed's.
+    var openCard: String? { inputs?.card ?? (counterInputs == nil ? nil : "sessions") }
+
     func open() { active = true; load() }
-    func close() { active = false; token = UUID(); task?.cancel(); task = nil; busy = false; inputs = nil }
+    func close() {
+        active = false; token = UUID(); task?.cancel(); task = nil; busy = false
+        inputs = nil; counterInputs = nil
+    }
     func reload() { load() }
     func selectWeek(_ weekStart: String) { requestedWeek = weekStart; load() }
 
     /// Read the drill-down for `card` (`tokens`, `cache_share` or `sessions`)
     /// in the week on screen.
     func showInputs(_ card: String) {
-        // Feed T rows carry no session reference, so only the saved week
-        // drills down.
-        guard active, counter == nil, let week = overview?.week_start else { return }
+        // Feed T rows carry no session reference the core could look up, so
+        // under feed T only the Sessions card drills, from the daemon's rows.
+        guard active else { return }
+        if counter != nil {
+            if card == "sessions", let counterSessions { counterInputs = counterSessions }
+            return
+        }
+        guard let week = overview?.week_start else { return }
         run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
             guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
             model.inputs = inputs
         }
     }
-    func hideInputs() { inputs = nil }
+    func hideInputs() { inputs = nil; counterInputs = nil }
 
     private func load() {
         guard active else { return }
-        inputs = nil
+        inputs = nil; counterInputs = nil
         run(.init("week_overview", weekStart: requestedWeek, tz: Self.offset)) { model, response in
             guard let overview = response.overview else { throw InsightsError.invalidResponse }
             model.overview = overview
@@ -794,6 +817,97 @@ enum InsightsOverviewWords {
         }
         let style = Date.FormatStyle(timeZone: TimeZone(secondsFromGMT: 0) ?? .current).month(.abbreviated).day()
         return first.formatted(style) + " \u{2013} " + last.formatted(style)
+    }
+}
+
+/// Feed T's counted sessions for the Sessions card's drill-down: the
+/// daemon's rows in its order, and whether their route column is drawn.
+/// The rows carry no reference to their sessions, so a row is known by its
+/// place.
+struct InsightsCounterSessions: Equatable, Sendable {
+    struct Row: Identifiable, Equatable, Sendable {
+        let id: Int
+        let session: DaemonData.InsightsWeekSession
+    }
+
+    let rows: [Row]
+    let column: InsightsRouteWords.Column
+
+    /// `nil` for an answer with no rollup.
+    init?(week: DaemonData.InsightsWeek) {
+        guard let sessions = week.rollup?.sessions else { return nil }
+        rows = sessions.enumerated().map { Row(id: $0.offset, session: $0.element) }
+        column = InsightsRouteWords.column(week)
+    }
+}
+
+/// Where a counted session's calls went, in the core's words. Every label
+/// comes from the proxy's proof, never from a backend's name; only
+/// verified proof reads as verified, and no proxy record is never "not
+/// private". The tokens here are the proxy's per-call count, drawn beside
+/// the transcript's and never added to it.
+enum InsightsRouteWords {
+    /// The Private AI column: drawn, replaced by the feed-off line, or left
+    /// out with nothing said.
+    enum Column: Equatable, Sendable { case shown, feedOff, hidden }
+
+    private static func text(_ key: String, _ copy: [String: String]) -> String { copy[key] ?? "" }
+    private static func dash(_ copy: [String: String]) -> String { text("analytics_unavailable", copy) }
+
+    /// Drawn only when the daemon says the rows carry a route. The feed
+    /// turned off in Settings gets its line; no proxy ledger, an older
+    /// daemon, or a reason this build does not know draw nothing.
+    static func column(_ week: DaemonData.InsightsWeek) -> Column {
+        if week.routingAvailable == true { return .shown }
+        return week.routingUnavailable == "ledger_feed_off" ? .feedOff : .hidden
+    }
+
+    /// The one line shown in place of the column while the feed is off.
+    static func feedOffLine(_ column: Column, copy: [String: String]) -> String? {
+        column == .feedOff ? text("analytics_route_feed_off", copy) : nil
+    }
+
+    /// The category's word; the dash for a missing route or a category this
+    /// build does not know, so nothing is claimed for it.
+    static func category(_ routing: DaemonData.InsightsWeekRouting?, copy: [String: String]) -> String {
+        let key: String
+        switch routing?.category {
+        case "unobserved": key = "analytics_route_unobserved"
+        case "unrecorded": key = "analytics_route_unrecorded"
+        case "outside": key = "analytics_route_outside"
+        case "mixed": key = "analytics_route_mixed"
+        case "check_failed": key = "analytics_route_check_failed"
+        case "routed_verified": key = "analytics_route_verified"
+        case "routed_unverified": key = "analytics_route_unverified"
+        default: return dash(copy)
+        }
+        return text(key, copy)
+    }
+
+    /// The route's qualifiers that have words; one this build does not
+    /// know is left out rather than shown as its wire label.
+    static func reasons(_ routing: DaemonData.InsightsWeekRouting?, copy: [String: String]) -> [String] {
+        (routing?.reasons ?? []).compactMap { reason in
+            reason == "some_calls_unrecorded" ? text("analytics_reason_" + reason, copy) : nil
+        }
+    }
+
+    /// The split in proxy tokens, each bucket the daemon's figure or the
+    /// dash. `nil` with no figures (no proxy record), and while the
+    /// failed-check bucket holds tokens or an unknown number of them: the
+    /// line has no place for that bucket, and without it the line would
+    /// read as if nothing went there.
+    static func split(_ routing: DaemonData.InsightsWeekRouting?, copy: [String: String]) -> String? {
+        guard let tokens = routing?.tokens, tokens.checkFailed == 0 else { return nil }
+        let figure = { (value: Int64?) in
+            InsightsOverviewWords.figure(value.flatMap { UInt64(exactly: $0) }, copy: copy)
+        }
+        return InsightsOverviewWords.fill(text("analytics_route_split", copy), [
+            "v": figure(tokens.verified),
+            "u": figure(tokens.routedUnverified),
+            "o": figure(tokens.outside),
+            "n": figure(tokens.unrecorded),
+        ])
     }
 }
 
@@ -1065,9 +1179,26 @@ enum InsightsSessionsWords {
     static func label(_ insight: LocalInsight, tokens: UInt64? = nil, copy: [String: String],
                       timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT()) ?? .current)
         -> String {
-        let harness = InsightsOverviewWords.harness(insight.source_format, copy: copy)
+        label(first: firstEvent(insight), source: insight.source_format, tokens: tokens, copy: copy,
+              timeZone: timeZone)
+    }
+
+    /// A counted session's label (feed T), from the daemon's row: its first
+    /// event, harness and transcript tokens. The row carries no reference,
+    /// so this is all that tells two sessions apart.
+    static func counterLabel(_ row: DaemonData.InsightsWeekSession, copy: [String: String],
+                             timeZone: TimeZone = TimeZone(secondsFromGMT: TimeZone.current.secondsFromGMT())
+                                ?? .current) -> String {
+        let first = row.startedAt.flatMap(parseEvent)
+        return label(first: first, source: row.source, tokens: row.tokens.flatMap { UInt64(exactly: $0) },
+                     copy: copy, timeZone: timeZone)
+    }
+
+    private static func label(first: Date?, source: String?, tokens: UInt64?, copy: [String: String],
+                              timeZone: TimeZone) -> String {
+        let harness = InsightsOverviewWords.harness(source, copy: copy)
         let figure = InsightsOverviewWords.figure(tokens, copy: copy)
-        guard let first = firstEvent(insight) else {
+        guard let first else {
             return InsightsOverviewWords.fill(text("analytics_session_label_undated", copy),
                                               ["harness": harness, "t": figure])
         }
@@ -1083,7 +1214,11 @@ enum InsightsSessionsWords {
     /// fractional seconds; the tests pin that both read.
     private static func firstEvent(_ insight: LocalInsight) -> Date? {
         guard let wire = insight.time_evidence?.earliest?.recorded_at else { return nil }
-        return try? Date(wire, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
+        return parseEvent(wire)
+    }
+
+    private static func parseEvent(_ wire: String) -> Date? {
+        try? Date(wire, strategy: Date.ISO8601FormatStyle(includingFractionalSeconds: true))
     }
 
     /// The session picker: each saved session by its label, valued by its ID.

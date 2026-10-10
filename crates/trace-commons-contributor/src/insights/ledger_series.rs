@@ -242,6 +242,21 @@ fn count(recorded: Option<i64>) -> Option<u32> {
     u32::try_from(recorded?).ok()
 }
 
+/// One call's tokens as a single figure: uncached input, cache reads, cache
+/// writes and output, normalized per facade as above, so OpenAI's cached
+/// input is not counted twice. `None` when any part is unknown, never a
+/// partial sum. For the route tally `daemon::insights_route_tally` keeps.
+#[must_use]
+pub(crate) fn call_tokens(row: &RoutedExchange) -> Option<u64> {
+    let counters = normalized_counters(row);
+    Some(
+        u64::from(counters.uncached_input?)
+            + u64::from(counters.cache_read?)
+            + u64::from(counters.cache_write?)
+            + u64::from(counters.output?),
+    )
+}
+
 fn normalized_counters(row: &RoutedExchange) -> Counters {
     let unknown = Counters {
         uncached_input: None,

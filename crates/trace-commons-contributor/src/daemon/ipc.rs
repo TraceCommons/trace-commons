@@ -2062,6 +2062,11 @@ impl DaemonShared {
             return;
         };
         ledger.refresh().await;
+        // The route tallies, from the snapshot the refresh above committed.
+        // Not from `take_added_rows`: that baselines after a restart and
+        // hands out nothing for the window, so calls would go uncounted.
+        // Off unless the ledger feed and the counter pass are both on.
+        super::insights_week::fold_ledger_after_refresh(self, ledger.as_ref());
         // Once per row this tick read that no earlier tick had. Reads only
         // the snapshot the refresh above committed; never a second fetch.
         let added = ledger.take_added_rows();
