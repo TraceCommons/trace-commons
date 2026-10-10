@@ -1979,8 +1979,9 @@ answers `404` when no pipeline runtime is injected:
   `409` means another reviewer holds a live claim.
 - `POST /v1/review/pipeline/runs/{run_id}/assessment` records the
   reviewer's `approve` or `reject` for the claim's `lease_token`, with a
-  reason label. An approval must list in `resolved_quarantine_reasons` every
-  hold that applies: the Admission reason (for a privacy quarantine,
+  reason label in `reason`: 1 to 64 characters of lowercase letters, digits
+  and `_`. Free text is refused with `422` (`invalid reason code`). An
+  approval must list in `resolved_quarantine_reasons` every hold that applies: the Admission reason (for a privacy quarantine,
   `privacy_review_required`), if Admission quarantined the run, and
   `privacy_pass_review_required`, if the privacy pass escalated it. An
   approval that leaves one out is refused with `422`
