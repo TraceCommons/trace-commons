@@ -76,7 +76,7 @@ final class NudgeSettingsStore {
         await write { try await NudgeSettings.write(id, on: on, through: $0) }
     }
 
-    /// A one-time offer. Turn on writes the kind on, which also ends the
+    /// A one-time offer. Enable writes the kind on, which also ends the
     /// offer; No thanks clears the offer's marker and changes nothing else.
     /// Answers whether the daemon took the write.
     @discardableResult
@@ -92,7 +92,7 @@ final class NudgeSettingsStore {
         return taken
     }
 
-    /// Turn on, then `prompt` -- the system's permission prompt -- only if
+    /// Enable, then `prompt` -- the system's permission prompt -- only if
     /// the daemon took the write: a refused one leaves the kind off, and a
     /// prompt for it would ask permission for nothing. Answers whether the
     /// write was taken.
@@ -195,7 +195,7 @@ struct NudgeSettingsSection: View {
     }
 }
 
-/// One one-time offer: the core's sentence and its two answers. Turn on
+/// One one-time offer: the core's sentence and its two answers. Enable
 /// asks for the system's permission afterwards, only once the daemon took
 /// the write.
 struct NudgeOfferCard: View {
