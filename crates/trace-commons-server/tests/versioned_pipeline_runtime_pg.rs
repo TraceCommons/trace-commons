@@ -47033,6 +47033,95 @@ async fn admission_quarantine_not_escalated_parks_as_today() {
     assert_eq!(reviewed.next_phase, Some(Phase::Score));
 }
 
+/// Task 5 (`load_privacy_pass_bytes`): a run whose pass is recorded reads
+/// the pass object back and checks it against the recorded
+/// `privacy_pass_content_hash`. A mismatch is `artifact_integrity_failed`:
+/// Review never reads bytes the pass did not record, writes no approved
+/// object and no review outcome, and does not call the classifier again.
+#[tokio::test]
+async fn a_recorded_pass_whose_bytes_do_not_match_its_hash_is_an_integrity_failure() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), None);
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_at_risk(&service, "pass-hash-mismatch", ResidualPiiRisk::Medium).await;
+    let parked = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and the policy");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(
+        parked.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    assert_eq!(boundary.calls(), 1);
+
+    let other_hash = sha256_prefixed(b"not the recorded pass object");
+    assert_ne!(
+        parked.privacy_pass_content_hash.as_deref(),
+        Some(other_hash.as_str())
+    );
+    let mut owner = owner_client().await;
+    let tx = owner_tenant_tx(&mut owner, &tenant).await;
+    let updated = tx
+        .execute(
+            "UPDATE pipeline_runs SET privacy_pass_content_hash = $3
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id, &other_hash],
+        )
+        .await
+        .expect("rewrite the recorded pass hash");
+    assert_eq!(updated, 1);
+    tx.commit().await.unwrap();
+
+    let claim = claim_for_review(&service, &tenant, created.run_id, '9').await;
+    let admission_reason = ReasonCode::new("privacy_review_required").unwrap();
+    service
+        .store()
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            admission_reason.clone(),
+            vec![admission_reason],
+        )
+        .await
+        .expect("resolving Admission's reason is accepted");
+    let refused = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs after the approval");
+    assert_eq!(
+        (
+            refused.state,
+            refused.last_error_label.as_deref(),
+            refused.next_phase
+        ),
+        (
+            PipelineRunState::Retry,
+            Some(PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL),
+            Some(Phase::Review)
+        ),
+        "{refused:?}"
+    );
+    assert!(refused.approved_object_ref_id.is_none(), "{refused:?}");
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        0
+    );
+    assert_eq!(boundary.calls(), 1, "a recorded pass is never re-run");
+}
+
 /// The submission row's stored `privacy_risk`.
 async fn stored_privacy_risk(
     backend: &PgBackend,
