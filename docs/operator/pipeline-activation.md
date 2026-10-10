@@ -1743,7 +1743,7 @@ out of it, and it runs whatever the bundle's Review policy does.
    neither the run's attempt count nor its phase. When the pass escalates a
    run Admission admitted, the same transaction moves the submission's
    status from `received` to `quarantined`, as `main`'s PII backstop
-   quarantines a trace it holds for a human (#1326); `main`'s review counts
+   quarantines a trace it holds for a human (#1332); `main`'s review counts
    (`review_sla`, `urgent_reviews`) then count the hold, as they count a run
    Admission quarantined. A `cleared` pass leaves the status as it is.
 4. Hand off. The Review policy gets the output's bytes as its source
@@ -2022,7 +2022,7 @@ for a run that ends with `privacy_classification_failed` (status
 `quarantined`, that reason). The transaction that records an escalated pass,
 and the one that ends the run, set the marker. The transaction that records
 an escalated pass also moves the stored status of an admitted run from
-`received` to `quarantined` (#1326), so the hold event and the stored status
+`received` to `quarantined` (#1332), so the hold event and the stored status
 agree. A run that ends with `privacy_classification_failed` keeps the stored
 status `received`. The pass clears the marker once each event of the run
 exists. The time of an event is the time of the append. A decision from
@@ -2761,7 +2761,7 @@ pipeline block (`processing_state`). The mapping:
 | Submission status in `trace_submissions` | Run | `status` |
 |---|---|---|
 | `accepted`, `rejected`, `revoked`, `expired`, `purged`, `quarantined` | any | the same value |
-| `received` (Review has not decided) | Admission quarantined it, or it waits for a human review (the privacy pass escalated it; a pass recorded by a build from before #1326 left the row `received`, a newer one stores `quarantined`) | `quarantined` |
+| `received` (Review has not decided) | Admission quarantined it, or it waits for a human review (the privacy pass escalated it; a pass recorded by a build from before #1332 left the row `received`, a newer one stores `quarantined`) | `quarantined` |
 | `received` | Admission rejected it | `rejected` |
 | `received` | failed with `privacy_classification_failed` (its content was never classified) | `quarantined` |
 | `received` | any other state: waiting for its privacy pass, or failed for another reason | `accepted` |
@@ -2982,9 +2982,11 @@ submissions out of its vector counts and its `missing_active_vectors` gate.
 Its submission counts and review counts include a pipeline submission only
 when its stored status is one that `main` reads. A run that Admission
 quarantined is counted, and so is a run that the privacy pass holds (the
-pass stores `quarantined`, #1326). A run that failed with
+pass stores `quarantined`, #1332). A run that failed with
 `privacy_classification_failed` keeps the stored status `received` and is
 in no count of `main`: read `work` in the pipeline operational summary.
+`GET /v1/review/pipeline/quarantine` lists the runs that wait for a
+human assessment, a held run included.
 `main`'s benchmark export, its two ranker exports, its ranking-feature run
 and its process-evaluation worker leave pipeline submissions out. The
 process-evaluation job route

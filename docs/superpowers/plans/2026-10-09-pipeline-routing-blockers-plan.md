@@ -33,7 +33,7 @@ The 11 tasks below are done as written. Then `main` moved by 9 commits, after th
 
 Known limits that this merge adds (they are also in the list "Known limits"):
 
-- A run that the privacy pass holds, or that fails with `privacy_classification_failed`, keeps the stored status `received`, so `main`'s `review_sla` and `urgent_reviews` do not count it. The pipeline review queue lists it.
+- A run that fails with `privacy_classification_failed` keeps the stored status `received`, so `main`'s `review_sla` and `urgent_reviews` do not count it; the `work` list of the pipeline operational summary shows it. A run that the privacy pass holds is `quarantined` since #1332, which `main` counts, and the pipeline review queue lists it (update of 2026-10-10).
 
 ## Update of 2026-10-10: the review of #1331 and `main` at `4f22b6d8`
 
@@ -102,7 +102,7 @@ Each question has a recommendation. The plan is written for the recommended answ
 - A pipeline payout audit row whose append fails is lost (as on `main`).
 - Each append of the review audit pass and of the payout step reads the tenant's whole file audit log (`append_audit_event_mirrored` reads its last event three times: the time stamp, the chain and the write check), as each append of `main` and of the credit pass does. The one read per pass of the credit pass (`credit_audit_events_in_file`) is a different read: it finds file-only events by id when the mirror is not required, and neither of these needs one: the review audit pass runs only with a required mirror and finds each event by its database row, and the payout step appends a new event with no lookup. A cheaper append is a change to `main`'s shared append path, not to these passes, and is not made here (review of #1331, finding m3).
 - L4-7: a follow-up that is lost to a process stop, for a withdrawal with no source session and a run with no index work and no export item, is not found by the recovery pass. The reconciler covers a version that has a source session.
-- A pipeline submission that Admission quarantined has the stored status `quarantined`, so `main`'s operational summary counts it in `review_sla` and, when it is old, in the gate `urgent_reviews`. The count is true, and the pipeline review routes clear it. #1185 does not name it, and this plan does not change it. Since #1324 a run that the privacy pass holds keeps the stored status `received` and is in no count of `main` (update of 2026-10-10).
+- A pipeline submission that Admission quarantined has the stored status `quarantined`, so `main`'s operational summary counts it in `review_sla` and, when it is old, in the gate `urgent_reviews`. The count is true, and the pipeline review routes clear it. #1185 does not name it, and this plan does not change it. A run that the privacy pass holds is `quarantined` since #1332 and is counted the same way; only a run that fails with `privacy_classification_failed` keeps the stored status `received` and is in no count of `main` (update of 2026-10-10).
 
 ---
 

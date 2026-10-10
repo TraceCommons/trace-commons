@@ -15084,7 +15084,15 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
     assert_audit_verification_is_clean(&fixture).await;
 
     // The hold event says `quarantined`, as the stored status does since
-    // #1326: `main`'s reconciliation reports no audit gap for it.
+    // #1332 (the escalated pass moved the admitted row from `received`):
+    // `main`'s reconciliation reports no audit gap for it.
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Quarantined);
     let caller = fixture
         .state
         .tokens
@@ -15108,7 +15116,7 @@ async fn the_worker_appends_one_audit_event_for_a_privacy_pass_hold() {
     assert!(report.db_audit_submission_metadata_mismatches.is_empty());
 }
 
-/// The whole sequence of a held run, possible since #1326: the privacy pass
+/// The whole sequence of a held run, possible since #1332: the privacy pass
 /// escalates an admitted run, a reviewer rejects it, and the server commits
 /// the rejection. The submission's audit events are, in order, the receipt's
 /// `submitted`, the hold (`quarantined`), the reviewer's `review_decision`
