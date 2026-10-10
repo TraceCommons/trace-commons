@@ -46044,8 +46044,9 @@ async fn quarantine_exhausted_pii_backstop(
 /// Re-redact a single held submission through the NEAR AI prose PII filter and,
 /// on success, release the hold. Loads the record + envelope, runs
 /// `rescrub_envelope_prose_pii_with`, then re-stores the rescrubbed envelope,
-/// updates the record's object pointers, mirrors a `RescrubbedEnvelope` object
-/// ref, and transitions the submission to `Accepted`/`Quarantined` based on the
+/// updates the record's object pointers, redaction counts and privacy risk,
+/// mirrors a `RescrubbedEnvelope` object ref, rebuilds the derived record from
+/// the rescrubbed envelope (DB and file), and transitions the submission to `Accepted`/`Quarantined` based on the
 /// POST-backstop residual PII risk. Any error propagates to the caller, which
 /// bumps the attempt counter and leaves the submission on
 /// `AwaitingPiiBackstop`.
@@ -46070,6 +46071,11 @@ async fn process_one_pii_backstop(
     let residual_risk_basis =
         rescrub_envelope_prose_pii_with(adapter, &mut envelope, classify_policy).await?;
     record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
+    // Written in the same breath as the basis, as the operator rescrub does:
+    // the submission row must record what THIS pass found, not the submit-time
+    // counts and risk the classifier has just superseded.
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
 
     // Status is chosen from the POST-backstop residual risk: a filter that
     // still leaves Medium/High risk re-quarantines rather than accepts.
@@ -46077,6 +46083,23 @@ async fn process_one_pii_backstop(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+
+    // Rebuild the derived duplicate-precheck record from the RESCRUBBED
+    // envelope. The one written at submit was built from the pre-backstop
+    // envelope, and its `canonical_summary` copies the first events'
+    // `redacted_content` verbatim -- the very prose PII this pass removed.
+    // Once the hold is released that row is consumer-visible (exports,
+    // reviewer views, the vector worker's embedding input), so it must be
+    // replaced while the submission is still held. The envelope's own
+    // embedding metadata is refreshed to match, as submit does.
+    let existing_derived = read_all_derived_records(&state.root, &item.tenant_id)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != item.submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    apply_embedding_precheck(&mut envelope, &derived_precheck);
+    let derived_record =
+        build_derived_record(&item.tenant_id, target_status, &envelope, derived_precheck);
 
     let stored = store_envelope(
         state,
@@ -46120,10 +46143,7 @@ async fn process_one_pii_backstop(
         db.upsert_trace_submission(storage_submission_write_from_record(
             &record,
             &envelope,
-            envelope
-                .embedding_analysis
-                .as_ref()
-                .map(|analysis| analysis.canonical_summary_hash.clone()),
+            Some(derived_record.canonical_summary_hash.clone()),
         )?)
         .await
         .context("failed to mirror rescrubbed trace submission metadata")?;
@@ -46145,9 +46165,31 @@ async fn process_one_pii_backstop(
             object_ref.object_store.clone(),
             object_ref.object_key.clone(),
         ));
+        let rescrubbed_ref_id = object_ref.object_ref_id;
+        let rescrubbed_content_sha256 = object_ref.content_sha256.clone();
         db.append_trace_object_ref(object_ref)
             .await
             .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 2b: replace the derived record built from the pre-backstop
+        // envelope, in the DB and then on disk, still BEFORE any status
+        // release. Its input is the rescrubbed ref just written (the store
+        // checks the ref belongs to this submission, so this follows step 2).
+        // A failure here propagates like any other step: the hold is not
+        // released and the next tick retries. A rebuilt row left behind by a
+        // later failure is harmless -- it holds only the rescrubbed summary,
+        // and the retry rewrites it.
+        db.append_trace_derived_record(storage_precheck_derived_write(
+            &record,
+            &derived_record,
+            &envelope,
+            rescrubbed_ref_id,
+            rescrubbed_content_sha256,
+        )?)
+        .await
+        .context("failed to mirror rebuilt trace derived record")?;
+        write_derived_record(&state.root, &derived_record)
+            .context("failed to write rebuilt trace derived record")?;
 
         // Step 3: now flip the on-disk record and release the DB hold. The file
         // record's object_key was already repointed to the rescrubbed artifact
@@ -64418,6 +64460,58 @@ async fn mirror_submission_to_db(
     .await
 }
 
+/// The duplicate-precheck `trace_derived_records` row for one submission.
+///
+/// One `derived_id` per submission (`deterministic_trace_uuid("derived-precheck",
+/// ..)`), so every writer -- submit, operator rescrub, the PII backstop and its
+/// remediation pass -- replaces the same row through the store's
+/// `ON CONFLICT (tenant_id, derived_id) DO UPDATE` rather than adding a second
+/// one beside a stale one. `input_object_ref_id` / `input_hash` name the
+/// envelope artifact the summary was built from.
+fn storage_precheck_derived_write(
+    record: &TraceCommonsSubmissionRecord,
+    derived_record: &TraceCommonsDerivedRecord,
+    envelope: &TraceContributionEnvelope,
+    input_object_ref_id: Uuid,
+    input_hash: String,
+) -> anyhow::Result<StorageTraceDerivedRecordWrite> {
+    Ok(StorageTraceDerivedRecordWrite {
+        derived_id: deterministic_trace_uuid("derived-precheck", record),
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: storage_derived_status(record.status),
+        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+        worker_version: "trace_commons_ingest_v1".to_string(),
+        input_object_ref: Some(
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id: input_object_ref_id,
+            },
+        ),
+        input_hash,
+        output_object_ref: None,
+        canonical_summary: Some(derived_record.canonical_summary.clone()),
+        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
+        summary_model: derived_record.summary_model.clone(),
+        task_success: Some(derived_record.task_success.clone()),
+        privacy_risk: Some(serde_storage_string(&record.privacy_risk)?),
+        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
+        tool_sequence: derived_record.tool_sequence.clone(),
+        tool_categories: derived_record.tool_categories.clone(),
+        coverage_tags: derived_record.coverage_tags.clone(),
+        duplicate_score: Some(derived_record.duplicate_score),
+        novelty_score: Some(derived_record.novelty_score),
+        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
+            analysis
+                .cluster_id
+                .clone()
+                .or_else(|| analysis.nearest_cluster_id.clone())
+        }),
+    })
+}
+
 /// Mirrors a submission's rows. The audit event for the write is appended
 /// separately, through [`append_audit_event_mirrored`].
 async fn mirror_submission_to_db_with_options(
@@ -64440,8 +64534,6 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
-    let derived_id = deterministic_trace_uuid("derived-precheck", record);
-    let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
         .contributor
         .credit_account_ref
@@ -64482,41 +64574,13 @@ async fn mirror_submission_to_db_with_options(
         .await
         .context("failed to mirror trace object ref")?;
 
-    db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
-        derived_id,
-        tenant_id: record.tenant_id.clone(),
-        submission_id: record.submission_id,
-        trace_id: record.trace_id,
-        status: storage_derived_status(record.status),
-        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
-        worker_version: "trace_commons_ingest_v1".to_string(),
-        input_object_ref: Some(
-            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
-                tenant_id: record.tenant_id.clone(),
-                submission_id: record.submission_id,
-                object_ref_id,
-            },
-        ),
-        input_hash: content_sha256,
-        output_object_ref: None,
-        canonical_summary: Some(derived_record.canonical_summary.clone()),
-        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
-        summary_model: derived_record.summary_model.clone(),
-        task_success: Some(derived_record.task_success.clone()),
-        privacy_risk: Some(privacy_risk.clone()),
-        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
-        tool_sequence: derived_record.tool_sequence.clone(),
-        tool_categories: derived_record.tool_categories.clone(),
-        coverage_tags: derived_record.coverage_tags.clone(),
-        duplicate_score: Some(derived_record.duplicate_score),
-        novelty_score: Some(derived_record.novelty_score),
-        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
-            analysis
-                .cluster_id
-                .clone()
-                .or_else(|| analysis.nearest_cluster_id.clone())
-        }),
-    })
+    db.append_trace_derived_record(storage_precheck_derived_write(
+        record,
+        derived_record,
+        envelope,
+        object_ref_id,
+        content_sha256,
+    )?)
     .await
     .context("failed to mirror trace derived metadata")?;
 

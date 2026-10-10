@@ -71439,12 +71439,6 @@ macro_rules! impl_ingest_test_corpus_store {
             ) -> Result<Vec<StorageTraceObjectRefRecord>, DatabaseError> {
                 todo!("stub")
             }
-            async fn append_trace_derived_record(
-                &self,
-                _: StorageTraceDerivedRecordWrite,
-            ) -> Result<(), DatabaseError> {
-                todo!("stub")
-            }
             async fn upsert_trace_vector_entry(
                 &self,
                 _: StorageTraceVectorEntryWrite,
@@ -71850,6 +71844,12 @@ macro_rules! impl_ingest_test_corpus_store {
 
 impl_ingest_test_corpus_store! {
     PerplexityDriverTestDb {
+        async fn append_trace_derived_record(
+            &self,
+            _: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            todo!("stub")
+        }
         async fn upsert_trace_submission(
             &self,
             _: StorageTraceSubmissionWrite,
@@ -86776,6 +86776,12 @@ impl PerUserTestDeviceKeyDb {
 // never calls any of them.
 impl_ingest_test_corpus_store! {
     PerUserTestDeviceKeyDb {
+        async fn append_trace_derived_record(
+            &self,
+            _: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            todo!("stub")
+        }
         async fn upsert_trace_submission(
             &self,
             _: StorageTraceSubmissionWrite,
@@ -87245,6 +87251,12 @@ impl DeviceGrantScopeTestDb {
 // issuer device-key ceiling path never calls any of them.
 impl_ingest_test_corpus_store! {
     DeviceGrantScopeTestDb {
+        async fn append_trace_derived_record(
+            &self,
+            _: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            todo!("stub")
+        }
         async fn upsert_trace_submission(
             &self,
             _: StorageTraceSubmissionWrite,
@@ -87792,6 +87804,12 @@ impl MockDbWithChunkEntries {
 
 impl_ingest_test_corpus_store! {
     MockDbWithChunkEntries {
+        async fn append_trace_derived_record(
+            &self,
+            _: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            todo!("stub")
+        }
         async fn upsert_trace_submission(
             &self,
             _: StorageTraceSubmissionWrite,
@@ -88435,9 +88453,91 @@ struct PiiBackstopDriverTestDb {
     /// The audit rows mirrored from the file log: the driver's transitions
     /// are file events mirrored here, not rows the store writes itself.
     audit_rows: std::sync::RwLock<Vec<StorageTraceAuditEventRecord>>,
+    /// Every `upsert_trace_submission` write, in call order, so a test can
+    /// assert what the driver mirrored (redaction counts, privacy risk,
+    /// canonical summary hash) rather than only the status it implied.
+    submission_writes: std::sync::RwLock<Vec<StorageTraceSubmissionWrite>>,
+}
+
+/// The row `append_trace_derived_record` would leave behind, mirroring the
+/// Postgres `ON CONFLICT (tenant_id, derived_id) DO UPDATE`.
+fn storage_derived_record_from_write(
+    write: StorageTraceDerivedRecordWrite,
+) -> StorageTraceDerivedRecord {
+    let now = Utc::now();
+    StorageTraceDerivedRecord {
+        derived_id: write.derived_id,
+        tenant_id: write.tenant_id,
+        submission_id: write.submission_id,
+        trace_id: write.trace_id,
+        status: write.status,
+        worker_kind: write.worker_kind,
+        worker_version: write.worker_version,
+        input_object_ref: write.input_object_ref,
+        input_hash: write.input_hash,
+        output_object_ref: write.output_object_ref,
+        canonical_summary: write.canonical_summary,
+        canonical_summary_hash: write.canonical_summary_hash,
+        summary_model: write.summary_model,
+        task_success: write.task_success,
+        privacy_risk: write.privacy_risk,
+        event_count: write.event_count,
+        tool_sequence: write.tool_sequence,
+        tool_categories: write.tool_categories,
+        coverage_tags: write.coverage_tags,
+        duplicate_score: write.duplicate_score,
+        novelty_score: write.novelty_score,
+        cluster_id: write.cluster_id,
+        created_at: now,
+        updated_at: now,
+    }
 }
 
 impl PiiBackstopDriverTestDb {
+    /// Upsert a derived row keyed by `(tenant, derived_id)`, replacing any
+    /// prior row with the same key exactly as the Postgres store does.
+    fn upsert_derived(&self, write: StorageTraceDerivedRecordWrite) {
+        let tenant_id = write.tenant_id.clone();
+        let derived_id = write.derived_id;
+        let mut rows = self.derived_records.write().unwrap();
+        rows.retain(|(t, row)| !(t == &tenant_id && row.derived_id == derived_id));
+        rows.push((tenant_id, storage_derived_record_from_write(write)));
+    }
+
+    /// The single duplicate-precheck derived row for one submission, if any.
+    fn derived_of(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Option<StorageTraceDerivedRecord> {
+        let rows = self.derived_records.read().unwrap();
+        let matching = rows
+            .iter()
+            .filter(|(t, row)| t == tenant_id && row.submission_id == submission_id)
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            matching.len() <= 1,
+            "one derived row per submission, found {}",
+            matching.len()
+        );
+        matching.into_iter().next()
+    }
+
+    fn submission_writes_of(
+        &self,
+        tenant_id: &str,
+        submission_id: Uuid,
+    ) -> Vec<StorageTraceSubmissionWrite> {
+        self.submission_writes
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|w| w.tenant_id == tenant_id && w.submission_id == submission_id)
+            .cloned()
+            .collect()
+    }
+
     fn new() -> Self {
         Self {
             submissions: std::sync::RwLock::new(std::collections::HashMap::new()),
@@ -88457,6 +88557,7 @@ impl PiiBackstopDriverTestDb {
             fail_release_invalidation: std::sync::atomic::AtomicBool::new(false),
             status_transitions: std::sync::RwLock::new(Vec::new()),
             audit_rows: std::sync::RwLock::new(Vec::new()),
+            submission_writes: std::sync::RwLock::new(Vec::new()),
         }
     }
 
@@ -89031,6 +89132,224 @@ async fn pii_backstop_process_one_releases_and_scrubs_trace() {
     assert!(
         prose.contains("[REDACTED:private_email]"),
         "the PII span must be replaced by the redaction placeholder: {prose}"
+    );
+}
+
+/// Seed the derived duplicate-precheck record a held submission was given at
+/// submit, built from its PRE-backstop envelope, into both the file store and
+/// the DB double. Returns that record so a test can compare against it.
+fn seed_pre_backstop_derived_record(
+    state: &AppState,
+    db: &PiiBackstopDriverTestDb,
+    tenant_id: &str,
+    submission_id: Uuid,
+) -> TraceCommonsDerivedRecord {
+    let record = read_submission_record(&state.root, tenant_id, submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope = read_envelope_by_record(state, &record).expect("held envelope reads");
+    let precheck = build_derived_precheck(&envelope, &[]);
+    let derived = build_derived_record(
+        tenant_id,
+        TraceCorpusStatus::AwaitingPiiBackstop,
+        &envelope,
+        precheck,
+    );
+    write_derived_record(&state.root, &derived).expect("seed file derived record");
+    db.upsert_derived(StorageTraceDerivedRecordWrite {
+        derived_id: derived.derived_id.expect("derived id"),
+        tenant_id: tenant_id.to_string(),
+        submission_id,
+        trace_id: derived.trace_id,
+        status: StorageTraceDerivedStatus::Current,
+        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+        worker_version: "trace_commons_ingest_v1".to_string(),
+        input_object_ref: None,
+        input_hash: "sha256:pre-backstop-submitted-envelope".to_string(),
+        output_object_ref: None,
+        canonical_summary: Some(derived.canonical_summary.clone()),
+        canonical_summary_hash: Some(derived.canonical_summary_hash.clone()),
+        summary_model: derived.summary_model.clone(),
+        task_success: Some(derived.task_success.clone()),
+        privacy_risk: Some("medium".to_string()),
+        event_count: Some(derived.event_count as i32),
+        tool_sequence: derived.tool_sequence.clone(),
+        tool_categories: derived.tool_categories.clone(),
+        coverage_tags: derived.coverage_tags.clone(),
+        duplicate_score: Some(derived.duplicate_score),
+        novelty_score: Some(derived.novelty_score),
+        cluster_id: None,
+    });
+    derived
+}
+
+/// GHSA-q7pr-c684-grrq: releasing a held trace must not leave the derived
+/// record built from the PRE-backstop envelope in place. That record's
+/// `canonical_summary` copies the first events' `redacted_content` verbatim,
+/// so a stale row carries exactly the prose PII the classifier removed, and
+/// on release it reaches the ranker / benchmark / reviewer / replay exports
+/// and the vector worker's embedding input.
+#[tokio::test]
+async fn pii_backstop_process_one_rebuilds_the_derived_record_from_the_rescrubbed_envelope() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    let seeded = seed_pre_backstop_derived_record(state.as_ref(), &db, "tenant-a", submission_id);
+    // Self-defence: the fixture must actually reproduce the leak, or the
+    // "lacks the marker" assertions below prove nothing.
+    assert!(
+        seeded.canonical_summary.contains(marker),
+        "the pre-backstop summary must carry the marker for this test to mean anything"
+    );
+    let seeded_db = db
+        .derived_of("tenant-a", submission_id)
+        .expect("seeded DB derived row");
+    assert!(trace_vector_embedding_input(&seeded_db).contains(marker));
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("process_one releases the hold");
+    assert_eq!(
+        db.status_of("tenant-a", submission_id),
+        Some(StorageTraceCorpusStatus::Accepted)
+    );
+
+    let file_derived = read_derived_record(&state.root, "tenant-a", submission_id)
+        .expect("file derived reads")
+        .expect("file derived exists");
+    assert!(
+        !file_derived.canonical_summary.contains(marker),
+        "file derived summary must be rebuilt from the rescrubbed envelope"
+    );
+    assert_ne!(
+        file_derived.canonical_summary_hash, seeded.canonical_summary_hash,
+        "file derived summary hash must change with the summary"
+    );
+    assert_eq!(file_derived.status, TraceCorpusStatus::Accepted);
+
+    let db_derived = db
+        .derived_of("tenant-a", submission_id)
+        .expect("DB derived row");
+    let db_summary = db_derived.canonical_summary.clone().unwrap_or_default();
+    assert!(
+        !db_summary.contains(marker),
+        "DB derived summary must be rebuilt from the rescrubbed envelope"
+    );
+    assert!(db_summary.contains("[REDACTED:private_email]"));
+    assert_ne!(
+        db_derived.canonical_summary_hash.as_deref(),
+        Some(seeded.canonical_summary_hash.as_str()),
+        "DB derived summary hash must change, so the vector worker re-embeds"
+    );
+    assert_eq!(
+        db_derived.canonical_summary_hash.as_deref(),
+        Some(file_derived.canonical_summary_hash.as_str()),
+        "file and DB derived copies describe the same rescrubbed envelope"
+    );
+    let rescrubbed_ref_id = *db
+        .appended_ref_ids
+        .read()
+        .unwrap()
+        .last()
+        .expect("rescrubbed ref appended");
+    assert_eq!(
+        db_derived
+            .input_object_ref
+            .as_ref()
+            .map(|object_ref| object_ref.object_ref_id),
+        Some(rescrubbed_ref_id),
+        "the rebuilt derived row names the rescrubbed envelope as its input"
+    );
+    assert!(
+        !trace_vector_embedding_input(&db_derived).contains(marker),
+        "the vector worker's embedding input must not carry the removed PII"
+    );
+}
+
+/// GHSA-q7pr-c684-grrq: the submission row the backstop mirrors must record
+/// what the classifier did. Before the fix the driver wrote the submit-time
+/// `redaction_counts` and `privacy_risk`, so the pilot row read `{}` after the
+/// classifier had redacted nine spans.
+#[tokio::test]
+async fn pii_backstop_process_one_records_the_post_backstop_counts_and_risk() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+    let (artifact_store, _) = fixture_gate_worker_artifact_store(artifact_temp.path());
+    let db = Arc::new(PiiBackstopDriverTestDb::new());
+    let db_dyn: Arc<dyn Database> = db.clone();
+    let state = backstop_driver_state(temp.path().to_path_buf(), db_dyn.clone(), artifact_store);
+
+    let marker = "jane.doe@example.com";
+    let submission_id = seed_held_backstop_submission(&state, "tenant-a", marker).await;
+    db.seed_awaiting("tenant-a", submission_id);
+    // Submit-time values that differ from anything the backstop derives, so
+    // a write that carries them through is distinguishable from one that
+    // records the post-backstop envelope.
+    let mut record = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    record.privacy_risk = ResidualPiiRisk::High;
+    record.redaction_counts = BTreeMap::new();
+    write_submission_record(&state.root, &record).expect("rewrite seeded record");
+
+    let item = GateWorkItem {
+        tenant_id: "tenant-a".to_string(),
+        submission_id,
+    };
+    let adapter = BackstopEmailStubAdapter {
+        needle: marker.to_string(),
+    };
+    process_one_pii_backstop(state.as_ref(), &db_dyn, &item, &adapter)
+        .await
+        .expect("process_one releases the hold");
+
+    let released = read_submission_record(&state.root, "tenant-a", submission_id)
+        .expect("record reads")
+        .expect("record exists");
+    let envelope = read_envelope_by_record(state.as_ref(), &released).expect("envelope reads");
+    assert!(
+        envelope
+            .privacy
+            .redaction_counts
+            .get("privacy_filter:private_email")
+            .is_some_and(|count| *count >= 1),
+        "fixture: the post-backstop envelope records the classifier's span: {:?}",
+        envelope.privacy.redaction_counts
+    );
+
+    let writes = db.submission_writes_of("tenant-a", submission_id);
+    let write = writes.last().expect("the driver mirrored the submission");
+    assert_eq!(
+        write.redaction_counts, envelope.privacy.redaction_counts,
+        "mirrored redaction_counts must be the post-backstop envelope's"
+    );
+    assert_eq!(
+        write.privacy_risk,
+        serde_storage_string(&envelope.privacy.residual_pii_risk).expect("risk encodes"),
+        "mirrored privacy_risk must be the post-backstop envelope's"
+    );
+    assert_eq!(released.privacy_risk, envelope.privacy.residual_pii_risk);
+    assert_eq!(released.redaction_counts, envelope.privacy.redaction_counts);
+    let db_derived = db
+        .derived_of("tenant-a", submission_id)
+        .expect("DB derived row");
+    assert_eq!(
+        write.canonical_summary_hash, db_derived.canonical_summary_hash,
+        "the submission row names the rebuilt summary's hash"
     );
 }
 
@@ -90002,6 +90321,13 @@ fn awaiting_pii_backstop_excluded_from_export_until_released() {
 
 impl_ingest_test_corpus_store! {
     PiiBackstopDriverTestDb {
+        async fn append_trace_derived_record(
+            &self,
+            write: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            self.upsert_derived(write);
+            Ok(())
+        }
         async fn upsert_trace_submission(
             &self,
             write: StorageTraceSubmissionWrite,
@@ -90010,6 +90336,7 @@ impl_ingest_test_corpus_store! {
             // here (status set to the target). Update the in-memory status and hand
             // back the seeded record with the new status; the caller discards it.
             let key = (write.tenant_id.clone(), write.submission_id);
+            self.submission_writes.write().unwrap().push(write.clone());
             self.statuses
                 .write()
                 .unwrap()
@@ -91861,6 +92188,12 @@ async fn logging_out_a_native_token_revokes_its_session_row() {
 // this file stubs it.
 impl_ingest_test_corpus_store! {
     NativeAuthTestDb {
+        async fn append_trace_derived_record(
+            &self,
+            _: StorageTraceDerivedRecordWrite,
+        ) -> Result<(), DatabaseError> {
+            todo!("stub")
+        }
         async fn upsert_trace_submission(
             &self,
             _: StorageTraceSubmissionWrite,
