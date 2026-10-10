@@ -657,11 +657,12 @@ final class InsightsOverviewModel {
     func showInputs(_ card: String) {
         // Feed T rows carry no session reference the core could look up, so
         // under feed T only the Sessions card drills, from the daemon's rows.
+        guard active else { return }
         if counter != nil {
             if card == "sessions", let counterSessions { counterInputs = counterSessions }
             return
         }
-        guard active, let week = overview?.week_start else { return }
+        guard let week = overview?.week_start else { return }
         run(.init("card_inputs", weekStart: week, tz: Self.offset, card: card)) { model, response in
             guard let inputs = response.inputs, inputs.card == card else { throw InsightsError.invalidResponse }
             model.inputs = inputs

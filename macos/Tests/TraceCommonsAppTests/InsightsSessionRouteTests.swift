@@ -295,6 +295,17 @@ final class InsightsSessionRouteTests: XCTestCase {
     }
 
     @MainActor
+    func testAClosedOverviewOpensNoFeedTDrill() throws {
+        // As under the saved week: nothing opens while the tab is closed.
+        let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
+        let week = try Self.decode(Self.recorded())
+        model.showCounter(week.coreOverview, sessions: InsightsCounterSessions(week: week))
+        model.showInputs("sessions")
+        XCTAssertNil(model.counterInputs)
+        XCTAssertNil(model.openCard)
+    }
+
+    @MainActor
     func testAFeedTWeekWithoutRowsDoesNotDrill() throws {
         let model = InsightsOverviewModel(service: { _ in throw InsightsError.invalidResponse })
         let week = try Self.decode(Self.recorded())
