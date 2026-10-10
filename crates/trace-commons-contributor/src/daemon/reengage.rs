@@ -480,6 +480,14 @@ mod tests {
         tick(&s, noon(), &Utc, digest(false, 1));
         assert_eq!(reads::take(), (0, 0), "every kind off");
 
+        // Only verdicts on: the consent hold is read, but idle sessions
+        // are not gathered, so a fresh one builds no join.
+        s.settings.lock().unwrap().notify.verdicts_landed = true;
+        let got = tick(&s, noon(), &Utc, digest(false, 1));
+        assert_eq!(got.standalone, None);
+        assert_eq!(reads::take(), (1, 0), "idle off, no join");
+        s.settings.lock().unwrap().notify.verdicts_landed = false;
+
         s.settings.lock().unwrap().notify.idle_sessions = true;
         let got = tick(&s, noon(), &Utc, digest(false, 1));
         assert_eq!(got.standalone, Some(Kind::IdleSessions));
