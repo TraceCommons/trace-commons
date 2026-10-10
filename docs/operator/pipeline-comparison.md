@@ -17,9 +17,9 @@
 For each trace, the command compares the content-dependent decisions of the
 two sides: the privacy risk, the admission, the gate results, the measured
 values, the chunk counts, the index membership, and the credit. Each
-compared value must be exactly equal. One named rule permits one known
-difference (see [What is compared](#what-is-compared)). Any other
-difference fails the run. The design is in
+compared value must be exactly equal. Two named rules permit two known
+differences (see [The permitted differences](#the-permitted-differences)).
+Any other difference fails the run. The design is in
 [the comparison spec](../superpowers/specs/2026-10-02-pipeline-comparison-design.md).
 
 ## Run a comparison
@@ -57,7 +57,7 @@ Three pins are committed:
 | Pin | Traces | Use |
 |---|---|---|
 | [`pin-local.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local.json) | 10 (4 bootstrap, 6 holdout) | A local pin: it names a `local_jsonl_dir` with committed session files, and it needs no network. It must pass. Check id `pipeline_comparison_local`. |
-| [`pin-local-risk.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json) | 8 (4 bootstrap, 4 holdout) | A local pin with one declared `medium` trace and one declared `high` trace. It must fail with one unexplained `admission` difference (the `high` trace) and one permitted pair (the `medium` trace). `--self-test` uses it. |
+| [`pin-local-risk.json`](../../crates/trace-commons-server/tests/fixtures/pipeline-compare-jsonl/pin-local-risk.json) | 8 (4 bootstrap, 4 holdout) | A local pin with one declared `medium` trace and one declared `high` trace. It must pass with two permitted pairs: the `medium` trace by `medium_risk_privacy_review` and the `high` trace by `high_risk_admission_reject`. `--self-test` uses it. |
 | [`versioned-pipeline-comparison-hf-pin-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json) | 10,000 (1,000 bootstrap, 9,000 holdout) | The network pin: it has no `local_jsonl_dir`, and its export reads the public Hugging Face dataset `jedisct1/security-audits`. Word filter 200 to 20,000. Check id `pipeline_comparison_hf`. See [The full run](#the-full-run). |
 
 ### What one run does
@@ -118,17 +118,19 @@ activation: it emits no check result.
 
 ### `--self-test`
 
-`--self-test` proves that the comparison can fail. It runs the harness four
-times in one environment, with the two local pins, and it passes only when
-each run gives its expected result:
+`--self-test` proves that the comparison permits the two ruled differences
+and fails on any other. Scenario 3 is the run that shows the failure. It
+runs the harness four times in one environment, with the two local pins, and
+it passes only when each run gives its expected result:
 
 1. `pin-local.json` passes and compares each of its traces.
-2. `pin-local-risk.json` fails with exactly one unexplained `admission`
-   difference, one permitted pair, and nothing else. The baseline accepts
+2. `pin-local-risk.json` passes and compares each of its traces, with
+   exactly two permitted pairs and nothing else. The baseline accepts
    the declared `medium` trace and the candidate quarantines it. The rule
    `medium_risk_privacy_review` permits this pair. The baseline quarantines
-   the declared `high` trace and the candidate rejects it. No rule permits
-   this pair, so it fails the run. The alignment keeps the two indexes
+   the declared `high` trace and the candidate rejects it. The rule
+   `high_risk_admission_reject` permits this pair. The report has no
+   unexplained difference. The alignment keeps the two indexes
    equal, so no later trace differs and the run does not stop early.
 3. `pin-local.json` with the baseline's quality floor changed fails. The
    report names the skew (`skew: "baseline_quality_floor"`), the pair at
@@ -196,16 +198,18 @@ Each trace gets one result: `equal`, `permitted` with the rule names, or
 `unexplained` with the field names. The run passes only when no trace is
 `unexplained`.
 
-### The permitted difference
+### The permitted differences
 
-One rule permits a difference in a compared field. The owner ruled on it
-on 2026-10-09 (decision PC-D22).
+Two rules permit a difference in a compared field. Each rule permits the
+difference in `admission` only.
 
 | Rule | Field | Source |
 |---|---|---|
-| `medium_risk_privacy_review` | `admission` | ruling PC-D22 |
+| `medium_risk_privacy_review` | `admission` | ruling PC-D22 (2026-10-09) |
+| `high_risk_admission_reject` | `admission` | ruling PC-D27 (2026-10-11) |
 
-The old path accepts a trace with a `medium` risk, because the harness
+**`medium_risk_privacy_review`.** The old path accepts a trace with a
+`medium` risk, because the harness
 sets the state field that has the same effect as
 `TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS=true` (it sets the field in
 code and reads no environment variable). The pipeline
@@ -223,13 +227,31 @@ The rule permits a pair only when all of these are true:
 - The baseline admission is `admit` and the candidate admission is
   `quarantine`.
 
-A pair that meets the condition and has no other difference is
+**`high_risk_admission_reject`.** The old path quarantines a trace with a
+`high` risk, and a reviewer then decides. The pipeline rejects it at
+Admission and runs no Review. The owner ruled that the reject is intended.
+The source of the intent is the design
+[the async privacy rescrub design](../superpowers/specs/2026-10-09-pipeline-async-privacy-rescrub-design.md),
+which says twice: "A receipt-time High is still rejected by Admission." The
+full run of 2026-10-09 had one such pair in 10,000 traces.
+
+With this rule, a trace whose risk is High at the receipt gets no reviewer
+in the pipeline. On `main`, a reviewer can approve it.
+
+The rule permits a pair only when all of these are true:
+
+- The field is `admission`.
+- `privacy_risk` is `high` on the two records.
+- `privacy_basis` is equal on the two records. The content of the basis does
+  not matter.
+- The baseline admission is `quarantine` and the candidate admission is
+  `reject`.
+
+A pair that meets the condition of a rule and has no other difference is
 `permitted`. A pair with a difference in another field is `unexplained`
-with that other field only. A pair that does not meet the condition stays
-`unexplained`: the reverse direction, a `low` or `high` risk, a basis that
-differs between the sides, or a candidate that rejects. A trace with a
-`high` risk (the baseline quarantines it and the candidate rejects it) has
-no ruling, and the tool reports it as `unexplained`.
+with that other field only. A pair that does not meet the condition of a
+rule stays `unexplained`: the reverse direction, another risk, a basis that
+differs between the sides, or another pair of decisions.
 
 Three fields of a record are not compared: `review`, `review_source`, and
 `gate_skipped_by_alignment`. The fields `position`, `partition`,
@@ -340,7 +362,7 @@ name, no secret-shaped value. The report has no time field.
 | `first_unexplained_position` | the position of the first unexplained trace, or `null` |
 | `alignment_lost_position` | the position of the pair at which the run stopped, or `null` |
 | `excluded_rules` | the three rules of [What is compared](#what-is-compared), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
-| `permitted_rules` | the closed list of the rules that permit a difference (see [The permitted difference](#the-permitted-difference)), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
+| `permitted_rules` | the closed list of the rules that permit a difference (see [The permitted differences](#the-permitted-differences)), each with `rule`, `source`, and `fields`. A report with another list is refused (`comparison_report_malformed`). |
 | `distribution` | for `baseline` and for `candidate`: the counts `admit`, `quarantine`, `reject`, `refused`, `other`, `scored`, `quality_passed`, `quality_failed`, `novelty_passed`, `novelty_failed`, `member`, `not_member`, `chunks_capped`. `member` and `not_member` count scored traces only. On each side the five admission counts add up to `compared_count`, each pass and fail pair and `member` with `not_member` add up to `scored`, and `chunks_capped` is at most `scored`; a report in which they do not is refused (`comparison_count_mismatch`). |
 | `branch_gaps` | the gate branches with no evidence on the baseline side: any of `quality_passed_true`, `quality_passed_false`, `novelty_passed_true`, `novelty_passed_false`, `member_true`, `member_false`. Always empty for a partial run. |
 | `records_digest` | the SHA-256 of the records file |

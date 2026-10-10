@@ -299,7 +299,7 @@ def build_parser():
         "--self-test",
         dest="self_test",
         action="store_true",
-        help="Run the four scenarios that show that the comparison finds a difference. Not evidence.",
+        help="Run the four scenarios that show that the comparison permits the ruled differences and fails on any other. Not evidence.",
     )
     compare_parser.add_argument(
         "--limit", type=int, default=None, help="Compare only the first N traces (a partial run; not evidence)."
@@ -874,12 +874,12 @@ def _compare_self_test(args, run):
 
     1. The local pin passes, and compares each of its traces
        (`compare_self_test_pass_incomplete`).
-    2. The risk pin fails (`compare_self_test_risk_passed`) with its declared
-       high risk as one unexplained `admission` difference and its declared
-       medium risk as one pair that the rule `medium_risk_privacy_review`
-       permits, and nothing else: no other field, no other rule, no refused
-       receipt, no alignment loss, and each trace compared
-       (`compare_self_test_risk_fields`).
+    2. The risk pin passes, and compares each of its traces, with its
+       declared high risk as one pair that the rule
+       `high_risk_admission_reject` permits and its declared medium risk as
+       one pair that the rule `medium_risk_privacy_review` permits, and
+       nothing else: no unexplained difference, no other rule, no refused
+       receipt, no alignment loss (`compare_self_test_risk_fields`).
     3. The local pin with the baseline's quality floor skewed fails
        (`compare_self_test_skew_passed`), and its report names the pair at
        which the run stopped and `quality_passed`
@@ -921,14 +921,14 @@ def _compare_self_test(args, run):
             return report
 
         first = scenario("compare_self_pass", "local")
-        risk = scenario("compare_self_risk", "risk", passed_label="compare_self_test_risk_passed")
+        risk = scenario("compare_self_risk", "risk")
         # The alignment keeps the two indexes equal after an admission
         # difference: no chain of later differences, and no early stop.
         require(
-            risk["unexplained_counts"] == {"admission": 1}
-            and risk["unexplained_total"] == 1
-            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
-            and risk["permitted_total"] == 1
+            risk["unexplained_counts"] == {}
+            and risk["unexplained_total"] == 0
+            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1, "high_risk_admission_reject": 1}
+            and risk["permitted_total"] == 2
             and not risk["partial"]
             and risk["alignment_lost_position"] is None
             and not any(risk["distribution"][side]["refused"] for side in SIDES),

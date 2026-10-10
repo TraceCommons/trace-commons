@@ -90,7 +90,7 @@ sides. Keep the run directory.
 
 | Label | Cause |
 |---|---|
-| `comparison_report_missing`, `comparison_report_malformed`, `comparison_count_mismatch`, `comparison_partial_mismatch` | The harness passed, but its report is absent or not valid: it is not JSON, it lacks a field or has a field that the harness does not write, a value has the wrong type, its list `permitted_rules` is not the closed list (rule `medium_risk_privacy_review`, source `ruling.PC-D22`, field `admission`), `permitted_counts` names another rule, its list `excluded_rules` is not exactly the three rules of [What is compared](pipeline-comparison.md#what-is-compared), or its counts do not agree with each other, also the `distribution` of a side with `compared_count` and with its `scored` count. |
+| `comparison_report_missing`, `comparison_report_malformed`, `comparison_count_mismatch`, `comparison_partial_mismatch` | The harness passed, but its report is absent or not valid: it is not JSON, it lacks a field or has a field that the harness does not write, a value has the wrong type, its list `permitted_rules` is not the closed list (rule `medium_risk_privacy_review`, source `ruling.PC-D22`, field `admission`; then rule `high_risk_admission_reject`, source `ruling.PC-D27`, field `admission`), `permitted_counts` names another rule, its list `excluded_rules` is not exactly the three rules of [What is compared](pipeline-comparison.md#what-is-compared), or its counts do not agree with each other, also the `distribution` of a side with `compared_count` and with its `scored` count. |
 | `comparison_report_check_mismatch`, `comparison_report_pin_mismatch`, `comparison_report_trace_count_mismatch`, `comparison_report_skew_mismatch`, `comparison_compared_count_mismatch` | The report is not the report of this run: it names another check id, other pin digests than the export manifest, another trace count, or another skew, or a pass compared a number of traces that is not the limit or the trace count. |
 | `comparison_check_results_unexpected`, `comparison_skew_with_check_result` | A check result exists where none can: for a partial run, for a report with a skew, or a result that is not the result of this check. |
 | `comparison_report_package_mismatch`, `comparison_evidence_malformed`, `comparison_evidence_mismatch`, `comparison_records_missing` | For a full run that passed, the check result does not agree with the report: the package digests differ, the evidence file cannot be read, the evidence does not equal the counts and the two file hashes, or the records file cannot be read. |
@@ -102,9 +102,8 @@ failure is shown.
 
 | Label | Cause |
 |---|---|
-| `compare_self_test_pass_incomplete` | Scenario 1 or 4 passed, but it was partial or compared no trace. |
-| `compare_self_test_risk_passed` | Scenario 2 passed. The comparison did not find the unexplained `admission` difference of the declared `high` trace. |
-| `compare_self_test_risk_fields` | Scenario 2 failed with a result that is not exactly one unexplained `admission` difference and one pair permitted by `medium_risk_privacy_review`, in a full run with no refused receipt and no alignment loss. |
+| `compare_self_test_pass_incomplete` | Scenario 1, 2, or 4 passed, but it was partial or compared no trace. |
+| `compare_self_test_risk_fields` | Scenario 2 passed, but its result is not exactly one pair permitted by `medium_risk_privacy_review` and one pair permitted by `high_risk_admission_reject`, with no unexplained difference, no refused receipt, and no alignment loss. |
 | `compare_self_test_skew_passed` | Scenario 3 passed. The comparison did not find the changed floor. |
 | `compare_self_test_skew_fields` | Scenario 3 failed, but its report lacks the alignment position or `quality_passed`. |
 | `compare_self_test_not_deterministic` | Scenario 4 gave a `report_digest` that is not the digest of scenario 1. |

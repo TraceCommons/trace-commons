@@ -2899,10 +2899,12 @@ async fn a_declared_high_trace_is_aligned() {
     assert!(pair.candidate.terminal);
     assert!(!pair.candidate.scored);
     // The two sides are not scored, so the admission is the one difference.
+    // The risk is high on each side with an equal basis, so PC-D27 permits it.
+    assert_eq!(pair.baseline.privacy_basis, pair.candidate.privacy_basis);
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
-        TraceComparison::Unexplained {
-            fields: vec!["admission"]
+        TraceComparison::Permitted {
+            rules: vec!["high_risk_admission_reject"]
         }
     );
     app.shutdown().await;
@@ -2932,10 +2934,12 @@ async fn a_large_tool_argument_keeps_its_risk_on_both_sides() {
         assert!(!record.scored);
         assert!(!record.member);
     }
+    // The risk is high on each side with an equal basis, so PC-D27 permits
+    // the admission difference.
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
-        TraceComparison::Unexplained {
-            fields: vec!["admission"]
+        TraceComparison::Permitted {
+            rules: vec!["high_risk_admission_reject"]
         }
     );
     app.shutdown().await;
