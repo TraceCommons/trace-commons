@@ -45636,6 +45636,11 @@ async fn record_privacy_pass_commits_once_under_the_lease() {
     assert_eq!(redaction_counts, serde_json::json!({"prose_pii_name": 2}));
     assert_eq!(pipeline_version, version);
     assert_eq!(redaction_hash, redaction_hash_before);
+    // #1326: the escalated hold is stored `quarantined`.
+    assert_eq!(
+        submission_status(&backend, &tenant, claimed.submission_id).await,
+        "quarantined"
+    );
     let tx = owner_tenant_tx(&mut owner, &tenant).await;
     let bundle_state: String = tx
         .query_one(
@@ -48139,4 +48144,72 @@ async fn retention_purge_deletes_the_privacy_pass_object() {
         );
     }
     assert_eq!(boundary.calls(), 1);
+}
+
+/// #1326: only an escalated pass quarantines the submission. A `cleared`
+/// pass writes its privacy values back and leaves an Admission-admitted
+/// run's `received` row as it is, so the run goes on to the Review policy
+/// and no human hold shows where there is none.
+#[tokio::test]
+async fn a_cleared_privacy_pass_leaves_the_submission_received() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let store = PgPipelineStore::new(backend.clone());
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = artifact_store(&dir);
+    let cleanup_after = chrono::Utc::now() + chrono::Duration::hours(1);
+    let content = b"{\"privacy\":\"the cleared pass output\"}".to_vec();
+    let content_hash = dependency_content_hash(&content);
+    let source_hash = dependency_content_hash(b"the source bytes the pass read");
+    let basis = safe_residual_risk_basis_labels(&[ResidualRiskCondition::FoundAndRemoved]);
+    let counts: BTreeMap<String, u32> = BTreeMap::new();
+
+    let claimed = seed_and_claim_review_run(&backend, &store, "privacy-pass-cleared").await;
+    let tenant = claimed.tenant_id.clone();
+    assert_eq!(
+        submission_status(&backend, &tenant, claimed.submission_id).await,
+        "received"
+    );
+    let receipt = stage_and_publish_attempt_artifact(
+        &store,
+        &artifacts,
+        &claimed,
+        PipelineAttemptArtifact::PrivacyPass,
+        &content,
+        cleanup_after,
+    )
+    .await;
+    let object_ref = privacy_pass_object_ref(
+        &claimed,
+        &receipt,
+        content.len(),
+        PIPELINE_DEFAULT_OBJECT_STORE_NAME,
+    );
+    let recorded = store
+        .record_privacy_pass(
+            &claimed,
+            PrivacyPassRecord {
+                object_ref: &object_ref,
+                ciphertext_sha256: &receipt.ciphertext_sha256,
+                content_hash: &content_hash,
+                source_hash: &source_hash,
+                basis_labels: &basis,
+                outcome: PrivacyPassOutcome::Cleared,
+                residual_pii_risk: ResidualPiiRisk::Low,
+                redaction_counts: &counts,
+                redaction_pipeline_version: "deterministic-test-v1+near-ai-pii-backstop-v1",
+            },
+        )
+        .await
+        .expect("record the cleared privacy pass");
+    assert_eq!(
+        recorded.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared)
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, claimed.submission_id).await,
+        "received",
+        "a cleared pass must not quarantine the submission"
+    );
 }
