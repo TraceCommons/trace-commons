@@ -3,7 +3,7 @@
 
 //! Internal credit settlement helpers for the versioned pipeline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -202,8 +202,10 @@ pub struct NearLogicalRequest {
 /// A test NEAR adapter with no network effect. It records each idempotency
 /// key once, answers a repeated key with the same result, and refuses a
 /// repeated key with a different method. A confirmation exists only once a
-/// test records one (`record_confirmation`). `fail_next` makes the next
-/// submit fail. It presents no credential unless built `authenticated`.
+/// test records one (`record_confirmation`) or a failure on chain
+/// (`record_failure`); a recorded failure wins over a recorded
+/// confirmation. `fail_next` makes the next submit fail. It presents no
+/// credential unless built `authenticated`.
 ///
 /// It is in the library, not behind `#[cfg(test)]`, because the integration
 /// tests and the ingest binary's tests link the library built without
@@ -215,6 +217,7 @@ pub struct NearLogicalRequest {
 pub struct RecordingNearAdapter {
     requests: Mutex<Vec<NearLogicalRequest>>,
     confirmations: Mutex<BTreeMap<String, NearConfirmationEvidence>>,
+    failures: Mutex<BTreeSet<String>>,
     fail_next: AtomicBool,
     authenticated: bool,
 }
@@ -224,6 +227,19 @@ pub struct RecordingNearAdapter {
 pub struct NearConfirmationEvidence {
     pub transaction_hash_hash: String,
     pub receipt_hash: String,
+}
+
+/// What a NEAR adapter reports for a submitted call: not decided yet,
+/// confirmed with hash-only evidence, or failed on chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NearPayoutConfirmation {
+    Pending,
+    Confirmed(NearConfirmationEvidence),
+    /// The result is final on chain and the transfer did not occur. It is
+    /// terminal for the line: the pass marks it `failed` and never submits
+    /// it again. An error of the lookup, a timeout, or a transaction that is
+    /// not known is `Pending`, never `Failed`.
+    Failed,
 }
 
 /// The NEAR payout rail for settled Trace Credit (P3-D11). Not a gate
@@ -253,7 +269,11 @@ pub trait NearPayoutAdapter: Send + Sync {
         false
     }
     async fn submit(&self, call: &NearCreditReceiptCall) -> anyhow::Result<String>;
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence>;
+    /// `Failed` only when the result is final on chain and the transfer did
+    /// not occur; it is terminal, and the pass does not submit the line
+    /// again. An error of the lookup, a timeout, or an unknown transaction
+    /// is `Pending`.
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation;
 }
 
 /// The payout adapter `TRACE_COMMONS_NEAR_SETTLEMENT_MODE=dry_run` pays
@@ -282,9 +302,9 @@ impl NearPayoutAdapter for DryRunNearPayoutAdapter {
         Ok(Self::transaction_hash(&call.idempotency_key))
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         let transaction_hash = Self::transaction_hash(idempotency_key);
-        Some(NearConfirmationEvidence {
+        NearPayoutConfirmation::Confirmed(NearConfirmationEvidence {
             transaction_hash_hash: format!(
                 "sha256:{:x}",
                 Sha256::digest(transaction_hash.as_bytes())
@@ -349,6 +369,23 @@ impl RecordingNearAdapter {
         Ok(())
     }
 
+    /// Records that the transaction of a submitted request failed on chain.
+    pub fn record_failure(&self, idempotency_key: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.requests
+                .lock()
+                .expect("near adapter mutex")
+                .iter()
+                .any(|request| request.idempotency_key == idempotency_key),
+            "cannot fail an unsubmitted NEAR request"
+        );
+        self.failures
+            .lock()
+            .expect("near failure mutex")
+            .insert(idempotency_key.to_string());
+        Ok(())
+    }
+
     pub fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
         self.confirmations
             .lock()
@@ -387,8 +424,19 @@ impl NearPayoutAdapter for RecordingNearAdapter {
         Ok(call.idempotency_key.clone())
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
-        Self::confirmation(self, idempotency_key)
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
+        if self
+            .failures
+            .lock()
+            .expect("near failure mutex")
+            .contains(idempotency_key)
+        {
+            return NearPayoutConfirmation::Failed;
+        }
+        match Self::confirmation(self, idempotency_key) {
+            Some(evidence) => NearPayoutConfirmation::Confirmed(evidence),
+            None => NearPayoutConfirmation::Pending,
+        }
     }
 }
 
@@ -641,17 +689,23 @@ mod tests {
         );
         assert_eq!(
             NearPayoutAdapter::confirmation(&adapter, &call.idempotency_key).await,
-            None
+            NearPayoutConfirmation::Pending
         );
         adapter
             .record_confirmation(&call.idempotency_key, &tx_hash, &receipt_hash)
             .unwrap();
         assert_eq!(
             NearPayoutAdapter::confirmation(&adapter, &call.idempotency_key).await,
-            Some(NearConfirmationEvidence {
+            NearPayoutConfirmation::Confirmed(NearConfirmationEvidence {
                 transaction_hash_hash: tx_hash,
                 receipt_hash,
             })
         );
+        adapter.record_failure(&call.idempotency_key).unwrap();
+        assert_eq!(
+            NearPayoutAdapter::confirmation(&adapter, &call.idempotency_key).await,
+            NearPayoutConfirmation::Failed
+        );
+        assert!(adapter.record_failure("unsubmitted").is_err());
     }
 }

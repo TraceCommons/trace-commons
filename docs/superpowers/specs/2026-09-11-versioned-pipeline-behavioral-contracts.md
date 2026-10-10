@@ -1690,18 +1690,25 @@ Expected results:
 
 #### SCN-016: Privacy pass escalation
 
+Amended by owner decision 2026-10-10 ("once PII removed we should go to
+accepted"): only a pass-time High escalates.
+
 1. Submit a trace whose only PII is prose that the deterministic redactor
    does not find.
 2. Confirm an Admission admit outcome at low risk.
-3. Run Review: the privacy pass finds the prose PII.
-4. Approve or reject it as a reviewer, resolving
-   `privacy_pass_review_required`.
+3. Run Review: the privacy pass finds the prose PII and removes it
+   (post-pass risk Medium, basis `found_and_removed`).
+4. Separately, submit a trace whose privacy pass ends at High, and approve
+   or reject it as a reviewer, resolving `privacy_pass_review_required`.
 
 Expected results:
 
 - The receipt makes no classifier call.
-- The run is held for a human review, and the Review policy does not run
-  before the assessment.
+- A pass that found and removed the PII records `cleared`; the run goes to
+  the Review policy without a human, ends accepted on the redacted content,
+  and the approved revision contains no prose PII.
+- A pass-time High is held for a human review, the submission is
+  `quarantined`, and the Review policy does not run before the assessment.
 - A rejection ends the run under `privacy_pass_human_review_rejected_v1`.
 - An approval is linked to the pass record, and the approved revision
   contains no prose PII.

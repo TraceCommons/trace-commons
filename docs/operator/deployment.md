@@ -679,7 +679,7 @@ the group does not exist; V90 creates it. The grants are these:
 
 | Table | Grant | Why |
 |---|---|---|
-| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash`; V117 adds the eight privacy-pass columns ([V117](#v117-the-privacy-pass-record)) | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, its admission decision, or `privacy_pass_required` |
+| `pipeline_runs` | `SELECT, INSERT`; `UPDATE` on `next_phase`, `state`, `last_error_label`, `updated_at`, `lease_token`, `lease_expires_at`, `attempt_count`, `next_attempt_at`, `phase_started_at`, `index_membership`, `index_command_ref`, `index_command_hash`, `index_write_state`, `score_neighbor_ref`, `score_neighbor_hash`, `settle_selection`, `settle_selection_hash`, `approved_revision_id`, `approved_object_ref_id`, `approved_content_hash`; V117 adds the eight privacy-pass columns ([V117](#v117-the-privacy-pass-record)); V118 adds `review_audit_pending_at` | the receipt inserts the run; claims, phase commits, retries, failures and the lease sweep lock and update it. Nothing updates its identity, `created_at`, `max_attempts`, its admission decision, or `privacy_pass_required` |
 | `phase_outcomes` | `SELECT, INSERT` | each phase commit appends its outcome, and later phases read it |
 | `pipeline_bundle_packages` | `SELECT, INSERT` | registering a bundle appends its package, and every phase reads it |
 | `pipeline_active_bundles` | `SELECT, INSERT` here; V112 adds `UPDATE (bundle_id, selected_at)` | startup selects the default bundle for a tenant that has none; the receipt reads it. The activation gate switches a tenant to a qualified bundle with the V112 `UPDATE` ([V110 to V113](#v110-to-v113-activation-policy-interventions-the-activation-gate-and-the-rebuild-fence)); no other statement of the runtime updates the row, and the runtime holds no `DELETE` |
@@ -797,6 +797,7 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 | `pipeline_review_assessments` | `SELECT, INSERT` | an assessment inserts its row; the claim, the review queue, and each Review attempt read it |
 | `pipeline_index_invalidations` | `SELECT, INSERT`; `UPDATE` on `state`, `completed_at`, `attempt_count`, `next_attempt_at`, `last_error_label` | a withdrawal or a cancelled index write queues the revision's removal; the worker claims, completes, retries, or fails it; the summaries count it |
 | `pipeline_run_settlements` | `UPDATE (credit_audited_at)`, the column V105 adds | the worker marks a leg's credit event audited once it appended the `CreditMutate` audit event |
+| `pipeline_runs` | `UPDATE (review_audit_pending_at)`, the column V118 adds | a Review commit, a review assessment, an escalated privacy pass and a failed privacy classification set the marker; the worker clears it once it appended the review audit events |
 | `pipeline_runs` (to `trace_gate_driver`) | `SELECT (tenant_id, submission_id)`, and a cross-tenant `SELECT` policy for that role only, as V36 gives it on `main`'s tables | `main`'s gate driver leaves every submission with a pipeline run out of its work list and backlog count; the pipeline's own Score scores it |
 | `pipeline_export_snapshots` | `SELECT, INSERT`; `UPDATE` on `state`, `export_manifest_id`, `completed_at`, `invalidated_at` | export creation and delivery, a withdrawal's invalidation, and the summaries |
 | `pipeline_export_snapshot_items` | `SELECT, INSERT`; `UPDATE` on `invalidated_at`, `invalidation_reason` | export creation, and a withdrawal's invalidation |
@@ -804,6 +805,9 @@ also grants `main`'s gate driver role, `trace_gate_driver`, two columns of
 No grant allows `DELETE` on assessments, snapshots, or items. A trigger
 refuses a direct `DELETE` and an `UPDATE` of their identity; they go only with
 their submission or tenant, through foreign-key cascades.
+
+V118 adds the `review_audit_pending_at` row above: see
+[V118](#v118-the-review-audit-marker).
 
 These routes also write tables older than V62, which no pipeline migration
 grants anything on. The pilot's V62-era table-wide grants cover them:
@@ -1128,7 +1132,9 @@ these migrations' code, do these steps:
    tenants whose row says `pipeline`. Move every other tenant (contained,
    `legacy`, or with no row) to the drain list, or off both lists. A `contain`
    or a `deactivate` does not protect a tenant on that build: only the lists
-   do.
+   do. A tenant with a pipeline run that is off both lists gets no index
+   invalidation processed. Put the tenant back on the drain list when a build
+   with the guards runs.
 
    On that build, a tenant that is off the receipts list uploads on the legacy
    path. This includes a contained tenant. That build does not read the row, so
@@ -1137,10 +1143,12 @@ these migrations' code, do these steps:
    tenant's uploads must stay stopped, do not install that build.
 3. Do not rely on a suspension: on that build it does not hold for a phase
    that already runs or for a payout. For a tenant with a suspended Settle
-   policy, keep the tenant off both lists (its pipeline work then waits), or
+   policy, keep the tenant off both lists (its pipeline work then waits, and
+   no index invalidation is processed for it), or
    set the NEAR settlement mode of the older build to `disabled`
    (`TRACE_COMMONS_NEAR_SETTLEMENT_MODE`; this stops every NEAR payout of the
    process, `main`'s too). Keep that until a build with the guards runs again.
+   If you took the tenant off both lists, put it back on the drain list then.
 
 See also "Run one build and one configuration" in "Scope lists and the routing
 row" of [pipeline-activation.md](pipeline-activation.md).
@@ -1234,6 +1242,28 @@ Check before deploying:
 ```sql
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_object_ref_id', 'UPDATE');
 SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'privacy_pass_approval_resolved_reasons', 'UPDATE');
+```
+
+### V118: the review audit marker
+
+V118 adds `pipeline_runs.review_audit_pending_at`, the marker of a review
+audit event that the worker must still append, a partial index on it, and
+`UPDATE (review_audit_pending_at)` for `trace_ingest_runtime`. Apply V118 as
+the migrator before you install the binary, after V117. V118 locks
+`pipeline_runs` until it commits. During that time, the uploads of routed
+tenants, the pipeline worker and `main`'s gate driver wait.
+
+A build from before V118 runs on a V118 database. A Review decision that it
+commits and a failed privacy classification get no audit event. A hold of
+the privacy pass that it records gets its event late, when a newer build
+next sets the run's marker (an assessment or a Review commit). An assessment
+that it records gets a second `review_decision` event when a newer build
+commits its Review.
+
+Check before deploying:
+
+```sql
+SELECT has_column_privilege('<ingest runtime login>', 'public.pipeline_runs', 'review_audit_pending_at', 'UPDATE');
 ```
 
 ### Build and install

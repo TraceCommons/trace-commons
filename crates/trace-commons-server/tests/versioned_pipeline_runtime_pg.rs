@@ -77,7 +77,7 @@ use trace_commons_server::versioned_pipeline_compat::{
     COMPATIBILITY_SCORE_RULE, CompatibilityBundleConfig,
 };
 use trace_commons_server::versioned_pipeline_credit::{
-    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter,
+    DryRunNearPayoutAdapter, NearConfirmationEvidence, NearPayoutAdapter, NearPayoutConfirmation,
     PIPELINE_SETTLEMENT_POLICY_VERSION, RecordingNearAdapter, RecordingSettlementAdapter,
     SettlementAdapterRegistry, credit_account_hash, pipeline_near_outbox_line_id,
 };
@@ -8334,26 +8334,37 @@ async fn a_missing_settlement_adapter_waits_without_charging() {
 }
 
 /// Review focus item 3 (part 3): a stored command that is missing, corrupt,
-/// bound to another tenant, or bound to another run of the same tenant
-/// makes Settle fail closed with the safe label `index_command_invalid`,
-/// without completing the run or writing a Settle outcome.
+/// bound to another tenant, read under the wrong key, or bound to another
+/// run of the same tenant makes Settle fail closed, without completing the
+/// run or writing a Settle outcome. Plan RB-D6 as the owner decided it on
+/// 2026-10-10 (review of #1331, minor finding 1): each failure the store
+/// reports, an integrity failure included, is `index_command_unreadable`,
+/// with the hourly wait (`mark_retry`, C5), because a store fault (a root
+/// that is not mounted, a wrong key) reads the same. That is cases a, b, c
+/// and e: the store refuses another tenant's command (case c) before any
+/// check of the pipeline, because it looks the key up under the run's own
+/// tenant, where no such object is. Only content that the store read and
+/// decrypted, and that fails a later check (case d: another run's command
+/// fails the hash check), is `index_command_invalid`, with the short backoff.
 #[tokio::test]
 async fn stored_command_binding_failures_fail_closed() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
 
-    async fn assert_fails_closed(service: &PipelineService, tenant: &str, run_id: uuid::Uuid) {
+    async fn assert_fails_closed(
+        service: &PipelineService,
+        tenant: &str,
+        run_id: uuid::Uuid,
+        label: &str,
+    ) {
         let processed = service
             .process_run(tenant, run_id)
             .await
             .unwrap()
             .expect("the Settle attempt runs and fails closed rather than erroring out");
         assert_ne!(processed.state, PipelineRunState::Complete);
-        assert_eq!(
-            processed.last_error_label.as_deref(),
-            Some("index_command_invalid")
-        );
+        assert_eq!(processed.last_error_label.as_deref(), Some(label));
         assert!(
             !service
                 .store()
@@ -8395,7 +8406,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::remove_file(&path).unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (b) overwrite the file with other bytes.
@@ -8423,7 +8434,7 @@ async fn stored_command_binding_failures_fail_closed() {
         );
         std::fs::write(&path, b"not a valid encrypted trace artifact").unwrap();
 
-        assert_fails_closed(&service, &tenant, run.run_id).await;
+        assert_fails_closed(&service, &tenant, run.run_id, "index_command_unreadable").await;
     }
 
     // (c) point index_command_ref at another tenant's stored command.
@@ -8457,7 +8468,13 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant_a, run_a.run_id).await;
+        assert_fails_closed(
+            &service,
+            &tenant_a,
+            run_a.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 
     // (d) point it at another run's command of the same tenant.
@@ -8486,7 +8503,41 @@ async fn stored_command_binding_failures_fail_closed() {
         .unwrap();
         tx.commit().await.unwrap();
 
-        assert_fails_closed(&service, &tenant, run_1.run_id).await;
+        assert_fails_closed(&service, &tenant, run_1.run_id, "index_command_invalid").await;
+    }
+
+    // (e) read the command under another key: the same root, the same
+    // package, a store with another master key.
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, _, _) = test_service(
+            backend.clone(),
+            artifact_store(&dir),
+            minimal_config(true),
+            None,
+        )
+        .await;
+        let wrong_key: Arc<dyn TraceArtifactStore> =
+            Arc::new(LocalEncryptedTraceArtifactStore::new(
+                dir.path(),
+                SecretsCrypto::new(SecretString::from(
+                    "pipeline-runtime-test-other-master-key-32b".to_string(),
+                ))
+                .unwrap(),
+            ));
+        let (wrong_key_service, _, _) =
+            test_service(backend.clone(), wrong_key, minimal_config(true), None).await;
+        assert_eq!(service.bundle_id(), wrong_key_service.bundle_id());
+        let tenant = format!("settle-binding-e-{}", uuid::Uuid::new_v4());
+        let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+
+        assert_fails_closed(
+            &wrong_key_service,
+            &tenant,
+            run.run_id,
+            "index_command_unreadable",
+        )
+        .await;
     }
 }
 
@@ -24024,7 +24075,7 @@ impl NearPayoutAdapter for CountingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         self.confirmations.fetch_add(1, Ordering::SeqCst);
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
@@ -24067,6 +24118,9 @@ struct NearOutboxRow {
     instrument_id: Option<String>,
     amount_micros: Option<i64>,
     near_call_json: serde_json::Value,
+    near_transaction_hash: Option<String>,
+    last_error_hash: Option<String>,
+    confirmed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Every `trace_near_credit_outbox` row of `tenant_id`.
@@ -24081,7 +24135,8 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
         .query(
             "SELECT near_outbox_id, settlement_batch_id, status, instrument_id,
                     (near_call_json -> 'args' ->> 'amount_micros')::BIGINT AS amount_micros,
-                    near_call_json
+                    near_call_json, near_transaction_hash, last_error_hash,
+                    confirmed_at
                FROM trace_near_credit_outbox
               WHERE tenant_id = $1
               ORDER BY created_at, near_outbox_id",
@@ -24098,6 +24153,9 @@ async fn near_outbox_rows(backend: &Arc<PgBackend>, tenant_id: &str) -> Vec<Near
             instrument_id: row.get("instrument_id"),
             amount_micros: row.get("amount_micros"),
             near_call_json: row.get("near_call_json"),
+            near_transaction_hash: row.get("near_transaction_hash"),
+            last_error_hash: row.get("last_error_hash"),
+            confirmed_at: row.get("confirmed_at"),
         })
         .collect()
 }
@@ -24232,6 +24290,122 @@ async fn payout_submits_once_and_confirms() {
         0,
         "a confirmed payout is not listed again"
     );
+}
+
+/// The hash a line that failed on chain stores in `last_error_hash`.
+fn near_transaction_failed_hash_text() -> String {
+    format!(
+        "sha256:{:x}",
+        Sha256::digest(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL.as_bytes())
+    )
+}
+
+/// A submitted line whose transaction the adapter reports as failed on
+/// chain becomes `failed` and keeps its transaction hash; the leg's payout
+/// is `failed` under `near_transaction_failed`, and no later pass submits
+/// the line again.
+#[tokio::test]
+async fn a_payout_that_fails_on_chain_is_marked_failed_and_not_submitted_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(run.state, PipelineRunState::Complete);
+
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox[0].status, "submitted");
+    let transaction_hash = outbox[0].near_transaction_hash.clone();
+    assert!(transaction_hash.is_some());
+
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(
+        outbox[0].near_transaction_hash, transaction_hash,
+        "the failed line keeps its transaction hash"
+    );
+    assert!(outbox[0].confirmed_at.is_none());
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
+    );
+
+    assert_eq!(
+        service.process_payouts(&tenant, 32).await.unwrap(),
+        0,
+        "a failed payout is not listed again"
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
+}
+
+/// A direct `process_payout` takes up a `failed` line again, but not one
+/// that failed on chain: no second submit, and the line keeps its marker.
+#[tokio::test]
+async fn a_direct_payout_does_not_submit_a_line_that_failed_on_chain_again() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let recording = Arc::new(RecordingNearAdapter::new());
+    let near = CountingNearAdapter::new(recording.clone());
+    let service = payout_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        trace_credit_only_config(),
+        vec![near_rail_trace_credit_adapter()],
+        near.clone(),
+        None,
+    )
+    .await;
+    let tenant = format!("payout-chain-fail-direct-{}", uuid::Uuid::new_v4());
+    let run = submit_and_complete(&service, &tenant, RECEIPT_PRINCIPAL).await;
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+    let transaction_hash = near_outbox_rows(&backend, &tenant).await[0]
+        .near_transaction_hash
+        .clone();
+    let key = recording.requests()[0].idempotency_key.clone();
+    recording.record_failure(&key).unwrap();
+    assert_eq!(service.process_payouts(&tenant, 32).await.unwrap(), 1);
+
+    service.process_payout(&tenant, run.run_id).await.unwrap();
+    let outbox = near_outbox_rows(&backend, &tenant).await;
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox[0].status, "failed");
+    assert_eq!(outbox[0].near_transaction_hash, transaction_hash);
+    assert_eq!(
+        outbox[0].last_error_hash.as_deref(),
+        Some(near_transaction_failed_hash_text().as_str())
+    );
+    let settlement = trace_credit_settlement(&service, &tenant, run.run_id).await;
+    assert_eq!(settlement.payout_state, "failed");
+    assert_eq!(
+        settlement.last_error_label.as_deref(),
+        Some(PIPELINE_NEAR_TRANSACTION_FAILED_LABEL)
+    );
+    assert_eq!(near.submits(), 1, "the line was submitted once");
 }
 
 /// Review Focus 5: a crash right after the outbox records the submit
@@ -24655,9 +24829,9 @@ impl NearPayoutAdapter for BadEvidenceNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.bad_keys.lock().unwrap().contains(idempotency_key) {
-            return Some(NearConfirmationEvidence {
+            return NearPayoutConfirmation::Confirmed(NearConfirmationEvidence {
                 transaction_hash_hash: "plain-transaction-reference".to_string(),
                 receipt_hash: format!("sha256:{}", "b".repeat(64)),
             });
@@ -24876,7 +25050,7 @@ impl NearPayoutAdapter for HoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         NearPayoutAdapter::confirmation(self.inner.as_ref(), idempotency_key).await
     }
 }
@@ -24999,7 +25173,7 @@ impl NearPayoutAdapter for ConfirmationHoldingNearAdapter {
         NearPayoutAdapter::submit(self.inner.as_ref(), call).await
     }
 
-    async fn confirmation(&self, idempotency_key: &str) -> Option<NearConfirmationEvidence> {
+    async fn confirmation(&self, idempotency_key: &str) -> NearPayoutConfirmation {
         if self.lookups.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.release.notified().await;
@@ -30332,6 +30506,95 @@ async fn a_missing_source_object_is_charged_and_ends_the_run() {
     );
 }
 
+/// Multi-lens review C5, residual: a failed store call of Settle's read of
+/// the stored index command (here an outage) is charged as
+/// `index_command_unreadable`, one hour between attempts, so a store fault
+/// spans hours in which an operator can correct it. The run fails only
+/// after its last attempt, and its open legs are forfeited. (A missing,
+/// corrupt or wrongly keyed command is a failure the store reports, and is
+/// `index_command_unreadable` too; only a command that the store read and
+/// that is wrong keeps `index_command_invalid` and the short backoff:
+/// `stored_command_binding_failures_fail_closed`.)
+#[tokio::test]
+async fn an_unreadable_settle_command_waits_an_hour_and_ends_the_run() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, _, _) =
+        test_service(backend.clone(), store.clone(), scored_config(true), None).await;
+    let tenant = format!("unreadable-command-{}", uuid::Uuid::new_v4());
+    let (run, _evidence) = run_to_settle_ready(&service, &tenant).await;
+    let legs = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(!legs.is_empty(), "Score created the legs before Settle");
+    // The store's reads fail from here on, as in an outage.
+    store.set(true, false);
+
+    let first = service
+        .process_run(&tenant, run.run_id)
+        .await
+        .unwrap()
+        .expect("Settle runs");
+    assert_eq!(
+        (
+            first.state,
+            first.last_error_label.as_deref(),
+            first.attempt_count
+        ),
+        (
+            PipelineRunState::Retry,
+            Some("index_command_unreadable"),
+            run.attempt_count + 1
+        ),
+        "an unreadable command is charged"
+    );
+    assert_integrity_retry_waits_an_hour(&first);
+    let charged = first.attempt_count;
+    let mut last = first;
+    while last.attempt_count < last.max_attempts {
+        force_due(&backend, &tenant, run.run_id).await;
+        last = service
+            .process_run(&tenant, run.run_id)
+            .await
+            .unwrap()
+            .expect("Settle runs again");
+        assert!(last.attempt_count > charged, "each attempt is charged");
+        if last.attempt_count < last.max_attempts {
+            assert_eq!(
+                (last.state, last.last_error_label.as_deref()),
+                (PipelineRunState::Retry, Some("index_command_unreadable")),
+                "the run fails only after its last attempt"
+            );
+            assert_integrity_retry_waits_an_hour(&last);
+        }
+    }
+    assert_eq!(
+        (last.state, last.last_error_label.as_deref()),
+        (
+            PipelineRunState::Failed,
+            Some(PIPELINE_ATTEMPTS_EXHAUSTED_LABEL)
+        ),
+        "the attempt budget ends the run"
+    );
+    let settlements = service
+        .store()
+        .list_settlements(&tenant, run.run_id)
+        .await
+        .unwrap();
+    assert!(
+        settlements
+            .iter()
+            .all(|settlement| settlement.operation_state == "forfeited"),
+        "every open leg is forfeited: {settlements:?}"
+    );
+    assert_eq!(settlements.len(), legs.len(), "no leg is added or lost");
+}
+
 /// ZA-2 follow-up: an in-memory Google Cloud Storage client that records
 /// each key written, and whose fetches fail with an untyped error (an
 /// outage, as a 503 or a refused connection is) while `fetches_down` is set.
@@ -32352,6 +32615,81 @@ async fn index_rebuild_fails_closed_on_a_tampered_command() {
         0,
         "a fail-closed rebuild must write no entry from the tampered run"
     );
+}
+
+/// C5 residual (plan RB-D6, as the owner decided it on 2026-10-10): the
+/// rebuild reads each stored command through Settle's read, so it splits the
+/// same way. A store outage and a missing command object are both failures
+/// the store reports, `index_command_unreadable` (the route's `503`: a rerun
+/// helps once the store is back). A command that the store reads and that
+/// fails the run's hash is `index_command_invalid` (the route's `409`). None
+/// writes an entry.
+#[tokio::test]
+async fn index_rebuild_splits_a_store_fault_from_bad_content() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = OutageArtifactStore::over(artifact_store(&dir));
+    let (service, index, _adapters) =
+        test_service(backend.clone(), store.clone(), minimal_config(true), None).await;
+    let tenant = format!("index-rebuild-unreadable-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (ready, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled = settle_included(&service, &tenant, &ready).await;
+    let (ready_2, _) = run_to_settle_ready(&service, &tenant).await;
+    let settled_2 = settle_included(&service, &tenant, &ready_2).await;
+    assert!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) > 0);
+
+    store.set(true, false);
+    let rebuilt = IsolatedPipelineIndex::new();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a store outage fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    store.set(false, false);
+    let (object_key, _) = settled
+        .index_command_ref
+        .as_deref()
+        .unwrap()
+        .rsplit_once('#')
+        .unwrap();
+    std::fs::remove_file(artifact_file_path(
+        dir.path(),
+        tenant_ref.as_str(),
+        object_key,
+    ))
+    .unwrap();
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a missing command fails the rebuild");
+    assert_eq!(error.to_string(), "index_command_unreadable");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    // Bad content: the first run's ref names the second run's command,
+    // which the store reads and which fails the first run's hash.
+    {
+        let mut client = backend.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET index_command_ref = $3
+             WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id, &settled_2.index_command_ref],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+    let error = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect_err("a command that fails its hash fails the rebuild closed");
+    assert_eq!(error.to_string(), "index_command_invalid");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
 }
 
 /// Task 8: a rebuild is strictly tenant-scoped -- run under tenant B's id, it
@@ -44709,6 +45047,251 @@ async fn distinct_content_and_unconfigured_controls_withhold_nothing() {
     assert_eq!(rows[0].credit_withheld_reason, None, "{rows:?}");
 }
 
+/// A model-training envelope whose first twelve events -- all that `main`'s
+/// canonical summary reads (`canonical_summary_for_embedding`) -- are the
+/// same for every `tail`, and whose last capture turn is `tail`. Two of
+/// these with different tails share a canonical summary and its hash, so
+/// `main`'s duplicate short-circuits fire, while the Score embeds the whole
+/// trace and finds the second one novel enough to index.
+async fn shared_prefix_envelope(
+    submission_id: uuid::Uuid,
+    tail: &str,
+) -> TraceContributionEnvelope {
+    let now = chrono::Utc::now();
+    let mut turns = (0..8)
+        .map(|_| RawTraceCaptureTurn {
+            user_input: "Inspect the bounded runtime fixture.".to_string(),
+            response: Some("Done.".to_string()),
+            tool_calls: Vec::new(),
+            started_at: now,
+            completed_at: Some(now + chrono::Duration::seconds(1)),
+            state: Some("complete".to_string()),
+        })
+        .collect::<Vec<_>>();
+    turns.push(RawTraceCaptureTurn {
+        user_input: tail.to_string(),
+        response: Some(tail.to_string()),
+        tool_calls: Vec::new(),
+        started_at: now,
+        completed_at: Some(now + chrono::Duration::seconds(1)),
+        state: Some("complete".to_string()),
+    });
+    let raw = RawTraceContribution::from_capture_turns(
+        &turns,
+        RecordedTraceContributionOptions {
+            include_message_text: true,
+            ..RecordedTraceContributionOptions::default()
+        },
+    );
+    let mut envelope = DeterministicTraceRedactor::try_default()
+        .unwrap()
+        .redact_trace(raw)
+        .await
+        .unwrap();
+    assert!(envelope.events.len() > 12, "{}", envelope.events.len());
+    envelope.submission_id = submission_id;
+    envelope.privacy.residual_pii_risk = ResidualPiiRisk::Low;
+    envelope.consent.scopes = vec![ConsentScope::ModelTraining];
+    envelope.trace_card.consent_scope = ConsentScope::ModelTraining;
+    envelope.trace_card.allowed_uses =
+        vec![TraceAllowedUse::Evaluation, TraceAllowedUse::ModelTraining];
+    envelope
+}
+
+const FIRST_TAIL: &str = "Rotate the staging database credentials, then rerun the migration \
+    suite against the replica and compare row counts table by table before cutover.";
+const DUPLICATE_TAIL: &str = "Profile the image thumbnail service under burst load; the p99 \
+    latency doubles once the decoder pool saturates, so widen it and add backpressure.";
+
+/// A trace `main`'s duplicate short-circuits withhold is never indexed,
+/// as on `main`, whose score driver short-circuits before it scores or
+/// indexes: the run that decides `label` records `Exclude` under that
+/// label in its committed Settle decision, its gate decision row carries
+/// the same label, and the index holds only the runs that were not
+/// duplicates. A later distinct trace scores against exactly that index,
+/// the same novelty and cardinality as in a tenant that never saw the
+/// duplicate, and a rebuild from the authoritative commands reproduces the
+/// live index without the duplicate.
+async fn assert_a_duplicate_is_not_indexed(
+    controls: trace_commons_server::versioned_pipeline::PipelineDuplicateControls,
+    delta: u64,
+    label: &str,
+) {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = delta;
+    let index = IsolatedPipelineIndex::new();
+    let service = compatibility_test_service_on(
+        backend.clone(),
+        artifact_store(&dir),
+        config,
+        None,
+        allow_all_authority(),
+        PipelineNoveltyUtilityChecks {
+            duplicate_controls: Some(controls),
+            ..issuing_checks()
+        },
+        index.clone(),
+    )
+    .await;
+    let distinct_text =
+        "Compile kernel module against vendored headers; linker reports unresolved symbols.";
+
+    let tenant = format!("dup-not-indexed-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let first = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &shared_prefix_envelope(uuid::Uuid::new_v4(), FIRST_TAIL).await,
+    )
+    .await;
+    let after_first = index.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID);
+    let duplicate = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &shared_prefix_envelope(uuid::Uuid::new_v4(), DUPLICATE_TAIL).await,
+    )
+    .await;
+    assert_eq!(duplicate.state, PipelineRunState::Complete, "{duplicate:?}");
+    // The Score alone would index it: only `main`'s short-circuit keeps it out.
+    let evidence: ScoreEvidence = serde_json::from_value(
+        score_outcome_of(&service, &tenant, duplicate.run_id)
+            .await
+            .evidence,
+    )
+    .unwrap();
+    assert_eq!(evidence.include_eligible, Some(true), "{evidence:?}");
+    let rows = gate_decision_rows(&tenant, duplicate.submission_id).await;
+    assert_eq!(rows[0].credit_withheld_reason.as_deref(), Some(label));
+    if delta > 0 {
+        // The same verdict withheld the leg.
+        let leg = trace_credit_settlement(&service, &tenant, duplicate.run_id).await;
+        assert_eq!(leg.last_error_label.as_deref(), Some(label), "{leg:?}");
+        assert_eq!(leg.credit_event_id, None, "{leg:?}");
+    }
+    assert_eq!(first.index_membership, "included", "{first:?}");
+    assert_eq!(
+        (
+            duplicate.index_membership.as_str(),
+            duplicate.index_write_state.as_str()
+        ),
+        ("excluded", "none"),
+        "a duplicate is never written to the index: {duplicate:?}"
+    );
+    assert_eq!(
+        index.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        after_first,
+        "the duplicate's Settle leaves the index as the first run left it"
+    );
+    let settle = service
+        .store()
+        .outcome_for_phase(&tenant, duplicate.run_id, Phase::Settle)
+        .await
+        .unwrap()
+        .expect("the duplicate's Settle outcome");
+    let settle: SettleDecision = serde_json::from_value(settle.decision).unwrap();
+    match &settle.index_membership {
+        IndexMembershipDecision::Exclude { reason } => assert_eq!(reason.as_str(), label),
+        other => panic!("the duplicate's Settle records its exclusion: {other:?}"),
+    }
+
+    let next = submit_envelope_and_complete(
+        &service,
+        &tenant,
+        RECEIPT_PRINCIPAL,
+        &envelope_with_text(uuid::Uuid::new_v4(), distinct_text).await,
+    )
+    .await;
+    assert_eq!(next.index_membership, "included", "{next:?}");
+    let next_row = gate_decision_rows(&tenant, next.submission_id).await;
+    assert!(
+        !matches!(
+            next_row[0].credit_withheld_reason.as_deref(),
+            Some("skipped_duplicate" | "cached")
+        ),
+        "{next_row:?}"
+    );
+
+    // The same two distinct traces in a tenant that never saw the duplicate.
+    let control = format!("dup-not-indexed-control-{}", uuid::Uuid::new_v4());
+    submit_envelope_and_complete(
+        &service,
+        &control,
+        RECEIPT_PRINCIPAL,
+        &shared_prefix_envelope(uuid::Uuid::new_v4(), FIRST_TAIL).await,
+    )
+    .await;
+    let control_next = submit_envelope_and_complete(
+        &service,
+        &control,
+        RECEIPT_PRINCIPAL,
+        &envelope_with_text(uuid::Uuid::new_v4(), distinct_text).await,
+    )
+    .await;
+    let control_row = gate_decision_rows(&control, control_next.submission_id).await;
+    assert_eq!(
+        (
+            next_row[0].novelty_score_micros,
+            next_row[0].index_cardinality_at_scoring
+        ),
+        (
+            control_row[0].novelty_score_micros,
+            control_row[0].index_cardinality_at_scoring
+        ),
+        "the duplicate does not change the next trace's novelty"
+    );
+    assert_eq!(
+        index.revision_count(&tenant_ref, MINIMAL_INDEX_ID),
+        index.revision_count(&pipeline_tenant_storage_ref(&control), MINIMAL_INDEX_ID),
+    );
+
+    let live = index.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID);
+    let rebuilt = IsolatedPipelineIndex::new();
+    let report = service
+        .rebuild_index_from_authoritative_commands(&tenant, rebuilt.clone())
+        .await
+        .expect("rebuild succeeds");
+    assert_eq!(
+        report.command_count, 2,
+        "the rebuild reads the two included runs, never the duplicate"
+    );
+    assert_eq!(
+        rebuilt.entry_set_hash(&tenant_ref, MINIMAL_INDEX_ID),
+        live,
+        "a rebuilt index matches the live index without the duplicate"
+    );
+}
+
+/// `skipped_duplicate` (a run with a `NoveltyUtility` leg) is not indexed.
+#[tokio::test]
+async fn a_skipped_duplicate_is_not_indexed() {
+    assert_a_duplicate_is_not_indexed(
+        trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+        CHECKED_DELTA_MICROCREDITS,
+        "skipped_duplicate",
+    )
+    .await;
+}
+
+/// `cached` (a run with no Trace Credit leg, a zero delta) is not indexed.
+#[tokio::test]
+async fn a_cached_duplicate_is_not_indexed() {
+    assert_a_duplicate_is_not_indexed(
+        trace_commons_server::versioned_pipeline::PipelineDuplicateControls {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 900_000,
+        },
+        0,
+        "cached",
+    )
+    .await;
+}
+
 /// Gives the submission's gate decision rows the dedup values a sweep would
 /// have written, as the owner (the sweep's own role is the gate driver's).
 async fn stamp_dedup_columns(tenant_id: &str, submission_id: uuid::Uuid) {
@@ -46843,9 +47426,10 @@ async fn approval_without_a_pass_is_refused() {
 
 /// Task 6: a privacy boundary whose deterministic half returns a fixed basis
 /// (`[ConsentContentFlag]` for the consent-flag tests) and whose classifier
-/// half, when built with a risk, sets the envelope's residual risk to it and
-/// reports `FoundAndRemoved`; built with `None` it finds nothing. Counts its
-/// classifier calls per test.
+/// half, when built with a risk, removes the prose marker `MARKER_SECRET`
+/// (when the content carries one), sets the envelope's residual risk to the
+/// risk and reports `FoundAndRemoved`; built with `None` it finds nothing.
+/// Counts its classifier calls per test.
 struct EscalatingBoundary {
     deterministic_basis: Vec<ResidualRiskCondition>,
     classifier_risk: Option<ResidualPiiRisk>,
@@ -46885,6 +47469,8 @@ impl PipelinePrivacyBoundary for EscalatingBoundary {
         self.classifier_calls.fetch_add(1, Ordering::SeqCst);
         match self.classifier_risk {
             Some(risk) => {
+                let text = serde_json::to_string(envelope)?;
+                *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
                 envelope.privacy.residual_pii_risk = risk;
                 Ok(vec![ResidualRiskCondition::FoundAndRemoved])
             }
@@ -46973,16 +47559,20 @@ async fn assert_held_by_the_pass(service: &PipelineService, tenant: &str, run: &
     assert_eq!(review_outcome_count(service, tenant, run.run_id).await, 0);
 }
 
-/// Task 6: an Admission-admitted run the privacy pass escalates (Medium,
-/// then High: High is held like Medium, never rejected, D1) is parked for a
-/// human under `privacy_pass_review_required`; the Review policy is not
-/// run; the queue lists it with that hold reason; a reviewer can claim it.
+/// Task 6: an Admission-admitted run the privacy pass escalates (High,
+/// held for a human, never rejected, D1) is parked for a human under
+/// `privacy_pass_review_required`; the Review policy is not run; the
+/// submission is `quarantined` (#1326); the queue lists it with that hold
+/// reason; a reviewer can claim it. Since the owner decision of 2026-10-10 a
+/// pass at Medium (PII found and removed) no longer escalates
+/// (`prose_pii_the_pass_removed_is_accepted_on_the_redacted_content`), so
+/// High is the only escalating risk.
 #[tokio::test]
 async fn escalated_admit_run_parks_for_a_human() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    for classifier_risk in [ResidualPiiRisk::Medium, ResidualPiiRisk::High] {
+    for classifier_risk in [ResidualPiiRisk::High] {
         let dir = tempfile::tempdir().unwrap();
         let boundary = EscalatingBoundary::new(Vec::new(), Some(classifier_risk));
         let service = privacy_pass_test_service(
@@ -47002,6 +47592,11 @@ async fn escalated_admit_run_parks_for_a_human() {
             .expect("Review runs the pass");
         assert_eq!(boundary.calls(), 1);
         assert_held_by_the_pass(&service, &tenant, &held).await;
+        assert_eq!(
+            submission_status(&backend, &tenant, created.submission_id).await,
+            "quarantined",
+            "a High hold quarantines the submission (#1326)"
+        );
         assert!(
             service
                 .process_run(&tenant, created.run_id)
@@ -47037,7 +47632,7 @@ async fn escalated_approval_must_resolve_privacy_pass_review_required() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47112,7 +47707,7 @@ async fn escalated_approval_resumes_without_a_second_classifier_call() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47546,11 +48141,14 @@ async fn stored_privacy_risk(
     risk
 }
 
-/// Task 6 (P3 scale): a consent-flag-only receipt is stored as raw `medium`
-/// and admitted at Low; a classifier that finds prose PII (Medium, plus
-/// `FoundAndRemoved`) escalates it, and the run is held, not approved.
+/// Task 6 (P3 scale), amended by the owner decision of 2026-10-10: a
+/// consent-flag-only receipt is stored as raw `medium` and admitted at Low;
+/// a classifier that finds and removes prose PII (Medium, plus
+/// `FoundAndRemoved`) used to escalate it and hold it for a human. It now
+/// clears: the run goes on to the Review policy and is approved on the
+/// pass output, and the row keeps the raw `medium` risk.
 #[tokio::test]
-async fn consent_flag_only_run_escalated_by_the_classifier_is_held() {
+async fn consent_flag_only_run_whose_pii_the_classifier_removed_is_cleared() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -47567,14 +48165,40 @@ async fn consent_flag_only_run_escalated_by_the_classifier_is_held() {
     )
     .await;
     let (tenant, created) =
-        submit_at_risk(&service, "consent-escalated", ResidualPiiRisk::Medium).await;
+        submit_at_risk(&service, "consent-removed", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "admit");
-    let held = service
+    let reviewed = service
         .process_run(&tenant, created.run_id)
         .await
         .unwrap()
-        .expect("Review runs the pass");
-    assert_held_by_the_pass(&service, &tenant, &held).await;
+        .expect("Review runs the pass and the policy");
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "{reviewed:?}"
+    );
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    let mut basis = reviewed
+        .privacy_pass_residual_risk_basis
+        .clone()
+        .expect("the pass records its basis");
+    basis.sort();
+    assert_eq!(
+        basis,
+        vec![
+            "consent_content_flag".to_string(),
+            "found_and_removed".to_string(),
+        ],
+        "the merged basis records what the classifier removed"
+    );
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        1
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
     assert_eq!(
         stored_privacy_risk(&backend, &tenant, created.submission_id).await,
         "medium",
@@ -47614,6 +48238,116 @@ async fn cleared_consent_flag_only_run_goes_straight_to_review() {
     assert_eq!(boundary.calls(), 1);
 }
 
+/// Owner decision 2026-10-10 ("once PII removed we should go to
+/// accepted"): an Admission-admitted run whose privacy pass finds prose PII
+/// and removes it (post-pass risk Medium, basis `found_and_removed`) is not
+/// held. The pass records `cleared` with the merged basis, the run goes on
+/// to the Review policy with the scrubbed bytes, no human assessment is
+/// linked, the submission ends `accepted` with the raw `medium` risk, and the
+/// approved content Score reads lacks the PII marker.
+#[tokio::test]
+async fn prose_pii_the_pass_removed_is_accepted_on_the_redacted_content() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_with_markers(&service, "removed-accepted", &["MARKER_SECRET"]).await;
+    assert_eq!(created.admission_decision, "admit");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and the policy");
+    assert_eq!(boundary.calls(), 1);
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "{reviewed:?}"
+    );
+    assert_ne!(
+        reviewed.state,
+        PipelineRunState::AwaitingReview,
+        "{reviewed:?}"
+    );
+    assert_eq!(reviewed.last_error_label, None, "{reviewed:?}");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    assert!(
+        reviewed
+            .privacy_pass_residual_risk_basis
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|label| label == "found_and_removed"),
+        "the pass records what it removed: {reviewed:?}"
+    );
+    assert!(reviewed.privacy_pass_approval_assessment_hash.is_none());
+    assert!(reviewed.privacy_pass_approval_resolved_reasons.is_none());
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert!(matches!(decision, ReviewDecision::Approved { .. }));
+    assert_eq!(rule_id, "minimal_review_passthrough_v1");
+    let evidence = review_evidence(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        reviewed.privacy_pass_content_hash.as_deref(),
+        Some(evidence.source_content_hash.as_str()),
+        "Review read the pass output"
+    );
+    let approved =
+        String::from_utf8(service.load_approved_bytes(&reviewed).await.unwrap()).unwrap();
+    assert!(!approved.contains("MARKER_SECRET"));
+    assert!(approved.contains("[redacted]"));
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
+    assert_eq!(
+        stored_privacy_risk(&backend, &tenant, created.submission_id).await,
+        "medium",
+        "the row holds the raw post-pass risk"
+    );
+    assert!(
+        service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing waits for a human"
+    );
+
+    process_until_idle(&service, &tenant).await;
+    let finished = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert!(
+        service
+            .store()
+            .list_outcomes(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Score),
+        "Score ran over the approved content"
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
+    assert_eq!(boundary.calls(), 1, "the pass is never re-run");
+}
+
 // Task 7 (Q2): a reviewer's decision on a run the privacy pass escalated.
 
 /// The run's committed Review outcome, decoded: its decision and its rule id.
@@ -47648,7 +48382,7 @@ async fn escalated_rejection_ends_the_run_rejected() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47723,7 +48457,7 @@ async fn escalated_approval_links_the_assessment() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),

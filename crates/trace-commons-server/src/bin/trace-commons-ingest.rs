@@ -8936,6 +8936,10 @@ fn app(state: Arc<AppState>) -> Router {
             post(pii_backstop_clear_stale_prior_risk_handler),
         )
         .route(
+            "/v1/admin/pii-backstop-rederive-released",
+            post(pii_backstop_rederive_released_handler),
+        )
+        .route(
             "/v1/admin/recompute-contributor-caps",
             post(recompute_contributor_caps_handler),
         )
@@ -14971,7 +14975,16 @@ async fn route_pipeline_receipt(
         .await
         .map_err(pipeline_receipt_error)?;
     match result {
-        PipelineReceiptResult::Created(_) => Ok(Some(pipeline_processing_receipt())),
+        PipelineReceiptResult::Created(run) => {
+            // `main`'s upload appends this event after its submission writes,
+            // and answers 500 when the append fails. The receipt has
+            // committed and the run exists; a retry replays and appends
+            // nothing.
+            append_pipeline_receipt_submitted_event(state, tenant, &run)
+                .await
+                .map_err(internal_error)?;
+            Ok(Some(pipeline_processing_receipt()))
+        }
         replayed_or_conflicting @ (PipelineReceiptResult::Replayed(_)
         | PipelineReceiptResult::ContentConflict) => {
             // A replay means a run already exists for this key, created by
@@ -15051,6 +15064,81 @@ async fn route_pipeline_receipt(
             Err(internal_error("pipeline_routing_result_unexpected"))
         }
     }
+}
+
+/// Appends `main`'s `submitted` audit event for a receipt that has just
+/// created `run`. No submission record is in scope, so the event is built
+/// here from the same fields `TraceCommonsAuditEvent::submitted` sets. Its
+/// status follows the Admission decision; an admitted receipt has the stored
+/// status `received`, which `main`'s audit status type does not have, so its
+/// event has none and its row says `received`. The row carries the privacy
+/// risk the receipt stored in `trace_submissions`, read back after the
+/// commit: the receipt re-scrubs its own copy of the envelope, which can
+/// raise the risk, so the handler's envelope is not the source. The
+/// Review-start privacy pass can change the stored risk later; the row
+/// keeps the receipt's unless a pass ended before this read, and
+/// `reconcile_db_mirror` does not compare the two for a pipeline submission
+/// whose run has a recorded privacy pass.
+async fn append_pipeline_receipt_submitted_event(
+    state: &AppState,
+    tenant: &TenantCtx,
+    run: &trace_commons_server::versioned_pipeline::PipelineRunRecord,
+) -> anyhow::Result<()> {
+    let (status, stored_status) = match run.admission_decision.as_str() {
+        "quarantine" => (
+            Some(TraceCorpusStatus::Quarantined),
+            StorageTraceCorpusStatus::Quarantined,
+        ),
+        "reject" => (
+            Some(TraceCorpusStatus::Rejected),
+            StorageTraceCorpusStatus::Rejected,
+        ),
+        "admit" => (None, StorageTraceCorpusStatus::Received),
+        // The run exists in this case, and the upload answers 500.
+        _ => anyhow::bail!("pipeline_receipt_decision_unexpected"),
+    };
+    let privacy_risk = state
+        .db_mirror
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("pipeline_receipt_database_missing"))?
+        .get_trace_submission(tenant.tenant_id(), run.submission_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("pipeline_receipt_submission_missing"))?
+        .privacy_risk;
+    let event = TraceCommonsAuditEvent {
+        event_id: Uuid::new_v4(),
+        tenant_id: tenant.tenant_id().to_string(),
+        submission_id: run.submission_id,
+        kind: "submitted".to_string(),
+        created_at: Utc::now(),
+        status,
+        actor_role: Some(tenant.role()),
+        actor_principal_ref: Some(tenant.principal_ref().to_string()),
+        reason: Some(tenant.auth_method_reason()),
+        export_count: None,
+        export_id: None,
+        decision_inputs_hash: None,
+        previous_event_hash: None,
+        event_hash: None,
+    };
+    append_audit_event_mirrored(
+        state,
+        tenant.auth(),
+        event,
+        AuditRowMirror {
+            action: StorageTraceAuditAction::Submit,
+            metadata: StorageTraceAuditSafeMetadata::Submission {
+                status: stored_status,
+                privacy_risk,
+            },
+            object_ref_id: Some(run.source_object_ref_id),
+            actor_role_label: None,
+            pipeline_receipt: true,
+        },
+        "submission audit event",
+    )
+    .await?;
+    Ok(())
 }
 
 /// Claims `submission_id` for the legacy path before its first write, when
@@ -15303,6 +15391,7 @@ async fn submit_trace_handler(
                         metadata: StorageTraceAuditSafeMetadata::Empty,
                         object_ref_id: None,
                         actor_role_label: None,
+                        pipeline_receipt: false,
                     },
                     "idempotent submit audit event",
                 )
@@ -15895,6 +15984,7 @@ async fn revoke_submission(
             metadata: audit_metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "revocation audit event",
     )
@@ -15953,6 +16043,7 @@ async fn revoke_submission(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "revocation artifact invalidation audit event",
         )
@@ -18812,7 +18903,8 @@ struct AccountTracesListQuery {
 }
 
 /// One keyset page of account-owned submission metadata. `next_cursor` is
-/// `Some` only when a further page may exist (a full page was returned).
+/// `Some` only when a further page may exist (the raw page was full). A page
+/// can hold fewer items than `limit`, or none, and still have a cursor.
 #[derive(Debug, Serialize)]
 struct AccountTracesPage {
     items: Vec<TraceCommonsTraceListItem>,
@@ -18956,19 +19048,28 @@ async fn account_traces_list_handler(
         )
         .await
         .map_err(internal_error)?;
+    // The cursor comes from the raw page, before the filter below drops rows
+    // that are not list items. A filtered page can be short and still have more.
+    let raw_len = records.len();
+    let last_raw = records
+        .last()
+        .map(|record| (record.received_at, record.submission_id));
     let records = records
         .into_iter()
         .filter_map(trace_commons_record_from_storage_submission)
         .collect::<anyhow::Result<Vec<_>>>()
         .map_err(internal_error)?;
 
-    // A full page implies there may be more; emit a continuation cursor from the
-    // last row. The derived map is intentionally empty: this is a metadata-only
-    // surface and the DTO's derived fields are skip-if-empty.
-    let next_cursor = (records.len() == limit)
-        .then(|| records.last())
-        .flatten()
-        .map(|record| encode_account_traces_cursor(record.received_at, record.submission_id));
+    // A full raw page implies there may be more; emit a continuation cursor from
+    // the last raw row. The derived map is intentionally empty: this is a
+    // metadata-only surface and the DTO's derived fields are skip-if-empty.
+    let next_cursor =
+        (raw_len == limit)
+            .then_some(last_raw)
+            .flatten()
+            .map(|(received_at, submission_id)| {
+                encode_account_traces_cursor(received_at, submission_id)
+            });
     let empty_derived = BTreeMap::new();
     let items = records
         .into_iter()
@@ -19880,6 +19981,34 @@ async fn account_source_session_status_handler(
     ))
 }
 
+/// The pipeline's follow-up of an account withdrawal, for each withdrawn
+/// version: its revision queued for removal from the pipeline index, a
+/// payload deletion per live object, and its runs' work ended. Zaki review 1,
+/// round 2, N-9: a build with no runtime injected takes the database path
+/// (`pipeline_store`), for a later runtime to process. A route that read "no
+/// pipeline run" before a run appeared reaches here with a runtime, so that
+/// build takes the runtime's path, which also wakes its worker. Idempotent,
+/// and nothing for a version with no run.
+async fn follow_up_account_withdrawal(
+    state: &AppState,
+    ctx: &AccountCtx,
+    affected_ids: &[Uuid],
+) -> anyhow::Result<()> {
+    let actor = account_audit_tenant(ctx);
+    for affected_id in affected_ids {
+        if let Some(pipeline) = state.pipeline_service.as_ref() {
+            pipeline
+                .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                .await?;
+        } else if let Some(store) = state.pipeline_store.as_ref() {
+            store
+                .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn account_trace_withdraw_handler(
     State(state): State<Arc<AppState>>,
     Extension(ctx): Extension<AccountCtx>,
@@ -19981,25 +20110,12 @@ async fn account_trace_withdraw_handler(
         (tombstone, vec![submission_id])
     };
 
-    // Zaki review 1, round 2, N-9: a build with no runtime injected takes
-    // this path for a submission with a pipeline run too, so each withdrawn
-    // version with one gets the pipeline's follow-up through the database
-    // (its revision queued for removal from the pipeline index, a payload
-    // deletion per live object, its runs' work ended), for a later runtime
-    // to process. After the tombstones and before the bytes, as the
-    // completion reconciler runs it; idempotent, and nothing for a version
-    // with no run.
-    if state.pipeline_service.is_none() {
-        if let Some(store) = state.pipeline_store.as_ref() {
-            let actor = account_audit_tenant(&ctx);
-            for affected_id in &affected_ids {
-                store
-                    .follow_up_withdrawal(&ctx.tenant_id, *affected_id, &actor.principal_ref)
-                    .await
-                    .map_err(|error| withdrawal_failed(&anyhow::Error::new(error)))?;
-            }
-        }
-    }
+    // Each withdrawn version gets the pipeline's follow-up, with or without
+    // a runtime injected. See `follow_up_account_withdrawal`. After the
+    // tombstones and before the bytes, as the completion reconciler runs it.
+    follow_up_account_withdrawal(state.as_ref(), &ctx, &affected_ids)
+        .await
+        .map_err(|error| withdrawal_failed(&error))?;
 
     // Credit is retained only if it is retained for every withdrawn version.
     let credit_retained = affected_ids.iter().all(|affected_id| {
@@ -35643,7 +35759,11 @@ async fn ranking_feature_run_handler(
     let tenant_policy =
         tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, &[body.target_use])
             .await?;
-    let metadata = read_reviewer_metadata_view(state.as_ref(), &tenant)
+    // Since #1325 a pipeline submission's derived record carries a
+    // `canonical_summary_hash` too, so the filter below no longer leaves it
+    // out: `main`'s view without the pipeline's submissions does, as for the
+    // ranker exports (L1-2).
+    let metadata = read_mains_reviewer_metadata_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
     let existing_features = read_ranking_features_for_admin(state.as_ref(), &tenant)
@@ -41791,6 +41911,7 @@ async fn run_process_evaluation_job(
         )?;
     }
 
+    refuse_a_pipeline_submission(state, &tenant.tenant_id, body.submission_id).await?;
     let mut record = read_utility_submission_record(state, tenant, body.submission_id)
         .await
         .map_err(internal_error)?
@@ -42015,7 +42136,7 @@ async fn run_process_evaluation_worker(
     )
     .await?;
     let tenant_policy = tenant_process_evaluation_policy_for_request(state, tenant).await?;
-    let view = read_reviewer_metadata_view(state, tenant)
+    let view = read_mains_reviewer_metadata_view(state, tenant)
         .await
         .map_err(internal_error)?;
     let derived_by_submission = view
@@ -43105,6 +43226,7 @@ async fn apply_review_decision(
             },
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "review decision audit event",
     )
@@ -43787,8 +43909,8 @@ async fn pipeline_review_assessment_handler(
     }
     // The audit row's labels, formed before the commit, so nothing that can
     // fail without an append stands between the commit and the answer.
-    let review_status = storage_corpus_status(resulting_status);
-    let decision_label = serde_storage_string(&review_status).map_err(internal_error)?;
+    let audit_row =
+        review_decision_audit_row(resulting_status, &reason_label, None).map_err(internal_error)?;
     let assessment = pipeline_service
         .store()
         .record_review_assessment(&claim, recommendation, reason, resolved_quarantine_reasons)
@@ -43806,23 +43928,18 @@ async fn pipeline_review_assessment_handler(
     let appended: anyhow::Result<()> = async {
         let submission_id =
             pipeline_run_submission_id(pipeline_service, &tenant.tenant_id, run_id).await?;
-        append_audit_event_with_db_mirror(
-            state.as_ref(),
+        // V118: the event takes the assessment's id, so the worker's review
+        // audit pass finds it and appends none of its own.
+        let mut event = TraceCommonsAuditEvent::review_decision(
             &tenant,
-            TraceCommonsAuditEvent::review_decision(
-                &tenant,
-                submission_id,
-                resulting_status,
-                Some(&trace_free_text_audit_reason(&reason_label)),
-            ),
-            StorageTraceAuditAction::Review,
-            StorageTraceAuditSafeMetadata::ReviewDecision {
-                decision: decision_label,
-                resulting_status: review_status,
-                reason_code: Some(reason_label.clone()),
-            },
-        )
-        .await
+            submission_id,
+            resulting_status,
+            Some(&trace_free_text_audit_reason(&reason_label)),
+        );
+        event.event_id = assessment.assessment_id;
+        append_audit_event_mirrored(state.as_ref(), &tenant, event, audit_row, "audit event")
+            .await
+            .map(|_| ())
     }
     .await;
     if let Err(error) = appended {
@@ -46044,8 +46161,9 @@ async fn quarantine_exhausted_pii_backstop(
 /// Re-redact a single held submission through the NEAR AI prose PII filter and,
 /// on success, release the hold. Loads the record + envelope, runs
 /// `rescrub_envelope_prose_pii_with`, then re-stores the rescrubbed envelope,
-/// updates the record's object pointers, mirrors a `RescrubbedEnvelope` object
-/// ref, and transitions the submission to `Accepted`/`Quarantined` based on the
+/// updates the record's object pointers, redaction counts and privacy risk,
+/// mirrors a `RescrubbedEnvelope` object ref, rebuilds the derived record from
+/// the rescrubbed envelope (DB and file), and transitions the submission to `Accepted`/`Quarantined` based on the
 /// POST-backstop residual PII risk. Any error propagates to the caller, which
 /// bumps the attempt counter and leaves the submission on
 /// `AwaitingPiiBackstop`.
@@ -46070,13 +46188,41 @@ async fn process_one_pii_backstop(
     let residual_risk_basis =
         rescrub_envelope_prose_pii_with(adapter, &mut envelope, classify_policy).await?;
     record.residual_risk_basis = Some(safe_residual_risk_basis_labels(&residual_risk_basis));
+    // Written in the same breath as the basis, as the operator rescrub does:
+    // the submission row must record what THIS pass found, not the submit-time
+    // counts and risk the classifier has just superseded.
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
 
-    // Status is chosen from the POST-backstop residual risk: a filter that
-    // still leaves Medium/High risk re-quarantines rather than accepts.
+    // Status is chosen from the POST-backstop residual risk through
+    // `status_for_risk`: Low is accepted, High is quarantined, and Medium is
+    // accepted only under TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS (as on
+    // the pilot), quarantined otherwise. PII the classifier found and removed
+    // raises the risk to Medium, not High, so with that setting a trace whose
+    // PII was removed is accepted. High (a key finding, incomplete coverage,
+    // a residual survivor, or a residual scan that could not run) always
+    // quarantines.
     let target_status = status_for_risk(
         envelope.privacy.residual_pii_risk,
         state.accept_medium_risk_submissions,
     );
+
+    // Rebuild the derived duplicate-precheck record from the RESCRUBBED
+    // envelope. The one written at submit was built from the pre-backstop
+    // envelope, and its `canonical_summary` copies the first events'
+    // `redacted_content` verbatim -- the very prose PII this pass removed.
+    // Once the hold is released that row is consumer-visible (exports,
+    // reviewer views, the vector worker's embedding input), so it must be
+    // replaced while the submission is still held. The envelope's own
+    // embedding metadata is refreshed to match, as submit does.
+    let existing_derived = read_all_derived_records(&state.root, &item.tenant_id)?
+        .into_iter()
+        .filter(|derived| derived.submission_id != item.submission_id)
+        .collect::<Vec<_>>();
+    let derived_precheck = build_derived_precheck(&envelope, &existing_derived);
+    apply_embedding_precheck(&mut envelope, &derived_precheck);
+    let derived_record =
+        build_derived_record(&item.tenant_id, target_status, &envelope, derived_precheck);
 
     let stored = store_envelope(
         state,
@@ -46120,10 +46266,7 @@ async fn process_one_pii_backstop(
         db.upsert_trace_submission(storage_submission_write_from_record(
             &record,
             &envelope,
-            envelope
-                .embedding_analysis
-                .as_ref()
-                .map(|analysis| analysis.canonical_summary_hash.clone()),
+            Some(derived_record.canonical_summary_hash.clone()),
         )?)
         .await
         .context("failed to mirror rescrubbed trace submission metadata")?;
@@ -46145,9 +46288,31 @@ async fn process_one_pii_backstop(
             object_ref.object_store.clone(),
             object_ref.object_key.clone(),
         ));
+        let rescrubbed_ref_id = object_ref.object_ref_id;
+        let rescrubbed_content_sha256 = object_ref.content_sha256.clone();
         db.append_trace_object_ref(object_ref)
             .await
             .context("failed to mirror rescrubbed trace object ref")?;
+
+        // Step 2b: replace the derived record built from the pre-backstop
+        // envelope, in the DB and then on disk, still BEFORE any status
+        // release. Its input is the rescrubbed ref just written (the store
+        // checks the ref belongs to this submission, so this follows step 2).
+        // A failure here propagates like any other step: the hold is not
+        // released and the next tick retries. A rebuilt row left behind by a
+        // later failure is harmless -- it holds only the rescrubbed summary,
+        // and the retry rewrites it.
+        db.append_trace_derived_record(storage_precheck_derived_write(
+            &record,
+            &derived_record,
+            &envelope,
+            rescrubbed_ref_id,
+            rescrubbed_content_sha256,
+        )?)
+        .await
+        .context("failed to mirror rebuilt trace derived record")?;
+        write_derived_record(&state.root, &derived_record)
+            .context("failed to write rebuilt trace derived record")?;
 
         // Step 3: now flip the on-disk record and release the DB hold. The file
         // record's object_key was already repointed to the rescrubbed artifact
@@ -46988,8 +47153,22 @@ async fn read_trace_operational_summary(
     tenant: &TenantCtx,
     generated_at: DateTime<Utc>,
 ) -> anyhow::Result<TraceOperationalSummaryResponse> {
-    let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state, tenant.auth()).await?;
+    let TraceCommonsMetadataView {
+        records,
+        mut derived,
+    } = read_reviewer_metadata_view(state, tenant.auth()).await?;
+    // The pipeline indexes its own submissions, so their derived records
+    // stay out of `main`'s vector counts and its `missing_active_vectors`
+    // gate. `records` is not filtered: the submission counts include them.
+    if state.db_reviewer_reads_for_tenant(tenant.tenant_id())
+        && let Some(store) = state.pipeline_store.as_ref()
+    {
+        let pipeline_submission_ids = store
+            .pipeline_submission_ids(tenant.tenant_id())
+            .await
+            .context("failed to list pipeline submissions")?;
+        derived.retain(|record| !pipeline_submission_ids.contains(&record.submission_id));
+    }
     let credit_events = read_operational_credit_events(state, tenant.auth(), &records).await?;
     let credit_risk = build_credit_risk_summary(
         state,
@@ -54159,7 +54338,7 @@ async fn run_benchmark_conversion_job(
         state,
         &job,
         "benchmark export job failure",
-        read_reviewer_metadata_view(state, tenant).await,
+        read_mains_reviewer_metadata_view(state, tenant).await,
     )
     .await?;
     let mut accepted_by_submission = BTreeMap::new();
@@ -57617,6 +57796,302 @@ async fn clear_one_stale_prior_risk(
     Ok(())
 }
 
+/// Query params for `POST /v1/admin/pii-backstop-rederive-released`.
+#[derive(Debug, Deserialize)]
+// A mistyped `dry_run` must be refused rather than read as the default,
+// because the default writes.
+#[serde(deny_unknown_fields)]
+struct RederiveBackstopReleasedQuery {
+    /// Submissions to rewrite in this call. Bounded on purpose; an omitted
+    /// limit is a small batch, never everything.
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Count-only acknowledgement. No submission ids, no tenant, no content.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+struct RederiveBackstopReleasedAck {
+    dry_run: bool,
+    /// Accepted or quarantined, unrevoked submissions in the tenant.
+    examined: u64,
+    /// Of those, the ones whose active envelope is the backstop's rescrubbed
+    /// artifact: the candidates.
+    backstop_released: u64,
+    /// Candidates whose derived row already names the rescrubbed artifact as
+    /// its input. Nothing to do; this is what makes a rerun cheap.
+    already_current: u64,
+    /// Candidates rewritten by this call (in a dry run: that would be).
+    rederived: u64,
+    /// Of `rederived`, those whose canonical summary actually changed --
+    /// i.e. whose derived row was still carrying pre-backstop text.
+    summary_changed: u64,
+    /// Vector entries marked invalidated so the vector worker re-embeds the
+    /// rebuilt summary.
+    vector_entries_invalidated: u64,
+    /// Candidates whose row moved on (revoked, purged, re-held) between the
+    /// listing and the write. Left alone.
+    skipped_status_changed: u64,
+    failed: u64,
+    /// Candidates still needing work after this call. Call again until 0.
+    remaining: u64,
+}
+
+/// Re-derive the derived records of submissions the PII backstop released
+/// before it rebuilt them itself (GHSA-q7pr-c684-grrq).
+///
+/// Until that fix the backstop replaced a held trace's envelope but left the
+/// derived duplicate-precheck row built at submit from the pre-backstop
+/// envelope, whose `canonical_summary` copies the first events' prose -- the
+/// PII the classifier had removed. It also left the submission row's
+/// `redaction_counts` and `privacy_risk` at their submit-time values. Those
+/// rows cannot tell which submissions the classifier actually redacted, so
+/// every backstop-released submission is a candidate.
+///
+/// For each candidate (accepted or quarantined, active envelope ref is a
+/// `RescrubbedEnvelope`) whose derived row does not already name that ref as
+/// its input: load the rescrubbed envelope, record its privacy risk, counts
+/// and summary hash on the submission row (a narrow UPDATE that refuses a row
+/// that has moved on), rewrite the derived row (DB, and the file copy where
+/// one exists), and, when the summary changed, invalidate the submission's
+/// vector entries so the vector worker re-embeds the rebuilt summary.
+///
+/// Tenant-scoped to the admin credential's tenant, bounded by `limit`, and
+/// idempotent: a rewritten row names the rescrubbed ref, so the next call
+/// counts it as `already_current`. Call repeatedly until `remaining` is 0.
+/// The response and the log line are counts only.
+async fn pii_backstop_rederive_released_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<RederiveBackstopReleasedQuery>,
+) -> ApiResult<Json<RederiveBackstopReleasedAck>> {
+    let tenant = authenticate_with_tenant_access_grant(state.as_ref(), &headers).await?;
+    require_admin(&tenant)?;
+    let db = state.db_mirror.as_ref().ok_or_else(|| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "backstop re-derivation requires a configured DB mirror",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(25).clamp(1, 500) as u64;
+    let ack =
+        rederive_backstop_released(state.as_ref(), db, &tenant.tenant_id, limit, query.dry_run)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons backstop re-derivation enumeration failed"
+                );
+                api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "backstop re-derivation failed",
+                )
+            })?;
+    tracing::info!(
+        dry_run = ack.dry_run,
+        examined = ack.examined,
+        backstop_released = ack.backstop_released,
+        already_current = ack.already_current,
+        rederived = ack.rederived,
+        summary_changed = ack.summary_changed,
+        vector_entries_invalidated = ack.vector_entries_invalidated,
+        skipped_status_changed = ack.skipped_status_changed,
+        failed = ack.failed,
+        remaining = ack.remaining,
+        "Trace Commons backstop-released derived records re-derived"
+    );
+    Ok(Json(ack))
+}
+
+/// Outcome of re-deriving one candidate.
+enum RederiveBackstopOutcome {
+    Rederived {
+        summary_changed: bool,
+        vector_entries_invalidated: u64,
+    },
+    StatusChanged,
+}
+
+async fn rederive_backstop_released(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    tenant_id: &str,
+    limit: u64,
+    dry_run: bool,
+) -> anyhow::Result<RederiveBackstopReleasedAck> {
+    let mut ack = RederiveBackstopReleasedAck {
+        dry_run,
+        ..RederiveBackstopReleasedAck::default()
+    };
+    let mut submissions = db
+        .list_trace_submissions(tenant_id)
+        .await
+        .context("failed to list trace submissions")?
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.status,
+                StorageTraceCorpusStatus::Accepted | StorageTraceCorpusStatus::Quarantined
+            ) && row.revoked_at.is_none()
+                && row.purged_at.is_none()
+        })
+        .collect::<Vec<_>>();
+    submissions.sort_by_key(|row| row.submission_id);
+    let derived_by_id = db
+        .list_trace_derived_records(tenant_id)
+        .await
+        .context("failed to list trace derived records")?
+        .into_iter()
+        .map(|row| (row.derived_id, row))
+        .collect::<BTreeMap<_, _>>();
+    // Read once per call: the precheck's neighbour scores are computed
+    // against the tenant's other derived records, as submit does.
+    let file_derived = read_all_derived_records(&state.root, tenant_id)?;
+
+    for row in submissions {
+        ack.examined += 1;
+        let submission_id = row.submission_id;
+        let Some(object_ref) = db
+            .get_latest_active_trace_object_ref(
+                tenant_id,
+                submission_id,
+                StorageTraceObjectArtifactKind::RescrubbedEnvelope,
+            )
+            .await
+            .context("failed to read active rescrubbed envelope ref")?
+        else {
+            continue;
+        };
+        ack.backstop_released += 1;
+        let derived_id = deterministic_trace_uuid_for("derived-precheck", tenant_id, submission_id);
+        let existing = derived_by_id.get(&derived_id);
+        if existing.is_some_and(|derived| derived.input_hash == object_ref.content_sha256) {
+            ack.already_current += 1;
+            continue;
+        }
+        if ack.rederived + ack.skipped_status_changed + ack.failed >= limit {
+            ack.remaining += 1;
+            continue;
+        }
+        let outcome = rederive_one_backstop_released(
+            state,
+            db,
+            row,
+            &object_ref,
+            existing.and_then(|derived| derived.canonical_summary_hash.as_deref()),
+            &file_derived,
+            dry_run,
+        )
+        .await;
+        match outcome {
+            Ok(RederiveBackstopOutcome::Rederived {
+                summary_changed,
+                vector_entries_invalidated,
+            }) => {
+                ack.rederived += 1;
+                ack.summary_changed += u64::from(summary_changed);
+                ack.vector_entries_invalidated += vector_entries_invalidated;
+            }
+            Ok(RederiveBackstopOutcome::StatusChanged) => ack.skipped_status_changed += 1,
+            Err(error) => {
+                ack.failed += 1;
+                tracing::warn!(
+                    error_hash = %safe_display_error_hash(&error),
+                    "Trace Commons backstop re-derivation failed for one submission"
+                );
+            }
+        }
+    }
+    Ok(ack)
+}
+
+async fn rederive_one_backstop_released(
+    state: &AppState,
+    db: &Arc<dyn Database>,
+    row: StorageTraceSubmissionRecord,
+    object_ref: &StorageTraceObjectRefRecord,
+    prior_summary_hash: Option<&str>,
+    file_derived: &[TraceCommonsDerivedRecord],
+    dry_run: bool,
+) -> anyhow::Result<RederiveBackstopOutcome> {
+    let tenant_id = row.tenant_id.clone();
+    let submission_id = row.submission_id;
+    let mut record = trace_commons_record_from_storage_submission(row)
+        .context("released submission has no corpus status")??;
+    let envelope = read_envelope_from_object_ref(state, &tenant_id, object_ref)?;
+    let existing = file_derived
+        .iter()
+        .filter(|derived| derived.submission_id != submission_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let precheck = build_derived_precheck(&envelope, &existing);
+    let derived_record = build_derived_record(&tenant_id, record.status, &envelope, precheck);
+    let summary_changed =
+        prior_summary_hash != Some(derived_record.canonical_summary_hash.as_str());
+    if dry_run {
+        return Ok(RederiveBackstopOutcome::Rederived {
+            summary_changed,
+            vector_entries_invalidated: 0,
+        });
+    }
+
+    record.privacy_risk = envelope.privacy.residual_pii_risk;
+    record.redaction_counts = envelope.privacy.redaction_counts.clone();
+    // First, and guarded: if the row is no longer a live released submission
+    // (revoked, purged, re-held since the listing), touch nothing else.
+    let updated = db
+        .record_released_submission_privacy_summary(
+            &tenant_id,
+            submission_id,
+            &serde_storage_string(&record.privacy_risk)?,
+            &record.redaction_counts,
+            &derived_record.canonical_summary_hash,
+        )
+        .await
+        .context("failed to record released submission privacy summary")?;
+    if updated == 0 {
+        return Ok(RederiveBackstopOutcome::StatusChanged);
+    }
+    db.append_trace_derived_record(storage_precheck_derived_write(
+        &record,
+        &derived_record,
+        &envelope,
+        object_ref.object_ref_id,
+        object_ref.content_sha256.clone(),
+    )?)
+    .await
+    .context("failed to rewrite trace derived record")?;
+    // The file copy is rewritten only where one exists; this pass does not
+    // create file state for a DB-primary submission.
+    if let Some(mut file_record) = read_derived_record(&state.root, &tenant_id, submission_id)? {
+        file_record.canonical_summary = derived_record.canonical_summary.clone();
+        file_record.canonical_summary_hash = derived_record.canonical_summary_hash.clone();
+        file_record.privacy_risk = derived_record.privacy_risk;
+        file_record.event_count = derived_record.event_count;
+        file_record.tool_sequence = derived_record.tool_sequence.clone();
+        file_record.tool_categories = derived_record.tool_categories.clone();
+        file_record.coverage_tags = derived_record.coverage_tags.clone();
+        file_record.duplicate_score = derived_record.duplicate_score;
+        file_record.novelty_score = derived_record.novelty_score;
+        write_derived_record(&state.root, &file_record)?;
+    }
+    // A changed summary has a new hash, hence a new vector entry id, so the
+    // vector worker indexes it on its next run. The entries embedded from the
+    // old summary are retired here so nothing keeps serving them.
+    let vector_entries_invalidated = if summary_changed {
+        db.invalidate_trace_vector_entries_for_submission(&tenant_id, submission_id)
+            .await
+            .context("failed to invalidate stale vector entries")?
+    } else {
+        0
+    };
+    Ok(RederiveBackstopOutcome::Rederived {
+        summary_changed,
+        vector_entries_invalidated,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct RequeueQuarantinedQuery {
     /// Bounded on purpose. The first use of this route is a SAMPLE: re-run a
@@ -57635,8 +58110,11 @@ struct RequeueQuarantinedAck {
 /// Move quarantined submissions back to `AwaitingPiiBackstop` for re-assessment.
 ///
 /// Quarantine is not always a verdict about the trace. A submission is
-/// quarantined when its POST-backstop residual risk is Medium or High, and that
-/// assessment is only as good as the classifier that produced it -- the pilot's
+/// quarantined when its POST-backstop residual risk is High, or Medium on a
+/// deployment that does not set TRACE_COMMONS_ACCEPT_MEDIUM_RISK_SUBMISSIONS
+/// (see `status_for_risk`; the pilot sets it, so there Medium is accepted), or
+/// when its backstop attempts are exhausted. That assessment is only as good
+/// as the classifier that produced it -- the pilot's
 /// 114 quarantined submissions were all assessed between 2026-08-25 and 08-27,
 /// inside the window when the hosted classifier's token ceiling was collapsing.
 /// A window that failed leaves its PII unredacted, which then presents as a
@@ -59376,7 +59854,7 @@ async fn collect_ranker_training_candidates(
     tenant_policy: Option<&TenantSubmissionPolicy>,
 ) -> anyhow::Result<Vec<TraceRankerTrainingCandidate>> {
     let TraceCommonsMetadataView { records, derived } =
-        read_reviewer_metadata_view(state, tenant).await?;
+        read_mains_reviewer_metadata_view(state, tenant).await?;
     let derived_by_submission = derived
         .into_iter()
         .map(|record| (record.submission_id, record))
@@ -62808,6 +63286,29 @@ fn collect_db_audit_submission_metadata_mismatches(
         .collect()
 }
 
+/// Whether `mismatch` is one a pipeline submission has by design, which
+/// `reconcile_db_mirror` leaves out, as the other comparisons of ruling
+/// F-M10 are. A pipeline submission's `submitted` row keeps the risk the
+/// receipt stored, and the Review-start privacy pass rewrites the stored
+/// risk (V117), so the two can differ once the pass is recorded. A run with
+/// no recorded pass had its risk rewritten by nothing, so it keeps the
+/// comparison, but for one row: the database backfill writes a pipeline
+/// submission's `submitted` row with the risk `unknown`, because the
+/// pipeline has no file record to take the risk from, and the audit table
+/// is insert-only, so that row can never agree.
+fn pipeline_risk_differs_by_design(
+    mismatch: &TraceDbAuditSubmissionMetadataMismatch,
+    pipeline_rows: &PipelineReconciliationRows,
+) -> bool {
+    pipeline_rows
+        .privacy_pass_submission_ids
+        .contains(&mismatch.submission_id)
+        || (mismatch.metadata_privacy_risk == "unknown"
+            && pipeline_rows
+                .submission_ids
+                .contains(&mismatch.submission_id))
+}
+
 /// Submit audit rows written before the DB row mirrored the file event, and
 /// the file events they stood for.
 #[derive(Debug, Default)]
@@ -64394,6 +64895,7 @@ fn submission_audit_row_mirror(
         },
         object_ref_id: Some(deterministic_trace_uuid("submitted-envelope", record)),
         actor_role_label: None,
+        pipeline_receipt: false,
     })
 }
 
@@ -64418,6 +64920,58 @@ async fn mirror_submission_to_db(
     .await
 }
 
+/// The duplicate-precheck `trace_derived_records` row for one submission.
+///
+/// One `derived_id` per submission (`deterministic_trace_uuid("derived-precheck",
+/// ..)`), so every writer -- submit, operator rescrub, the PII backstop and its
+/// remediation pass -- replaces the same row through the store's
+/// `ON CONFLICT (tenant_id, derived_id) DO UPDATE` rather than adding a second
+/// one beside a stale one. `input_object_ref_id` / `input_hash` name the
+/// envelope artifact the summary was built from.
+fn storage_precheck_derived_write(
+    record: &TraceCommonsSubmissionRecord,
+    derived_record: &TraceCommonsDerivedRecord,
+    envelope: &TraceContributionEnvelope,
+    input_object_ref_id: Uuid,
+    input_hash: String,
+) -> anyhow::Result<StorageTraceDerivedRecordWrite> {
+    Ok(StorageTraceDerivedRecordWrite {
+        derived_id: deterministic_trace_uuid("derived-precheck", record),
+        tenant_id: record.tenant_id.clone(),
+        submission_id: record.submission_id,
+        trace_id: record.trace_id,
+        status: storage_derived_status(record.status),
+        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
+        worker_version: "trace_commons_ingest_v1".to_string(),
+        input_object_ref: Some(
+            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
+                tenant_id: record.tenant_id.clone(),
+                submission_id: record.submission_id,
+                object_ref_id: input_object_ref_id,
+            },
+        ),
+        input_hash,
+        output_object_ref: None,
+        canonical_summary: Some(derived_record.canonical_summary.clone()),
+        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
+        summary_model: derived_record.summary_model.clone(),
+        task_success: Some(derived_record.task_success.clone()),
+        privacy_risk: Some(serde_storage_string(&record.privacy_risk)?),
+        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
+        tool_sequence: derived_record.tool_sequence.clone(),
+        tool_categories: derived_record.tool_categories.clone(),
+        coverage_tags: derived_record.coverage_tags.clone(),
+        duplicate_score: Some(derived_record.duplicate_score),
+        novelty_score: Some(derived_record.novelty_score),
+        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
+            analysis
+                .cluster_id
+                .clone()
+                .or_else(|| analysis.nearest_cluster_id.clone())
+        }),
+    })
+}
+
 /// Mirrors a submission's rows. The audit event for the write is appended
 /// separately, through [`append_audit_event_mirrored`].
 async fn mirror_submission_to_db_with_options(
@@ -64440,8 +64994,6 @@ async fn mirror_submission_to_db_with_options(
         envelope,
     )?;
     let object_ref_id = object_ref.object_ref_id;
-    let derived_id = deterministic_trace_uuid("derived-precheck", record);
-    let privacy_risk = serde_storage_string(&record.privacy_risk)?;
     let credit_account_ref = envelope
         .contributor
         .credit_account_ref
@@ -64482,41 +65034,13 @@ async fn mirror_submission_to_db_with_options(
         .await
         .context("failed to mirror trace object ref")?;
 
-    db.append_trace_derived_record(StorageTraceDerivedRecordWrite {
-        derived_id,
-        tenant_id: record.tenant_id.clone(),
-        submission_id: record.submission_id,
-        trace_id: record.trace_id,
-        status: storage_derived_status(record.status),
-        worker_kind: StorageTraceWorkerKind::DuplicatePrecheck,
-        worker_version: "trace_commons_ingest_v1".to_string(),
-        input_object_ref: Some(
-            trace_commons_server::trace_corpus_storage::TenantScopedTraceObjectRef {
-                tenant_id: record.tenant_id.clone(),
-                submission_id: record.submission_id,
-                object_ref_id,
-            },
-        ),
-        input_hash: content_sha256,
-        output_object_ref: None,
-        canonical_summary: Some(derived_record.canonical_summary.clone()),
-        canonical_summary_hash: Some(derived_record.canonical_summary_hash.clone()),
-        summary_model: derived_record.summary_model.clone(),
-        task_success: Some(derived_record.task_success.clone()),
-        privacy_risk: Some(privacy_risk.clone()),
-        event_count: Some(derived_record.event_count.min(i32::MAX as usize) as i32),
-        tool_sequence: derived_record.tool_sequence.clone(),
-        tool_categories: derived_record.tool_categories.clone(),
-        coverage_tags: derived_record.coverage_tags.clone(),
-        duplicate_score: Some(derived_record.duplicate_score),
-        novelty_score: Some(derived_record.novelty_score),
-        cluster_id: envelope.embedding_analysis.as_ref().and_then(|analysis| {
-            analysis
-                .cluster_id
-                .clone()
-                .or_else(|| analysis.nearest_cluster_id.clone())
-        }),
-    })
+    db.append_trace_derived_record(storage_precheck_derived_write(
+        record,
+        derived_record,
+        envelope,
+        object_ref_id,
+        content_sha256,
+    )?)
     .await
     .context("failed to mirror trace derived metadata")?;
 
@@ -66688,6 +67212,28 @@ fn system_audit_tenant(tenant_id: &str, actor_ref: &'static str) -> TenantAuth {
     }
 }
 
+/// The database row of a `review_decision` audit event for a pipeline
+/// review assessment: the route's append and the worker's repair of a missed
+/// one build it here, so the two cannot differ. Labels only.
+fn review_decision_audit_row(
+    resulting_status: TraceCorpusStatus,
+    reason_code: &str,
+    actor_role_label: Option<&'static str>,
+) -> anyhow::Result<AuditRowMirror> {
+    let review_status = storage_corpus_status(resulting_status);
+    Ok(AuditRowMirror {
+        action: StorageTraceAuditAction::Review,
+        metadata: StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: serde_storage_string(&review_status)?,
+            resulting_status: review_status,
+            reason_code: Some(reason_code.to_string()),
+        },
+        object_ref_id: None,
+        actor_role_label,
+        pipeline_receipt: false,
+    })
+}
+
 /// The audit action the store records for a change to `status`.
 fn lifecycle_status_audit_action(status: TraceCorpusStatus) -> StorageTraceAuditAction {
     match status {
@@ -66745,6 +67291,7 @@ async fn append_lifecycle_status_audit(
                 LifecycleAuditActor::Tenant => None,
                 LifecycleAuditActor::System => Some("system"),
             },
+            pipeline_receipt: false,
         },
         "lifecycle status audit event",
     )
@@ -66784,6 +67331,7 @@ async fn append_lifecycle_counts_audit(
             },
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "lifecycle counts audit event",
     )
@@ -71030,6 +71578,7 @@ fn legacy_segment_resume_row_mirror(event: &TraceCommonsAuditEvent) -> Option<Au
         },
         object_ref_id: None,
         actor_role_label: None,
+        pipeline_receipt: false,
     })
 }
 
@@ -71384,6 +71933,7 @@ async fn run_audit_chain_repair(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "audit chain repair audit event",
         )
@@ -71624,6 +72174,7 @@ async fn run_tombstone_repair(
                 },
                 object_ref_id: None,
                 actor_role_label: None,
+                pipeline_receipt: false,
             },
             "tombstone repair audit event",
         )
@@ -71670,6 +72221,12 @@ struct AuditRowMirror {
     /// The row's `actor_role` when the event names no role and the actor is
     /// not the tenant credential: an in-process driver, recorded as `system`.
     actor_role_label: Option<&'static str>,
+    /// The event is a pipeline receipt's `submitted` event: set by the
+    /// receipt's own append, and by the backfill for an event whose
+    /// submission has no file record. An admitted receipt's event has no
+    /// status (its stored status `received` is not an audit status), which
+    /// `normalize_audit_event_metadata` accepts only for such an event.
+    pipeline_receipt: bool,
 }
 
 /// Appends `event` to the file audit log and mirrors it to the DB, with its
@@ -71824,6 +72381,7 @@ async fn append_audit_event_with_db_mirror(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "audit event",
     )
@@ -71957,6 +72515,7 @@ async fn append_single_trace_content_read_audit_row(
             metadata,
             object_ref_id,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
         "trace content read audit event",
     )
@@ -72045,6 +72604,11 @@ async fn revalidate_db_export_sources(
     Ok(object_ref_ids)
 }
 
+/// `mirror_audit_event_row_to_db` for a row of `main`'s own (no object ref,
+/// no role label, not a pipeline receipt). The backfill, its last caller
+/// outside the tests, builds its row itself since it marks a pipeline
+/// receipt's `submitted` event.
+#[cfg(test)]
 async fn mirror_audit_event_to_db(
     state: &AppState,
     tenant: &TenantAuth,
@@ -72061,6 +72625,7 @@ async fn mirror_audit_event_to_db(
             metadata,
             object_ref_id: None,
             actor_role_label: None,
+            pipeline_receipt: false,
         },
     )
     .await
@@ -72091,8 +72656,9 @@ fn audit_event_storage_write(
         metadata,
         object_ref_id,
         actor_role_label,
+        pipeline_receipt,
     } = row;
-    let metadata = normalize_audit_event_metadata(event, action, metadata)?;
+    let metadata = normalize_audit_event_metadata(event, action, metadata, pipeline_receipt)?;
     let canonical_event_json = event
         .previous_event_hash
         .as_deref()
@@ -72124,18 +72690,26 @@ fn audit_event_storage_write(
     })
 }
 
+/// `pipeline_receipt`: `event` is a pipeline receipt's `submitted` event
+/// (`AuditRowMirror::pipeline_receipt`).
 fn normalize_audit_event_metadata(
     event: &TraceCommonsAuditEvent,
     action: StorageTraceAuditAction,
     metadata: StorageTraceAuditSafeMetadata,
+    pipeline_receipt: bool,
 ) -> anyhow::Result<StorageTraceAuditSafeMetadata> {
     if action == StorageTraceAuditAction::Submit && event.kind == "submitted" {
-        let expected_status = event.status.map(storage_corpus_status).ok_or_else(|| {
-            anyhow::anyhow!(
+        // A pipeline receipt's event for an admitted trace has no status:
+        // its stored status is `received`, which the audit status type does
+        // not have. Any other `submitted` event requires its status.
+        let expected_status = match event.status {
+            Some(status) => storage_corpus_status(status),
+            None if pipeline_receipt => StorageTraceCorpusStatus::Received,
+            None => anyhow::bail!(
                 "submitted audit event {} requires canonical status",
                 event.event_id
-            )
-        })?;
+            ),
+        };
         return match metadata {
             StorageTraceAuditSafeMetadata::Submission { status, .. }
                 if status == expected_status =>
@@ -74269,7 +74843,24 @@ async fn backfill_db_mirror_from_files(
         }
         let (action, metadata) =
             audit_backfill_storage_projection_for_records(event, &records_by_submission);
-        match mirror_audit_event_to_db(state, tenant, event, action, metadata).await {
+        // A `submitted` event with no status is a pipeline receipt's (for
+        // an admitted trace) when its submission has no file record: a
+        // legacy submission always has one, and a pipeline submission never
+        // does. The signal survives a database restore, which loses each run
+        // admitted after the backup (review of #1331, finding 1). An event
+        // with no status of a submission with a file record is refused, as
+        // before the pipeline appended one.
+        let pipeline_receipt = event.kind == "submitted"
+            && event.status.is_none()
+            && !records_by_submission.contains_key(&event.submission_id);
+        let row = AuditRowMirror {
+            action,
+            metadata,
+            object_ref_id: None,
+            actor_role_label: None,
+            pipeline_receipt,
+        };
+        match mirror_audit_event_row_to_db(state, tenant, event, row).await {
             Ok(()) => report.backfilled += 1,
             Err(error) => {
                 report.record_failure("audit_event", event.event_id.to_string(), error.to_string())
@@ -74714,6 +75305,14 @@ fn audit_backfill_storage_projection(
         _ => StorageTraceAuditAction::Read,
     };
     let metadata = match event.kind.as_str() {
+        // A `submitted` event with no status is a pipeline receipt's for an
+        // admitted trace (stored status `received`). After a database
+        // restore this backfill is the only repair of the audit rows, and
+        // one event it cannot write blocks each later event of the tenant.
+        "submitted" if event.status.is_none() => StorageTraceAuditSafeMetadata::Submission {
+            status: StorageTraceCorpusStatus::Received,
+            privacy_risk: "unknown".to_string(),
+        },
         "submitted" | "quarantine_remediated" | "quarantine_operator_rescrub" => event
             .status
             .map(|status| StorageTraceAuditSafeMetadata::Submission {
@@ -76184,8 +76783,10 @@ async fn reconcile_db_mirror(
         .iter()
         .map(|record| (record.submission_id, record))
         .collect::<BTreeMap<_, _>>();
-    let db_audit_submission_metadata_mismatches =
+    let mut db_audit_submission_metadata_mismatches =
         collect_db_audit_submission_metadata_mismatches(&db_audit_events, &db_by_submission);
+    db_audit_submission_metadata_mismatches
+        .retain(|mismatch| !pipeline_risk_differs_by_design(mismatch, &pipeline_rows));
     let file_derived_by_submission = file_derived
         .iter()
         .map(|record| (record.submission_id, record))

@@ -1,6 +1,8 @@
 # Pipeline privacy rescrub out of the receipt
 
-Status: revised after owner review, 2026-10-09. The implementation plan is
+Status: revised after owner review, 2026-10-09; escalation rule amended by
+owner decision 2026-10-10 (see "Decision 2026-10-10: PII found and removed
+is accepted" under "Escalation"). The implementation plan is
 `docs/superpowers/plans/2026-10-09-pipeline-async-privacy-rescrub.md`; see
 "Corrections from the implementation plan" at the end.
 Scope: `trace-commons-server` only. No client or protocol change. One
@@ -142,25 +144,50 @@ The pass is a server control, not part of the bundle, for the same reason
 the boundary is one at the receipt today. A bundle cannot opt out of it, and
 the package and its qualification do not change.
 
-**Escalation.** The pass can raise the risk above what Admission saw. This
-matters in practice. A trace whose only PII is prose, like stage 3's
-`pii-residual` probe, has nothing the deterministic redactor recognises, so
-Admission now admits it at Low. Today the receipt-time classifier is what
-quarantines it. Under this proposal the pass must.
+**Escalation.** The pass can raise the risk above what Admission saw. A
+trace whose only PII is prose, like stage 3's `pii-residual` probe, has
+nothing the deterministic redactor recognises, so Admission admits it at
+Low, and only the pass's classifier finds it.
+
+**Decision 2026-10-10: PII found and removed is accepted.** Owner decision
+(Zaki): "Once PII removed we should go to accepted", for the pipeline as
+for legacy. The rule as first written (quoted below where it is amended) escalated any pass
+risk above Admission's, so a post-pass Medium -- the classifier found prose
+PII and removed it -- held the run for a human. On the pilot, stage 3's
+`pii-residual` probe (names, a date of birth, an address) was held on the
+pipeline path. The rule is now: **the pass escalates only when its risk is
+High and above the receipt's** (`privacy_pass_outcome` in
+`versioned_pipeline.rs`). A post-pass Medium is the found-and-removed (or
+consent-flag) floor, and the envelope the pass hands Review is the redacted
+one, so the pass records `cleared` -- with its merged basis (for example
+`found_and_removed`), the redaction counts and the raw `medium` risk written
+back, so the audit trail keeps what was removed -- and the run goes on to
+the Review policy with the scrubbed bytes. An Admission-admitted run ends
+accepted on the redacted content, with its gate decision and credit like any
+accepted run, and Score and exports read only that approved content. High
+(a key finding, a coverage gap, a survivor, or a residual scan that could
+not run: what redaction did not resolve) is still held for a human and the
+submission stored `quarantined` (#1326), never rejected automatically.
+Admission is unchanged: a receipt-time Medium that Admission quarantined
+keeps Admission's hold whatever the pass clears, and a receipt-time High is
+still rejected by Admission. The text below describes the hold mechanics,
+which apply unchanged to a High escalation.
 
 Admission's decision is committed and is not rewritten, and the bundle's
 Review policy only knows to wait for a human when Admission said
 Quarantine. So the escalation is the server's, not the policy's.
 
-The pass escalates when its merged risk is above the risk Admission saw:
-Medium or High for a run Admission admitted, High for a run Admission
-quarantined at Medium. Both sides are on Admission's scale. The submission
+The pass escalates when its merged risk is High and above the risk
+Admission saw (as amended 2026-10-10; first written as "above the risk
+Admission saw: Medium or High for a run Admission admitted, High for a run
+Admission quarantined at Medium"). Both sides are on Admission's scale. The submission
 row stores the envelope's raw residual risk, and a Medium whose only basis
 is the consent content flag is Low to Admission; so the receipt-time side
 is that raw value mapped through the same rule, with the stored basis, and
 the pass side is its own raw risk mapped with the merged basis. A
 consent-flag-only trace admitted at Low whose classifier then finds prose
-PII escalates. The pass writes the raw post-classifier risk back to the
+PII, and removes it, now clears (2026-10-10); it escalated as first
+written. The pass writes the raw post-classifier risk back to the
 submission row, the scale the row holds everywhere else. When it escalates, the server holds the run
 itself before it calls the Review policy:
 - **No human assessment recorded after the pass** (`load_review_assessment`,
@@ -304,9 +331,12 @@ deliberate difference.
   object is swept. A crash after the transaction does not call the
   classifier again. A lease lost mid-pass records one result.
 - **Escalation.** A run that Admission admitted at Low and the pass finds
-  Medium or High parks `AwaitingReview` with `privacy_pass_review_required`,
-  and the Review policy is not called. So does a consent-flag-only Medium
-  that Admission admitted at Low, once the classifier finds prose PII. After an approving assessment the
+  High parks `AwaitingReview` with `privacy_pass_review_required`, the
+  submission is stored `quarantined`, and the Review policy is not called.
+  A run the pass finds Medium because it found and removed PII (a
+  consent-flag-only Medium included) is not held: the pass records
+  `cleared` and the run completes accepted on the redacted content, which
+  lacks the PII (amended 2026-10-10). After an approving assessment the
   next dispatch calls the policy once, with the pass's output and no second
   classifier call, and the run records the assessment's hash. After a
   rejecting assessment the run ends rejected. A quarantined run is not
