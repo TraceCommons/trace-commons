@@ -2923,9 +2923,11 @@ and `status_changed`: on the fetch that changes it, and on the first daemon tick
 after it ages out or its policy ends, which no fetch does. `unenroll` empties the slot, and with no config left the
 fetch sends nothing until the next enrollment; every tick without a config
 empties the slot again, so a fetch already in flight when `unenroll` ran cannot
-leave the old enrollment's missions in it. The 6-hour schedule belongs to
+leave the old enrollment's missions in it. The 6-hour schedule and the slot belong to
 one enrollment: the first tick under a new one (a new ingest URL or device
-key) fetches, even inside the previous enrollment's interval.
+key) empties the slot and fetches, even inside the previous enrollment's
+interval, so a failure of that fetch leaves `mission_fit` absent rather than
+the previous enrollment's.
 
 **What fits.** An entry is read through the same M1/M2 rule
 `mission_matches` applies: adapter on, folder not Never, session neither kept

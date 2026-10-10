@@ -358,13 +358,16 @@ impl MissionSlotSchedule {
     }
 
     /// Note the enrollment this tick runs under. One that differs from the
-    /// enrollment the schedule was kept for makes it due at once.
-    pub(crate) fn enrolled(&mut self, config: &ContributorConfig) {
+    /// enrollment the schedule was kept for makes it due at once; the
+    /// return value says whether it differed.
+    pub(crate) fn enrolled(&mut self, config: &ContributorConfig) -> bool {
         let current = (config.ingest_url.clone(), config.device_key_id.clone());
-        if self.enrollment.as_ref() != Some(&current) {
-            self.next_at = None;
-            self.enrollment = Some(current);
+        if self.enrollment.as_ref() == Some(&current) {
+            return false;
         }
+        self.next_at = None;
+        self.enrollment = Some(current);
+        true
     }
 }
 
@@ -464,7 +467,12 @@ async fn fetch_into_mission_slot(
         clear_catalogue(&shared.mission_catalogue);
         return;
     };
-    schedule.enrolled(&config);
+    // A slot filled under another enrollment is not this one's: emptied
+    // before the first fetch under this one, so a failure of that fetch
+    // leaves mission fit unknown rather than the old enrollment's.
+    if schedule.enrolled(&config) {
+        clear_catalogue(&shared.mission_catalogue);
+    }
     if !schedule.due(now) {
         return;
     }

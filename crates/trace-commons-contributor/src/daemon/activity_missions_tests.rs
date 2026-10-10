@@ -943,3 +943,43 @@ async fn the_mission_slot_is_emptied_on_a_tick_without_a_config() {
     );
     server.abort();
 }
+
+/// A slot filled under one enrollment is never read under another: the
+/// first tick under a new enrollment empties it before fetching, so when
+/// that first fetch fails, the new enrollment's mission fit is unknown
+/// rather than the old enrollment's missions.
+#[tokio::test]
+async fn the_mission_slot_does_not_carry_over_to_a_new_enrollment() {
+    use crate::daemon::activity_missions::{MissionSlotSchedule, refresh_mission_slot};
+    let answer = Arc::new(std::sync::Mutex::new((
+        StatusCode::OK,
+        predicate_catalogue(&[claude_rust()]),
+    )));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (base, server) = activity_server(answer.clone(), calls.clone()).await;
+    let s = shared();
+    configure_catalogue(&s, &base);
+    let mut schedule = MissionSlotSchedule::default();
+    let now = Utc::now();
+    refresh_mission_slot(&s, now, &mut schedule).await;
+    assert!(slot_missions(&s).is_some());
+
+    // A new enrollment between two ticks, and its first fetch fails.
+    let mut cfg = s.store.load_config().unwrap().unwrap();
+    cfg.device_key_id = "sha256:another-device-key".into();
+    s.store.save_config(&cfg).unwrap();
+    *answer.lock().unwrap() = (StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({}));
+    refresh_mission_slot(&s, now + chrono::TimeDelta::seconds(5), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+
+    // The same enrollment's failed fetch keeps its own slot.
+    *answer.lock().unwrap() = (StatusCode::OK, predicate_catalogue(&[claude_rust()]));
+    refresh_mission_slot(&s, now + chrono::TimeDelta::days(1), &mut schedule).await;
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+    *answer.lock().unwrap() = (StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({}));
+    refresh_mission_slot(&s, now + chrono::TimeDelta::days(2), &mut schedule).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+    server.abort();
+}
