@@ -77,11 +77,6 @@ pub const NUDGE_BACKLOG_BODY_ONE: &str = concat!(
 );
 /// DRAFT, NEEDS APPROVAL.
 pub const NUDGE_BACKLOG_REVIEW: &str = "Review";
-/// Ron's draft (`native-app-design-data-audit.md:182`). DRAFT, NEEDS
-/// APPROVAL.
-pub const NUDGE_BACKLOG_REVIEW_IN_TRACES: &str = "Review the {n} in Traces";
-/// [`NUDGE_BACKLOG_REVIEW_IN_TRACES`] for one. DRAFT, NEEDS APPROVAL.
-pub const NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE: &str = "Review it in Traces";
 /// Every card's dismissal. DRAFT, NEEDS APPROVAL.
 pub const NUDGE_NOT_NOW: &str = "Not now";
 /// The panel row for U1. Carries no number: the badge already does.
@@ -285,13 +280,14 @@ pub const OFFER_NOTIFY_VERDICTS_EXISTING: &str = "Traces you send are now judged
 /// The one-time offer to existing installs on the Traces card (owner
 /// decision 7). "At most once a week" restates the N1 repeat interval of
 /// owner decisions 4 and 26 at the default queue TTL and changes with it.
-/// Wording from Ron's #1303 design review. DRAFT, NEEDS APPROVAL.
+/// Ron's wording, 2026-10-09 (#1303 design review, item 12).
 pub const OFFER_NOTIFY_IDLE_EXISTING: &str =
     "We can tell you when traces sit idle for a few days. At most once a week.";
-/// Accepts an offer. "Enable", not "Turn on", per Ron's #1303 design
-/// review. DRAFT, NEEDS APPROVAL.
-pub const OFFER_ENABLE: &str = "Enable";
-/// Declines an offer. DRAFT, NEEDS APPROVAL.
+/// Accepts an offer. Ron's wording, 2026-10-09 (#1303 design review,
+/// item 11): "Enable", as the arming offer and the witness confirmation
+/// say. The key keeps its name, which the shells read.
+pub const OFFER_TURN_ON: &str = "Enable";
+/// Declines an offer. Ron's wording, 2026-10-09.
 pub const OFFER_NO_THANKS: &str = "No thanks";
 
 // ---------------------------------------------------------------------
@@ -363,14 +359,14 @@ pub const LIST_ORDER_SUGGESTED: &str = "Suggested first";
 pub const LIST_ORDER_QUEUE: &str = "Oldest first";
 /// The Traces sort control's own accessible name, so it is not read with
 /// the tree's. DRAFT, NEEDS APPROVAL.
-pub const LIST_ORDER_LABEL: &str = "Order of waiting sessions";
+pub const LIST_ORDER_LABEL: &str = "Order of waiting traces";
 /// A row tag, only when the entry's `mission_fit` is above zero. DRAFT,
 /// NEEDS APPROVAL.
 pub const ENTRY_MISSION_FIT: &str = "Fits a mission";
 /// The Traces list while the idle card's Review has narrowed it to the
 /// idle sessions (`list_pending {filter: "idle_sessions"}`). DRAFT, NEEDS
 /// APPROVAL.
-pub const LIST_FILTER_IDLE: &str = "Showing idle sessions only";
+pub const LIST_FILTER_IDLE: &str = "Showing idle traces only";
 /// Leaves that filter for every waiting session. DRAFT, NEEDS APPROVAL.
 pub const LIST_FILTER_CLEAR: &str = "Show all";
 
@@ -406,10 +402,6 @@ pub const ESTIMATE_EXPLAINER: &str = "Made on this device from the trace's size 
 pub const PLURAL_FORMS: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_TITLE", "NUDGE_BACKLOG_TITLE_ONE"),
     ("NUDGE_BACKLOG_BODY", "NUDGE_BACKLOG_BODY_ONE"),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
-    ),
     ("NUDGE_PANEL_BACKLOG", "NUDGE_PANEL_BACKLOG_ONE"),
     ("NUDGE_PANEL_IDLE", "NUDGE_PANEL_IDLE_ONE"),
     ("NUDGE_IDLE_TITLE", "NUDGE_IDLE_TITLE_ONE"),
@@ -449,7 +441,7 @@ pub const PLURAL_FORMS: &[(&str, &str)] = &[
 ];
 
 /// `one` when `count` is exactly 1, else `many`. Zero takes the plural:
-/// "0 sessions".
+/// "0 traces".
 #[must_use]
 pub fn pick(count: u64, many: &'static str, one: &'static str) -> &'static str {
     if count == 1 { one } else { many }
@@ -474,14 +466,6 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
     ("NUDGE_BACKLOG_BODY", NUDGE_BACKLOG_BODY),
     ("NUDGE_BACKLOG_BODY_ONE", NUDGE_BACKLOG_BODY_ONE),
     ("NUDGE_BACKLOG_REVIEW", NUDGE_BACKLOG_REVIEW),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
-        NUDGE_BACKLOG_REVIEW_IN_TRACES,
-    ),
-    (
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE",
-        NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE,
-    ),
     ("NUDGE_NOT_NOW", NUDGE_NOT_NOW),
     ("NUDGE_PANEL_BACKLOG", NUDGE_PANEL_BACKLOG),
     ("NUDGE_PANEL_BACKLOG_ONE", NUDGE_PANEL_BACKLOG_ONE),
@@ -590,7 +574,7 @@ pub const NUDGE_COPY: &[(&str, &str)] = &[
         OFFER_NOTIFY_VERDICTS_EXISTING,
     ),
     ("OFFER_NOTIFY_IDLE_EXISTING", OFFER_NOTIFY_IDLE_EXISTING),
-    ("OFFER_ENABLE", OFFER_ENABLE),
+    ("OFFER_TURN_ON", OFFER_TURN_ON),
     ("OFFER_NO_THANKS", OFFER_NO_THANKS),
     ("SETTING_SUGGESTIONS", SETTING_SUGGESTIONS),
     ("SETTING_SUGGESTIONS_HELP", SETTING_SUGGESTIONS_HELP),
@@ -640,12 +624,11 @@ mod tests {
 
     /// Every key spec section 6 names, the combined rows split into one key
     /// each. The offer buttons the spec gives as words only are
-    /// `OFFER_ENABLE` and `OFFER_NO_THANKS`.
+    /// `OFFER_TURN_ON` and `OFFER_NO_THANKS`.
     const SPEC_KEYS: &[&str] = &[
         "NUDGE_BACKLOG_TITLE",
         "NUDGE_BACKLOG_BODY",
         "NUDGE_BACKLOG_REVIEW",
-        "NUDGE_BACKLOG_REVIEW_IN_TRACES",
         "NUDGE_NOT_NOW",
         "NUDGE_PANEL_BACKLOG",
         "NUDGE_PANEL_IDLE",
@@ -676,7 +659,7 @@ mod tests {
         "OFFER_NOTIFY_VERDICTS",
         "OFFER_NOTIFY_VERDICTS_EXISTING",
         "OFFER_NOTIFY_IDLE_EXISTING",
-        "OFFER_ENABLE",
+        "OFFER_TURN_ON",
         "OFFER_NO_THANKS",
         "DIGEST_PENDING_REASSURANCE",
         "DIGEST_VERDICT_SENTENCE",
@@ -1180,6 +1163,15 @@ mod tests {
         );
     }
 
+    /// Decisions 9 and 28 are ruled (Ron, 2026-10-09): the backlog title
+    /// is pinned by `the_backlog_title_is_traces_to_review`; the N1 body is
+    /// the alternative, with its singular form.
+    #[test]
+    fn ruled_copy_decisions_are_selected() {
+        assert_eq!(NOTIFY_IDLE_BODY, NOTIFY_IDLE_BODY_ALTERNATIVE);
+        assert_eq!(NOTIFY_IDLE_BODY_ONE, NOTIFY_IDLE_BODY_ALTERNATIVE_ONE);
+    }
+
     /// The threshold is a phrase, so "1 day" never reads "1 days", and no
     /// string spells a number before a hard-coded "days".
     #[test]
@@ -1249,9 +1241,11 @@ mod tests {
                 .find(|(k, _)| *k == want)
                 .map(|(_, text)| *text)
         };
-        assert_eq!(key("OFFER_ENABLE"), Some("Enable"));
+        assert_eq!(key("OFFER_TURN_ON"), Some("Enable"));
         assert_eq!(key("OFFER_NO_THANKS"), Some("No thanks"));
-        assert_eq!(key("OFFER_TURN_ON"), None);
+        for (key, text) in NUDGE_COPY {
+            assert_ne!(*text, "Turn on", "{key}");
+        }
     }
 
     /// Ron's #1303 design review, item 12: the idle offer's text.

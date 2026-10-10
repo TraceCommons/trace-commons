@@ -107,7 +107,12 @@ public protocol DaemonDataClient: Sendable {
     /// neither of which is part of `skipped`. An id the daemon does not
     /// know is refused with `project-id-unrecognized`. A `verdict` is the
     /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
-    func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse
+    /// A `filter` narrows the folder to what `listPending` lists under the
+    /// same filter, so Submit under the idle filter sends what is shown;
+    /// `nil` sends none and the whole folder is meant.
+    func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -288,6 +293,11 @@ extension DaemonDataClient {
     /// `approveFolder` with no verdict.
     public func approveFolder(projectId: String) async throws -> ApproveResponse {
         try await approveFolder(projectId: projectId, verdict: nil)
+    }
+
+    /// `approveFolder` over the whole folder.
+    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: verdict, filter: nil)
     }
 
     /// The first page of the mission catalogue, at the daemon's default size.

@@ -40,9 +40,9 @@ final class NudgeSurfaceTests: XCTestCase {
         XCTAssertEqual(nudge.state, "armed")
         XCTAssertEqual(nudge.lead, "idle_sessions")
         XCTAssertEqual(nudge.mark, "ready")
-        XCTAssertEqual(nudge.text?.title, "14 sessions from Claude Code and Codex have been idle for 3 days or more")
+        XCTAssertEqual(nudge.text?.title, "14 traces from Claude Code and Codex have been idle for 3 days or more")
         XCTAssertEqual(nudge.text?.actions.map(\.id), ["review", "not_now"])
-        XCTAssertEqual(nudge.text?.panelRow, "Some sessions have been idle for 3 days or more")
+        XCTAssertEqual(nudge.text?.panelRow, "Some traces have been idle for 3 days or more")
         XCTAssertEqual(nudge.markText?.accessibility, "14 of them have been idle for 3 days or more.")
         XCTAssertEqual(nudge.markText?.tooltip, "14 idle for 3 days or more.")
         XCTAssertEqual(status.idleSessions?.count, 14)
@@ -127,7 +127,7 @@ final class NudgeSurfaceTests: XCTestCase {
         let idle = try await SampleDaemonClient(.normalDay).status().nudge
         let card = try XCTUnwrap(NudgeSurface.card(idle, on: .traces))
         XCTAssertEqual(card.kind, .idleSessions)
-        XCTAssertEqual(card.title, "2 sessions from Claude Code have been idle for 3 days or more")
+        XCTAssertEqual(card.title, "2 traces from Claude Code have been idle for 3 days or more")
         XCTAssertEqual(card.body, idle?.text?.body)
         XCTAssertEqual(card.actions.map(\.label), ["Review", "Not now"])
         XCTAssertEqual(card.actions.map(\.intent), [.review(.idleSessions), .notNow(.idleSessions)])
@@ -179,7 +179,7 @@ final class NudgeSurfaceTests: XCTestCase {
 
     func testThePanelRowIsTheLeadsOwnRowAndOpensItsPlace() async throws {
         let idle = NudgeSurface.panelRow(try await SampleDaemonClient(.normalDay).status().nudge)
-        XCTAssertEqual(idle?.text, "Some sessions have been idle for 3 days or more")
+        XCTAssertEqual(idle?.text, "Some traces have been idle for 3 days or more")
         XCTAssertEqual(idle?.intent, .review(.idleSessions))
         XCTAssertEqual(NudgeSurface.panelRow(try nudge(Self.verdictsJSON))?.intent, .seeHistory)
         XCTAssertEqual(NudgeSurface.panelRow(try nudge(Self.backlogJSON))?.intent, .review(.reviewBacklog))

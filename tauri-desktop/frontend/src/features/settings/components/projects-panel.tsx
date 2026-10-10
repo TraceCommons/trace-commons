@@ -57,7 +57,7 @@ export function ProjectsPanel({
       )}
       {state === "ready" && projects.length === 0 && (
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          No projects seen yet. Sessions appear here after discovery.
+          No projects seen yet. Traces appear here after discovery.
         </p>
       )}
       {state === "ready" && projects.length > 0 && (
@@ -70,7 +70,7 @@ export function ProjectsPanel({
               <div>
                 <strong>
                   {project.is_unresolved_bucket
-                    ? "Sessions with no project"
+                    ? "Traces with no project"
                     : project.project_label}
                 </strong>
                 {project.project_path && <span>{project.project_path}</span>}
@@ -84,7 +84,7 @@ export function ProjectsPanel({
                 </small>
                 {project.is_unresolved_bucket && (
                   <small>
-                    These sessions cannot be contributed automatically.
+                    These traces cannot be contributed automatically.
                   </small>
                 )}
                 {project.mode === "auto_upload" && (

@@ -46,7 +46,7 @@ test("a malformed rewording list is refused, not read as empty", () => {
 const notice = {
   title: "What automatic contributing from api now means",
   body: "b",
-  now_heading: "What happens to its sessions",
+  now_heading: "What happens to its traces",
   scope: "s",
   limit: "l",
   no_review: "n",
@@ -115,14 +115,14 @@ test("a malformed held object is refused", () => {
 
 const heldNotice = {
   title: "Automatic contributing is on hold",
-  body: "3 sessions ...",
+  body: "3 traces ...",
   reasons: ["This commons does not yet accept automatic contributions from your account."],
   release: "r",
   ask_first: "a",
   projects: [
     {
       project_id: "3f1c",
-      line: "api: 3 sessions waiting",
+      line: "api: 3 traces waiting",
       ask_first_action: "Ask me",
       ask_first_failed: "f",
     },

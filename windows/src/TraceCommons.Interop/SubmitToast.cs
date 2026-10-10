@@ -199,7 +199,7 @@ public sealed class SubmitToast
             ("not-pending", "already decided"),
             ("not-pinned", "could not be prepared"),
             ("envelope-too-large", "too large to send"),
-            ("session-file-vanished", "the session file is gone"),
+            ("session-file-vanished", "the trace file is gone"),
             ("preview-failed", "could not be read"),
             // Listed so a toast can never render this one as "could not be
             // prepared", which would be a false account of a refusal the

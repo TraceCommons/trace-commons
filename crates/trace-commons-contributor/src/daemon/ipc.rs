@@ -264,6 +264,10 @@ pub const ERR_CORRECTION_TOO_LONG: &str = "correction-too-long";
 /// and every one of them would carry it into the corpus as the
 /// contributor's own words.
 pub const ERR_CORRECTION_NEEDS_ENTRY: &str = "correction-needs-entry-id";
+/// `approve {entry_id, filter}`. A filter narrows a group (`project_id` or
+/// `all`) to what a filtered list shows; one entry is already one entry, and
+/// a filter it could fail would only hide which of the two was meant.
+pub const ERR_FILTER_NEEDS_GROUP: &str = "filter-needs-group";
 /// `approve` while a "Never" contribution override is in force (#1208). The
 /// override promises nothing is queued or sent; clearing it lets the
 /// contributor approve again.
@@ -3681,7 +3685,7 @@ pub fn handle_request(shared: &DaemonShared, req: &Request) -> Response {
         "list_audit" => handle_list_audit(shared, req),
         // Resolved outcomes only. Pending review holds and approved/uploading
         // entries are still waiting, and must not appear in the shells'
-        // "Sessions no longer waiting" group.
+        // "Traces no longer waiting" group.
         //
         // Deliberately NOT named `eligibility_reasons`: every source of a
         // `reason_label` applies to an entry that already exists in the
@@ -6177,6 +6181,21 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
             }
         }
     };
+    // Nudge U4: an optional `filter`, read exactly as `list_pending` reads
+    // it. `idle_sessions` narrows a group to `queue::idle_candidates`, the
+    // set the Traces list shows under the idle card's Review, so a folder's
+    // Submit sends what is drawn under it and nothing the filter hid.
+    let idle_filter = match req.params.get("filter") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::String(f)) if f == LIST_FILTER_IDLE_SESSIONS => true,
+        Some(serde_json::Value::String(_)) => {
+            return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_UNRECOGNIZED);
+        }
+        Some(_) => return Response::err(req.id, ERR_BAD_PARAMS, ERR_LIST_FILTER_INVALID),
+    };
+    if idle_filter && !all && req.params.get("project_id").is_none() {
+        return Response::err(req.id, ERR_BAD_PARAMS, ERR_FILTER_NEEDS_GROUP);
+    }
     if correction.is_some() {
         if !matches!(verdict.as_deref(), Some("partly") | Some("failed")) {
             return Response::err(req.id, ERR_BAD_PARAMS, ERR_CORRECTION_NEEDS_VERDICT);
@@ -6220,11 +6239,16 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         .unwrap_or_default();
     // The approval instant is taken by `approve_as_a_person`, under the
     // lock that approves; see there.
-    let approval_hold_secs = shared
-        .settings
-        .lock()
-        .expect("settings lock")
-        .approval_hold_secs;
+    let (approval_hold_secs, queue_ttl_days) = {
+        let settings = shared.settings.lock().expect("settings lock");
+        (settings.approval_hold_secs, settings.queue_ttl_days)
+    };
+    // The idle window the filter reads, taken from settings before policy
+    // and queue are locked, in the order `list_pending` takes them. `None`
+    // below the TTL the kind needs: nothing is idle, so nothing is selected.
+    let idle_days = idle_filter
+        .then(|| super::nudge::idle_window(queue_ttl_days).map(|w| w.idle_days))
+        .flatten();
     // `None`, not `Some("")`, when there is no readable config:
     // every call site expresses "unknown" the same way, and the
     // uploader treats it as "re-ask" -- fail-closed.
@@ -6276,13 +6300,36 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
     // from the key the daemon itself holds, never from the caller's string
     // -- the same rule `set_project_mode` follows, and the reason
     // `daemon-audit.jsonl` cannot be injected into.
+    // What a group selector chooses from: every pending entry, or under the
+    // idle filter only the idle ones. Lock order is policy before queue.
+    fn candidates<'q>(
+        policy: &super::policy::ProjectPolicy,
+        queue: &'q super::queue::Queue,
+        idle_filter: bool,
+        idle_days: Option<i64>,
+    ) -> Vec<&'q super::queue::QueueEntry> {
+        if !idle_filter {
+            return queue.pending();
+        }
+        match idle_days {
+            Some(days) => super::queue::idle_candidates(queue, policy, Utc::now(), days),
+            None => Vec::new(),
+        }
+    }
     let (ids, project_audit_label): (Vec<Uuid>, Option<String>) = if all {
+        let policy = shared.policy.lock().expect("policy lock");
         let queue = shared.queue.lock().expect("queue lock");
         // `all` is the largest group there is and carries the same hole for
         // the same reason. Filtering it here as well as the project path is
         // deliberate: leaving it out would keep the defect alive behind a
         // different button.
-        let (ids, excluded, held) = group_selection(queue.pending().iter().copied(), group_filters);
+        let (ids, excluded, held) = group_selection(
+            candidates(&policy, &queue, idle_filter, idle_days)
+                .iter()
+                .copied(),
+            group_filters,
+        );
+        drop(policy);
         excluded_ineligible = excluded;
         excluded_held = held;
         (ids, None)
@@ -6311,8 +6358,7 @@ async fn handle_approve(shared: &DaemonShared, req: &Request) -> Response {
         // Only `Pending`: an entry already approved has had its terms
         // fixed, and a project-wide call must not silently re-pin them.
         let (ids, excluded, held) = group_selection(
-            queue
-                .pending()
+            candidates(&policy, &queue, idle_filter, idle_days)
                 .iter()
                 .copied()
                 .filter(|e| e.project_key == key),
@@ -8197,7 +8243,7 @@ fn redacted_settings(s: &DaemonSettings) -> serde_json::Value {
         // `*_root_configured` stays true only for a source pointed at a
         // folder. A source declared OFF is answered but has no folder, so
         // reporting it as configured would tell a settings screen to print
-        // "sessions folder set" about an agent the contributor said they do
+        // "traces folder set" about an agent the contributor said they do
         // not use. The mode carries that distinction, and carries no path.
         obj.remove("claude_root");
         obj.remove("codex_root");
@@ -19047,6 +19093,58 @@ mod tests {
                 .result
                 .unwrap();
             assert_eq!(all["pending"].as_array().unwrap().len(), 5);
+        }
+
+        /// A folder's Submit under the idle filter selects what the filtered
+        /// list shows and nothing it hid: `approve {project_id, filter}`
+        /// reads the same `queue::idle_candidates`. Observed on `skipped`,
+        /// as `a_project_approve_selects_only_what_can_be_sent` is: these
+        /// seeds have no session file, so every selected entry lands there.
+        #[tokio::test]
+        async fn a_filtered_folder_approve_selects_only_the_idle_traces() {
+            let s = live();
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 9);
+            let recent = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 1);
+            let listed = list_idle(&s);
+            assert_eq!(listed, vec![idle.to_string()]);
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "approve",
+                    serde_json::json!({"project_id": project_id_for(ASK), "filter": "idle_sessions"}),
+                ),
+            )
+            .await;
+            let result = r.result.expect("approve answers");
+            let selected: Vec<&serde_json::Value> = result["skipped"]
+                .as_array()
+                .expect("a skipped list")
+                .iter()
+                .map(|e| &e["entry_id"])
+                .collect();
+            assert_eq!(selected, vec![&serde_json::json!(idle)], "{result}");
+            assert!(
+                s.queue.lock().unwrap().get(recent).is_some(),
+                "the trace the filter hid is still waiting"
+            );
+        }
+
+        /// A filter narrows a group; on one entry it is refused by label.
+        #[tokio::test]
+        async fn a_filter_on_one_entry_is_refused() {
+            let s = live();
+            let idle = seed_idle(&s, ASK, crate::source::SOURCE_CLAUDE_CODE, 9);
+            let r = handle_request_async(
+                &s,
+                &req(
+                    "approve",
+                    serde_json::json!({"entry_id": idle, "filter": "idle_sessions"}),
+                ),
+            )
+            .await;
+            let err = r.error.expect("refused");
+            assert_eq!(err.code, ERR_BAD_PARAMS);
+            assert_eq!(err.message, ERR_FILTER_NEEDS_GROUP);
         }
 
         /// The filter is spelled as the kind's own label, so a filter and a

@@ -132,7 +132,8 @@ struct SessionReviewCard: View {
     /// Loading or the read that failed; then what would leave this
     /// computer, the redaction summary, the surviving secret, the residual
     /// risk, the gate statement, the consent scopes, eligibility, the
-    /// verdict and correction, and the credential refusal.
+    /// verdict and correction. The credential refusal is said under the
+    /// buttons (`actions`).
     @ViewBuilder
     private func preview(_ entry: DaemonData.QueueEntry, _ review: MonitorSessionReviewCopy) -> some View {
         if let failure {
@@ -189,11 +190,6 @@ struct SessionReviewCard: View {
             eligibility(entry, review)
             if let outcome {
                 verdict(outcome)
-                if store.correctionRefused == entry.entryId {
-                    GlassNotice(tone: .outside, title: outcome.correctionCredentialHeadline) {
-                        Text(outcome.correctionCredentialBody)
-                    }
-                }
             } else {
                 caption(review.outcomeUnavailable, outside: true)
             }
@@ -392,39 +388,33 @@ struct SessionReviewCard: View {
 
     // MARK: Actions
 
-    /// Look inside, Dismiss and Contribute on one line, as Ron's review
-    /// ends (`waiting-review.tsx`): Look inside a link on the left, Dismiss
-    /// and Contribute on the right. No label wraps or shortens: a
-    /// Contribute label too long for the line ("Enroll to approve") moves
-    /// Look inside onto a line of its own above, rather than clip the one
-    /// button that sends. Native's Keep is a link on the line under them.
-    /// The scrubbing caveat sits directly above the buttons, at reading
-    /// weight, as the review sheet repeats it at the commit.
+    /// Contribute, Dismiss and Look inside on one line, left-aligned: the
+    /// action first as the primary button, then Dismiss and Look inside as
+    /// links, the order the owner ruled for every card (Ron, 2026-10-09).
+    /// No label wraps or shortens: a Contribute label too long for the line
+    /// ("Enroll to approve") moves Look inside onto a line of its own
+    /// below, rather than clip the one button that sends. Native's Keep is
+    /// a link on the line under them. The scrubbing caveat sits directly
+    /// above the buttons, at reading weight, as the review sheet repeats it
+    /// at the commit; a refused action is said directly below them.
     @ViewBuilder
     private func actions(_ entry: DaemonData.QueueEntry) -> some View {
         let busy = store.acting.contains(entry.entryId)
         ScrubbingCaveatAtCommit()
-        TracesRefusal(store: store, entryId: entry.entryId)
         if let words, let review {
-            VStack(alignment: .trailing, spacing: GlassTokens.Space.s3) {
+            VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                 ViewThatFits(in: .horizontal) {
-                    // At least 4 before Dismiss, not the row's 8: the three
-                    // fit Ron's 300 inspector with a point to spare.
-                    HStack(spacing: 0) {
+                    HStack(spacing: GlassTokens.Space.s4) {
+                        contribute(entry, words)
+                        dismiss(entry, words)
                         lookInside(entry, review)
-                        Spacer(minLength: GlassTokens.Space.s2)
-                        HStack(spacing: GlassTokens.Space.s4) {
-                            dismiss(entry, words)
-                            contribute(entry, words)
-                        }
                     }
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
-                        lookInside(entry, review)
                         HStack(spacing: GlassTokens.Space.s4) {
-                            Spacer(minLength: 0)
-                            dismiss(entry, words)
                             contribute(entry, words)
+                            dismiss(entry, words)
                         }
+                        lookInside(entry, review)
                     }
                 }
                 Button(words.keep) { act(.keep, entry) }
@@ -432,8 +422,19 @@ struct SessionReviewCard: View {
                     .lineLimit(1)
                     .fixedSize()
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(busy)
+        }
+        // A refused action, then a refused correction, under the buttons
+        // they are about (Ron, 2026-10-09).
+        TracesRefusal(store: store, entryId: entry.entryId)
+        if let outcome {
+            if store.correctionRefused == entry.entryId {
+                VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
+                    GlassAlert(outcome.correctionCredentialHeadline)
+                    GlassAlert(outcome.correctionCredentialBody)
+                }
+            }
         }
     }
 
@@ -451,7 +452,7 @@ struct SessionReviewCard: View {
 
     private func dismiss(_ entry: DaemonData.QueueEntry, _ words: MonitorTracesCopy) -> some View {
         Button(words.dismissAction) { act(.dismiss, entry) }
-            .buttonStyle(GlassButtonStyle(.glass))
+            .buttonStyle(GlassButtonStyle(.link))
             .lineLimit(1)
             .fixedSize()
     }

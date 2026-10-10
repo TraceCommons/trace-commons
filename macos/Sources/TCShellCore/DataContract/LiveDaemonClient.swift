@@ -162,9 +162,12 @@ public final class LiveDaemonClient: DaemonDataClient, @unchecked Sendable {
         try await call("cancel", params: ["project_id": projectId], as: DaemonData.CancelFolderResult.self).canceled
     }
 
-    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
+    public func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse {
         var params: [String: Any] = ["project_id": projectId]
         if let verdict { params["outcome"] = verdict.rawValue }
+        if let filter { params["filter"] = filter.rawValue }
         return try await call("approve", params: params, as: ApproveResponse.self)
     }
 

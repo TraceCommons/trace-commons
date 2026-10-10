@@ -72,9 +72,9 @@ fn digest_body(
     let mut lines = Vec::new();
     if pending_count > 0 {
         let noun = if pending_count == 1 {
-            "session"
+            "trace"
         } else {
-            "sessions"
+            "traces"
         };
         let from = summarize_digest_labels(pending_projects)
             .map(|labels| format!(" from {labels}"))
@@ -84,9 +84,9 @@ fn digest_body(
     }
     if contributed_count > 0 {
         let noun = if contributed_count == 1 {
-            "session"
+            "trace"
         } else {
-            "sessions"
+            "traces"
         };
         // A project is named only when exactly one contributed -- the same
         // rule as the daemon's `notify::contribution_text` and the three
@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(
             digest_body(2, &projects, 1, &contributed, 4.25).as_deref(),
             Some(
-                "2 sessions ready from alpha and beta.\nNothing is sent until you review them.\n1 session contributed from alpha. 4.3 credit pending."
+                "2 traces ready from alpha and beta.\nNothing is sent until you review them.\n1 trace contributed from alpha. 4.3 credit pending."
             )
         );
     }
@@ -494,7 +494,7 @@ mod tests {
     fn contribution_line_matches_the_design_examples() {
         assert_eq!(
             digest_body(0, &[], 1, &["orchard-api".to_owned()], 6.0).as_deref(),
-            Some("1 session contributed from orchard-api. 6.0 credit pending.")
+            Some("1 trace contributed from orchard-api. 6.0 credit pending.")
         );
         assert_eq!(
             digest_body(
@@ -505,7 +505,7 @@ mod tests {
                 10.5
             )
             .as_deref(),
-            Some("2 sessions contributed. 10.5 credit pending.")
+            Some("2 traces contributed. 10.5 credit pending.")
         );
     }
 

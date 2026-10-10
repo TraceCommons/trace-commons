@@ -65,7 +65,7 @@ final class NudgeTracesTests: XCTestCase {
         await store.load()
         let card = store.nudgeCard
         XCTAssertEqual(card?.kind, .idleSessions)
-        XCTAssertEqual(card?.title, "2 sessions from Claude Code have been idle for 3 days or more")
+        XCTAssertEqual(card?.title, "2 traces from Claude Code have been idle for 3 days or more")
         XCTAssertEqual(card?.actions.map(\.label), ["Review", "Not now"])
         // Nothing to say, nothing drawn.
         let quiet = TracesStore(client: SampleDaemonClient(.empty))
@@ -93,6 +93,32 @@ final class NudgeTracesTests: XCTestCase {
         XCTAssertEqual(store.tree.allSessions.count, everything)
     }
 
+    /// While Review has the list narrowed to the idle traces, the idle card
+    /// is not drawn: the list is its answer. Show all brings it back.
+    func test_theIdleCardHidesWhileItsFilterIsOn() async {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        XCTAssertEqual(store.nudgeCard?.kind, .idleSessions)
+        await store.perform(.review(.idleSessions))
+        XCTAssertNil(store.nudgeCard)
+        await store.showIdleOnly(false)
+        XCTAssertEqual(store.nudgeCard?.kind, .idleSessions)
+    }
+
+    /// Under the idle filter a folder's Submit counts the traces drawn
+    /// under it, never the whole folder's count from `list_projects`.
+    func test_aFilteredFoldersSubmitCountsWhatIsShown() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        await store.perform(.review(.idleSessions))
+        let folders = store.tree.folders.filter { !$0.sessions.isEmpty }
+        XCTAssertFalse(folders.isEmpty)
+        for folder in folders {
+            XCTAssertEqual(
+                store.groupOffer(folder).count, folder.sessions.filter { !$0.heldForReview }.count, folder.id)
+        }
+    }
+
     func test_notNowDeclinesTheKindAndGoesNowhere() async {
         let client = SampleDaemonClient(.normalDay)
         let store = TracesStore(client: client)
@@ -110,15 +136,12 @@ final class NudgeTracesTests: XCTestCase {
         XCTAssertEqual(store.nudgeError, .unreachable)
     }
 
-    /// Until an order is chosen the tree is drawn as it always was, newest
-    /// first, and neither choice is shown as selected. A chosen order is
+    /// Suggested first is selected from the start, so the control always
+    /// shows the order the list is in (Ron, 2026-10-09). A chosen order is
     /// the daemon's: suggested, or the queue's own, oldest first.
     func test_theOrderControlAsksTheDaemonForItsOrder() async {
         let store = TracesStore(client: SampleDaemonClient(.busyQueue))
         await store.load()
-        XCTAssertNil(store.order)
-        XCTAssertFalse(store.keepsOrder)
-        await store.setOrder(.suggested)
         XCTAssertEqual(store.order, .suggested)
         XCTAssertTrue(store.keepsOrder)
         XCTAssertEqual(store.phase, .loaded)

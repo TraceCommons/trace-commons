@@ -16,6 +16,10 @@ final class NudgeSettingsStore {
     private(set) var readError: DaemonDataError?
     /// The last write the core refused, until the next write.
     private(set) var writeError: DaemonDataError?
+    /// The kind of the offer whose answer was refused, so the refusal is
+    /// said under that offer's buttons; nil when the refused write was a
+    /// switch.
+    private(set) var refusedOfferKind: String?
     /// A write in flight.
     private(set) var writing = false
     private(set) var client: (any DaemonDataClient)?
@@ -32,6 +36,7 @@ final class NudgeSettingsStore {
         settings = nil
         readError = nil
         writeError = nil
+        refusedOfferKind = nil
         writing = false
     }
 
@@ -76,13 +81,15 @@ final class NudgeSettingsStore {
     /// Answers whether the daemon took the write.
     @discardableResult
     func answer(_ offer: NudgeSettings.Offer, accept: Bool) async -> Bool {
-        await write { client in
+        let taken = await write { client in
             if accept {
                 try await client.setNotifyKind(offer.kind, on: true)
             } else {
                 try await client.dismissNotifyOffer(kind: offer.kind)
             }
         }
+        if writeError != nil { refusedOfferKind = offer.kind }
+        return taken
     }
 
     /// Turn on, then `prompt` -- the system's permission prompt -- only if
@@ -103,6 +110,7 @@ final class NudgeSettingsStore {
         writing = true
         defer { writing = false }
         writeError = nil
+        refusedOfferKind = nil
         guard let client else {
             writeError = .unreachable
             return false
@@ -184,15 +192,23 @@ struct NudgeOfferCard: View {
                     .glassType(GlassTokens.TypeScale.body)
                     .foregroundStyle(GlassColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: GlassTokens.Space.s3) {
-                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
-                        .buttonStyle(GlassButtonStyle(.glass))
+                // The accept first as a button, the decline after it as a
+                // link: every card's order (Ron, 2026-10-09).
+                HStack(spacing: GlassTokens.Space.s4) {
                     Button(offer.accept) {
                         Task { await store.accept(offer) { await requestAuthorization() } }
                     }
                     .buttonStyle(GlassButtonStyle(.glass))
+                    Button(offer.decline) { Task { await store.answer(offer, accept: false) } }
+                        .buttonStyle(GlassButtonStyle(.link))
                 }
                 .disabled(store.writing)
+                // A refused answer, under the buttons it is about (Ron,
+                // 2026-10-09).
+                if store.refusedOfferKind == offer.kind, let error = store.writeError,
+                   let line = MonitorWords.table?.line(for: error) {
+                    GlassAlert(line)
+                }
             }
         }
     }
@@ -202,7 +218,7 @@ struct NudgeOfferCard: View {
 /// History, the idle one on Traces -- for an install that existed before
 /// the two kinds. The same settings, words and answers as Settings; once
 /// answered either way the daemon clears it and it is not drawn again. A
-/// refused answer is said under it, in the core's line.
+/// refused answer is said in the core's line under that card's buttons.
 struct NudgeOfferCards: View {
     let place: NudgeSurface.Place
     @EnvironmentObject private var model: AppModel
@@ -214,9 +230,6 @@ struct NudgeOfferCards: View {
                 NudgeOfferCard(offer: offer, store: store) {
                     _ = await Notifier.shared.requestAuthorizationIfNeverAsked()
                 }
-            }
-            if let error = store.writeError, let line = MonitorWords.table?.line(for: error) {
-                GlassAlert(line)
             }
         }
         .task(id: model.liveData.map(ObjectIdentifier.init)) {

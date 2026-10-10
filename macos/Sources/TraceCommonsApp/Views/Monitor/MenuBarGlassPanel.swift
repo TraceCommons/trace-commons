@@ -256,11 +256,10 @@ struct MenuBarGlassPanel: View {
                 // No override before onboarding is done (R-43): it is a
                 // grant, and first run is where consent is asked.
                 .disabled(!store.canChooseOverride || model.requiresOnboarding)
+                // A refused override: the failed request's red line, under
+                // the choices it is about (Ron, 2026-10-09).
                 if let refusal = store.overrideRefusal {
-                    Text(refusal)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    GlassAlert(refusal)
                         .accessibilityAddTraits(.isStaticText)
                 }
             }

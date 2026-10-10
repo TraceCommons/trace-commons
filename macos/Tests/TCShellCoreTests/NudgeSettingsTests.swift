@@ -23,7 +23,7 @@ final class NudgeSettingsTests: XCTestCase {
         "SETTING_NOTIFY_BUDGET_HELP": "At most one a day.",
         "OFFER_NOTIFY_VERDICTS_EXISTING": "Sessions are now judged.",
         "OFFER_NOTIFY_IDLE_EXISTING": "Idle sessions can be a notification.",
-        "OFFER_TURN_ON": "Turn on",
+        "OFFER_TURN_ON": "Enable",
         "OFFER_NO_THANKS": "No thanks",
         "LIST_ORDER_SUGGESTED": "Suggested first",
         "LIST_ORDER_QUEUE": "Oldest first",
@@ -126,8 +126,8 @@ final class NudgeSettingsTests: XCTestCase {
     func testThePendingOffersAreDrawnInTheCoresWords() throws {
         let pending = try settings(#"{"verdicts_offer_pending":true,"idle_offer_pending":true}"#)
         XCTAssertEqual(NudgeSettings.offers(pending, copy: Self.copy), [
-            .init(kind: "verdicts_landed", text: "Sessions are now judged.", accept: "Turn on", decline: "No thanks"),
-            .init(kind: "idle_sessions", text: "Idle sessions can be a notification.", accept: "Turn on", decline: "No thanks"),
+            .init(kind: "verdicts_landed", text: "Sessions are now judged.", accept: "Enable", decline: "No thanks"),
+            .init(kind: "idle_sessions", text: "Idle sessions can be a notification.", accept: "Enable", decline: "No thanks"),
         ])
         XCTAssertEqual(NudgeSettings.offers(try settings(#"{"idle_offer_pending":false}"#), copy: Self.copy), [])
         XCTAssertEqual(NudgeSettings.offers(try settings("{}"), copy: Self.copy), [])

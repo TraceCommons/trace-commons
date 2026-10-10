@@ -11,7 +11,7 @@ export function HistoryDetailView({
     return (
       <section className="rounded-2xl border border-border bg-card/80 mt-4 p-[26px]">
         <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
-          Reading owned session detail…
+          Reading owned trace detail…
         </p>
       </section>
     );

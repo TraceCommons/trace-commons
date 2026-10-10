@@ -39,23 +39,6 @@ struct ProjectsSection: View {
         // The container is always present, so the dialog is attached
         // whether or not any project is drawn.
         VStack(alignment: .leading, spacing: GlassTokens.Space.cardGap) {
-            if let error = model.lastActionError {
-                GlassNotice(tone: .outside) {
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s3) {
-                        Text(error)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        // An error is never undismissable, and is put away
-                        // the way every action message is: an x named by
-                        // the banner's word, never Traces' dismiss verb.
-                        Button { model.lastActionError = nil } label: {
-                            Image(systemName: "xmark").imageScale(.small)
-                        }
-                        .buttonStyle(GlassButtonStyle(.glass))
-                        .accessibilityLabel(ActionNoticeWords.dismissWord)
-                    }
-                }
-            }
             GlassEyebrowCard(SettingsWords.projects) {
                 VStack(alignment: .leading, spacing: 0) {
                     // The list defaults to empty, and a failed
@@ -70,6 +53,23 @@ struct ProjectsSection: View {
                     }
                     ForEach(Array(model.projects.enumerated()), id: \.element.id) { index, project in
                         GlassTableRow(first: index == 0) { row(project) }
+                    }
+                    // A refused mode change, unboxed, under the controls it
+                    // is about (Ron, 2026-10-09).
+                    if let error = model.lastActionError {
+                        HStack(alignment: .firstTextBaseline, spacing: GlassTokens.Space.s3) {
+                            GlassAlert(error)
+                            // An error is never undismissable, and is put
+                            // away the way every action message is: an x
+                            // named by the banner's word, never Traces'
+                            // dismiss verb.
+                            Button { model.lastActionError = nil } label: {
+                                Image(systemName: "xmark").imageScale(.small)
+                            }
+                            .buttonStyle(GlassButtonStyle(.link))
+                            .accessibilityLabel(ActionNoticeWords.dismissWord)
+                        }
+                        .padding(.top, GlassTokens.Space.s3)
                     }
                 }
             }

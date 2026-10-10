@@ -287,16 +287,7 @@ pub fn backlog_card(batch: &Batch) -> CardText {
             batch_clauses(batch),
         ),
         actions: vec![
-            action(
-                ACTION_REVIEW,
-                &fill(
-                    one(
-                        copy::NUDGE_BACKLOG_REVIEW_IN_TRACES,
-                        copy::NUDGE_BACKLOG_REVIEW_IN_TRACES_ONE,
-                    ),
-                    &values,
-                ),
-            ),
+            action(ACTION_REVIEW, copy::NUDGE_BACKLOG_REVIEW),
             action(ACTION_NOT_NOW, copy::NUDGE_NOT_NOW),
         ],
         panel_row: one(copy::NUDGE_PANEL_BACKLOG, copy::NUDGE_PANEL_BACKLOG_ONE).to_string(),
@@ -830,10 +821,10 @@ mod tests {
     fn backlog_card_uses_the_plain_title_and_reads_singular() {
         let many = backlog_card(&batch(6, &[], 0));
         assert_eq!(many.title, "6 traces to review");
-        assert_eq!(many.actions[0].label, "Review the 6 in Traces");
+        assert_eq!(many.actions[0].label, "Review");
         let one = backlog_card(&batch(1, &[], 0));
         assert_eq!(one.title, "1 trace to review");
-        assert_eq!(one.actions[0].label, "Review it in Traces");
+        assert_eq!(one.actions[0].label, "Review");
         assert_eq!(one.panel_row, copy::NUDGE_PANEL_BACKLOG_ONE);
         card_filled(&many);
         card_filled(&one);

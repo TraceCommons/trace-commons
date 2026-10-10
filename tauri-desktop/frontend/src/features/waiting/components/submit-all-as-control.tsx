@@ -50,7 +50,7 @@ export function SubmitAllAsControl({
       >
         <div className="grid gap-2.5">
           <p className="m-0 text-sm text-muted-foreground">
-            Apply one outcome to {eligibleCount} eligible session
+            Apply one outcome to {eligibleCount} eligible trace
             {eligibleCount === 1 ? "" : "s"}.
           </p>
           <div className="flex flex-wrap gap-2">

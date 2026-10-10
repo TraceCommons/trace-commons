@@ -831,7 +831,7 @@ fn default_menu_bar_mark_enabled() -> bool {
 /// a day at a fixed local hour.
 ///
 /// K9 (#1118): the WYSIWYG design's Flow 2/3 alerts show a single evening
-/// digest ("1 session contributed from orchard-api. 6.0 credit pending."),
+/// digest ("1 trace contributed from orchard-api. 6.0 credit pending."),
 /// and the issue's open decision #5 asks whether that is a fixed evening
 /// time or the interval this daemon already had. Both stay supported --
 /// `Interval` is the default and unchanged, so no existing install's

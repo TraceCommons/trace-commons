@@ -31,10 +31,10 @@ final class TracesStore {
 
     // MARK: The nudge (re-engagement)
 
-    /// The order chosen with the order control (`list_pending {order}`);
-    /// nil until one is chosen, and the tree is then drawn newest first as
-    /// it always was.
-    private(set) var order: DaemonData.PendingOrder?
+    /// The order chosen with the order control (`list_pending {order}`).
+    /// Suggested first until another is chosen (Ron, 2026-10-09): a
+    /// segmented control always shows which order the list is in.
+    private(set) var order: DaemonData.PendingOrder? = .suggested
     /// Narrowed to the idle sessions the idle card named
     /// (`list_pending {filter: "idle_sessions"}`), by its Review.
     private(set) var idleOnly = false
@@ -51,12 +51,17 @@ final class TracesStore {
     /// The core's fixed nudge words, decoded once.
     let nudgeCopy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
 
-    /// Whether the tree keeps the core's order: once an order is chosen.
+    /// Whether the tree keeps the core's order: whenever an order is set.
     var keepsOrder: Bool { order != nil }
 
     /// The idle or backlog card, in the daemon's words; nil when it has
-    /// none to show here.
-    var nudgeCard: NudgeSurface.Card? { NudgeSurface.card(status?.nudge, on: .traces) }
+    /// none to show here. The idle card is not drawn while its own Review
+    /// has the list narrowed to the traces it named: the list is already
+    /// the answer to it, and its Show all is the way back.
+    var nudgeCard: NudgeSurface.Card? {
+        guard let card = NudgeSurface.card(status?.nudge, on: .traces) else { return nil }
+        return idleOnly && card.kind == .idleSessions ? nil : card
+    }
 
     private func build(
         _ read: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)
@@ -768,9 +773,20 @@ final class TracesStore {
 
     /// What the folder's group control offers, from the daemon's counts on
     /// its `list_projects` row and the shared table (`groupSubmit`); never a
-    /// count compared to zero here.
+    /// count compared to zero here. Under the idle filter those counts are
+    /// the whole folder's, so the offer counts the traces drawn under it
+    /// instead -- less any held for a person, which no group sends -- and
+    /// Submit sends only those (`approveFolder(filter:)`); what the daemon
+    /// then leaves out as ineligible is said after, in its own line.
     func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
-        EligibilitySurface.groupSubmit(
+        if idleOnly {
+            return EligibilitySurface.groupSubmit(
+                pendingCount: folder.sessions.filter { !$0.heldForReview }.count,
+                contributableCount: nil,
+                fallbackPending: folder.sessions.count,
+                calls: Self.eligibilityCalls)
+        }
+        return EligibilitySurface.groupSubmit(
             pendingCount: folder.pendingCount,
             contributableCount: folder.contributableCount,
             fallbackPending: folder.sessions.count,
@@ -784,7 +800,8 @@ final class TracesStore {
     }
 
     /// Contribute for a whole folder, optionally with one verdict for every
-    /// session ("Submit all as"). The core's toast is kept for its Undo, and
+    /// session ("Submit all as"); under the idle filter, only the folder's
+    /// traces the filter shows. The core's toast is kept for its Undo, and
     /// what it left out as ineligible is said in the core's words.
     func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
         guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
@@ -800,7 +817,8 @@ final class TracesStore {
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
-            let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
+            let response = try await client.approveFolder(
+                projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil)
             guard mine == attachment else { return }
             lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast, label: folder.label)
             lastContributed = nil

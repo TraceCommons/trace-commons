@@ -183,12 +183,10 @@ struct FirstRunFrame<Header: View, Content: View, Pinned: View>: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s6) {
                         content
+                        // A failed step: the failed request's red line,
+                        // unboxed (Ron, 2026-10-09).
                         if let notice {
-                            GlassNotice(tone: .outside) {
-                                Text(notice)
-                                    .fixedSize(horizontal: false, vertical: true)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
+                            GlassAlert(notice)
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .topLeading)

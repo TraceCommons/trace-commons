@@ -209,7 +209,7 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertEqual(SettingsLegacyWords.optionalEachOne, "Optional data use")
         XCTAssertEqual(SettingsLegacyWords.alwaysOn, "required")
         XCTAssertTrue(SettingsLegacyWords.appliesFromNow.hasPrefix("Applies to traces sent from now on."))
-        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A session counts as finished after 30 seconds of quiet.")
+        XCTAssertEqual(SettingsLegacyWords.sessionFinishedAfter(30), "A trace counts as finished after 30 seconds of quiet.")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("armed-auto-upload", project: "demo"),
                        "Automatic contributing turned on for demo")
         XCTAssertEqual(SettingsLegacyWords.auditSentence("a-future-action", project: nil), "Changed")
@@ -270,13 +270,13 @@ final class SettingsParityTests: XCTestCase {
         XCTAssertTrue(source.contains(".disabled(copy.tokenHeading == nil)"))
         XCTAssertEqual(source.components(separatedBy: ".glassModal(isPresented:").count - 1, 4)
         XCTAssertFalse(source.contains(".confirmationDialog("))
-        // A save failure keeps the core's refusal glyph and tone, as legacy
-        // `NativeFlowNotice` did; a missing wallet copy is still a refusal.
+        // A save failure is the failed request's red line, unboxed, under
+        // the Enable and Disable it is about (Ron, 2026-10-09).
         XCTAssertFalse(source.contains("GlassNotice(tone: .outside)"), "the save failure's tone is chosen in Swift")
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.inferenceSaveFailed, glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.inferenceEvidenceSaveFailed {\n                    GlassAlert(copy.inferenceSaveFailed)"))
         XCTAssertTrue(source.contains(
-            "GlassFlowNotice(message: copy.tokenSaveFailed ?? \"\", glyph: copy.wallet?.refusedGlyph ?? \"\", tone: copy.wallet?.refusedTone)"))
+            "if model.tokenContributionSaveFailed {\n                    GlassAlert(copy.tokenSaveFailed ?? \"\")"))
         XCTAssertEqual(GlassFlowNotice.status(forTone: "refused"), .outside)
         XCTAssertEqual(GlassFlowNotice.status(forTone: "neutral"), .off)
         XCTAssertEqual(GlassFlowNotice.status(forTone: ""), .off)

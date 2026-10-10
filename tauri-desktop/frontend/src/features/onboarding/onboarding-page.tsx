@@ -48,13 +48,13 @@ export function OnboardingPage({
     privacy: "Extra scrub before sending?",
     inference: "Connect inference",
     disclosure_scrub: "What automatic contributing removes",
-    disclosure_witness: "Where sessions go",
+    disclosure_witness: "Where traces go",
     grant: "Turn on automatic contributing",
     projects: "What to watch",
     done: "You're set up",
   } as const;
   const pageDescriptions = {
-    welcome: "A local contributor for sessions you choose to share.",
+    welcome: "A local contributor for traces you choose to share.",
     roots:
       "Declare which local folders may be watched. Nothing is auto-discovered.",
     connect: "Enrollment happens only when you press Connect.",

@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(value["eligible_count"], 3);
         assert_eq!(
             value["withheld_line"],
-            "4 sessions here cannot be sent, so they are not included."
+            "4 traces here cannot be sent, so they are not included."
         );
 
         // An absent `contributable_count`: every pending session is

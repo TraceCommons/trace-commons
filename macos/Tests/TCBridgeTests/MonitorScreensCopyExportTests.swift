@@ -59,9 +59,9 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertEqual(shell.watching(tools: 1), "Watching 1 tool")
         XCTAssertEqual(shell.watching(tools: 3), "Watching 3 tools")
         XCTAssertEqual(shell.waiting(0, secondLook: 2), "Nothing waiting for you")
-        XCTAssertEqual(shell.waiting(1, secondLook: 0), "1 session waiting for you")
-        XCTAssertEqual(shell.waiting(4, secondLook: 2), "4 sessions waiting for you \u{00B7} 2 worth a second look")
-        XCTAssertEqual(shell.focusTip(tool: nil, focused: false), "Select a tool, project or session first")
+        XCTAssertEqual(shell.waiting(1, secondLook: 0), "1 trace waiting for you")
+        XCTAssertEqual(shell.waiting(4, secondLook: 2), "4 traces waiting for you \u{00B7} 2 worth a second look")
+        XCTAssertEqual(shell.focusTip(tool: nil, focused: false), "Select a tool, project or trace first")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: false), "Show Codex in the map")
         XCTAssertEqual(shell.focusTip(tool: "Codex", focused: true), "Back to the whole map")
         XCTAssertEqual(shell.showMap, "Show the flow map")
@@ -94,7 +94,7 @@ final class MonitorScreensCopyExportTests: XCTestCase {
         XCTAssertEqual(copy.safeguards.rowsUnavailable, "{count} rows unavailable")
         XCTAssertTrue(copy.safeguards.capacityUnreadable.contains("could not read how many"))
         XCTAssertEqual(copy.safeguards.remaining, "{uploads} uploads left \u{00B7} {megabytes} MB left")
-        XCTAssertEqual(copy.safeguards.heldByLimitOne, "1 queued session held by limit")
+        XCTAssertEqual(copy.safeguards.heldByLimitOne, "1 queued trace held by limit")
     }
 
     /// The screens and the Traces tab say the same thing when the core does
