@@ -18985,6 +18985,24 @@ async fn checked_compatibility_service_over_adapter(
     authority: Arc<dyn PipelineAuthorityProvider>,
     trace_credit: Arc<dyn SettlementAdapter>,
 ) -> Arc<PipelineService> {
+    checked_compatibility_service_over_adapter_with(
+        backend,
+        dir,
+        authority,
+        trace_credit,
+        issuing_checks(),
+    )
+    .await
+}
+
+/// `checked_compatibility_service_over_adapter` under `checks`.
+async fn checked_compatibility_service_over_adapter_with(
+    backend: &Arc<PgBackend>,
+    dir: &tempfile::TempDir,
+    authority: Arc<dyn PipelineAuthorityProvider>,
+    trace_credit: Arc<dyn SettlementAdapter>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
     let mut config = CompatibilityBundleConfig::local_reference();
     config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
     let scorer = Arc::new(ReferencePerplexityScorer::new());
@@ -19016,10 +19034,104 @@ async fn checked_compatibility_service_over_adapter(
         .with_authority(authority)
         .with_privacy(default_privacy_boundary())
         .with_unqualified_routing(true)
-        .with_novelty_utility_checks(issuing_checks())
+        .with_novelty_utility_checks(checks)
         .build()
         .expect("build pipeline service"),
     )
+}
+
+/// The duplicate verdict is decided once, before a leg is dispatched. B's
+/// Trace Credit leg is dispatched while the earlier same-content
+/// submission A has not passed Review, and its adapter answers
+/// `Unavailable`; A's Review then commits. B's retry must not re-decide
+/// the dispatched leg as a duplicate (which would fail it as
+/// `settlement_unreconciled` because of a neighbour's progress): it
+/// completes and pays, and B's gate decision row carries no duplicate
+/// label.
+#[tokio::test]
+async fn a_dispatched_leg_is_not_re_decided_as_a_duplicate() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let outage = Arc::new(OutageThenRecordingAdapter {
+        inner: RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_test_only",
+            "none",
+        ),
+        failures_left: AtomicUsize::new(0),
+    });
+    let service = checked_compatibility_service_over_adapter_with(
+        &backend,
+        &dir,
+        allow_all_authority(),
+        CountingSettlementAdapter::new(outage.clone()),
+        PipelineNoveltyUtilityChecks {
+            duplicate_controls: Some(
+                trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+            ),
+            ..issuing_checks()
+        },
+    )
+    .await;
+    let tenant = format!("compat-dup-dispatched-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("the receipt creates a run")
+        };
+        runs.push(created);
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, b.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("B's {phase} runs"));
+    }
+    outage.fail_next_calls(1);
+    let first = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle runs");
+    assert_eq!(first.state, PipelineRunState::Retry);
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert!(leg.dispatched_at.is_some(), "{leg:?}");
+
+    service
+        .process_run(&tenant, a.run_id)
+        .await
+        .unwrap()
+        .expect("A's Review runs");
+    force_due(&backend, &tenant, b.run_id).await;
+    let second = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle runs again");
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert_eq!(
+        (
+            leg.operation_state.as_str(),
+            leg.last_error_label.as_deref()
+        ),
+        ("complete", None),
+        "{leg:?}"
+    );
+    assert!(leg.credit_event_id.is_some(), "{leg:?}");
+    assert_eq!(second.state, PipelineRunState::Complete, "{second:?}");
+    let rows = gate_decision_rows(&tenant, b.submission_id).await;
+    assert_eq!(rows[0].credit_withheld_reason, None, "{rows:?}");
 }
 
 /// poldsam P-1: a Trace Credit leg an earlier Settle attempt dispatched
@@ -44432,6 +44544,93 @@ async fn a_duplicate_submission_records_skipped_duplicate_on_its_gate_row() {
     assert_eq!(leg.credit_event_id, None);
     let first_leg = trace_credit_settlement(&service, &tenant, first.run_id).await;
     assert!(first_leg.credit_event_id.is_some(), "{first_leg:?}");
+}
+
+/// The duplicate verdict is decided once per run. B's Trace Credit leg is
+/// paid while the earlier same-content submission A has not passed Review,
+/// then B's Settle crashes before its commit. A's Review commits, and B's
+/// retry commits: its gate decision row must agree with the paid leg (no
+/// duplicate label, its credit quality kept), not re-decide B as a
+/// duplicate of A after B's credit event exists.
+#[tokio::test]
+async fn a_paid_leg_fixes_the_duplicate_verdict_across_a_settle_crash() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = CompatibilityBundleConfig::local_reference();
+    config.novelty_utility_microcredits = CHECKED_DELTA_MICROCREDITS;
+    let service = Arc::new(
+        compatibility_test_builder(
+            backend.clone(),
+            artifact_store(&dir),
+            config,
+            None,
+            allow_all_authority(),
+            PipelineNoveltyUtilityChecks {
+                duplicate_controls: Some(
+                    trace_commons_server::versioned_pipeline::PipelineDuplicateControls::MAIN_DEFAULT,
+                ),
+                ..issuing_checks()
+            },
+            IsolatedPipelineIndex::new(),
+        )
+        .with_crash_point(PipelineCrashPoint::AfterInstrumentOperation)
+        .build()
+        .expect("build pipeline service"),
+    );
+    let tenant = format!("gate-row-dup-crash-{}", uuid::Uuid::new_v4());
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        let env = model_training_envelope(uuid::Uuid::new_v4()).await;
+        let raw = serde_json::to_vec(&env).unwrap();
+        let key = env.submission_id.to_string();
+        let PipelineReceiptResult::Created(created) =
+            submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
+                .await
+                .unwrap()
+        else {
+            panic!("receipt creates a run")
+        };
+        runs.push(created);
+    }
+    let (a, b) = (&runs[0], &runs[1]);
+    for phase in ["Review", "Score"] {
+        service
+            .process_run(&tenant, b.run_id)
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("B's {phase} runs"));
+    }
+    let crash = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .expect_err("B's Settle crashes after its leg completes");
+    assert_eq!(crash.to_string(), INJECTED_PIPELINE_CRASH);
+    let leg = trace_credit_settlement(&service, &tenant, b.run_id).await;
+    assert_eq!(leg.operation_state, "complete", "{leg:?}");
+    assert!(leg.credit_event_id.is_some(), "B's leg is paid: {leg:?}");
+
+    service
+        .process_run(&tenant, a.run_id)
+        .await
+        .unwrap()
+        .expect("A's Review runs");
+    expire_lease(&backend, &tenant, b.run_id).await;
+    let completed = service
+        .process_run(&tenant, b.run_id)
+        .await
+        .unwrap()
+        .expect("B's Settle retries");
+    assert_eq!(completed.state, PipelineRunState::Complete, "{completed:?}");
+
+    let rows = gate_decision_rows(&tenant, b.submission_id).await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(
+        rows[0].credit_withheld_reason, None,
+        "the row agrees with B's paid leg: {rows:?}"
+    );
+    assert!(rows[0].credit_quality_micros.is_some(), "{rows:?}");
 }
 
 /// `main`'s canonical-hash cache: with the skip-duplicate knob off, a
