@@ -2739,7 +2739,14 @@ What the row holds:
   the driver is enabled; see the compatibility mapping spec), and then the
   row holds no credit quality, so the contributor status shows the duplicate
   line and 0.0 pending as on `main`; otherwise the Trace Credit leg's label
-  when one of `main`'s NoveltyUtility checks withheld the award.
+  when one of `main`'s NoveltyUtility checks withheld the award. A run
+  recorded as a duplicate is also kept out of the vector index, as `main`
+  never indexes one: Settle decides the verdict once, when it persists its
+  selection and before the index write, and the run ends with
+  `index_membership = 'excluded'`, `index_write_state = 'none'` and a
+  committed Settle decision of `Exclude` under the same label. An index
+  rebuild reads only `included` runs, so it leaves duplicates out too. The
+  bundle package and its hash do not depend on the duplicate controls.
 
 The vector entry and snapshot ids, the per-author columns and every column a
 sweep fills (dedup, contributor cap, correction, composite score) start
