@@ -35737,7 +35737,11 @@ async fn ranking_feature_run_handler(
     let tenant_policy =
         tenant_utility_credit_policy_for_request(state.as_ref(), &tenant, &[body.target_use])
             .await?;
-    let metadata = read_reviewer_metadata_view(state.as_ref(), &tenant)
+    // Since #1325 a pipeline submission's derived record carries a
+    // `canonical_summary_hash` too, so the filter below no longer leaves it
+    // out: `main`'s view without the pipeline's submissions does, as for the
+    // ranker exports (L1-2).
+    let metadata = read_mains_reviewer_metadata_view(state.as_ref(), &tenant)
         .await
         .map_err(internal_error)?;
     let existing_features = read_ranking_features_for_admin(state.as_ref(), &tenant)

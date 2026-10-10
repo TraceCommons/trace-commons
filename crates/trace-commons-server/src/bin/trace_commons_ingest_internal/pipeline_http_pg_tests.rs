@@ -10120,6 +10120,45 @@ async fn mains_process_evaluation_leaves_pipeline_submissions_out() {
     assert_ne!(legacy["error"], "pipeline_run_owns_submission", "{legacy}");
 }
 
+/// `main`'s ranking-feature run leaves the submissions with a pipeline run
+/// out, as its ranker exports do (L1-2): since #1325 the pipeline's Review
+/// commit stores a `canonical_summary_hash` on its derived record, which
+/// alone no longer tells the two apart. A legacy submission still gets its
+/// server features.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mains_ranking_feature_run_leaves_pipeline_submissions_out() {
+    let Some((fixture, state, pipeline_id, legacy_id)) = mixed_submissions_fixture().await else {
+        return;
+    };
+    let (status, run) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/workers/ranking/features/run",
+        auth_headers(&fixture.admin_token),
+        Some(serde_json::json!({
+            "dry_run": false,
+            "target_use": "ranking_model_training",
+            "feature_schema_version": "ranking-features-server-v1",
+            "reason": "ranking features of a mixed tenant",
+            "limit": 10,
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{run}");
+    let featured = state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_ranking_features(&fixture.base.tenant)
+        .await
+        .expect("the ranking features read")
+        .into_iter()
+        .map(|feature| feature.submission_id)
+        .collect::<BTreeSet<_>>();
+    assert!(!featured.contains(&pipeline_id), "{run}");
+    assert_eq!(featured, BTreeSet::from([legacy_id]), "{run}");
+}
+
 /// Zaki review 1, round 2, N-2: the pipeline assessment route applies the
 /// privileged-action consent check `main`'s review decision route applies
 /// (`ensure_record_matches_privileged_action_policy_abac`): a reviewer whose

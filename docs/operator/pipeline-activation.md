@@ -2966,8 +2966,9 @@ quarantined is counted. A run that the privacy pass holds, and a run that
 failed with `privacy_classification_failed`, keep the stored status
 `received` and are in no count of `main`: read `work` in the pipeline
 operational summary and `GET /v1/review/pipeline/quarantine`.
-`main`'s benchmark export, its two ranker exports and its process-evaluation
-worker leave pipeline submissions out. The process-evaluation job route
+`main`'s benchmark export, its two ranker exports, its ranking-feature run
+and its process-evaluation worker leave pipeline submissions out. The
+process-evaluation job route
 refuses one with `409` `pipeline_run_owns_submission`.
 
 ## DB reconciliation of a pipeline tenant

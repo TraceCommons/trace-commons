@@ -121,7 +121,7 @@ Each question has a recommendation. The plan is written for the recommended answ
 - Modify: `runbook`, the same paragraph as Task 1
 - Test: `http_tests`
 
-**Consumer sweep (review rule 1).** `read_reviewer_metadata_view` has 12 unfiltered call sites at `6c3932b8`:
+**Consumer sweep (review rule 1).** `read_reviewer_metadata_view` has 12 unfiltered call sites at `6c3932b8` (one row corrected after the merge of `main`):
 
 | Function | Takes the filter in this plan? |
 | --- | --- |
@@ -129,7 +129,7 @@ Each question has a recommendation. The plan is written for the recommended answ
 | `read_trace_operational_summary` | The derived list only (Task 1). |
 | `run_credit_settlement_unlocked`, `build_credit_risk_summary` | No, and they must not: the list is a lookup for ledger events, and a filter would make credit from `main`'s manual routes on a pipeline submission impossible to settle (money rule, C24). |
 | `analytics_handler`, `list_traces_handler`, `run_analytics_release_drill` | No. They count or list metadata. They read no body. |
-| `ranking_feature_run_handler` | No. The pipeline's `summary` record has no `canonical_summary_hash`, so it is not a candidate. |
+| `ranking_feature_run_handler` | Yes (review of #1331, finding m2). Planned as No, because the pipeline's `summary` record had no `canonical_summary_hash`; since #1325 the pipeline's Review commit stores one, so a pipeline submission became a candidate and got server ranking features the ranker exports then leave out. It reads `read_mains_reviewer_metadata_view`. |
 | `run_canary_read_drill`, `trace_vector_nearest_neighbor_policy_gap_count_for_tenant` | No. Neither reads a pipeline body or counts a pipeline row. |
 
 - [ ] **Step 1: Write three failing tests** in `http_tests`. Each uses one accepted pipeline submission and one accepted legacy submission of one tenant, database reviewer reads on, and `state.pipeline_store` set. Copy `mains_database_replay_export_leaves_pipeline_submissions_out` (`product_fixture()` has an export worker token).
