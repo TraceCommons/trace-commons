@@ -78,9 +78,14 @@ Version 1:
 Rollout order matters. Mission objects are strict, so a contributor build
 from before this field refuses any catalogue in which a mission carries a
 `predicate` key at all: its whole activity-missions surface reads unavailable,
-not just mission fit. A policy without predicates is unaffected. Operators
-should configure predicates only once the client release that reads them is
-what contributors run.
+not just mission fit. The same holds for a native macOS app from before it:
+the daemon's `activity_missions_catalogue` reply carries predicates as
+published, and the app checks mission keys against a closed set. From this
+release the app reads a mission's `predicate` as the protocol does (a
+version-1 block against its key set, a later version carried unread) and never
+matches on it. A policy without predicates is unaffected. Operators should
+configure predicates only once the client release that reads them, daemon and
+app, is what contributors run.
 
 The contributor daemon fetches the catalogue on its own schedule, the same
 anonymous request for every contributor, and feeds only missions with a

@@ -7528,7 +7528,10 @@ later-version block holding a float or an integer outside i64/u64 is malformed
 and refuses the catalogue, since it would not re-serialize to the bytes the
 server hashed. The
 catalogue this method returns carries predicates as published; matching on them
-happens only in the daemon's mission slot.
+happens only in the daemon's mission slot. A shell checking mission keys must
+therefore admit `predicate`: the native macOS app reads a version-1 block
+against its key set and carries a later version unread, and an app from before
+this release refuses the whole catalogue once a mission carries one.
 
 Both replies carry `consent_copy::ACTIVITY_MISSIONS_DISCLOSURE` assembled in Rust.
 Neither read changes capture, contribution consent, project modes, scopes,
