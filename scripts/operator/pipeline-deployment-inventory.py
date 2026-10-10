@@ -36,6 +36,8 @@ ROUTE_RULES = (
     # Read-only catalogue of activity eligibility; rewards remain off.
     (re.compile(r"^/v1/activity-missions$"), ("EXP-004", "CRD-004")),
     (re.compile(r"^/v1/missions"), ("EXP-004", "CRD-004")),
+    # The local credit estimate table: public, non-personal, fetched before an account exists.
+    (re.compile(r"^/v1/credit-estimate/table$"), ("EXP-004", "CRD-004")),
     (re.compile(r"^/v1/public/"), ("STA-001", "CMP-001")),
     (re.compile(r"^/v1/research/"), ("EXP-004", "CMP-001")),
     (re.compile(r"^/v1/reward-offers/"), ("CRD-001", "STA-001")),
