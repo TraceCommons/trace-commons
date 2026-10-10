@@ -538,6 +538,7 @@ public struct GlassMapField: View {
             .background(GlassTokens.Color.mapFieldOuter.color)
             ZStack {
                 GlassMapMarkTile()
+                GlassMapShimmerHost()
                 GlassMapMarkGlow(pointer: pointer)
             }
             .mask(GlassMapMarks.fade)
@@ -587,10 +588,18 @@ enum GlassMapMarks {
     static let size: CGFloat = 4.2
     /// The marks at rest: white over the dark field, black over the light.
     static let ink = GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08))
-    /// The marks at the centre of the light.
-    static let litInk = GlassRGBA(0xFFFFFF, alpha: 0.42, light: GlassRGBA(0x000000, alpha: 0.3))
+    /// The marks at the centre of the light: about twice their resting
+    /// ink, no more (owner, 2026-10-10: the first cut was too bright).
+    static let litInk = GlassRGBA(0xFFFFFF, alpha: 0.2, light: GlassRGBA(0x000000, alpha: 0.15))
     /// The light itself, a soft white bloom under the pointer.
-    static let bloom = GlassRGBA(0xFFFFFF, alpha: 0.07, light: GlassRGBA(0xFFFFFF, alpha: 0.4))
+    static let bloom = GlassRGBA(0xFFFFFF, alpha: 0.035, light: GlassRGBA(0xFFFFFF, alpha: 0.2))
+    /// The marks at the crest of the shimmer.
+    static let shimmerInk = GlassRGBA(0xFFFFFF, alpha: 0.24, light: GlassRGBA(0x000000, alpha: 0.16))
+    /// How often the shimmer crosses the field, and how long it takes.
+    static let shimmerEvery: Duration = .seconds(40)
+    static let shimmerDuration: Double = 2.4
+    /// The shimmer band's half-width, as a fraction of the field's diagonal.
+    static let shimmerHalfWidth: CGFloat = 0.14
     /// How far the light reaches from the pointer.
     static let reach: CGFloat = 140
 
@@ -626,6 +635,18 @@ enum GlassMapMarks {
         return result
     }
 
+    /// The shimmer band at `sweep` (its fractional part; each whole step is
+    /// one pass): the gradient's start and end, centred on a point that
+    /// travels the field's diagonal from beyond its top-left corner to
+    /// beyond its bottom-right, so a pass starts and ends off the field.
+    static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
+        let progress = CGFloat(sweep - sweep.rounded(.down))
+        let half = shimmerHalfWidth
+        let along = -half + progress * (1 + half * 2)
+        func point(_ t: CGFloat) -> CGPoint { CGPoint(x: size.width * t, y: size.height * t) }
+        return (point(along - half), point(along + half))
+    }
+
     /// How lit a mark is at `distance` from the pointer: 1 under it, easing
     /// to 0 at `reach`.
     static func light(distance: CGFloat) -> Double {
@@ -644,6 +665,55 @@ private struct GlassMapMarkTile: View {
                 if let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) { marks.addPath(mark) }
             }
             context.fill(marks, with: .color(GlassMapMarks.ink.color))
+        }
+    }
+}
+
+/// Runs the shimmer: one pass across the field every `shimmerEvery`, none
+/// under Reduce Motion. The loop ends with the view.
+private struct GlassMapShimmerHost: View {
+    @State private var sweep: Double = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        GlassMapShimmer(sweep: sweep)
+            .task(id: reduceMotion) {
+                guard !reduceMotion else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: GlassMapMarks.shimmerEvery)
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeInOut(duration: GlassMapMarks.shimmerDuration)) { sweep += 1 }
+                }
+            }
+    }
+}
+
+/// A light catching the marks along a diagonal band: the whole tile filled
+/// once with a gradient that is clear but for the band. Between passes the
+/// band sits off the field and nothing shows.
+struct GlassMapShimmer: View, Animatable {
+    var sweep: Double
+
+    nonisolated var animatableData: Double {
+        get { sweep }
+        set { sweep = newValue }
+    }
+
+    var body: some View {
+        Canvas { context, size in
+            let progress = sweep - sweep.rounded(.down)
+            guard progress > 0 else { return }
+            var marks = Path()
+            for origin in GlassMapMarks.origins(in: size) {
+                if let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) { marks.addPath(mark) }
+            }
+            let band = GlassMapMarks.shimmerBand(sweep: sweep, size: size)
+            let crest = GlassMapMarks.shimmerInk.color
+            context.fill(
+                marks,
+                with: .linearGradient(
+                    Gradient(colors: [crest.opacity(0), crest, crest.opacity(0)]),
+                    startPoint: band.start, endPoint: band.end))
         }
     }
 }

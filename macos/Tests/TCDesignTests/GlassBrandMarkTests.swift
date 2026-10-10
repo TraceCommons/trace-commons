@@ -48,9 +48,26 @@ final class GlassBrandMarkTests: XCTestCase {
         XCTAssertEqual(steps, steps.sorted(by: >))
     }
 
+    /// A pass starts and ends with the band off the field, crosses its
+    /// middle halfway, and runs top-left to bottom-right.
+    func test_theShimmerCrossesTheDiagonal() {
+        let size = CGSize(width: 400, height: 300)
+        let before = GlassMapMarks.shimmerBand(sweep: 0, size: size)
+        XCTAssertLessThanOrEqual(before.end.x, 0.001)
+        XCTAssertLessThanOrEqual(before.end.y, 0.001)
+        let middle = GlassMapMarks.shimmerBand(sweep: 0.5, size: size)
+        XCTAssertEqual((middle.start.x + middle.end.x) / 2, 200, accuracy: 0.001)
+        XCTAssertEqual((middle.start.y + middle.end.y) / 2, 150, accuracy: 0.001)
+        let after = GlassMapMarks.shimmerBand(sweep: 0.9999, size: size)
+        XCTAssertGreaterThanOrEqual(after.start.x, 399.9)
+        XCTAssertGreaterThanOrEqual(after.start.y, 299.9)
+        // A later pass is the same pass.
+        XCTAssertEqual(GlassMapMarks.shimmerBand(sweep: 3.5, size: size).start, middle.start)
+    }
+
     /// The marks are faint at rest and stay translucent when lit.
     func test_theMarksStayTranslucent() {
-        for ink in [GlassMapMarks.ink, GlassMapMarks.litInk, GlassMapMarks.bloom] {
+        for ink in [GlassMapMarks.ink, GlassMapMarks.litInk, GlassMapMarks.bloom, GlassMapMarks.shimmerInk] {
             XCTAssertLessThan(ink.alpha, 0.5)
             XCTAssertLessThan(ink.light.alpha, 0.5)
         }
