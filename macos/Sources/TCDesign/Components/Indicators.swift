@@ -331,8 +331,9 @@ public struct GlassBarBucket: Identifiable, Sendable {
     }
 }
 
-/// Shared over kept, per period. Values scale to the largest bucket, never
-/// below `scaleFloor`, so a count of one stays short.
+/// Shared over kept, per period, as a tapered dot matrix. Values scale to
+/// the largest bucket, never below `scaleFloor`, so a count of one stays
+/// short.
 public struct GlassBarGraph: View {
     private let buckets: [GlassBarBucket]
     private let scaleFloor: Double
@@ -376,27 +377,30 @@ public struct GlassBarGraph: View {
     private var bars: some View {
         let maximum = max(scaleFloor, buckets.map { max($0.up, $0.down) }.max() ?? 0)
         let thin = buckets.count > 14
-        return HStack(alignment: .bottom, spacing: thin ? 2 : 6) {
+        // Top-aligned: a bucket with no label is shorter than one with a
+        // label, and on the bottom it would lift the labelled columns' dots
+        // off the others' rows.
+        return HStack(alignment: .top, spacing: thin ? 2 : 6) {
             ForEach(buckets) { bucket in
+                let isHovered = hovered == bucket.id
                 VStack(spacing: GlassTokens.Space.s2) {
-                    ZStack {
-                        let track = RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
-                        track
-                            .fill(GlassColor.ink(hovered == bucket.id ? 0.18 : 0.08))
-                            .glassEdge(GlassTokens.Shadow.barTrackEdge, in: track)
-                        VStack(spacing: 0) {
-                            Spacer(minLength: 0)
-                            bar(bucket.up, of: maximum, color: GlassTokens.Color.dataShared.color, top: true)
-                            Rectangle().fill(GlassColor.ink(0.18)).frame(height: 1)
-                            bar(bucket.down, of: maximum, color: GlassTokens.Color.dataKept.color, top: false)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, thin ? 2 : 6)
+                    Canvas { context, size in
+                        Self.drawMatrix(
+                            in: &context, size: size, columns: thin ? 1 : 3,
+                            radius: thin ? 1.6 : 2.1, inset: thin ? 1 : 5,
+                            up: Self.dotAlphas(bucket.up, of: maximum),
+                            down: Self.dotAlphas(bucket.down, of: maximum),
+                            unlit: GlassColor.ink(isHovered ? 0.2 : 0.09))
                     }
+                    // Under the pointer the column takes a solid wash, never
+                    // an outline (owner, 2026-10-10).
+                    .background(
+                        RoundedRectangle(cornerRadius: thin ? 3 : GlassTokens.Radius.control, style: .continuous)
+                            .fill(GlassColor.ink(isHovered ? 0.07 : 0)))
                     .frame(height: 96)
                     Text(bucket.label)
                         .glassType(thin ? GlassTokens.TypeScale.micro.weight(.regular) : GlassTokens.TypeScale.caption)
-                        .foregroundStyle(Self.labelInk(hovered: hovered == bucket.id).color)
+                        .foregroundStyle(Self.labelInk(hovered: isHovered).color)
                         // Never wrapped or cut ("Sat", "14:00"): centred on
                         // its bar and free to run past it, as #1146's
                         // `white-space: nowrap`, without widening the bar.
@@ -412,22 +416,54 @@ public struct GlassBarGraph: View {
         }
     }
 
-    private func bar(_ value: Double, of maximum: Double, color: Color, top: Bool) -> some View {
-        let height = value <= 0 ? 0 : max(3, value / maximum * 46)
-        // Shared stands on the axis and kept hangs from it (#1146
-        // `.tc-bar-graph__down { top: 50% }`), never from the track's foot.
-        return VStack(spacing: 0) {
-            UnevenRoundedRectangle(
-                topLeadingRadius: top ? 99 : 0,
-                bottomLeadingRadius: top ? 0 : 99,
-                bottomTrailingRadius: top ? 0 : 99,
-                topTrailingRadius: top ? 99 : 0
-            )
-            .fill(color)
-            .frame(height: height)
-            if top { EmptyView() }
+    /// Dots in each half of a column, from the axis out.
+    static let rows = 7
+
+    /// The tapered matrix (owner, 2026-10-10): each half of a column is
+    /// `rows` dots, lit from the axis out in proportion to the value. Lit
+    /// dots brighten toward the tip, and the last one carries the remainder
+    /// as a partial dot, so a 7-dot column still tells 9 from 11. A count of
+    /// one always lights a dot. 0 is an unlit dot.
+    static func dotAlphas(_ value: Double, of maximum: Double, rows: Int = rows) -> [Double] {
+        guard value > 0, maximum > 0 else { return Array(repeating: 0, count: rows) }
+        let lit = max(1, min(Double(rows), value / maximum * Double(rows)))
+        let tip = lit.rounded(.up)
+        return (0..<rows).map { row in
+            let fill = min(1, max(0, lit - Double(row)))
+            guard fill > 0 else { return 0 }
+            let taper = 0.35 + 0.65 * Double(row + 1) / tip
+            return taper * (fill < 1 ? max(0.35, fill) : 1)
         }
-        .frame(height: 47.5, alignment: top ? .bottom : .top)
+    }
+
+    /// Shared rises from the axis in purple and kept hangs from it in blue
+    /// (#1146 `.tc-bar-graph__down { top: 50% }`), on a 1pt axis rule.
+    private static func drawMatrix(
+        in context: inout GraphicsContext, size: CGSize, columns: Int, radius: CGFloat, inset: CGFloat,
+        up: [Double], down: [Double], unlit: Color
+    ) {
+        let half = size.height / 2
+        // Rows keep one pitch in every column, whatever its width, so a
+        // narrow range's dots line up across the graph; only the columns
+        // close in.
+        let pitch = (half - 1) / CGFloat(rows)
+        let across = min(pitch, (size.width - inset * 2) / CGFloat(columns))
+        let left = (size.width - across * CGFloat(columns)) / 2 + across / 2
+        let shared = GlassTokens.Color.dataShared.color
+        let kept = GlassTokens.Color.dataKept.color
+        func dot(_ x: CGFloat, _ y: CGFloat, _ alpha: Double, _ color: Color) {
+            let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+            context.fill(Path(ellipseIn: rect), with: .color(alpha > 0 ? color.opacity(alpha) : unlit))
+        }
+        for column in 0..<columns {
+            let x = left + CGFloat(column) * across
+            for row in 0..<rows {
+                let offset = pitch * (CGFloat(row) + 0.5) + 0.5
+                dot(x, half - offset, up[row], shared)
+                dot(x, half + offset, down[row], kept)
+            }
+        }
+        context.fill(Path(CGRect(x: 0, y: half - 0.5, width: size.width, height: 1)), with: .color(GlassColor.ink(0.14)))
     }
 }
 

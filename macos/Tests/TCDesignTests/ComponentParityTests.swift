@@ -71,15 +71,26 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertNotNil(GlassTokens.Color.controlSelectedFloating.lightRGB)
     }
 
-    /// The bar graph's labels are `statusOff`, primary under the pointer,
-    /// and its track has #1146's inner top highlight.
-    func test_theBarGraphTrackAndLabels() {
+    /// The bar graph's labels are `statusOff`, primary under the pointer.
+    func test_theBarGraphLabels() {
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: false), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: true), GlassTokens.Color.textPrimary)
-        let edge = GlassTokens.Shadow.barTrackEdge
-        XCTAssertEqual(edge.count, 1)
-        XCTAssertTrue(edge[0].inset)
-        XCTAssertEqual(edge[0].y, 1)
+    }
+
+    /// The tapered matrix: nothing lit for nothing, one dot for a count of
+    /// one, a full column at the maximum brightening to the tip, and a
+    /// partial last dot that keeps 9 apart from 11.
+    func test_theBarGraphTapersItsDots() {
+        XCTAssertEqual(GlassBarGraph.dotAlphas(0, of: 40), Array(repeating: 0, count: 7))
+        let one = GlassBarGraph.dotAlphas(1, of: 40)
+        XCTAssertEqual(one.filter { $0 > 0 }.count, 1)
+        XCTAssertEqual(one[0], 1, accuracy: 0.0001)
+        let full = GlassBarGraph.dotAlphas(40, of: 40)
+        XCTAssertEqual(full.count, 7)
+        XCTAssertEqual(full.last ?? 0, 1, accuracy: 0.0001)
+        XCTAssertEqual(full, full.sorted())
+        XCTAssertNotEqual(GlassBarGraph.dotAlphas(9, of: 40), GlassBarGraph.dotAlphas(11, of: 40))
+        XCTAssertTrue(GlassBarGraph.dotAlphas(.infinity, of: 40).allSatisfy { $0 <= 1 })
     }
 
     /// A later window slides in from the trailing side, an earlier one from
