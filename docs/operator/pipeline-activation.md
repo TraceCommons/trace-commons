@@ -1721,12 +1721,22 @@ receipt-time risk is the submission row's stored risk and basis as the
 receipt wrote them, mapped the way the receipt maps them for Admission: a
 `medium` whose only basis is `consent_content_flag` is Low. The pass's risk
 is the classifier output's risk with the merged basis, mapped the same way.
-The outcome is `escalated` when the pass's risk is strictly above the
-receipt-time risk, and `cleared` otherwise. So a run Admission admitted (at
-Low) escalates at Medium or High, and a run Admission quarantined (at
-Medium) escalates at High only. A pass-time High is held for a human like
-Medium, never rejected by the pass; a receipt-time High is still rejected by
-Admission (`privacy_risk_rejected`). The server parks an escalated run for a
+The outcome is `escalated` when the pass's risk is High and strictly above
+the receipt-time risk, and `cleared` otherwise (owner decision 2026-10-10,
+"once PII removed we should go to accepted"; until then a pass-time Medium
+escalated too). A pass-time Medium is the found-and-removed floor: the
+classifier found prose PII and removed it, and the output Review reads is
+the redacted envelope. Such a run is `cleared`: the pass still records its
+merged basis (`privacy_pass_residual_risk_basis`, for example
+`found_and_removed`) and writes the redaction counts and the raw `medium`
+risk back to the submission row, and the run goes on to the Review policy,
+so a run Admission admitted ends `accepted` on the redacted content, with
+its gate decision row and credit like any accepted run. A run Admission
+quarantined (at Medium) escalates at High only, and otherwise keeps
+Admission's hold. A pass-time High (what redaction did not resolve: a key
+finding, a coverage gap, a survivor, a residual scan that could not run) is
+held for a human, never rejected by the pass; a receipt-time High is still
+rejected by Admission (`privacy_risk_rejected`). The server parks an escalated run for a
 human, whatever Admission decided ("Quarantined runs and human review"). A
 `cleared` run goes to the Review policy with the pass output, as an
 Admission-admitted or Admission-quarantined run did before.
@@ -2617,7 +2627,9 @@ pipeline block (`processing_state`). The mapping:
 
 A run Admission admitted reads `accepted` between the receipt and the worker
 dispatch that runs its privacy pass, and `quarantined` from that dispatch on
-if the pass escalates it. A check that reads the status right after an
+if the pass escalates it (a pass-time High). A run whose pass found and
+removed prose PII (a pass-time Medium) is not escalated and stays
+`accepted`, on its redacted content. A check that reads the status right after an
 upload must wait for a worker dispatch first.
 
 Its pending points are 0 when its Trace Credit leg will not be paid:

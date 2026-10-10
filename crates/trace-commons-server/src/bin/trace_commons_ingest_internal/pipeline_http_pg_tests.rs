@@ -13452,11 +13452,18 @@ async fn db_policy_tenant_authority_matches_legacy_admission() {
     }
 }
 
-/// Task 6: a privacy boundary whose classifier half raises the envelope's
-/// residual risk to Medium and reports `FoundAndRemoved`, so the
-/// Review-start privacy pass escalates an Admission-admitted run (test
-/// doubles live in the test files).
-struct EscalatingClassifierBoundary;
+/// Task 6: a privacy boundary whose classifier half removes the prose-PII
+/// marker `PROSE_PII_MARKER` (wherever the envelope carries it), sets the
+/// envelope's residual risk to `risk` and reports `FoundAndRemoved`. At
+/// High the Review-start privacy pass escalates an Admission-admitted run;
+/// at Medium (PII found and removed) it clears it (owner decision
+/// 2026-10-10). Test doubles live in the test files.
+struct EscalatingClassifierBoundary {
+    risk: ResidualPiiRisk,
+}
+
+/// The prose-PII marker `EscalatingClassifierBoundary` removes.
+const PROSE_PII_MARKER: &str = "PROSE_PII_MARKER_JANE_DOE";
 
 #[async_trait::async_trait]
 impl PipelinePrivacyBoundary for EscalatingClassifierBoundary {
@@ -13471,12 +13478,157 @@ impl PipelinePrivacyBoundary for EscalatingClassifierBoundary {
         &self,
         envelope: &mut TraceContributionEnvelope,
     ) -> anyhow::Result<Vec<ResidualRiskCondition>> {
-        envelope.privacy.residual_pii_risk = ResidualPiiRisk::Medium;
+        let text = serde_json::to_string(envelope)?;
+        *envelope = serde_json::from_str(&text.replace(PROSE_PII_MARKER, "[REDACTED:person]"))?;
+        envelope.privacy.residual_pii_risk = self.risk;
         Ok(vec![ResidualRiskCondition::FoundAndRemoved])
     }
 }
 
-/// Task 6: the review queue route lists a run the privacy pass escalated,
+/// Owner decision 2026-10-10 ("once PII removed we should go to accepted"),
+/// end to end: an Admission-admitted run whose Review-start privacy pass
+/// finds prose PII and removes it (post-pass risk Medium, basis
+/// `found_and_removed`) is not held for a human. The run completes on the
+/// scrubbed bytes like any accepted run: the pass is recorded `cleared`,
+/// the approved content lacks the marker, the submission row is `accepted`,
+/// the contributor's submission-status route reports it `accepted` with its
+/// ledger credit, the gate decision row is written, the credit route counts
+/// its credit, and the review queue is empty.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_whose_privacy_pass_removed_pii_completes_accepted() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    let owner = account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-removed-accepted-{suffix}");
+    let token = format!("token-removed-accepted-{suffix}");
+    let reviewer = format!("token-review-removed-accepted-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    insert_token(&mut tokens, &tenant, &reviewer, TokenRole::Reviewer);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(EscalatingClassifierBoundary {
+            risk: ResidualPiiRisk::Medium,
+        }),
+    );
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts),
+        true,
+        true,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens);
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    let principal = static_token_principal_ref(&token);
+
+    let mut envelope = model_training_envelope().await;
+    set_metadata_only_tool_name(&mut envelope, PROSE_PII_MARKER);
+    assert!(
+        serde_json::to_string(&envelope)
+            .unwrap()
+            .contains(PROSE_PII_MARKER)
+    );
+    let run = completed_run_of(&service, &tenant, &principal, &envelope).await;
+    assert_eq!(run.admission_decision, "admit");
+    assert_eq!(
+        run.privacy_pass_outcome,
+        Some(trace_commons_server::versioned_pipeline::PrivacyPassOutcome::Cleared),
+        "{run:?}"
+    );
+    assert_eq!(
+        run.privacy_pass_residual_risk_basis,
+        Some(vec!["found_and_removed".to_string()])
+    );
+    assert_eq!(run.privacy_pass_approval_assessment_hash, None);
+    assert!(run.approved_revision_id.is_some(), "{run:?}");
+    let approved = String::from_utf8(service.load_approved_bytes(&run).await.unwrap()).unwrap();
+    assert!(
+        !approved.contains(PROSE_PII_MARKER),
+        "Review read the scrubbed bytes"
+    );
+    assert!(approved.contains("[REDACTED:person]"));
+    let row = owner
+        .get_trace_submission(&tenant, run.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    assert_eq!(row.status, StorageTraceCorpusStatus::Accepted);
+
+    let (status, documents) = route_request(
+        state.clone(),
+        "POST",
+        "/v1/contributors/me/submission-status",
+        auth_headers(&token),
+        Some(serde_json::json!({"submission_ids": [run.submission_id]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    let documents = documents.as_array().expect("a document list").clone();
+    assert_eq!(documents.len(), 1, "{documents:?}");
+    assert_eq!(documents[0]["status"], "accepted", "{documents:?}");
+    assert_eq!(
+        documents[0]["credit_points_ledger"].as_f64(),
+        Some(2.5),
+        "the run's NoveltyUtility credit counts like any accepted run's: {documents:?}"
+    );
+
+    let gate_rows: i64 = owner
+        .trace_pool_for_test()
+        .get()
+        .await
+        .unwrap()
+        .query_one(
+            "SELECT COUNT(*) FROM trace_gate_decisions
+              WHERE submission_id = $1 AND pipeline_run_id = $2",
+            &[&run.submission_id, &run.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(gate_rows, 1, "the gate path records the run like any other");
+    let (status, credit) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/contributors/me/credit",
+        auth_headers(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{credit}");
+    assert!(
+        credit["credit_points_ledger"].as_f64().unwrap_or_default() > 0.0,
+        "the run's credit counts: {credit}"
+    );
+
+    let (status, queue) = route_request(
+        state.clone(),
+        "GET",
+        "/v1/review/pipeline/quarantine",
+        auth_headers(&reviewer),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{queue}");
+    assert_eq!(queue, serde_json::json!([]), "nothing waits for a human");
+}
+
+/// Task 6: the review queue route lists a run the privacy pass escalated
+/// (High; a Medium pass clears since the owner decision of 2026-10-10),
 /// with `hold_reason = privacy_pass_review_required` (not Admission's
 /// reason, which an admitted run does not have) and
 /// `assessment_superseded = false`.
@@ -13489,7 +13641,9 @@ async fn pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason() {
                 &ConfiguredTraceArtifactStore::legacy(artifacts),
                 IsolatedPipelineIndex::new(),
                 2_500_000,
-                Arc::new(EscalatingClassifierBoundary),
+                Arc::new(EscalatingClassifierBoundary {
+                    risk: ResidualPiiRisk::High,
+                }),
             )
         },
         false,
@@ -13563,7 +13717,7 @@ async fn pipeline_review_queue_lists_an_escalated_run_with_its_hold_reason() {
 }
 
 /// #1326: an Admission-admitted run the Review-start privacy pass escalated
-/// is held for a human, and the reviewer who claims it can assess it. The
+/// (High) is held for a human, and the reviewer who claims it can assess it. The
 /// pass moves the submission row from `received` to `quarantined`, as
 /// `main`'s PII backstop does for the equal state, so the assessment route's
 /// consent check reads the record (it answered `404 trace submission not
@@ -13580,7 +13734,9 @@ async fn a_reviewer_assesses_an_admitted_run_the_privacy_pass_escalated() {
                 &ConfiguredTraceArtifactStore::legacy(artifacts),
                 IsolatedPipelineIndex::new(),
                 2_500_000,
-                Arc::new(EscalatingClassifierBoundary),
+                Arc::new(EscalatingClassifierBoundary {
+                    risk: ResidualPiiRisk::High,
+                }),
             )
         },
         false,
