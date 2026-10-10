@@ -395,7 +395,7 @@ pub fn week_rollup<Tz: TimeZone>(
 
     for prepared in prepare(feed, sessions) {
         let input = prepared.input;
-        let placed_in_week = input.placed_at.as_ref().map(&in_week);
+        let placed_in_week = input.placed_at.as_ref().map(in_week);
         let mut contribution = Contribution::default();
         let present = match &input.body {
             SessionBody::Claude {
