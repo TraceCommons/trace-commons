@@ -360,9 +360,35 @@ private struct Launcher: View {
         EdgeRailController.shared.attach(model: model, compute: compute)
         navigation.registerServiceStart { startServices() }
         activateServices()
-        // The only thing a notification action may do is open the Monitor
-        // at Traces.
+        // The only thing a digest action may do is open the Monitor at
+        // Traces.
         Notifier.shared.onReview = { OpenMonitor.request(.traces(entryId: nil)) }
+        // A re-engagement button sends its one request (best effort: the
+        // place opens either way, and a "Not now" the core did not take
+        // leaves the suggestion as it was) and opens its place, if any.
+        Notifier.shared.onNudge = { intent in
+            let effect = NudgeSurface.effect(intent)
+            if let client = model.daemonData {
+                Task { try? await NudgeSurface.send(effect, through: client) }
+            }
+            if let destination = effect.destination {
+                OpenMonitor.request(MonitorDestination(nudge: destination))
+            }
+        }
+
+        // The re-engagement declaration follows whether a notification can
+        // be posted: re-read once the prompt is answered, and whenever the
+        // app comes forward, since System Settings may have changed it.
+        Notifier.shared.onAuthorizationAnswered = {
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in await model.refreshReengageDeclaration() }
+        }
 
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,

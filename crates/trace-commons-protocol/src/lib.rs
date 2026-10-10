@@ -11,6 +11,7 @@ pub mod insights_usage_series;
 pub mod invite_lookup;
 pub mod legacy_invite_link;
 pub mod llm;
+pub mod local_credit_estimate;
 pub mod mission_catalog;
 pub mod mission_draft;
 pub mod mission_evaluation;

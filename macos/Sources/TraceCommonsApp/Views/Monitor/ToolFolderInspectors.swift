@@ -115,12 +115,10 @@ struct FolderInspector: View {
                         caption(eligible)
                     }
                 }
-                if let refused = store.writeErrors[folder.id] {
-                    GlassNotice(tone: .outside, title: words.line(for: refused)) { EmptyView() }
-                }
                 // Ron's buttons wrap as his row does at this width: Submit
                 // all eligible on its own line, then Submit all as and
-                // Ignore, every label on one line.
+                // Ignore, every label on one line. Ignore, the decline, is
+                // a link after the actions (Ron, 2026-10-09).
                 VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                     let submits = Self.offersSubmitAll(folder, store: store)
                     if submits {
@@ -140,13 +138,17 @@ struct FolderInspector: View {
                         }
                         if let copy = ignoreCopy {
                             Button(copy.button) { route(TracesTreeView.modeChange(folder, .ignore), .ignore) }
-                                .buttonStyle(GlassButtonStyle(.glass))
+                                .buttonStyle(GlassButtonStyle(.link))
                                 .help(copy.tooltip)
                         }
                     }
                 }
                 .lineLimit(1)
                 .disabled(busy)
+                // A refused write, under the buttons it is about.
+                if let refused = store.writeErrors[folder.id] {
+                    GlassAlert(words.line(for: refused))
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

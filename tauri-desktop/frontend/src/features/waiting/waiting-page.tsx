@@ -121,7 +121,7 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
             <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
               QUEUE
             </span>
-            <h2>Sessions awaiting your decision</h2>
+            <h2>Traces awaiting your decision</h2>
           </div>
           <Button
             className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
@@ -144,13 +144,13 @@ export function WaitingPage({ status }: { status: CoreStatus | null }) {
         {waiting.state === "error" && (
           <CenteredNotice
             title="The watcher isn't running."
-            body="It didn't answer. Nothing is being noticed or sent while it's stopped, and sessions already waiting stay on this machine."
+            body="It didn't answer. Nothing is being noticed or sent while it's stopped, and traces already waiting stay on this machine."
           />
         )}
         {waiting.state === "ready" && entries.length === 0 && (
           <CenteredNotice
             title="Nothing is waiting."
-            body="When a session finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
+            body="When a trace finishes and goes quiet, it shows up here. Nothing is sent unless you say so."
           />
         )}
         {waiting.state === "ready" &&

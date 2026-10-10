@@ -31,7 +31,7 @@ public class DigestContributionTests
     public void SingularReadsAsOneSession()
     {
         Assert.Equal(
-            "1 session contributed from api.",
+            "1 trace contributed from api.",
             DigestText.ContributionLine(1, new[] { "api" }, 0));
     }
 
@@ -43,10 +43,10 @@ public class DigestContributionTests
     public void MoreThanOneProjectNamesNone()
     {
         Assert.Equal(
-            "4 sessions contributed.",
+            "4 traces contributed.",
             DigestText.ContributionLine(4, new[] { "api", "web" }, 0));
         Assert.Equal(
-            "9 sessions contributed.",
+            "9 traces contributed.",
             DigestText.ContributionLine(
                 9,
                 new[] { "api", "web", "cli", "docs", "infra", "mobile", "sdk", "tools" },
@@ -61,10 +61,10 @@ public class DigestContributionTests
     public void MatchesTheDesignExamples()
     {
         Assert.Equal(
-            "1 session contributed from orchard-api. 6.0 credit pending.",
+            "1 trace contributed from orchard-api. 6.0 credit pending.",
             DigestText.ContributionLine(1, new[] { "orchard-api" }, 6.0));
         Assert.Equal(
-            "2 sessions contributed. 10.5 credit pending.",
+            "2 traces contributed. 10.5 credit pending.",
             DigestText.ContributionLine(2, new[] { "orchard-api", "portfolio" }, 10.5));
     }
 
@@ -76,7 +76,7 @@ public class DigestContributionTests
     public void TheWaitingHalfSummarisesAfterThreeToo()
     {
         Assert.StartsWith(
-            "9 sessions ready from api, web, cli and 5 more.",
+            "9 traces ready from api, web, cli and 5 more.",
             DigestText.Body(
                 9,
                 new[] { "api", "web", "cli", "docs", "infra", "mobile", "sdk", "tools" }),
@@ -91,7 +91,7 @@ public class DigestContributionTests
     public void DuplicateLabelsAreCollapsedBeforeCounting()
     {
         Assert.Equal(
-            "8 sessions contributed from api.",
+            "8 traces contributed from api.",
             DigestText.ContributionLine(8, new[] { "api", "api", " " }, 0));
     }
 
@@ -111,7 +111,7 @@ public class DigestContributionTests
     public void BlankLabelsAreDroppedRatherThanTrailingAFrom()
     {
         Assert.Equal(
-            "2 sessions contributed.",
+            "2 traces contributed.",
             DigestText.ContributionLine(2, new[] { "", "  " }, 0));
     }
 
@@ -124,7 +124,7 @@ public class DigestContributionTests
     public void CreditIsStatedOnlyWhenThereIsSome()
     {
         Assert.Equal(
-            "2 sessions contributed from api. 4.3 credit pending.",
+            "2 traces contributed from api. 4.3 credit pending.",
             DigestText.ContributionLine(2, new[] { "api" }, 4.25));
         Assert.DoesNotContain(
             "credit",

@@ -31,7 +31,15 @@ public protocol DaemonDataClient: Sendable {
     /// `.daemon(code: "bad_params", message: "project-id-unrecognized")`,
     /// never answered with `[]`, so a stale id cannot read as "nothing
     /// waiting".
-    func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry]
+    ///
+    /// `filter` narrows it to the idle candidates the idle card named;
+    /// `order` sorts what is selected (`.suggested`: mission fit, then the
+    /// estimate tier, then size and recency, all decided by the daemon).
+    /// `nil` and `.queue` send neither, so the request is the one before
+    /// these existed.
+    func listPending(
+        projectId: String?, filter: DaemonData.PendingFilter?, order: DaemonData.PendingOrder?
+    ) async throws -> [DaemonData.QueueEntry]
     /// `list_kept`.
     func listKept() async throws -> [DaemonData.QueueEntry]
 
@@ -99,7 +107,12 @@ public protocol DaemonDataClient: Sendable {
     /// neither of which is part of `skipped`. An id the daemon does not
     /// know is refused with `project-id-unrecognized`. A `verdict` is the
     /// opt-in "Submit all as" answer, sent as `outcome`; `nil` sends none.
-    func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse
+    /// A `filter` narrows the folder to what `listPending` lists under the
+    /// same filter, so Submit under the idle filter sends what is shown;
+    /// `nil` sends none and the whole folder is meant.
+    func approveFolder(
+        projectId: String, verdict: ContributorVerdict?, filter: DaemonData.PendingFilter?
+    ) async throws -> ApproveResponse
     /// `cancel` for one entry: Undo inside the hold window (R7). Only an
     /// entry still `approved` can be cancelled, which the hold guarantees
     /// until it ends; any other is refused with `not-cancelable`. The entry
@@ -116,6 +129,29 @@ public protocol DaemonDataClient: Sendable {
     func undoKeep(entryId: String) async throws -> DaemonData.KeepResult
     /// `dismiss`: permanent.
     func dismiss(entryId: String) async throws
+
+    // MARK: Nudges
+
+    /// `nudge_opened {kind}`: sent only from a suggestion's own action
+    /// (Review, See history, the panel row), never for being shown. For
+    /// `verdicts_landed` it acknowledges the news.
+    func nudgeOpened(_ kind: NudgeSurface.Kind) async throws
+    /// `nudge_decline {kind}`: the in-app "Not now". `verdicts_landed` is
+    /// refused by the daemon (`nudge-kind-not-declinable`).
+    func nudgeDecline(_ kind: NudgeSurface.Kind) async throws
+    /// `set_suggestions_enabled {on}`: the cards, the panel row and the mark.
+    func setSuggestionsEnabled(_ on: Bool) async throws
+    /// `set_menu_bar_mark_enabled {on}`: the news ring and the idle halo.
+    func setMenuBarMarkEnabled(_ on: Bool) async throws
+    /// `set_notifications_enabled {on}`: "Notifications from Trace Commons".
+    func setNotificationsEnabled(_ on: Bool) async throws
+    /// `set_notify_kind {kind, on}`. Answering `verdicts_landed` or
+    /// `idle_sessions` either way also ends that kind's one-time offer.
+    func setNotifyKind(_ kind: String, on: Bool) async throws
+    /// `set_settings {<kind>_offer_pending: false}`: a one-time offer
+    /// dismissed without turning the kind on. Only `verdicts_landed` and
+    /// `idle_sessions` have one; any other kind throws and sends nothing.
+    func dismissNotifyOffer(kind: String) async throws
 
     // MARK: Projects and tools
 
@@ -266,6 +302,11 @@ public protocol DaemonDataClient: Sendable {
 }
 
 extension DaemonDataClient {
+    /// `list_pending` in queue order, every pending entry or one project's.
+    public func listPending(projectId: String?) async throws -> [DaemonData.QueueEntry] {
+        try await listPending(projectId: projectId, filter: nil, order: nil)
+    }
+
     /// `approve` for one entry with no verdict.
     public func approve(entryId: String) async throws -> ApproveResponse {
         try await approve(entryId: entryId, verdict: nil, correction: nil)
@@ -274,6 +315,11 @@ extension DaemonDataClient {
     /// `approveFolder` with no verdict.
     public func approveFolder(projectId: String) async throws -> ApproveResponse {
         try await approveFolder(projectId: projectId, verdict: nil)
+    }
+
+    /// `approveFolder` over the whole folder.
+    public func approveFolder(projectId: String, verdict: ContributorVerdict?) async throws -> ApproveResponse {
+        try await approveFolder(projectId: projectId, verdict: verdict, filter: nil)
     }
 
     /// The first page of the mission catalogue, at the daemon's default size.
@@ -292,6 +338,9 @@ public enum DaemonDataEvent: Equatable, Sendable {
     /// `digest_due`, with the contribution counts a notification is built
     /// from.
     case digestDue(DaemonData.DigestDue)
+    /// `reengage_due`: one standalone re-engagement notification, in the
+    /// daemon's words. Delivered only to a subscriber that accepts it.
+    case reengageDue(DaemonData.ReengageDue)
     /// A scheduled preview reached a terminal state. Read `state`: only
     /// `.ready` carries a summary; `.tooLarge` and `.failed` are answers
     /// too, and must be drawn as what they are, never as ready.
@@ -338,6 +387,11 @@ public enum DaemonDataEventParser {
                 return .unknown(name)
             }
             return .digestDue(digest)
+        case "reengage_due":
+            guard let due = try? decoder.decode(DaemonData.ReengageDue.self, from: payloadData) else {
+                return .unknown(name)
+            }
+            return .reengageDue(due)
         case "preview_ready":
             guard let outcome = try? decoder.decode(DaemonData.PreviewRequestOutcome.self, from: payloadData)
             else { return .unknown(name) }

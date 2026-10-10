@@ -287,7 +287,7 @@ pub fn digest_due_for_schedule<Tz: chrono::TimeZone>(
 /// environment, may be logged by it, and must never contain a path.
 pub fn digest_text(pending: &[&QueueEntry]) -> String {
     let count = pending.len();
-    let noun = if count == 1 { "session" } else { "sessions" };
+    let noun = if count == 1 { "trace" } else { "traces" };
     let projects: BTreeSet<&str> = pending
         .iter()
         .map(|e| e.project_label.as_str())
@@ -322,8 +322,8 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 ///
 /// Approved 2026-10-06, the project clause too: K9 (#1118) rewords it to
 /// match the WYSIWYG design's Flow 2/3 evening-digest alerts exactly --
-/// "1 session contributed from orchard-api. 6.0 credit pending." and
-/// "2 sessions contributed. 10.5 credit pending." The design names a project
+/// "1 trace contributed from orchard-api. 6.0 credit pending." and
+/// "2 traces contributed. 10.5 credit pending." The design names a project
 /// only when there is exactly one; contributions spread across more than one
 /// project say only the count, with no partial list and no "and N more" --
 /// unlike [`digest_text`]'s pending-queue sentence, which still names up to
@@ -340,7 +340,7 @@ pub fn digest_text(pending: &[&QueueEntry]) -> String {
 /// clause always ends with a period, and credit follows as its own
 /// sentence -- and each pins the design's two examples verbatim.
 pub fn contribution_text(count: usize, projects: &BTreeSet<String>, credit_pending: f32) -> String {
-    let noun = if count == 1 { "session" } else { "sessions" };
+    let noun = if count == 1 { "trace" } else { "traces" };
     let mut line = format!("{count} {noun} contributed");
     let mut named = projects.iter().filter(|p| !p.trim().is_empty());
     if let (Some(only), None) = (named.next(), named.next()) {
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn contribution_text_names_the_one_project_and_never_a_path() {
         let text = contribution_text(3, &labels(&["orchard-api"]), 0.0);
-        assert!(text.contains("3 sessions contributed"), "{text}");
+        assert!(text.contains("3 traces contributed"), "{text}");
         assert!(text.contains("orchard-api"), "{text}");
         assert!(!text.contains('/'), "must not contain a path: {text}");
     }
@@ -509,8 +509,8 @@ mod tests {
     #[test]
     fn contribution_text_is_singular_for_one_session() {
         let text = contribution_text(1, &labels(&["proj"]), 0.0);
-        assert!(text.contains("1 session contributed"), "{text}");
-        assert!(!text.contains("sessions"), "{text}");
+        assert!(text.contains("1 trace contributed"), "{text}");
+        assert!(!text.contains("traces"), "{text}");
     }
 
     /// K9 (#1118): the design's second Flow 3 alert has no project name at
@@ -525,19 +525,19 @@ mod tests {
         );
         // The whole sentence, not a substring check: proves nothing beyond
         // the count and noun survives, no partial list and no "and N more".
-        assert_eq!(text, "9 sessions contributed.");
+        assert_eq!(text, "9 traces contributed.");
     }
 
     #[test]
     fn contribution_text_copes_with_missing_labels() {
         assert_eq!(
             contribution_text(2, &labels(&[]), 0.0),
-            "2 sessions contributed."
+            "2 traces contributed."
         );
         // A blank label beside a real one does not count as a second project.
         assert_eq!(
             contribution_text(2, &labels(&["", "api"]), 0.0),
-            "2 sessions contributed from api."
+            "2 traces contributed from api."
         );
     }
 
@@ -548,7 +548,7 @@ mod tests {
     fn contribution_text_matches_the_design_flow_2_example() {
         assert_eq!(
             contribution_text(1, &labels(&["orchard-api"]), 6.0),
-            "1 session contributed from orchard-api. 6.0 credit pending."
+            "1 trace contributed from orchard-api. 6.0 credit pending."
         );
     }
 
@@ -557,7 +557,7 @@ mod tests {
     fn contribution_text_matches_the_design_flow_3_example() {
         assert_eq!(
             contribution_text(2, &labels(&["orchard-api", "portfolio"]), 10.5),
-            "2 sessions contributed. 10.5 credit pending."
+            "2 traces contributed. 10.5 credit pending."
         );
     }
 
@@ -590,7 +590,7 @@ mod tests {
         let b = entry("proj");
         let c = entry("other");
         let text = digest_text(&[&a, &b, &c]);
-        assert!(text.contains("3 sessions"), "{text}");
+        assert!(text.contains("3 traces"), "{text}");
         assert!(text.contains("proj"), "{text}");
         assert!(text.contains("other"), "{text}");
         assert!(
@@ -603,8 +603,8 @@ mod tests {
     fn digest_text_is_singular_for_one_session() {
         let a = entry("proj");
         let text = digest_text(&[&a]);
-        assert!(text.contains("1 session ready"), "{text}");
-        assert!(!text.contains("sessions"), "{text}");
+        assert!(text.contains("1 trace ready"), "{text}");
+        assert!(!text.contains("traces"), "{text}");
     }
 
     #[test]
@@ -620,7 +620,7 @@ mod tests {
         let mut a = entry("proj");
         a.project_label = String::new();
         let text = digest_text(&[&a]);
-        assert_eq!(text, "1 session ready to contribute");
+        assert_eq!(text, "1 trace ready to contribute");
     }
 
     /// The poll loop uses `interval_elapsed` to decide whether reading the

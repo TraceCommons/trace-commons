@@ -509,9 +509,7 @@ struct PreviewSheet: View {
                     .disabled(loadingTurns)
             }
             if turnsFailed, let line = Self.traces?.requestFailed {
-                Text(line)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+                GlassAlert(line)
             }
             if let turns, !turns.turns.isEmpty {
                 Text(words.turnIndexEyebrow)
@@ -709,9 +707,7 @@ private struct OriginalSearchTab: View {
                     .monospacedDigit()
                     .foregroundStyle(GlassColor.textPrimary)
             } else if failed, let line = Self.requestFailed {
-                Text(line)
-                    .glassType(GlassTokens.TypeScale.caption)
-                    .foregroundStyle(GlassColor.textSecondary)
+                GlassAlert(line)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

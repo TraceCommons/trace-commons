@@ -60,7 +60,7 @@ final class MenuBarStatusTests: XCTestCase {
     func testPausedCountKeepsDimmingAndAccessiblePause() {
         let state = MenuBarStatus.state(decisionsOwed: 3, unhealthy: false, paused: true)
         XCTAssertTrue(state.isPaused)
-        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 123, unhealthy: false, paused: true).contains("123 sessions"))
+        XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 123, unhealthy: false, paused: true).contains("123 traces"))
         XCTAssertTrue(MenuBarStatus.accessibilityLabel(decisionsOwed: 3, unhealthy: false, paused: true).hasSuffix("Paused."))
     }
 

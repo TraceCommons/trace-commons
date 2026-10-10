@@ -31,7 +31,7 @@ pub const QUIT_TITLE: &str = concat!("Quit ", crate::app_name!(), "?");
 pub const QUIT_HOSTING_BODY: &str = concat!(
     "Quitting stops ",
     crate::app_name!(),
-    " watching for finished sessions. Nothing is queued or sent until you open it again. \
+    " watching for finished traces. Nothing is queued or sent until you open it again. \
      Anything already waiting stays waiting."
 );
 
@@ -48,7 +48,7 @@ pub const QUIT_HOSTING_BODY: &str = concat!(
 /// automatically, so no shell has to know the project policy to say it. "Unless it's paused" is there because
 /// pause is the one state in which the watcher does neither.
 pub const QUIT_ATTACHED_BODY: &str = "The background watcher keeps running after you quit. \
-     Unless it's paused, it keeps sending sessions you've already approved, and any session \
+     Unless it's paused, it keeps sending traces you've already approved, and any trace \
      from a project set to contribute automatically, including ones that finish after you \
      quit. Everything else waits for you.";
 

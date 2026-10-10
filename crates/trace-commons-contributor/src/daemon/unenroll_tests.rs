@@ -146,6 +146,112 @@ async fn unenroll_keeps_what_is_not_the_enrollment() {
     assert!(!crate::daemon::audit::load(&s.store).unwrap().is_empty());
 }
 
+/// The contribution-mission catalogue slot is this enrollment's: unenroll
+/// empties it, so a next account's `list_pending` starts unknown.
+#[test]
+fn unenroll_empties_the_mission_catalogue_slot() {
+    let s = shared();
+    enroll_fixture(&s);
+    crate::daemon::mission_matching::receive_catalogue(
+        &s.mission_catalogue,
+        &json!({"schema_version": 1, "missions": []}),
+        Utc::now(),
+    )
+    .unwrap();
+    assert!(s.mission_catalogue.lock().unwrap().is_some());
+    unenroll(&s).unwrap();
+    assert!(s.mission_catalogue.lock().unwrap().is_none());
+}
+
+/// The estimate table is public and not account-scoped (nudge value
+/// addendum, 4.6), so signing out leaves whatever table is in force.
+#[test]
+fn unenroll_leaves_the_estimate_table_slot() {
+    let s = shared();
+    enroll_fixture(&s);
+    let published = crate::daemon::ipc::EstimateTableSlot {
+        basis: crate::daemon::ipc::ESTIMATE_BASIS_PUBLISHED,
+        ..crate::daemon::ipc::EstimateTableSlot::built_in()
+    };
+    *s.estimate_table.lock().unwrap() = published.clone();
+    unenroll(&s).unwrap();
+    assert_eq!(*s.estimate_table.lock().unwrap(), published);
+}
+
+/// Nudge S3: account B never inherits account A's suggestion ledger. Every
+/// nudge stamp goes, in memory and on disk; the suggestions switch is a
+/// setting about this Mac and stays.
+#[tokio::test]
+async fn unenroll_clears_every_nudge_field_and_keeps_the_switch() {
+    let s = shared();
+    enroll_fixture(&s);
+    for method in ["nudge_decline", "nudge_opened"] {
+        let r = handle_request(&s, &req(method, json!({"kind": "review_backlog"})));
+        assert!(r.error.is_none(), "{method}: {:?}", r.error);
+    }
+    let off = handle_request(&s, &req("set_suggestions_enabled", json!({"on": false})));
+    assert!(off.error.is_none(), "{:?}", off.error);
+    let off = handle_request(&s, &req("set_notifications_enabled", json!({"on": false})));
+    assert!(off.error.is_none(), "{:?}", off.error);
+    // Nudge S4: verdict marks, news and acknowledgement belong to this
+    // account too.
+    {
+        let mut state = s.state.lock().unwrap();
+        let at = chrono::Utc::now();
+        state.verdict_marks.insert(
+            uuid::Uuid::from_bytes([7; 16]).to_string(),
+            crate::daemon::nudge::VerdictMark {
+                accepted: true,
+                ..Default::default()
+            },
+        );
+        state.verdict_marks_seeded = true;
+        state.verdicts_pending = Some(crate::daemon::nudge::VerdictDelta {
+            newly_accepted: 1,
+            newly_held: 0,
+            newly_final: 0,
+            credit_final_delta: 0.0,
+            since: at,
+            newest_at: at,
+            submissions: Default::default(),
+        });
+        // Nudge U4: the idle batching set names this account's queue.
+        state.idle_announced.insert(uuid::Uuid::from_bytes([9; 16]));
+        // Nudge A2: the notification budget belongs to this account too.
+        state.record_attention(
+            crate::daemon::attention::Kind::VerdictsLanded,
+            crate::daemon::attention::Route::Standalone,
+            at,
+        );
+        state.save(&s.store).unwrap();
+    }
+    assert!(
+        !crate::daemon::state::DaemonState::load(&s.store)
+            .unwrap()
+            .nudges
+            .is_empty()
+    );
+
+    assert!(call(&s).await.error.is_none());
+
+    let cleared = |state: &crate::daemon::state::DaemonState| {
+        state.nudges.is_empty()
+            && state.verdict_marks.is_empty()
+            && !state.verdict_marks_seeded
+            && state.verdicts_pending.is_none()
+            && state.idle_announced.is_empty()
+            && state.attention_log.is_empty()
+            && state.last_notified_at.is_none()
+    };
+    assert!(cleared(&s.state.lock().unwrap()), "cleared in memory");
+    assert!(
+        cleared(&crate::daemon::state::DaemonState::load(&s.store).unwrap()),
+        "the cleared ledger and marks are persisted"
+    );
+    assert!(!s.settings.lock().unwrap().suggestions_enabled);
+    assert!(!s.settings.lock().unwrap().notifications_enabled);
+}
+
 #[tokio::test]
 async fn unenroll_writes_one_label_only_audit_row() {
     let s = shared();

@@ -87,7 +87,7 @@ final class InferenceParityTests: XCTestCase {
                        "let label = Self.stateLabel(state: state, copy: copy, calls: calls)",
                        "GlassStatusLabel(label.line, status: label.status)",
                        "eyebrow: copy.panelConnectionEyebrow, title: copy.settingsTitle,",
-                       "GlassNotice(tone: .outside, title: refusal)",
+                       "GlassAlert(refusal)",
                        "Button(ActionNoticeWords.coreDismissWord ?? ActionNoticeWords.dismissWord, action: onDismiss)"] {
             XCTAssertTrue(source.contains(needle), "PrivateInferenceView.swift lacks \(needle)")
         }

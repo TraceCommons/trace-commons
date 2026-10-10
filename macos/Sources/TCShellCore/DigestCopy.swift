@@ -19,7 +19,7 @@ import Foundation
 /// design's two example sentences verbatim.
 public enum DigestCopy {
     /// Nil when nothing was contributed -- the caller then has only the
-    /// waiting half, or nothing to say at all. A line reading "0 sessions
+    /// waiting half, or nothing to say at all. A line reading "0 traces
     /// contributed" is worse than no line.
     public static func contributionLine(
         count: Int,
@@ -27,7 +27,7 @@ public enum DigestCopy {
         creditPending: Double
     ) -> String? {
         guard count > 0 else { return nil }
-        let noun = count == 1 ? "session" : "sessions"
+        let noun = count == 1 ? "trace" : "traces"
         var line = "\(count) \(noun) contributed"
         // Labels only, never a path: a notification is rendered by the
         // desktop environment and may be logged by it.

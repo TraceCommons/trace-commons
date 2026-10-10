@@ -175,6 +175,19 @@ final class SettingsSectionsTests: XCTestCase {
         }
     }
 
+    /// The digest interval line at one hour, the shortest interval the
+    /// daemon allows, is the core's singular, never "every 1 hours"
+    /// (poldsam's #1298 review, finding 2). Other intervals keep the plural.
+    func test_theDigestIntervalLineAtOneHourIsTheCoresSingular() throws {
+        let words = try XCTUnwrap(ShellWords.table?.settings)
+        XCTAssertFalse(words.atMostOneNotificationOne.isEmpty)
+        XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(1), words.atMostOneNotificationOne)
+        XCTAssertFalse(SettingsLegacyWords.atMostOneNotification(1).contains("1 hours"))
+        XCTAssertEqual(SettingsLegacyWords.atMostOneNotification(4),
+                       ShellWords.fill(words.atMostOneNotification, ["hours": "4"]))
+        XCTAssertTrue(SettingsLegacyWords.atMostOneNotification(4).contains("4 hours"))
+    }
+
     /// The view a section's `case` arm draws in `GlassSettingsContent`.
     static func view(drawnFor section: SettingsSection, in content: String) -> String? {
         let arm = "case .\(section.rawValue):"

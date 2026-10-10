@@ -73,7 +73,7 @@ pub const SETTINGS_ARMING_CONFIRM: &str = "Enable";
 ///
 /// Approved 2026-10-06. The first paragraph changed with the from-now
 /// default; the second and third are the agreed text unchanged. It still
-/// opens "Sessions from this project will be scrubbed", which
+/// opens "Traces from this project will be scrubbed", which
 /// `arming_wording::project_arming_claim` depends on.
 ///
 /// Each sentence is held to what the daemon does, because this is the only
@@ -83,7 +83,7 @@ pub const SETTINGS_ARMING_CONFIRM: &str = "Enable";
 /// now belongs to [`ARMING_BODY_WITH_BACKLOG`] alone. It also used to say
 /// three things that were not true:
 ///
-/// - "Every future session" -- at the time, arming also sent sessions
+/// - "Every future trace" -- at the time, arming also sent sessions
 ///   already waiting.
 /// - "A session is sent a day after you last work on it, so there is time to
 ///   change your mind" -- a waiting session already quiet for a day goes out
@@ -92,18 +92,18 @@ pub const SETTINGS_ARMING_CONFIRM: &str = "Enable";
 /// - "You can turn this off at any time", with nothing said about what that
 ///   does -- turning automatic off left every session it had approved still
 ///   uploading. It now returns them to waiting, and the sentence says so.
-pub const ARMING_BODY: &str = "Sessions from this project will be scrubbed and contributed \
-     without asking you, from now on. You won't review them first. Sessions already on this Mac \
-     keep waiting for you to pick them.\n\nNo session is sent until it has been quiet for a \
+pub const ARMING_BODY: &str = "Traces from this project will be scrubbed and contributed \
+     without asking you, from now on. You won't review them first. Traces already on this Mac \
+     keep waiting for you to pick them.\n\nNo trace is sent until it has been quiet for a \
      day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting \
      for you, and anything already sent stays sent.";
 
 /// The confirmation for arming **with the backlog**
 /// (`set_project_mode` `include_backlog: true`): the agreed wording from
 /// before the from-now default, which is still exactly what that call does.
-pub const ARMING_BODY_WITH_BACKLOG: &str = "Sessions from this project will be scrubbed and \
+pub const ARMING_BODY_WITH_BACKLOG: &str = "Traces from this project will be scrubbed and \
      contributed without asking you, including any already waiting. You won't review them \
-     first.\n\nNo session is sent until it has been quiet for a day.\n\nYou can turn this off \
+     first.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off \
      at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already \
      sent stays sent.";
 
@@ -143,10 +143,10 @@ pub struct CustomizeCopy {
 #[must_use]
 pub fn customize_copy() -> CustomizeCopy {
     CustomizeCopy {
-        share_automatically_rule: "New sessions from this folder are contributed without asking you.",
-        backlog_rule: "Sessions already on this Mac keep waiting until you pick them below.",
-        picker_heading: "Past sessions, by folder",
-        picker_explainer: "Tick the sessions already on this Mac that you want to include. \
+        share_automatically_rule: "New traces from this folder are contributed without asking you.",
+        backlog_rule: "Traces already on this Mac keep waiting until you pick them below.",
+        picker_heading: "Past traces, by folder",
+        picker_explainer: "Tick the traces already on this Mac that you want to include. \
              Anything you leave unticked keeps waiting for you.",
         picker_include: "Include selected",
         keep: "Keep",
@@ -154,10 +154,10 @@ pub fn customize_copy() -> CustomizeCopy {
              offer it again later.",
         kept_heading: "Kept on this Mac",
         undo_keep: "Undo",
-        undo_keep_queue_full: "Too many sessions are waiting. Decide some of them first, then \
+        undo_keep_queue_full: "Too many traces are waiting. Decide some of them first, then \
              offer this one again.",
         undo_keep_folder_never: "This folder is set to Never. Change its rule first, then offer \
-             this session again.",
+             this trace again.",
     }
 }
 
@@ -294,13 +294,13 @@ pub fn folder_mode_label(mode: &str) -> Option<&'static str> {
 /// The `notify_only` sub-list line, from the
 /// menu-bar handoff. True under an "Ask me" override: no folder sends
 /// unattended, and a folder set to Never stays off.
-pub const CONTRIBUTION_MODE_ASK_LINE: &str = "Every finished session waits for you.";
+pub const CONTRIBUTION_MODE_ASK_LINE: &str = "Every finished trace waits for you.";
 
 /// The `auto_upload` sub-list line, from the
 /// handoff. It is a summary, not the disclosure: the confirmation
 /// ([`contribution_override_confirm_copy`]) carries that, including that
 /// sessions already on this Mac keep waiting and Never folders stay off.
-pub const CONTRIBUTION_MODE_AUTO_LINE: &str = "Scrubbed sessions go; the digest tells you.";
+pub const CONTRIBUTION_MODE_AUTO_LINE: &str = "Scrubbed traces go; the digest tells you.";
 
 /// The `ignore` sub-list line, from the handoff.
 pub const CONTRIBUTION_MODE_NEVER_LINE: &str = "Nothing is queued or sent.";
@@ -308,7 +308,8 @@ pub const CONTRIBUTION_MODE_NEVER_LINE: &str = "Nothing is queued or sent.";
 /// Under the pill's `auto_upload` label when
 /// `status.contribution_mode_partial` is true (#1208): a folder set to Never,
 /// or sessions from a folder the app could not identify, do not upload.
-pub const CONTRIBUTION_MODE_AUTO_PARTIAL: &str = "Except folders set to Never. Sessions from a folder the app can't identify still wait for you.";
+pub const CONTRIBUTION_MODE_AUTO_PARTIAL: &str =
+    "Except folders set to Never. Traces from a folder the app can't identify still wait for you.";
 
 /// Shown under the pill while an override is in
 /// force (`status.contribution_override` not null), so it reads "override"
@@ -346,8 +347,8 @@ pub const CONTRIBUTION_OVERRIDE_NEVER_TITLE: &str = "Stop contributing from ever
 /// is offered then by that folder's own setting -- so a folder set to
 /// contribute automatically sends it.
 pub const CONTRIBUTION_OVERRIDE_NEVER_BODY: &str = "Nothing is queued or sent from any folder \
-     until you turn this off, including sessions you already approved.\n\nTurning this off \
-     puts each folder back on its own setting, and sessions you approved are sent. Sessions you \
+     until you turn this off, including traces you already approved.\n\nTurning this off \
+     puts each folder back on its own setting, and traces you approved are sent. Traces you \
      finish in the meantime are then treated by that setting, so a folder set to contribute \
      automatically sends them without asking.";
 pub const CONTRIBUTION_OVERRIDE_NEVER_CONFIRM: &str = "Stop everywhere";
@@ -359,10 +360,10 @@ pub const CONTRIBUTION_OVERRIDE_AUTO_TITLE: &str = "Contribute automatically fro
 /// now (nothing already on disk is sent unattended), Never folders stay off,
 /// the settle window, and what turning it off does. Its second paragraph is
 /// [`ARMING_BODY`]'s, unchanged.
-pub const CONTRIBUTION_OVERRIDE_AUTO_BODY: &str = "Sessions from every folder will be scrubbed \
+pub const CONTRIBUTION_OVERRIDE_AUTO_BODY: &str = "Traces from every folder will be scrubbed \
      and contributed without asking you, from now on, until you turn this off. You won't review \
-     them first. Sessions already on this Mac keep waiting for you to pick them, and folders set \
-     to Never stay off.\n\nNo session is sent until it has been quiet for a day.\n\nTurning this \
+     them first. Traces already on this Mac keep waiting for you to pick them, and folders set \
+     to Never stay off.\n\nNo trace is sent until it has been quiet for a day.\n\nTurning this \
      off puts each folder back on its own setting. Anything it hasn't sent yet from a folder \
      that asks first goes back to waiting for you, and anything already sent stays sent.";
 /// The confirm button: the arming offer's own ([`ARMING_OFFER_CONFIRM`]).
@@ -387,7 +388,7 @@ pub const CONTRIBUTION_OVERRIDE_CLEAR_TITLE: &str = "Use each folder's setting?"
 pub const CONTRIBUTION_OVERRIDE_CLEAR_BODY: &str = concat!(
     "Each folder goes back to its own setting. Folders set to ",
     folder_mode_auto_label!(),
-    " send their finished sessions without asking again."
+    " send their finished traces without asking again."
 );
 /// The confirm button. Approved 2026-10-08 (button rule).
 pub const CONTRIBUTION_OVERRIDE_CLEAR_CONFIRM: &str = "Clear override";
@@ -687,10 +688,10 @@ mod contribution_override_copy_tests {
         let c = contribution_mode_copy();
         let modes: Vec<&str> = c.choices.iter().map(|c| c.mode).collect();
         assert_eq!(modes, ["notify_only", "auto_upload", "ignore"]);
-        assert_eq!(c.choices[0].line, "Every finished session waits for you.");
+        assert_eq!(c.choices[0].line, "Every finished trace waits for you.");
         assert_eq!(
             c.choices[1].line,
-            "Scrubbed sessions go; the digest tells you."
+            "Scrubbed traces go; the digest tells you."
         );
         assert_eq!(c.choices[2].line, "Nothing is queued or sent.");
         // Each choice's mode is one the override method takes.
@@ -728,7 +729,7 @@ mod contribution_override_copy_tests {
         assert!(auto.contains("keep waiting for you"));
         assert!(!auto.contains("already waiting"), "the backlog does not go");
         assert!(auto.contains("Never stay off"));
-        assert!(auto.contains("No session is sent until it has been quiet for a day."));
+        assert!(auto.contains("No trace is sent until it has been quiet for a day."));
         assert!(CONTRIBUTION_OVERRIDE_ASK_BODY.contains("Never stay off"));
         for body in [
             CONTRIBUTION_OVERRIDE_AUTO_BODY,
@@ -859,11 +860,11 @@ mod arming_body_tests {
     fn the_arming_body_is_exactly_what_was_agreed() {
         assert_eq!(
             ARMING_BODY,
-            "Sessions from this project will be scrubbed and contributed without asking you, from now on. You won't review them first. Sessions already on this Mac keep waiting for you to pick them.\n\nNo session is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
+            "Traces from this project will be scrubbed and contributed without asking you, from now on. You won't review them first. Traces already on this Mac keep waiting for you to pick them.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
         );
         assert_eq!(
             ARMING_BODY_WITH_BACKLOG,
-            "Sessions from this project will be scrubbed and contributed without asking you, including any already waiting. You won't review them first.\n\nNo session is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
+            "Traces from this project will be scrubbed and contributed without asking you, including any already waiting. You won't review them first.\n\nNo trace is sent until it has been quiet for a day.\n\nYou can turn this off at any time. Anything it hasn't sent yet goes back to waiting for you, and anything already sent stays sent."
         );
     }
 
@@ -891,7 +892,7 @@ mod arming_body_tests {
     #[test]
     fn the_arming_body_makes_none_of_the_retracted_claims() {
         for claim in [
-            "Every future session",
+            "Every future trace",
             "change your mind",
             "a day after you last work",
         ] {

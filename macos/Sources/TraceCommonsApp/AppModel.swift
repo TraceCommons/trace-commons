@@ -163,9 +163,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var startup: Startup = .starting
     @Published private(set) var isStartingDaemon = false
     private let daemonStartup: DaemonStartup
+    /// The opt-in events to declare now (`Notifier.acceptedEvents`).
+    /// Replaced only by tests.
+    private let reengageAccepts: () async -> [String]
 
-    init(daemonStartup: DaemonStartup? = nil) {
+    init(
+        daemonStartup: DaemonStartup? = nil,
+        reengageAccepts: @escaping () async -> [String] = { await Notifier.shared.acceptedEvents() }
+    ) {
         self.daemonStartup = daemonStartup ?? DaemonStartup()
+        self.reengageAccepts = reengageAccepts
         // `@Published` emits in `willSet`, so the emitted value is read,
         // not `PendingInvite.shared.value`. Delivered on the main actor:
         // `PendingInvite` is main-actor isolated.
@@ -966,7 +973,12 @@ final class AppModel: ObservableObject {
     /// The client the first run's passkey sheets complete their ceremony
     /// with (`LivePasskeyAccount`). Nil while no daemon is running.
     var passkeyClient: DaemonClient? { client }
-    private var subscription: TCSubscription?
+    /// The one subscription and what it declares (`ReengageDeclaration`):
+    /// `reengage_due` only while a notification can be posted.
+    private var reengage: ReengageDeclaration<TCSubscription>?
+    private var subscription: TCSubscription? { reengage?.token }
+    /// Whether the daemon currently counts this app as a renderer.
+    var declaresReengagement: Bool { reengage?.isDeclared ?? false }
     /// The C1 data contract's live client (K1 of #1173), for screens that
     /// read through `DaemonDataClient`. Created with the daemon and fed by
     /// the same `tc_subscribe` callback as `handle(event:)`, so there is
@@ -1232,7 +1244,10 @@ final class AppModel: ObservableObject {
         // Captured, not read through `self`: the callback runs on a Rust
         // thread, and `deliver` is lock-guarded and never calls back in.
         let liveData = self.liveData
-        subscription = daemon.subscribe { [weak self] json in
+        // Declares nothing yet: `reengage_due` is declared on this same
+        // subscription once the system's answer is known, and only while a
+        // notification can be posted (`refreshReengageDeclaration`).
+        let subscription = daemon.subscribe { [weak self] json in
             liveData?.deliver(eventJSON: json)
             // Rust background thread. Nothing observable may be touched
             // here; hop first, always.
@@ -1241,12 +1256,30 @@ final class AppModel: ObservableObject {
                 self?.handle(event: event)
             }
         }
+        // This app renders the re-engagement notifications itself
+        // (`Notifier.postReengage`), so the daemon may send them and count
+        // it as a renderer -- but only while the system lets it post.
+        reengage = subscription.map { token in
+            ReengageDeclaration(token: token) { [weak daemon] token, accepts in
+                daemon?.redeclare(token, accepts: accepts)
+            }
+        }
+        Task { await refreshReengageDeclaration() }
         // No `subscribe` call follows: the contract's `snapshot`-on-subscribe
         // is a property of the SOCKET connection loop, which sends it to the
         // client that just connected. `tc_subscribe` attaches to the event
         // bus directly and gets no such courtesy frame, so the first paint
         // comes from the explicit `list_pending` + `status` in refreshAll()
         // rather than from waiting on a snapshot that will never arrive.
+    }
+
+    /// Declares `reengage_due` when a notification can be posted now, and
+    /// withdraws it when one cannot. Called at start, when the permission
+    /// prompt is answered, and when the app comes forward (the contributor
+    /// may have changed it in System Settings).
+    func refreshReengageDeclaration() async {
+        let accepts = await reengageAccepts()
+        reengage?.update(accepts: accepts)
     }
 
     private func handle(event: DaemonEvent) {
@@ -1289,7 +1322,9 @@ final class AppModel: ObservableObject {
             // The listener's own state moves under this, and with it whether
             // any tool has answered yet. Re-read rather than left to age.
             refreshHarnesses()
-        case .digestDue(let count, let contributed, let contributedProjects, let credit, _):
+        case .reengageDue(let due):
+            Notifier.shared.postReengage(due)
+        case .digestDue(let count, let contributed, let contributedProjects, let credit, let text):
             refreshQueue()
             // A digest can now be about what went out unasked, with nothing
             // waiting at all -- so this also refreshes history, which is the
@@ -1299,6 +1334,7 @@ final class AppModel: ObservableObject {
                 refreshHistory()
             }
             Notifier.shared.postDigest(
+                text: text,
                 pendingCount: count,
                 projects: waitingByProject.map(\.label),
                 contributedCount: contributed,
@@ -1341,7 +1377,7 @@ final class AppModel: ObservableObject {
         // Dropped first so no new work can be started from this side while
         // teardown runs; `perform`, `enroll` and the rest all guard on
         // `client`.
-        self.subscription = nil
+        reengage = nil
         self.daemon = nil
         self.client = nil
         // Screens' `for await` loops end here rather than waiting on a

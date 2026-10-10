@@ -9,6 +9,8 @@ mod account_trust_growth_routes;
 mod activity_missions;
 #[path = "trace_commons_ingest_internal/admission.rs"]
 mod admission;
+#[path = "trace_commons_ingest_internal/credit_estimate.rs"]
+mod credit_estimate;
 #[path = "trace_commons_ingest_internal/file_witness.rs"]
 mod file_witness;
 #[path = "trace_commons_ingest_internal/inference_connection.rs"]
@@ -1636,6 +1638,10 @@ fn flush_vector_indexes_on_shutdown(state: &AppState) {
 struct AppState {
     activity_missions_policy:
         Option<Arc<trace_commons_protocol::activity_missions::ActivityPolicy>>,
+    /// The local credit estimate table `GET /v1/credit-estimate/table`
+    /// serves: the operator-installed one, validated at boot, else the
+    /// protocol's built-in table. Never empty.
+    credit_estimate_table: Arc<trace_commons_protocol::local_credit_estimate::LocalEstimateTable>,
     inference_connection_catalog:
         Arc<Vec<trace_commons_server::inference_connection::OperatorInferenceConnection>>,
     near_provisioning_enabled: bool,
@@ -4815,6 +4821,7 @@ impl AppState {
             account_near_config,
             inference_connection_catalog: Arc::new(inference_connection_routes::catalog_from_env()?),
             activity_missions_policy: activity_missions::policy_from_env()?,
+            credit_estimate_table: credit_estimate::table_from_env()?,
             attestation_signing,
             legacy_invite_link,
             #[cfg(any(feature = "local-gpu-models", feature = "near-ai-scorer"))]
@@ -8381,6 +8388,13 @@ fn app(state: Arc<AppState>) -> Router {
         // Unauthenticated, like /v1/source above and for the same structural
         // reason: it is registered here, outside every auth layer, on purpose.
         .route("/v1/public/register-stats", get(register_stats_handler))
+        // Unauthenticated and outside tenant context for the same reason: the
+        // estimate table is public, non-personal data a client fetches before
+        // it has an account.
+        .route(
+            "/v1/credit-estimate/table",
+            get(credit_estimate::table_handler),
+        )
         .route(
             "/v1/traces",
             get(list_traces_handler)
@@ -8867,6 +8881,10 @@ fn app(state: Arc<AppState>) -> Router {
         )
         .route("/v1/admin/recluster-dedup", post(recluster_dedup_handler))
         .route("/v1/admin/rederive-dedup", post(rederive_dedup_handler))
+        .route(
+            "/v1/admin/credit-estimate-eval",
+            post(credit_estimate::eval_handler),
+        )
         .route(
             "/v1/admin/pii-backstop-requeue-quarantined",
             post(pii_backstop_requeue_quarantined_handler),
