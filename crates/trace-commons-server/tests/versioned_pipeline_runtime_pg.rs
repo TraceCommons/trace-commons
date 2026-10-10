@@ -47088,9 +47088,10 @@ async fn approval_without_a_pass_is_refused() {
 
 /// Task 6: a privacy boundary whose deterministic half returns a fixed basis
 /// (`[ConsentContentFlag]` for the consent-flag tests) and whose classifier
-/// half, when built with a risk, sets the envelope's residual risk to it and
-/// reports `FoundAndRemoved`; built with `None` it finds nothing. Counts its
-/// classifier calls per test.
+/// half, when built with a risk, removes the prose marker `MARKER_SECRET`
+/// (when the content carries one), sets the envelope's residual risk to the
+/// risk and reports `FoundAndRemoved`; built with `None` it finds nothing.
+/// Counts its classifier calls per test.
 struct EscalatingBoundary {
     deterministic_basis: Vec<ResidualRiskCondition>,
     classifier_risk: Option<ResidualPiiRisk>,
@@ -47130,6 +47131,8 @@ impl PipelinePrivacyBoundary for EscalatingBoundary {
         self.classifier_calls.fetch_add(1, Ordering::SeqCst);
         match self.classifier_risk {
             Some(risk) => {
+                let text = serde_json::to_string(envelope)?;
+                *envelope = serde_json::from_str(&text.replace("MARKER_SECRET", "[redacted]"))?;
                 envelope.privacy.residual_pii_risk = risk;
                 Ok(vec![ResidualRiskCondition::FoundAndRemoved])
             }
@@ -47218,16 +47221,20 @@ async fn assert_held_by_the_pass(service: &PipelineService, tenant: &str, run: &
     assert_eq!(review_outcome_count(service, tenant, run.run_id).await, 0);
 }
 
-/// Task 6: an Admission-admitted run the privacy pass escalates (Medium,
-/// then High: High is held like Medium, never rejected, D1) is parked for a
-/// human under `privacy_pass_review_required`; the Review policy is not
-/// run; the queue lists it with that hold reason; a reviewer can claim it.
+/// Task 6: an Admission-admitted run the privacy pass escalates (High,
+/// held for a human, never rejected, D1) is parked for a human under
+/// `privacy_pass_review_required`; the Review policy is not run; the
+/// submission is `quarantined` (#1326); the queue lists it with that hold
+/// reason; a reviewer can claim it. Since the owner decision of 2026-10-10 a
+/// pass at Medium (PII found and removed) no longer escalates
+/// (`prose_pii_the_pass_removed_is_accepted_on_the_redacted_content`), so
+/// High is the only escalating risk.
 #[tokio::test]
 async fn escalated_admit_run_parks_for_a_human() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
-    for classifier_risk in [ResidualPiiRisk::Medium, ResidualPiiRisk::High] {
+    for classifier_risk in [ResidualPiiRisk::High] {
         let dir = tempfile::tempdir().unwrap();
         let boundary = EscalatingBoundary::new(Vec::new(), Some(classifier_risk));
         let service = privacy_pass_test_service(
@@ -47247,6 +47254,11 @@ async fn escalated_admit_run_parks_for_a_human() {
             .expect("Review runs the pass");
         assert_eq!(boundary.calls(), 1);
         assert_held_by_the_pass(&service, &tenant, &held).await;
+        assert_eq!(
+            submission_status(&backend, &tenant, created.submission_id).await,
+            "quarantined",
+            "a High hold quarantines the submission (#1326)"
+        );
         assert!(
             service
                 .process_run(&tenant, created.run_id)
@@ -47282,7 +47294,7 @@ async fn escalated_approval_must_resolve_privacy_pass_review_required() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47357,7 +47369,7 @@ async fn escalated_approval_resumes_without_a_second_classifier_call() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47791,11 +47803,14 @@ async fn stored_privacy_risk(
     risk
 }
 
-/// Task 6 (P3 scale): a consent-flag-only receipt is stored as raw `medium`
-/// and admitted at Low; a classifier that finds prose PII (Medium, plus
-/// `FoundAndRemoved`) escalates it, and the run is held, not approved.
+/// Task 6 (P3 scale), amended by the owner decision of 2026-10-10: a
+/// consent-flag-only receipt is stored as raw `medium` and admitted at Low;
+/// a classifier that finds and removes prose PII (Medium, plus
+/// `FoundAndRemoved`) used to escalate it and hold it for a human. It now
+/// clears: the run goes on to the Review policy and is approved on the
+/// pass output, and the row keeps the raw `medium` risk.
 #[tokio::test]
-async fn consent_flag_only_run_escalated_by_the_classifier_is_held() {
+async fn consent_flag_only_run_whose_pii_the_classifier_removed_is_cleared() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -47812,14 +47827,40 @@ async fn consent_flag_only_run_escalated_by_the_classifier_is_held() {
     )
     .await;
     let (tenant, created) =
-        submit_at_risk(&service, "consent-escalated", ResidualPiiRisk::Medium).await;
+        submit_at_risk(&service, "consent-removed", ResidualPiiRisk::Medium).await;
     assert_eq!(created.admission_decision, "admit");
-    let held = service
+    let reviewed = service
         .process_run(&tenant, created.run_id)
         .await
         .unwrap()
-        .expect("Review runs the pass");
-    assert_held_by_the_pass(&service, &tenant, &held).await;
+        .expect("Review runs the pass and the policy");
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "{reviewed:?}"
+    );
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    let mut basis = reviewed
+        .privacy_pass_residual_risk_basis
+        .clone()
+        .expect("the pass records its basis");
+    basis.sort();
+    assert_eq!(
+        basis,
+        vec![
+            "consent_content_flag".to_string(),
+            "found_and_removed".to_string(),
+        ],
+        "the merged basis records what the classifier removed"
+    );
+    assert_eq!(
+        review_outcome_count(&service, &tenant, created.run_id).await,
+        1
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
     assert_eq!(
         stored_privacy_risk(&backend, &tenant, created.submission_id).await,
         "medium",
@@ -47859,6 +47900,116 @@ async fn cleared_consent_flag_only_run_goes_straight_to_review() {
     assert_eq!(boundary.calls(), 1);
 }
 
+/// Owner decision 2026-10-10 ("once PII removed we should go to
+/// accepted"): an Admission-admitted run whose privacy pass finds prose PII
+/// and removes it (post-pass risk Medium, basis `found_and_removed`) is not
+/// held. The pass records `cleared` with the merged basis, the run goes on
+/// to the Review policy with the scrubbed bytes, no human assessment is
+/// linked, the submission ends `accepted` with the raw `medium` risk, and the
+/// approved content Score reads lacks the PII marker.
+#[tokio::test]
+async fn prose_pii_the_pass_removed_is_accepted_on_the_redacted_content() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let service = privacy_pass_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        boundary.clone(),
+        None,
+    )
+    .await;
+    let (tenant, created) =
+        submit_with_markers(&service, "removed-accepted", &["MARKER_SECRET"]).await;
+    assert_eq!(created.admission_decision, "admit");
+    let reviewed = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs the pass and the policy");
+    assert_eq!(boundary.calls(), 1);
+    assert_eq!(
+        reviewed.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "{reviewed:?}"
+    );
+    assert_ne!(
+        reviewed.state,
+        PipelineRunState::AwaitingReview,
+        "{reviewed:?}"
+    );
+    assert_eq!(reviewed.last_error_label, None, "{reviewed:?}");
+    assert_eq!(reviewed.next_phase, Some(Phase::Score), "{reviewed:?}");
+    assert!(
+        reviewed
+            .privacy_pass_residual_risk_basis
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|label| label == "found_and_removed"),
+        "the pass records what it removed: {reviewed:?}"
+    );
+    assert!(reviewed.privacy_pass_approval_assessment_hash.is_none());
+    assert!(reviewed.privacy_pass_approval_resolved_reasons.is_none());
+    let (decision, rule_id) = review_decision_and_rule(&service, &tenant, created.run_id).await;
+    assert!(matches!(decision, ReviewDecision::Approved { .. }));
+    assert_eq!(rule_id, "minimal_review_passthrough_v1");
+    let evidence = review_evidence(&service, &tenant, created.run_id).await;
+    assert_eq!(
+        reviewed.privacy_pass_content_hash.as_deref(),
+        Some(evidence.source_content_hash.as_str()),
+        "Review read the pass output"
+    );
+    let approved =
+        String::from_utf8(service.load_approved_bytes(&reviewed).await.unwrap()).unwrap();
+    assert!(!approved.contains("MARKER_SECRET"));
+    assert!(approved.contains("[redacted]"));
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
+    assert_eq!(
+        stored_privacy_risk(&backend, &tenant, created.submission_id).await,
+        "medium",
+        "the row holds the raw post-pass risk"
+    );
+    assert!(
+        service
+            .store()
+            .list_review_queue(&tenant, 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing waits for a human"
+    );
+
+    process_until_idle(&service, &tenant).await;
+    let finished = service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(finished.state, PipelineRunState::Complete, "{finished:?}");
+    assert!(
+        service
+            .store()
+            .list_outcomes(&tenant, created.run_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|outcome| outcome.phase == Phase::Score),
+        "Score ran over the approved content"
+    );
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "accepted"
+    );
+    assert_eq!(boundary.calls(), 1, "the pass is never re-run");
+}
+
 // Task 7 (Q2): a reviewer's decision on a run the privacy pass escalated.
 
 /// The run's committed Review outcome, decoded: its decision and its rule id.
@@ -47893,7 +48044,7 @@ async fn escalated_rejection_ends_the_run_rejected() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),
@@ -47968,7 +48119,7 @@ async fn escalated_approval_links_the_assessment() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::Medium));
+    let boundary = EscalatingBoundary::new(Vec::new(), Some(ResidualPiiRisk::High));
     let service = privacy_pass_test_service(
         backend.clone(),
         artifact_store(&dir),

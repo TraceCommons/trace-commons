@@ -296,7 +296,8 @@ pub const PIPELINE_PRIVACY_PASS_ALREADY_RECORDED_LABEL: &str = "privacy_pass_alr
 /// writes nothing.
 pub const PIPELINE_PRIVACY_PASS_MISSING_LABEL: &str = "privacy_pass_missing";
 /// Safe label of a run the Review-start privacy pass escalated (its risk is
-/// above the receipt-time risk, decision P3), held for a human whatever
+/// High and above the receipt-time risk, decision P3 as amended 2026-10-10,
+/// `privacy_pass_outcome`), held for a human whatever
 /// Admission decided: the run's parking label, the review queue's hold
 /// reason, and a reason an approving assessment must resolve. Distinct from
 /// Admission's `privacy_review_required`.
@@ -993,6 +994,33 @@ pub fn pipeline_privacy_risk(
         }
         ResidualPiiRisk::Medium => PrivacyRisk::Medium,
         ResidualPiiRisk::High => PrivacyRisk::High,
+    }
+}
+
+/// The Review-start privacy pass's outcome (decision P3, as amended by the
+/// owner decision of 2026-10-10, "once PII removed we should go to
+/// accepted"). `receipt_risk` and `pass_risk` are both on Admission's scale
+/// (`pipeline_privacy_risk`).
+///
+/// The pass escalates only when its risk is High and strictly above the
+/// receipt's. A post-pass Medium is the found-and-removed (or consent-flag)
+/// floor: the classifier found prose PII and the envelope Review reads is
+/// the redacted one, so the pass clears and the run goes on to the Review
+/// policy on the scrubbed bytes, with the merged basis
+/// (`found_and_removed`) and the redaction counts recorded for audit. High
+/// means something redaction did not resolve (a key finding, a coverage gap,
+/// a survivor, a residual scan that could not run) and is held for a human,
+/// never rejected (D1). A receipt already at High never reaches the pass
+/// (Admission rejects it), and a Medium receipt Admission quarantined keeps
+/// Admission's hold whatever the pass clears.
+pub fn privacy_pass_outcome(
+    receipt_risk: PrivacyRisk,
+    pass_risk: PrivacyRisk,
+) -> PrivacyPassOutcome {
+    if pass_risk == PrivacyRisk::High && pass_risk > receipt_risk {
+        PrivacyPassOutcome::Escalated
+    } else {
+        PrivacyPassOutcome::Cleared
     }
 }
 
@@ -11282,9 +11310,12 @@ impl PipelineService {
     /// (decision P7). Otherwise the pass loads the source (the receipt's
     /// post-deterministic envelope), runs the boundary's classifier half on
     /// it under `privacy_pass_timeout`, and merges the receipt's basis with
-    /// the classifier's conditions. It escalates when the classified risk is
-    /// strictly above the receipt-time risk, both on Admission's scale
-    /// (`pipeline_privacy_risk`, decision P3). It stores the output under
+    /// the classifier's conditions. It escalates only when the classified
+    /// risk is High and strictly above the receipt-time risk, both on
+    /// Admission's scale (`pipeline_privacy_risk`, `privacy_pass_outcome`,
+    /// decision P3 as amended 2026-10-10): a Medium from PII the classifier
+    /// found and removed clears, and Review reads the redacted output. It
+    /// stores the output under
     /// this attempt's own key (staged as `privacy-pass`, so the sweep deletes
     /// it if nothing commits it), then records the pass on the run
     /// (`record_privacy_pass`). A refused record deletes this attempt's
@@ -11348,11 +11379,7 @@ impl PipelineService {
         }
         let receipt_risk = pipeline_privacy_risk(&receipt.residual_pii_risk, &receipt_basis);
         let risk = pipeline_privacy_risk(&envelope.privacy.residual_pii_risk, &merged);
-        let outcome = if risk > receipt_risk {
-            PrivacyPassOutcome::Escalated
-        } else {
-            PrivacyPassOutcome::Cleared
-        };
+        let outcome = privacy_pass_outcome(receipt_risk, risk);
         let basis_labels = safe_residual_risk_basis_labels(&merged);
 
         let bytes = serde_json::to_vec(&envelope)?;
@@ -16917,6 +16944,39 @@ mod tests {
         assert_eq!(
             pipeline_privacy_risk(&ResidualPiiRisk::High, &[]),
             PrivacyRisk::High
+        );
+    }
+
+    /// Decision P3 as amended 2026-10-10: only a High pass risk above the
+    /// receipt's escalates; a Medium pass risk (PII found and removed, or a
+    /// consent flag) clears, whatever the receipt's risk was.
+    #[test]
+    fn privacy_pass_escalates_only_at_high() {
+        use PrivacyRisk::{High, Low, Medium};
+        for (receipt, pass, expected) in [
+            (Low, Low, PrivacyPassOutcome::Cleared),
+            (Low, Medium, PrivacyPassOutcome::Cleared),
+            (Medium, Medium, PrivacyPassOutcome::Cleared),
+            (Medium, Low, PrivacyPassOutcome::Cleared),
+            (Low, High, PrivacyPassOutcome::Escalated),
+            (Medium, High, PrivacyPassOutcome::Escalated),
+            (High, High, PrivacyPassOutcome::Cleared),
+        ] {
+            assert_eq!(
+                privacy_pass_outcome(receipt, pass),
+                expected,
+                "{receipt:?} -> {pass:?}"
+            );
+        }
+        // The pilot's prose-PII probe: a Low receipt whose classifier found
+        // and removed names, a date of birth and an address.
+        let pass = pipeline_privacy_risk(
+            &ResidualPiiRisk::Medium,
+            &[ResidualRiskCondition::FoundAndRemoved],
+        );
+        assert_eq!(
+            privacy_pass_outcome(PrivacyRisk::Low, pass),
+            PrivacyPassOutcome::Cleared
         );
     }
 
