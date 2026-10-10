@@ -119,6 +119,26 @@ final class NudgeTracesTests: XCTestCase {
         }
     }
 
+    /// Ron's #1303 review, item 1, the send half: under the idle filter a
+    /// folder's Submit sends what is drawn under it and nothing the filter
+    /// hid. The sample daemon approves what `approve {project_id, filter}`
+    /// selects, so the toast counts what was sent.
+    func test_aFilteredFoldersSubmitSendsOnlyWhatIsShown() async throws {
+        let store = TracesStore(client: SampleDaemonClient(.normalDay))
+        await store.load()
+        await store.perform(.review(.idleSessions))
+        // A folder the filter narrowed: fewer drawn than the folder holds.
+        let folder = try XCTUnwrap(store.tree.folders.first { folder in
+            !folder.sessions.isEmpty && store.mayContributeFolder(folder)
+                && folder.sessions.count < (folder.pendingCount ?? 0)
+        })
+        let shown = folder.sessions.filter { !$0.heldForReview }.count
+        await store.contributeFolder(folder, verdict: nil)
+        let sent = try XCTUnwrap(store.lastContributedFolder)
+        XCTAssertEqual(sent.projectId, folder.id)
+        XCTAssertEqual(sent.toast, SubmitToast.render(approved: UInt64(shown), redactions: 0, flagged: 0, skipped: []))
+    }
+
     func test_notNowDeclinesTheKindAndGoesNowhere() async {
         let client = SampleDaemonClient(.normalDay)
         let store = TracesStore(client: client)
