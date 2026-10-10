@@ -111,7 +111,7 @@ public sealed class SwitchOnNoticesTests
             {
                 new Dictionary<string, object?>
                 {
-                    ["project_id"] = "p", ["line"] = "api: 2 sessions waiting",
+                    ["project_id"] = "p", ["line"] = "api: 2 traces waiting",
                     ["ask_first_action"] = "Ask me", ["ask_first_failed"] = "F",
                 },
             },

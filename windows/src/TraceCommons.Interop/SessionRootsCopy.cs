@@ -21,7 +21,7 @@ namespace TraceCommons.Interop;
 public static class SessionRootsCopy
 {
     /// <summary>The screen's heading.</summary>
-    public const string Title = "Which session folders should Trace Commons watch?";
+    public const string Title = "Which trace folders should Trace Commons watch?";
 
     /// <summary>
     /// The screen's body. Says plainly that nothing is watched until asked,
@@ -46,7 +46,7 @@ public static class SessionRootsCopy
     /// box is editable.
     /// </summary>
     public const string ManualHint =
-        "If your sessions are somewhere else, type or paste that folder above.";
+        "If your traces are somewhere else, type or paste that folder above.";
 
     /// <summary>
     /// Why Continue is disabled. Shown rather than left to a greyed-out
@@ -93,7 +93,7 @@ public static class SessionRootsCopy
             // would answer "no location for this agent" about a store holding
             // thousands of sessions, turning the one line that makes this a
             // consent prompt into a dead end.
-            return "Trace Commons has no location for this agent. Type the folder its sessions are in.";
+            return "Trace Commons has no location for this agent. Type the folder its traces are in.";
         }
 
         if (!candidate.Exists)
@@ -103,14 +103,14 @@ public static class SessionRootsCopy
 
         if (candidate.SessionCount == 0)
         {
-            return "This folder is here, but holds no sessions yet.";
+            return "This folder is here, but holds no traces yet.";
         }
 
         string sessions = candidate.SessionCount == 1
-            ? "1 session"
+            ? "1 trace"
             : string.Format(
                 CultureInfo.CurrentCulture,
-                "{0} sessions",
+                "{0} traces",
                 candidate.SessionCount);
 
         return string.Format(

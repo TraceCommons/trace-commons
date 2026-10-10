@@ -10,6 +10,9 @@ repository.workspace = true
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
+# Pure-Rust backend only. The local credit estimate's deflate ratio must match
+# between the daemon and the server, and a zlib backend compresses differently.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 futures = { version = "0.3", optional = true }
 hex = "0.4"
 regex = "1"

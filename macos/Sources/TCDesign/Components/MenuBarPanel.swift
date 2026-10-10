@@ -313,14 +313,40 @@ public struct GlassMenuBarStrip: View {
         case unavailable
     }
 
+    /// The re-engagement mark the core lit. It never replaces or hides a
+    /// higher state: the news ring sits in the badge's slot only while that
+    /// slot is empty on a live strip, and the halo only rings a badge that
+    /// is drawn.
+    public enum Mark: Equatable, Sendable {
+        case none
+        /// Something new to look at: a small hollow ring.
+        case news
+        /// Some decisions owed are idle sessions: a halo around the badge.
+        case ready
+    }
+
     private let columns: [GlassDayColumn]
     private let condition: Condition
     private let badge: Int?
+    private let mark: Mark
 
-    public init(columns: [GlassDayColumn], condition: Condition, badge: Int?) {
+    public init(columns: [GlassDayColumn], condition: Condition, badge: Int?, mark: Mark = .none) {
         self.columns = Array(columns.suffix(7))
         self.condition = condition
         self.badge = badge
+        self.mark = mark
+    }
+
+    /// The mark drawn: the ring only with no badge on a live strip (no
+    /// attention mark, not paused, not unavailable), the halo only around
+    /// a badge that is drawn.
+    public static func shownMark(_ mark: Mark, badge: Int?, condition: Condition) -> Mark {
+        let badgeShown = shownBadge(badge, condition: condition) != nil
+        switch mark {
+        case .news: return !badgeShown && condition == .live ? .news : .none
+        case .ready: return badgeShown ? .ready : .none
+        case .none: return .none
+        }
     }
 
     /// Each column's up and down bar heights. Unavailable is flat: data
@@ -373,6 +399,7 @@ public struct GlassMenuBarStrip: View {
         .padding(.horizontal, 4)
         .frame(height: 22)
         .overlay(alignment: .bottomTrailing) {
+            let shownMark = Self.shownMark(mark, badge: badge, condition: condition)
             if let badge = Self.shownBadge(badge, condition: condition) {
                 Text("\(badge)")
                     .glassGlyph(10, weight: .bold)
@@ -381,6 +408,13 @@ public struct GlassMenuBarStrip: View {
                     .frame(minWidth: 16, minHeight: 16)
                     .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
                     .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))
+                    // The halo: the accent line colour, outside the badge's
+                    // own edge, as `GlassStatusDot`'s ring sits outside it.
+                    .overlay {
+                        if shownMark == .ready {
+                            Capsule().stroke(GlassTokens.Color.purpleText.color, lineWidth: 2).padding(-2.5)
+                        }
+                    }
                     .offset(x: 6, y: 2)
             } else if Self.showsAttention(condition) {
                 // The shipping mark's attention state, in the badge's place.
@@ -390,6 +424,13 @@ public struct GlassMenuBarStrip: View {
                     .frame(minWidth: 16, minHeight: 16)
                     .background(Capsule().fill(GlassTokens.Color.menuModeNever.color))
                     .overlay(Capsule().stroke(GlassTokens.Color.menuBadgeEdge.color, lineWidth: 1.5))
+                    .offset(x: 6, y: 2)
+            } else if shownMark == .news {
+                // The news ring, hollow, in the badge's slot.
+                Circle()
+                    .stroke(GlassTokens.Color.purpleText.color, lineWidth: 1.5)
+                    .frame(width: 9, height: 9)
+                    .frame(width: 16, height: 16)
                     .offset(x: 6, y: 2)
             }
         }

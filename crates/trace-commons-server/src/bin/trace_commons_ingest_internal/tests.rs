@@ -6120,6 +6120,9 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
     Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
         activity_missions_policy: None,
+        credit_estimate_table: Arc::new(
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+        ),
         root,
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -29028,6 +29031,9 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
     let state = Arc::new(AppState {
         inference_connection_catalog: Arc::new(Vec::new()),
         activity_missions_policy: None,
+        credit_estimate_table: Arc::new(
+            trace_commons_protocol::local_credit_estimate::LocalEstimateTable::built_in(),
+        ),
         root: temp.path().to_path_buf(),
         near_provisioning_enabled: false,
         near_account_identity: None,
@@ -72393,6 +72399,38 @@ impl Database for PerplexityDriverTestDb {
             .collect())
     }
 
+    /// In-memory analogue of the Postgres `list_recent_gate_decision_keys`:
+    /// every decision row (any tenant), sorted `decided_at DESC,
+    /// decision_id DESC` as the real query orders it, capped at `limit`.
+    async fn list_recent_gate_decision_keys(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow>, DatabaseError>
+    {
+        let limit = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let mut rows: Vec<trace_commons_server::trace_corpus_storage::GateDecisionKeyRow> = self
+            .gate_decisions
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(tenant_id, row)| {
+                trace_commons_server::trace_corpus_storage::GateDecisionKeyRow {
+                    tenant_id: tenant_id.clone(),
+                    submission_id: row.submission_id,
+                    decision_id: row.decision_id,
+                    decided_at: row.decided_at,
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            b.decided_at
+                .cmp(&a.decided_at)
+                .then(b.decision_id.cmp(&a.decision_id))
+        });
+        rows.truncate(limit);
+        Ok(rows)
+    }
+
     /// In-memory analogue of the Postgres `list_dedup_rederive_rows`
     /// enumeration: every decision row (any tenant), sorted
     /// `decided_at ASC, decision_id ASC` as the real query orders it, capped
@@ -99939,4 +99977,471 @@ async fn near_ai_measurements_handler_refuses_without_a_credential() {
         .await
         .expect_err("an unknown bearer is refused");
     assert_eq!(err.0, StatusCode::FORBIDDEN);
+}
+
+mod credit_estimate_tests {
+    use super::*;
+    use axum::body::{Body, to_bytes};
+    use credit_estimate::{CreditEstimateEvalQuery, run_credit_estimate_eval};
+    use tower::ServiceExt;
+    use trace_commons_protocol::local_credit_estimate::{
+        LocalEstimateFeatures, LocalEstimateTable,
+    };
+    use trace_commons_server::credit_estimate_fit::EstimateWithheldLabel;
+    use trace_commons_server::trace_gate_service::LegacyDeterministicGateService;
+
+    const USER_TEXTS: [&str; 4] = [
+        "ESTIMATE-FIXTURE-ONE make the build pass",
+        "ESTIMATE-FIXTURE-TWO rotate the key and confirm health",
+        "ESTIMATE-FIXTURE-THREE a session that repeats an earlier one",
+        "ESTIMATE-FIXTURE-FOUR a session still being scored",
+    ];
+    const TENANTS: [&str; 4] = ["tenant-a", "tenant-a", "tenant-b", "tenant-b"];
+
+    struct EvalFixture {
+        _temp: tempfile::TempDir,
+        _artifact_temp: tempfile::TempDir,
+        state: Arc<AppState>,
+        db: Arc<PerplexityDriverTestDb>,
+        submission_ids: Vec<Uuid>,
+        features: Vec<LocalEstimateFeatures>,
+    }
+
+    /// Four stored envelopes over two tenants, gated through the enclave
+    /// mock: two scored under calibration 3, one withheld as a duplicate,
+    /// one with no label yet.
+    async fn eval_fixture() -> EvalFixture {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let artifact_temp = tempfile::tempdir().expect("artifact temp dir");
+        let (artifact_store, decryptor, _) =
+            fixture_gate_worker_artifact_store_with_decryptor(artifact_temp.path());
+        let db = Arc::new(PerplexityDriverTestDb::new());
+        let mut submission_ids = Vec::new();
+        let mut features = Vec::new();
+        for (tenant_id, text) in TENANTS.iter().zip(USER_TEXTS) {
+            let envelope = sample_envelope_with_user_input(text).await;
+            features.push(LocalEstimateFeatures::from_envelope(&envelope));
+            let plaintext = serde_json::to_vec(&envelope).expect("envelope serializes");
+            let submission_id = envelope.submission_id;
+            let receipt = artifact_store
+                .store
+                .put_serialized_json(
+                    &tenant_storage_ref(tenant_id),
+                    TraceArtifactKind::ContributionEnvelope,
+                    &submission_id.to_string(),
+                    &plaintext,
+                )
+                .expect("v2 artifact write");
+            db.seed_ungated_submission(
+                tenant_id,
+                submission_id,
+                StorageTraceObjectRefRecord {
+                    tenant_id: tenant_id.to_string(),
+                    submission_id,
+                    object_ref_id: Uuid::new_v4(),
+                    artifact_kind: StorageTraceObjectArtifactKind::SubmittedEnvelope,
+                    object_store: artifact_store.object_store_name().to_string(),
+                    object_key: receipt.object_key.clone(),
+                    content_sha256: format!("sha256:{}", receipt.ciphertext_sha256),
+                    encryption_key_ref: format!("tenant:{}", tenant_storage_ref(tenant_id)),
+                    size_bytes: plaintext.len() as i64,
+                    compression: None,
+                    created_by_job_id: None,
+                    invalidated_at: None,
+                    deleted_at: None,
+                    updated_at: receipt.encrypted_at,
+                    created_at: receipt.encrypted_at,
+                },
+            );
+            submission_ids.push(submission_id);
+        }
+        let db_mirror: Arc<dyn Database> = db.clone();
+        let mut state = test_state_with_configured_artifact_store_policies_and_export_guardrails(
+            temp.path().to_path_buf(),
+            Some(db_mirror),
+            Some(artifact_store),
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        Arc::make_mut(&mut state).gate_service =
+            Arc::new(EnclaveGateService::mock_with_decryptor(decryptor));
+        let mut decision_ids = Vec::new();
+        for (tenant_id, submission_id) in TENANTS.iter().zip(&submission_ids) {
+            decision_ids
+                .push(score_submission_for_dedup_test(&state, tenant_id, *submission_id).await);
+        }
+        // The inline gate path writes a credit quality for every decision;
+        // clear the two that must carry none.
+        for i in [2, 3] {
+            db.credit_quality_scores
+                .write()
+                .unwrap()
+                .remove(&(TENANTS[i].to_string(), decision_ids[i]));
+        }
+        for (i, q) in [(0, 150_000), (1, 220_000)] {
+            db.update_trace_gate_decision_credit_quality(TENANTS[i], decision_ids[i], q, 0, 3)
+                .await
+                .expect("seed credit quality");
+        }
+        for (_, row) in db.gate_decisions.write().unwrap().iter_mut() {
+            if row.decision_id == decision_ids[2] {
+                row.credit_withheld_reason = Some("skipped_duplicate".to_string());
+            }
+        }
+        EvalFixture {
+            _temp: temp,
+            _artifact_temp: artifact_temp,
+            state,
+            db,
+            submission_ids,
+            features,
+        }
+    }
+
+    fn query(dry_run: bool, fit: bool) -> CreditEstimateEvalQuery {
+        CreditEstimateEvalQuery {
+            dry_run,
+            limit: None,
+            fit,
+        }
+    }
+
+    /// Rows are label-only: the features the protocol computes from each
+    /// stored envelope, the labels, and a tenant hash. Unlabelled decisions
+    /// are counted and left out; nothing in the response names a
+    /// submission, a tenant, or any content.
+    #[tokio::test]
+    async fn eval_returns_label_only_rows_derived_inside_the_gate() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.counts.decisions, 4, "{:?}", response.counts);
+        assert_eq!(response.counts.submissions, 4);
+        assert_eq!(response.counts.unlabelled, 1);
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.derived, 3);
+        assert_eq!(response.counts.failed, 0);
+        assert!(response.fit.is_none());
+        assert_eq!(response.rows.len(), 3);
+
+        for i in 0..3 {
+            let row = response
+                .rows
+                .iter()
+                .find(|row| row.features == fx.features[i])
+                .unwrap_or_else(|| panic!("row {i} present"));
+            assert!(row.tenant_tag.starts_with('t'), "{}", row.tenant_tag);
+            match i {
+                0 => assert_eq!(row.displayed_credit, Some(1.5)),
+                1 => assert_eq!(row.displayed_credit, Some(2.2)),
+                _ => {
+                    assert_eq!(row.displayed_credit, None);
+                    assert_eq!(row.withheld, Some(EstimateWithheldLabel::Duplicate));
+                }
+            }
+            if i < 2 {
+                assert_eq!(row.credit_quality_calibration_version, Some(3));
+                assert_eq!(row.withheld, None);
+            }
+        }
+
+        let json = serde_json::to_string(&response).expect("serializes");
+        for submission_id in &fx.submission_ids {
+            assert!(!json.contains(&submission_id.to_string()));
+        }
+        for needle in ["tenant-a", "tenant-b", "ESTIMATE-FIXTURE", "decided_at"] {
+            assert!(!json.contains(needle), "{needle} leaked: {json}");
+        }
+    }
+
+    /// Kristi's #1285 review, finding 3: a capped run reads the NEWEST
+    /// decisions, so it reaches the calibration the fit trains on, and
+    /// every submission it reaches has its latest decision -- the one its
+    /// label comes from -- among the rows. Decisions are dated in fixture
+    /// order, so the newest two are submission 3 (unlabelled) and
+    /// submission 2 (withheld); oldest-first would read 0 and 1.
+    #[tokio::test]
+    async fn a_capped_eval_reads_the_newest_decisions() {
+        let fx = eval_fixture().await;
+        let base = Utc::now() - chrono::Duration::days(1);
+        for (_, row) in fx.db.gate_decisions.write().unwrap().iter_mut() {
+            let i = fx
+                .submission_ids
+                .iter()
+                .position(|id| *id == row.submission_id)
+                .expect("fixture submission");
+            row.decided_at = base + chrono::Duration::minutes(i as i64);
+        }
+        let response = run_credit_estimate_eval(
+            fx.state.as_ref(),
+            &CreditEstimateEvalQuery {
+                dry_run: false,
+                limit: Some(2),
+                fit: false,
+            },
+        )
+        .await
+        .expect("eval runs");
+        assert_eq!(response.counts.decisions, 2, "{:?}", response.counts);
+        assert_eq!(response.counts.unlabelled, 1, "{:?}", response.counts);
+        assert_eq!(response.counts.labelled, 1, "{:?}", response.counts);
+        assert_eq!(response.rows.len(), 1);
+        assert_eq!(response.rows[0].features, fx.features[2]);
+    }
+
+    /// Kristi's #1285 review, finding 4: shuffling alone does not unlink a
+    /// row. Neither the exact credit quality, which sits beside the
+    /// submission id in `trace_gate_decisions`, nor an unsalted tenant hash,
+    /// which anyone with the tenant id can recompute, may appear in a row.
+    /// The label is displayed credit (2 decimals), and the tenant is a tag
+    /// that only says which rows share a tenant within this one run.
+    #[tokio::test]
+    async fn eval_rows_carry_no_value_that_joins_back_to_a_decision() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        let json = serde_json::to_value(&response).expect("serializes");
+        let text = json.to_string();
+        for tenant_id in TENANTS {
+            let hash = sha256_prefixed(tenant_id);
+            assert!(!text.contains(&hash), "unsalted tenant hash: {text}");
+        }
+        for micros in ["150000", "220000", "credit_quality_micros"] {
+            assert!(!text.contains(micros), "{micros} leaked: {text}");
+        }
+        let rows = json["rows"].as_array().expect("rows");
+        let tag_of = |features: &LocalEstimateFeatures| {
+            let row = rows
+                .iter()
+                .find(|row| row["features"] == serde_json::to_value(features).unwrap())
+                .expect("row present");
+            row["tenant_tag"]
+                .as_str()
+                .expect("a tenant tag")
+                .to_string()
+        };
+        // Rows 0 and 1 are tenant-a, row 2 tenant-b.
+        assert_eq!(tag_of(&fx.features[0]), tag_of(&fx.features[1]));
+        assert_ne!(tag_of(&fx.features[0]), tag_of(&fx.features[2]));
+        let shown: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|row| row["displayed_credit"].as_f64())
+            .map(|credit| format!("{credit:.2}"))
+            .collect();
+        assert_eq!(
+            shown,
+            BTreeSet::from(["1.50".to_string(), "2.20".to_string()])
+        );
+    }
+
+    /// A dry run reads labels only: no envelope is loaded or decrypted and
+    /// no row is returned.
+    #[tokio::test]
+    async fn eval_dry_run_counts_without_decrypting() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(true, false))
+            .await
+            .expect("dry run");
+        assert_eq!(response.counts.decisions, 4);
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.unlabelled, 1);
+        assert_eq!(response.counts.derived, 0);
+        assert!(response.rows.is_empty());
+        assert!(response.dry_run);
+    }
+
+    /// A gate service that never sees plaintext fails each row closed: it
+    /// is counted as failed and never becomes a row of zeros.
+    #[tokio::test]
+    async fn eval_counts_rows_a_gate_cannot_derive_as_failed() {
+        let fx = eval_fixture().await;
+        let mut state = fx.state.clone();
+        Arc::make_mut(&mut state).gate_service = Arc::new(LegacyDeterministicGateService::new());
+        let response = run_credit_estimate_eval(state.as_ref(), &query(false, false))
+            .await
+            .expect("eval runs");
+        assert_eq!(response.counts.labelled, 3);
+        assert_eq!(response.counts.failed, 3);
+        assert_eq!(response.counts.derived, 0);
+        assert!(response.rows.is_empty());
+    }
+
+    /// With `fit`, the report rides along; this corpus is far too small for
+    /// a held-out check, so it says so and emits no table.
+    #[tokio::test]
+    async fn eval_fit_reports_and_refuses_to_guess_on_a_tiny_corpus() {
+        let fx = eval_fixture().await;
+        let response = run_credit_estimate_eval(fx.state.as_ref(), &query(false, true))
+            .await
+            .expect("eval runs");
+        let fit = response.fit.expect("fit report");
+        assert!(!fit.passed);
+        assert!(fit.table.is_none());
+        assert_eq!(fit.no_table_reason, Some("insufficient_held_out_rows"));
+    }
+
+    fn admin(uri: &str, token: &str) -> axum::http::Request<Body> {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("request builds")
+    }
+
+    #[tokio::test]
+    async fn eval_route_refuses_bad_queries_missing_dependencies_and_non_admins() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bare = test_state(temp.path().to_path_buf());
+        for (uri, expected) in [
+            (
+                "/v1/admin/credit-estimate-eval",
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?dryrun=true",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?dry_run=true&fit=true",
+                StatusCode::BAD_REQUEST,
+            ),
+            // Kristi's #1285 review, finding 3: a limit over the cap is
+            // refused, before any dependency is looked at, rather than
+            // run unbounded.
+            (
+                "/v1/admin/credit-estimate-eval?limit=10001",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/v1/admin/credit-estimate-eval?limit=-1",
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let response = app(bare.clone())
+                .oneshot(admin(uri, "admin-token-a"))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), expected, "{uri}");
+        }
+        let response = app(bare)
+            .oneshot(admin("/v1/admin/credit-estimate-eval", "token-a"))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn eval_route_returns_rows_to_an_admin() {
+        let fx = eval_fixture().await;
+        let response = app(fx.state.clone())
+            .oneshot(admin(
+                "/v1/admin/credit-estimate-eval?limit=10",
+                "admin-token-a",
+            ))
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["rows"].as_array().map(Vec::len), Some(3), "{value}");
+        assert_eq!(value["counts"]["labelled"], 3);
+    }
+
+    async fn get_table(state: Arc<AppState>) -> (StatusCode, serde_json::Value) {
+        let response = app(state)
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/v1/credit-estimate/table")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&body).expect("json body"))
+    }
+
+    /// Unauthenticated, and the built-in table when none is installed: a
+    /// client parses it with the same validator it applies to any table.
+    #[tokio::test]
+    async fn table_route_serves_the_built_in_without_credentials() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let (status, body) = get_table(test_state(temp.path().to_path_buf())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            LocalEstimateTable::from_value(&body).expect("client accepts it"),
+            LocalEstimateTable::built_in()
+        );
+    }
+
+    fn three_tier_table() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "features_version": "lef1",
+            "version": "f20261008",
+            "credit_quality_calibration": "cq3",
+            "bytes_per_token": 4,
+            "chunk_target_tokens": 2048,
+            "chunk_cap": 16,
+            "weights": [{"term": "ln_content_bytes", "weight": 1.0}],
+            "cut_offs": [6.0, 9.0],
+            "bands": [
+                {"low": 1.1, "high": 2.0},
+                {"low": 1.4, "high": 2.6},
+                {"low": 1.9, "high": 3.2}
+            ],
+            "withheld_share": 0.08
+        })
+    }
+
+    #[tokio::test]
+    async fn table_route_serves_an_installed_table() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let mut state = test_state(temp.path().to_path_buf());
+        let installed = LocalEstimateTable::from_value(&three_tier_table()).unwrap();
+        Arc::make_mut(&mut state).credit_estimate_table = Arc::new(installed.clone());
+        let (status, body) = get_table(state).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(LocalEstimateTable::from_value(&body).unwrap(), installed);
+    }
+
+    /// No path is the built-in table; a valid file is that table; a file
+    /// the client would refuse, or one that cannot be read, is a boot
+    /// error with a label, never an empty table served at request time.
+    #[test]
+    fn table_from_path_loads_validates_or_refuses() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            credit_estimate::table_from_path(None).unwrap(),
+            LocalEstimateTable::built_in()
+        );
+        let good = temp.path().join("good.json");
+        std::fs::write(&good, three_tier_table().to_string()).unwrap();
+        assert_eq!(
+            credit_estimate::table_from_path(Some(&good))
+                .unwrap()
+                .tier_count(),
+            3
+        );
+        let mut refused = three_tier_table();
+        refused["schema_version"] = serde_json::json!(2);
+        let bad = temp.path().join("bad.json");
+        std::fs::write(&bad, refused.to_string()).unwrap();
+        for path in [bad, temp.path().join("missing.json")] {
+            let err = credit_estimate::table_from_path(Some(&path)).unwrap_err();
+            assert_eq!(err.to_string(), "credit_estimate_table_invalid");
+        }
+    }
 }

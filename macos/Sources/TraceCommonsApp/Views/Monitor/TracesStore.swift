@@ -25,10 +25,112 @@ final class TracesStore {
     var showsIgnored = true {
         didSet {
             guard showsIgnored != oldValue, let read = lastRead else { return }
-            tree = TracesTree.build(
-                entries: read.entries, projects: read.projects, settings: read.settings,
-                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            tree = build(read)
         }
+    }
+
+    // MARK: The nudge (re-engagement)
+
+    /// The order chosen with the order control (`list_pending {order}`).
+    /// Suggested first until another is chosen (Ron, 2026-10-09): a
+    /// segmented control always shows which order the list is in.
+    private(set) var order: DaemonData.PendingOrder? = .suggested
+    /// Narrowed to the idle sessions the idle card named
+    /// (`list_pending {filter: "idle_sessions"}`), by its Review.
+    private(set) var idleOnly = false
+    /// An idle filter requested before any client was attached
+    /// (`requestIdleOnly`), applied by the first attach to one.
+    private var idleRequested = false
+    /// A row's tags in the core's words (`tc_nudge_entry_tags_json`), by
+    /// entry id; rows with nothing to draw are absent.
+    private(set) var rowTags: [String: NudgeEntryTags] = [:]
+    /// A nudge request in flight.
+    private(set) var nudgeBusy = false
+    /// The last nudge request the core refused, until the next one.
+    private(set) var nudgeError: DaemonDataError?
+    /// The core's fixed nudge words, decoded once.
+    let nudgeCopy: NudgeCopy? = NudgeCopy.decode(fromJSON: TCCoreCopy.nudgeCopyJSON())
+
+    /// Whether the tree keeps the core's order: whenever an order is set.
+    var keepsOrder: Bool { order != nil }
+
+    /// The idle or backlog card, in the daemon's words; nil when it has
+    /// none to show here. The idle card is not drawn while its own Review
+    /// has the list narrowed to the traces it named: the list is already
+    /// the answer to it, and its Show all is the way back.
+    var nudgeCard: NudgeSurface.Card? {
+        guard let card = NudgeSurface.card(status?.nudge, on: .traces) else { return nil }
+        return idleOnly && card.kind == .idleSessions ? nil : card
+    }
+
+    private func build(
+        _ read: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)
+    ) -> TracesTree {
+        TracesTree.build(
+            entries: read.entries, projects: read.projects, settings: read.settings,
+            scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored,
+            keepsOrder: keepsOrder, onlyWithSessions: idleOnly)
+    }
+
+    /// Asks the core for the list in `order`.
+    func setOrder(_ order: DaemonData.PendingOrder) async {
+        self.order = order
+        await load()
+    }
+
+    /// Narrows the list to the idle sessions, or leaves the filter.
+    func showIdleOnly(_ on: Bool) async {
+        idleOnly = on
+        await load()
+    }
+
+    /// The idle filter asked for from outside the list -- a notification's
+    /// Review, or the menu-bar panel row -- which can arrive before a
+    /// freshly opened window has attached its client. With no client yet it
+    /// is held, and the first attach to a client applies it instead of
+    /// clearing it.
+    func requestIdleOnly() async {
+        guard client != nil else {
+            idleRequested = true
+            return
+        }
+        await showIdleOnly(true)
+    }
+
+    /// A card button: its request, then its place. Review narrows (or, on
+    /// the backlog card, widens) the list here; Not now goes nowhere. A
+    /// refusal is kept and said by the card; a Review still opens its list,
+    /// since looking changes nothing.
+    func perform(_ intent: NudgeSurface.Intent) async {
+        guard !nudgeBusy else { return }
+        let effect = NudgeSurface.effect(intent)
+        let mine = attachment
+        nudgeBusy = true
+        defer { if mine == attachment { nudgeBusy = false } }
+        nudgeError = nil
+        do {
+            try await NudgeSurface.send(effect, through: try attached())
+        } catch {
+            guard mine == attachment else { return }
+            nudgeError = error as? DaemonDataError ?? .undecodable(method: "nudge")
+            guard case .traces? = effect.destination else { return }
+        }
+        guard mine == attachment else { return }
+        if case .traces(let idle)? = effect.destination { idleOnly = idle }
+        await load()
+    }
+
+    /// Each row's tags, in the core's words, by entry id.
+    static func rowTags(_ entries: [DaemonData.QueueEntry]) -> [String: NudgeEntryTags] {
+        var tags: [String: NudgeEntryTags] = [:]
+        for entry in entries {
+            guard let input = NudgeEntryTags.input(for: entry),
+                  let decoded = NudgeEntryTags.decode(fromJSON: TCCoreCopy.nudgeEntryTagsJSON(entryJSON: input)),
+                  !decoded.isEmpty
+            else { continue }
+            tags[entry.entryId] = decoded
+        }
+        return tags
     }
     /// The last successful read the tree was built from.
     @ObservationIgnored private var lastRead: (entries: [DaemonData.QueueEntry], projects: [ProjectRow], settings: DaemonData.Settings?)?
@@ -173,6 +275,13 @@ final class TracesStore {
         actionError = nil
         writeErrors = [:]
         folderNotice = nil
+        // A new daemon starts unfiltered, unless the filter was asked for
+        // before any client was here to load it.
+        idleOnly = client != nil && idleRequested
+        if client != nil { idleRequested = false }
+        rowTags = [:]
+        nudgeBusy = false
+        nudgeError = nil
         // A new client is a new daemon: no undo, toast or refusal from the
         // old one survives into it.
         lastKept = nil
@@ -334,7 +443,7 @@ final class TracesStore {
             switch event {
             case .snapshot, .queueChanged, .statusChanged, .resyncRequired:
                 await load()
-            case .digestDue, .previewReady, .inferenceCallAdded, .unknown:
+            case .digestDue, .reengageDue, .previewReady, .inferenceCallAdded, .unknown:
                 break
             }
         }
@@ -358,7 +467,8 @@ final class TracesStore {
         let mine = generation
         do {
             let client = try attached()
-            async let entries = client.listPending(projectId: nil)
+            async let entries = client.listPending(
+                projectId: nil, filter: idleOnly ? .idleSessions : nil, order: order)
             async let projects = client.listProjects()
             // Settings only decide the tool switches. Unreadable settings
             // are unknown: no switch, never off, and the row says so.
@@ -366,13 +476,13 @@ final class TracesStore {
             async let status = try? client.status()
             async let destinations = try? client.toolDestinations()
             let read = (entries: try await entries, projects: try await projects.projects, settings: await settings)
-            let built = TracesTree.build(
-                entries: read.entries, projects: read.projects, settings: read.settings,
-                scansWhenUnset: Self.scansWhenUnset, showsIgnored: showsIgnored)
+            let built = build(read)
+            let tags = Self.rowTags(read.entries)
             let statusRead = await status
             let routes = await destinations
             guard mine == generation else { return }
             tree = built
+            rowTags = tags
             lastRead = read
             self.status = statusRead
             self.destinations = routes
@@ -663,9 +773,20 @@ final class TracesStore {
 
     /// What the folder's group control offers, from the daemon's counts on
     /// its `list_projects` row and the shared table (`groupSubmit`); never a
-    /// count compared to zero here.
+    /// count compared to zero here. Under the idle filter those counts are
+    /// the whole folder's, so the offer counts the traces drawn under it
+    /// instead -- less any held for a person, which no group sends -- and
+    /// Submit sends only those (`approveFolder(filter:)`); what the daemon
+    /// then leaves out as ineligible is said after, in its own line.
     func groupOffer(_ folder: TracesTree.FolderNode) -> GroupSubmitOffer {
-        EligibilitySurface.groupSubmit(
+        if idleOnly {
+            return EligibilitySurface.groupSubmit(
+                pendingCount: folder.sessions.filter { !$0.heldForReview }.count,
+                contributableCount: nil,
+                fallbackPending: folder.sessions.count,
+                calls: Self.eligibilityCalls)
+        }
+        return EligibilitySurface.groupSubmit(
             pendingCount: folder.pendingCount,
             contributableCount: folder.contributableCount,
             fallbackPending: folder.sessions.count,
@@ -679,7 +800,8 @@ final class TracesStore {
     }
 
     /// Contribute for a whole folder, optionally with one verdict for every
-    /// session ("Submit all as"). The core's toast is kept for its Undo, and
+    /// session ("Submit all as"); under the idle filter, only the folder's
+    /// traces the filter shows. The core's toast is kept for its Undo, and
     /// what it left out as ineligible is said in the core's words.
     func contributeFolder(_ folder: TracesTree.FolderNode, verdict: ContributorVerdict?) async {
         guard !writing.contains(folder.id), mayContributeFolder(folder), let client else { return }
@@ -695,7 +817,8 @@ final class TracesStore {
         folderNotice = nil
         writeErrors[folder.id] = nil
         do {
-            let response = try await client.approveFolder(projectId: folder.id, verdict: verdict)
+            let response = try await client.approveFolder(
+                projectId: folder.id, verdict: verdict, filter: idleOnly ? .idleSessions : nil)
             guard mine == attachment else { return }
             lastContributedFolder = ContributedFolder(projectId: folder.id, toast: response.toast, label: folder.label)
             lastContributed = nil

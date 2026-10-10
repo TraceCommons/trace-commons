@@ -102,7 +102,7 @@ async fn activity_missions_public_catalogue_is_anonymous_and_preserves_null_rewa
     assert_eq!(result["catalogue"], activity_empty_catalogue());
     assert_eq!(
         result["disclosure"],
-        "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no sessions. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement."
+        "Matching stays on this Mac; no activity profile or match result is sent. Missions change no capture or contribution permissions and send no traces. Progress uses contributions made through your existing consent. Mission rewards are disabled, and no mission credit is available. Any future mission credit would remain pending and conditional until settlement."
     );
     assert_eq!(persisted_files(s.store.dir()), before);
     server.abort();

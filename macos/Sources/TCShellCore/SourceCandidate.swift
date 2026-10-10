@@ -28,7 +28,7 @@ public enum SourceKind: String, CaseIterable, Equatable, Sendable {
 ///
 /// This exists so the roots screen can ask about something specific.
 /// Discovery is not consent -- nothing here selects anything -- but a
-/// contributor agreeing to "953 sessions, most recent 2 hours ago" is
+/// contributor agreeing to "953 traces, most recent 2 hours ago" is
 /// agreeing to something they can actually picture, which an empty text
 /// field asking for a path from memory is not.
 public struct SourceCandidate: Equatable, Sendable {
@@ -77,9 +77,9 @@ public struct SourceCandidate: Equatable, Sendable {
         if !exists {
             line = "Not found on this machine"
         } else if sessionCount == 0 {
-            line = "Found, but holding no sessions yet"
+            line = "Found, but holding no traces yet"
         } else {
-            let noun = sessionCount == 1 ? "session" : "sessions"
+            let noun = sessionCount == 1 ? "trace" : "traces"
             line = "\(sessionCount) \(noun)"
             if let mostRecent {
                 line += ", most recent \(Self.age(of: mostRecent, at: now))"

@@ -129,7 +129,7 @@ final class ProjectRowTests: XCTestCase {
             isUnresolvedBucket: true
         )
         XCTAssertEqual(bucket.displayLabel, ProjectCopy.unresolvedBucketLabel)
-        XCTAssertEqual(bucket.displayLabel, "Sessions with no project")
+        XCTAssertEqual(bucket.displayLabel, "Traces with no project")
         XCTAssertNotEqual(bucket.displayLabel, bucket.projectLabel)
     }
 

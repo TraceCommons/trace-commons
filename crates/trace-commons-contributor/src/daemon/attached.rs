@@ -261,8 +261,21 @@ impl AttachedDaemon {
     where
         F: Fn(Event) + Send + 'static,
     {
+        self.subscribe_with_accepts(sink, &serde_json::Value::Null)
+    }
+
+    /// [`Self::subscribe`], declaring which opt-in events this subscriber
+    /// can render (`subscribe`'s `accepts`). `Null` declares none.
+    pub fn subscribe_with_accepts<F>(
+        &self,
+        sink: F,
+        accepts: &serde_json::Value,
+    ) -> Result<Response, AttachError>
+    where
+        F: Fn(Event) + Send + 'static,
+    {
         *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
-        self.call("subscribe", &serde_json::json!({}))
+        self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
     }
 }
 
@@ -435,8 +448,20 @@ mod windows_attached {
         where
             F: Fn(Event) + Send + 'static,
         {
+            self.subscribe_with_accepts(sink, &serde_json::Value::Null)
+        }
+
+        /// See the Unix `subscribe_with_accepts`.
+        pub fn subscribe_with_accepts<F>(
+            &self,
+            sink: F,
+            accepts: &serde_json::Value,
+        ) -> Result<Response, AttachError>
+        where
+            F: Fn(Event) + Send + 'static,
+        {
             *self.sink.lock().unwrap() = Some(Arc::new(Mutex::new(Box::new(sink))));
-            self.call("subscribe", &serde_json::json!({}))
+            self.call("subscribe", &serde_json::json!({ "accepts": accepts }))
         }
     }
 
@@ -551,6 +576,17 @@ impl AttachedDaemon {
     }
 
     pub fn subscribe<F>(&self, _sink: F) -> Result<Response, AttachError>
+    where
+        F: Fn(Event) + Send + 'static,
+    {
+        match self._never {}
+    }
+
+    pub fn subscribe_with_accepts<F>(
+        &self,
+        _sink: F,
+        _accepts: &serde_json::Value,
+    ) -> Result<Response, AttachError>
     where
         F: Fn(Event) + Send + 'static,
     {

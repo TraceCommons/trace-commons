@@ -15,7 +15,7 @@ final class SkillLearningExportTests: XCTestCase {
         )
 
         XCTAssertGreaterThanOrEqual(fields.count, 50)
-        XCTAssertEqual(fields["heading"], "Learn from session")
+        XCTAssertEqual(fields["heading"], "Learn from trace")
         XCTAssertTrue(fields.values.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
     }
 

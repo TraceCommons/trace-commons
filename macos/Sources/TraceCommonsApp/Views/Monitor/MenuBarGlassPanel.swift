@@ -47,6 +47,7 @@ struct MenuBarGlassPanel: View {
                 pills
                     .transition(.opacity)
             }
+            nudgeRow
             legend
             graph
             recent
@@ -255,11 +256,10 @@ struct MenuBarGlassPanel: View {
                 // No override before onboarding is done (R-43): it is a
                 // grant, and first run is where consent is asked.
                 .disabled(!store.canChooseOverride || model.requiresOnboarding)
+                // A refused override: the failed request's red line, under
+                // the choices it is about (Ron, 2026-10-09).
                 if let refusal = store.overrideRefusal {
-                    Text(refusal)
-                        .glassType(GlassTokens.TypeScale.caption)
-                        .foregroundStyle(GlassColor.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    GlassAlert(refusal)
                         .accessibilityAddTraits(.isStaticText)
                 }
             }
@@ -337,6 +337,32 @@ struct MenuBarGlassPanel: View {
             keptChip: stale ? "—" : String(columns.reduce(0) { $0 + $1.down }),
             leading: start.formatted(.dateTime.month(.abbreviated).day()),
             trailing: Date().formatted(.dateTime.month(.abbreviated).day()))
+    }
+
+    // MARK: The nudge row
+
+    /// The lead suggestion's panel row, in the daemon's words: tapping it
+    /// opens its place (Traces at the idle sessions, Traces, or History).
+    @ViewBuilder
+    private var nudgeRow: some View {
+        if let row = store.nudgeRow {
+            Button {
+                Task {
+                    let destination = await store.open(row)
+                    open(destination)
+                }
+            } label: {
+                HStack {
+                    Text(row.text)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").glassGlyph(10, weight: .semibold)
+                }
+            }
+            .buttonStyle(GlassMenuRowStyle())
+            .padding(.vertical, -GlassTokens.Space.s2)
+        }
     }
 
     // MARK: Recent activity
@@ -472,11 +498,27 @@ struct MenuBarStripLabel: View {
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        Image(nsImage: rendered)
+        let available = model.startup == .running && !store.stale
+        let condition = MenuPanelStatus.condition(
+            decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+            paused: model.status.paused, available: model.startup == .running, stale: store.stale)
+        let badge = MenuPanelStatus.badge(model.decisionsOwed)
+        // The mark's words, only while the strip draws the mark: the badge
+        // and condition come from a different read than the nudge, and a
+        // ring or halo the strip hid is never spoken or shown as a tooltip.
+        let words = MenuPanelStatus.markWords(
+            store.status?.nudge, available: available, badge: badge, condition: condition)
+        Image(nsImage: rendered(
+            condition: condition, badge: badge,
+            mark: MenuPanelStatus.mark(store.status?.nudge, available: available)))
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(MenuBarStatus.accessibilityLabel(
-                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running))
+            .accessibilityLabel(MenuPanelStatus.markAccessibility(
+                base: MenuBarStatus.accessibilityLabel(
+                    decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
+                    paused: model.status.paused, available: model.startup == .running),
+                words: words))
+            // The drawn mark's tooltip clause, in the core's words.
+            .help(MenuPanelStatus.markTooltip(words))
             // The label is always alive, so it owns the subscription: the
             // app's live client, re-attached whenever the daemon restarts.
             .task(id: model.liveData.map(ObjectIdentifier.init)) {
@@ -490,14 +532,17 @@ struct MenuBarStripLabel: View {
     /// a view lost its bars and kept the badge as a bare number. Drawn as a
     /// non-template image it reaches the menu bar in its own colours.
     /// Padded past the badge's offset so the badge is not clipped.
+    /// The condition, badge and nudge mark are the ones `body` speaks, so
+    /// the drawn mark and its words never disagree.
     @MainActor
-    private var rendered: NSImage {
+    private func rendered(
+        condition: GlassMenuBarStrip.Condition, badge: Int?, mark: GlassMenuBarStrip.Mark
+    ) -> NSImage {
         let renderer = ImageRenderer(content: GlassMenuBarStrip(
             columns: store.columns,
-            condition: MenuPanelStatus.condition(
-                decisionsOwed: model.decisionsOwed, unhealthy: model.health != nil,
-                paused: model.status.paused, available: model.startup == .running, stale: store.stale),
-            badge: MenuPanelStatus.badge(model.decisionsOwed))
+            condition: condition,
+            badge: badge,
+            mark: mark)
             .padding(.trailing, 6)
             .padding(.bottom, 2))
         renderer.scale = displayScale
@@ -525,6 +570,39 @@ enum MenuPanelStatus {
         guard available, !stale else { return .unavailable }
         if unhealthy || decisionsOwed == nil { return .attention }
         return paused ? .paused : .live
+    }
+
+    /// The nudge mark the strip draws; nothing while it cannot vouch for
+    /// what it shows.
+    static func mark(_ nudge: DaemonData.Nudge?, available: Bool) -> GlassMenuBarStrip.Mark {
+        switch NudgeSurface.mark(nudge, available: available) {
+        case .news: .news
+        case .ready: .ready
+        case .none: .none
+        }
+    }
+
+    /// The core's words for the mark the strip draws, or nil while it draws
+    /// none: the daemon lit nothing, the strip cannot vouch for it, or the
+    /// badge or condition hides it (`GlassMenuBarStrip.shownMark`).
+    static func markWords(
+        _ nudge: DaemonData.Nudge?, available: Bool, badge: Int?, condition: GlassMenuBarStrip.Condition
+    ) -> DaemonData.NudgeMarkText? {
+        let lit = mark(nudge, available: available)
+        guard GlassMenuBarStrip.shownMark(lit, badge: badge, condition: condition) != .none else { return nil }
+        return NudgeSurface.markText(nudge, available: available)
+    }
+
+    /// The item's accessibility label: what it already says, then the drawn
+    /// mark's sentence from the core, whole.
+    static func markAccessibility(base: String, words: DaemonData.NudgeMarkText?) -> String {
+        guard let sentence = words?.accessibility, !sentence.isEmpty else { return base }
+        return base + " " + sentence
+    }
+
+    /// The drawn mark's tooltip clause; empty while no mark is drawn.
+    static func markTooltip(_ words: DaemonData.NudgeMarkText?) -> String {
+        words?.tooltip ?? ""
     }
 
     /// The Private AI pill's state.

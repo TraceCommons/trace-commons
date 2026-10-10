@@ -147,7 +147,7 @@ public static class HistoryCopy
     public const string NothingYet = "Nothing has been sent yet";
 
     public const string NothingYetBody =
-        "Once you approve a session it appears here, with what became of it and what it earned.";
+        "Once you approve a trace it appears here, with what became of it and what it earned.";
 
     /// <summary>
     /// The heading over <c>queue_outcome_counts</c>.
@@ -158,10 +158,10 @@ public static class HistoryCopy
     /// the watcher discarded before a queue entry ever existed, and the
     /// contract says in as many words not to present it as though it can.
     /// </remarks>
-    public const string OutcomesHeading = "Sessions that were offered and did not go out";
+    public const string OutcomesHeading = "Traces that were offered and did not go out";
 
     public const string OutcomesFootnote =
-        "Counted from entries that reached your queue. A session the watcher never offered is "
+        "Counted from entries that reached your queue. A trace the watcher never offered is "
         + "not counted here.";
 
     /// <summary>

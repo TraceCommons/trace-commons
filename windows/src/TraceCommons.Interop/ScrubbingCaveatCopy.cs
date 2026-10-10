@@ -30,7 +30,7 @@ public static class ScrubbingCaveatCopy
     /// a control that opens it.
     /// </remarks>
     public const string NothingMatchedLine =
-        "Nothing matched. On a session that touched credentials, that is itself worth a "
+        "Nothing matched. On a trace that touched credentials, that is itself worth a "
         + "second look. Search it for anything you would not want to send.";
 
     /// <summary>

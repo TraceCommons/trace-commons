@@ -198,7 +198,7 @@ final class UsesScreenTests: XCTestCase {
         let uses = try copy().uses
         let grant = try grant()
         let scrub = try XCTUnwrap(grant.scrub)
-        XCTAssertEqual(grant.pathAskFirstTitle, "Review each session yourself.")
+        XCTAssertEqual(grant.pathAskFirstTitle, "Review each trace yourself.")
         XCTAssertEqual(grant.pathAskFirstDetail, "Nothing is contributed until you approve it.")
         XCTAssertEqual(grant.pathAutomaticTitle, "Contribute automatically from projects that first appear.")
         XCTAssertFalse(try XCTUnwrap(grant.pathAskFirst).contains("later"))
