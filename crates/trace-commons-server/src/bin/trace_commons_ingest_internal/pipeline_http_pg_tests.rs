@@ -3982,6 +3982,17 @@ async fn pass_object_fixture(label: &str, db_reviewer_reads: bool) -> Option<Pas
 async fn pass_object_run(
     fixture: &PassObjectFixture,
 ) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
+    pass_object_run_with(fixture, None).await
+}
+
+/// `pass_object_run`, with `tool` added to the envelope's required tools
+/// when given, so its canonical summary differs from the default run's:
+/// the legacy ranker export, like `main`'s, collapses submissions whose
+/// derived records share a canonical summary hash.
+async fn pass_object_run_with(
+    fixture: &PassObjectFixture,
+    tool: Option<&str>,
+) -> trace_commons_server::versioned_pipeline::PipelineRunRecord {
     let tenant = fixture.tenant.as_str();
     fixture
         .service
@@ -4004,6 +4015,9 @@ async fn pass_object_run(
         .privacy
         .warnings
         .push("MARKER_SECRET in a free-text field".to_string());
+    if let Some(tool) = tool {
+        envelope.replay.required_tools.push(tool.to_string());
+    }
     let body = serde_json::to_vec(&envelope).expect("envelope serialises");
     let (status, receipt) = route_trace(&fixture.state, &fixture.token, &body).await;
     assert_eq!(status, StatusCode::OK, "{receipt}");
@@ -4343,8 +4357,9 @@ async fn legacy_readers_never_emit_a_pipeline_source() {
     }
 
     // A second pipeline submission: the ranker pair export pairs two
-    // candidates, so with one it selects nothing.
-    let second = pass_object_run(&fixture).await;
+    // candidates, so with one it selects nothing. Its content differs, since
+    // the export collapses two with the same canonical summary hash.
+    let second = pass_object_run_with(&fixture, Some("second_submission_tool")).await;
     let pipeline_submissions = [run.submission_id, second.submission_id];
 
     // Each job selects the pipeline submissions: the fixture gives them every
@@ -7046,6 +7061,35 @@ pub(super) fn assemble_compatibility_pipeline_service_with(
     adapters: Vec<Arc<dyn SettlementAdapter>>,
     crash_point: Option<PipelineCrashPoint>,
 ) -> Arc<PipelineService> {
+    assemble_compatibility_pipeline_service_with_checks(
+        backend,
+        configured_store,
+        index,
+        novelty_utility_microcredits,
+        privacy,
+        adapters,
+        crash_point,
+        // A runtime that routes the compatibility bundle needs the
+        // pipeline's credit issuer (Zaki review 1, round 2, finding 15).
+        PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+    )
+}
+
+/// `assemble_compatibility_pipeline_service_with`, under `checks`.
+#[allow(clippy::too_many_arguments)]
+fn assemble_compatibility_pipeline_service_with_checks(
+    backend: Arc<PgBackend>,
+    configured_store: &ConfiguredTraceArtifactStore,
+    index: Arc<IsolatedPipelineIndex>,
+    novelty_utility_microcredits: u64,
+    privacy: Arc<dyn PipelinePrivacyBoundary>,
+    adapters: Vec<Arc<dyn SettlementAdapter>>,
+    crash_point: Option<PipelineCrashPoint>,
+    checks: PipelineNoveltyUtilityChecks,
+) -> Arc<PipelineService> {
     let assembler = CompatibilityTestAssembler {
         index,
         novelty_utility_microcredits,
@@ -7069,12 +7113,7 @@ pub(super) fn assemble_compatibility_pipeline_service_with(
         None,
         TEST_NEAR_CONFIRMATION_INTERVAL,
         TEST_NEAR_PAYOUT_CONTROLS,
-        // A runtime that routes the compatibility bundle needs the
-        // pipeline's credit issuer (Zaki review 1, round 2, finding 15).
-        &PipelineNoveltyUtilityChecks {
-            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
-            ..PipelineNoveltyUtilityChecks::default()
-        },
+        &checks,
         main_gate_of(&compatibility_test_config(novelty_utility_microcredits)),
     )
     .expect("assemble the injected compatibility pipeline runtime")
@@ -7279,6 +7318,134 @@ async fn score_shadow_credit_decision(
         total_chunk_count: int("total_chunk_count").map(|v| v as i32),
         chunks_capped: evidence["chunks_capped"].as_bool(),
     }
+}
+
+/// Stage 3, 2026-10-09: of two submissions with the same content, `main`
+/// shows the second as a duplicate with 0.0 pending ("This trace duplicates
+/// an earlier submission under your account and earns no separate
+/// credit."), from its driver's `skipped_duplicate` row. A compatibility run
+/// under `main`'s duplicate controls reads the same: its gate decision row
+/// is withheld as `skipped_duplicate` with no credit quality, so the status
+/// shows no pending credit and the duplicate line, and no `NoveltyUtility`
+/// credit. The first submission keeps its gate figure.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_status_shows_a_duplicate_as_mains_does() {
+    let Some(runtime) = runtime_backend(4).await else {
+        return;
+    };
+    account_owner_backend()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenant = format!("tenant-compat-dup-{suffix}");
+    let token = format!("token-compat-dup-{suffix}");
+    let mut tokens = BTreeMap::new();
+    insert_token(&mut tokens, &tenant, &token, TokenRole::Contributor);
+    let dir = tempfile::tempdir().expect("temp dir");
+    let artifacts = local_artifacts(&dir);
+    let service = assemble_compatibility_pipeline_service_with_checks(
+        runtime.clone(),
+        &ConfiguredTraceArtifactStore::legacy(artifacts.clone()),
+        IsolatedPipelineIndex::new(),
+        2_500_000,
+        Arc::new(PassThroughPipelinePrivacyBoundary),
+        vec![RecordingSettlementAdapter::new(
+            InstrumentId::trace_credit(),
+            "recording_trace_credit_compatibility_http_test_only",
+            "none",
+        )],
+        None,
+        PipelineNoveltyUtilityChecks {
+            issuer_principal_ref: Some(TEST_PIPELINE_CREDIT_ISSUER.to_string()),
+            duplicate_controls: Some(PipelineDuplicateControls::MAIN_DEFAULT),
+            ..PipelineNoveltyUtilityChecks::default()
+        },
+    );
+    let principal = static_token_principal_ref(&token);
+    let first_envelope = model_training_envelope().await;
+    let mut second_envelope = first_envelope.clone();
+    second_envelope.submission_id = Uuid::new_v4();
+    second_envelope.trace_id = Uuid::new_v4();
+    let first = completed_run_of(&service, &tenant, &principal, &first_envelope).await;
+    let second = completed_run_of(&service, &tenant, &principal, &second_envelope).await;
+    let first_quality = score_shadow_credit_decision(&runtime, &tenant, &first)
+        .await
+        .credit_quality_micros
+        .expect("a compatibility Score records a shadow credit quality");
+
+    let mut state = test_state_with_options(
+        dir.path().to_path_buf(),
+        Some(mains_database().await),
+        Some(artifacts.clone()),
+        true,
+        true,
+        false,
+        false,
+    );
+    let state_mut = Arc::make_mut(&mut state);
+    state_mut.tokens = Arc::new(tokens.clone());
+    state_mut.pipeline_service = Some(service.clone());
+    state_mut.pipeline_activation = routing_store(&runtime);
+    state_mut.pipeline_product = Some(Arc::new(PipelineProductStore::new(runtime.clone())));
+    state_mut.pipeline_drain_tenant_ids = Arc::new(BTreeSet::from([tenant.clone()]));
+    let (status, documents) = route_request(
+        state,
+        "POST",
+        "/v1/contributors/me/submission-status",
+        auth_headers(&token),
+        Some(serde_json::json!({
+            "submission_ids": [first.submission_id, second.submission_id]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{documents}");
+    let documents = documents.as_array().expect("a document list").clone();
+    let document_of = |submission_id: Uuid| {
+        documents
+            .iter()
+            .find(|document| document["submission_id"] == submission_id.to_string())
+            .unwrap_or_else(|| panic!("a document for {submission_id}: {documents:?}"))
+            .clone()
+    };
+    let first_document = document_of(first.submission_id);
+    let first_pending = first_document["credit_points_pending"].as_f64().unwrap();
+    assert!(
+        (first_pending - f64::from(credit_points_from_quality_micros(first_quality))).abs() < 1e-4,
+        "{first_document}"
+    );
+
+    let document = document_of(second.submission_id);
+    assert_eq!(document["status"], "accepted", "{document}");
+    assert_eq!(
+        document["credit_points_pending"].as_f64(),
+        Some(0.0),
+        "{document}"
+    );
+    let explanation = document["explanation"]
+        .as_array()
+        .expect("explanation lines")
+        .iter()
+        .map(|line| line.as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        explanation.contains(
+            &"This trace duplicates an earlier submission under your account and earns no \
+              separate credit."
+                .to_string()
+        ),
+        "{explanation:?}"
+    );
+    // No NoveltyUtility credit: the status omits a zero ledger figure, and
+    // the Trace Credit leg is withheld under main's label.
+    assert!(document.get("credit_points_ledger").is_none(), "{document}");
+    assert_eq!(
+        document["pipeline"]["instruments"][0]["internal_settlement_state"], "withheld",
+        "{document}"
+    );
+    assert_eq!(
+        document["pipeline"]["instruments"][0]["reason_label"], "skipped_duplicate",
+        "{document}"
+    );
 }
 
 /// Ruling T15-7: a compatibility run's contributor status reads as `main`'s

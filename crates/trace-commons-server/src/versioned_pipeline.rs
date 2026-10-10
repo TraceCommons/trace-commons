@@ -1594,6 +1594,29 @@ pub struct ApprovedRevision {
     pub content_hash: String,
     pub source_content_hash: String,
     pub worker_identity: String,
+    /// `canonical_summary_for_embedding` of the approved envelope and its
+    /// hash, which `main`'s duplicate controls read
+    /// ([`PipelineDuplicateControls`]): the Review commit records them on
+    /// its derived record. `None` when the approved content is not an
+    /// envelope.
+    pub canonical_summary: Option<String>,
+    pub canonical_summary_hash: Option<String>,
+}
+
+/// The approved content's canonical summary and its hash
+/// (`ApprovedRevision::canonical_summary`).
+pub fn approved_canonical_summary(content: &[u8]) -> (Option<String>, Option<String>) {
+    match serde_json::from_slice::<TraceContributionEnvelope>(content) {
+        Ok(envelope) => {
+            let summary =
+                trace_commons_protocol::trace_contribution::canonical_summary_for_embedding(
+                    &envelope,
+                );
+            let hash = sha256_prefixed(summary.as_bytes());
+            (Some(summary), Some(hash))
+        }
+        Err(_) => (None, None),
+    }
 }
 
 /// What the Review-start privacy pass records with `record_privacy_pass`:
@@ -2672,8 +2695,9 @@ impl PgPipelineStore {
                     "INSERT INTO trace_derived_records (
                         tenant_id, derived_id, submission_id, trace_id, status,
                         worker_kind, worker_version, input_object_ref_id, input_hash,
-                        output_object_ref_id, summary_model
-                     ) VALUES ($1,$2,$3,$4,'current','summary',$5,$6,$7,$8,$5)
+                        output_object_ref_id, summary_model,
+                        canonical_summary, canonical_summary_hash
+                     ) VALUES ($1,$2,$3,$4,'current','summary',$5,$6,$7,$8,$5,$9,$10)
                      ON CONFLICT (tenant_id, derived_id) DO NOTHING",
                     &[
                         &run.tenant_id,
@@ -2684,6 +2708,8 @@ impl PgPipelineStore {
                         &derived_input_object_ref_id,
                         &approved.source_content_hash,
                         &approved.object_ref.object_ref_id,
+                        &approved.canonical_summary,
+                        &approved.canonical_summary_hash,
                     ],
                 )
                 .await?;
@@ -5340,6 +5366,7 @@ impl PgPipelineStore {
         run: &PipelineRunRecord,
         outcome: StoredPhaseResult,
         index_membership: &str,
+        duplicate_controls: Option<&PipelineDuplicateControls>,
     ) -> Result<PipelineRunRecord, DatabaseError> {
         if outcome.phase != Phase::Settle || run.next_phase != Some(Phase::Settle) {
             return Err(DatabaseError::Constraint(
@@ -5373,7 +5400,7 @@ impl PgPipelineStore {
         // Spec 2026-10-08, Slice C: the run's gate decision row, on this
         // transaction, after the lease and policy checks, so a refused
         // commit writes none.
-        Self::write_pipeline_gate_decision_on_tx(&tx, run).await?;
+        Self::write_pipeline_gate_decision_on_tx(&tx, run, duplicate_controls).await?;
         let row = tx
             .query_one(
                 "UPDATE pipeline_runs
@@ -5416,9 +5443,19 @@ impl PgPipelineStore {
     /// Settle phase runs the same evidence check before any leg settles
     /// (`PipelineGateDecisionScoreValues::from_evidence`), so this refusal
     /// is reached only if the outcome changed between the two.
+    ///
+    /// `duplicate_controls` are `main`'s duplicate short-circuits
+    /// ([`PipelineDuplicateControls`]). When one applies to the submission
+    /// (`duplicate_withheld_reason_on_tx`), or the Trace Credit leg was
+    /// withheld under one, the row records its label as
+    /// `credit_withheld_reason` and holds no credit quality, the shape of
+    /// `main`'s `skipped_duplicate` and `cached` rows, which the contributor
+    /// status reads as a duplicate with no pending credit. Every other
+    /// column still comes from the Score.
     pub async fn write_pipeline_gate_decision_on_tx(
         tx: &Transaction<'_>,
         run: &PipelineRunRecord,
+        duplicate_controls: Option<&PipelineDuplicateControls>,
     ) -> Result<bool, DatabaseError> {
         let incomplete = || {
             DatabaseError::Constraint(PIPELINE_GATE_DECISION_EVIDENCE_INCOMPLETE_LABEL.to_string())
@@ -5476,6 +5513,21 @@ impl PgPipelineStore {
             )
             .await?
             .and_then(|row| row.get("last_error_label"));
+        // `main` checks for a duplicate before anything else, so its label
+        // takes precedence over a credit check's.
+        let credit_withheld_reason =
+            match Self::duplicate_withheld_reason_on_tx(tx, run, duplicate_controls).await? {
+                Some(label) => Some(label.to_string()),
+                None => credit_withheld_reason,
+            };
+        let duplicate = credit_withheld_reason
+            .as_deref()
+            .is_some_and(is_duplicate_withheld_label);
+        let (credit_quality_micros, credit_quality_version) = if duplicate {
+            (None, None)
+        } else {
+            (values.credit_quality_micros, values.credit_quality_version)
+        };
         let decision_id = pipeline_gate_decision_id(&run.tenant_id, run.run_id);
         let gate_policy_version = format!("pipeline:{}", run.bundle_id);
         let written = tx
@@ -5513,8 +5565,8 @@ impl PgPipelineStore {
                     &values.chunk_count,
                     &values.chunks_capped,
                     &values.total_chunk_count,
-                    &values.credit_quality_micros,
-                    &values.credit_quality_version,
+                    &credit_quality_micros,
+                    &credit_quality_version,
                     &values.index_cardinality,
                     &run.run_id,
                 ],
@@ -5547,6 +5599,131 @@ impl PgPipelineStore {
                 PIPELINE_GATE_DECISION_CONFLICT_LABEL.to_string(),
             ))
         }
+    }
+
+    /// `main`'s duplicate short-circuits ([`PipelineDuplicateControls`]) for
+    /// the run's submission, on the caller's transaction, in `main`'s
+    /// order: `skipped_duplicate`, then `cached`. `None` when `controls` is
+    /// `None` or neither applies.
+    ///
+    /// The inputs are the ones `main`'s driver reads, recorded by the
+    /// pipeline's Review commit on its derived record: the submission's
+    /// canonical summary and its hash (`canonical_summary_for_embedding` of
+    /// the approved envelope). The submission row's own
+    /// `canonical_summary_hash` stays NULL, as before: withdrawal tombstones
+    /// and the legacy exports read it, and their behaviour is unchanged.
+    /// `main` stores the duplicate score at submit, computed against the
+    /// derived records that existed then; here it is computed against the
+    /// derived records of the tenant's submissions received before this
+    /// one (`trace_summary_duplicate_score`, `main`'s precheck score), and
+    /// the cache looks only at gate decisions of submissions received
+    /// before this one, so two runs settling in either order cannot both
+    /// withhold each other. A submission whose Review recorded no summary
+    /// (a run that passed Review before this was added) has no duplicate
+    /// score, as a `main` submission with no derived record has none.
+    pub async fn duplicate_withheld_reason_on_tx(
+        tx: &Transaction<'_>,
+        run: &PipelineRunRecord,
+        controls: Option<&PipelineDuplicateControls>,
+    ) -> Result<Option<&'static str>, DatabaseError> {
+        let Some(controls) = controls else {
+            return Ok(None);
+        };
+        let Some(target) = tx
+            .query_opt(
+                "SELECT s.received_at, d.canonical_summary, d.canonical_summary_hash
+                   FROM trace_submissions s
+                   LEFT JOIN LATERAL (
+                        SELECT canonical_summary, canonical_summary_hash
+                          FROM trace_derived_records
+                         WHERE tenant_id = s.tenant_id AND submission_id = s.submission_id
+                           AND canonical_summary IS NOT NULL
+                           AND canonical_summary_hash IS NOT NULL
+                         ORDER BY created_at, derived_id
+                         LIMIT 1
+                   ) d ON TRUE
+                  WHERE s.tenant_id = $1 AND s.submission_id = $2",
+                &[&run.tenant_id, &run.submission_id],
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let received_at: DateTime<Utc> = target.get("received_at");
+        if controls.skip_duplicates {
+            let summary: Option<String> = target.get("canonical_summary");
+            let summary_hash: Option<String> = target.get("canonical_summary_hash");
+            if let (Some(summary), Some(summary_hash)) = (summary, summary_hash) {
+                let candidates = tx
+                    .query(
+                        "SELECT d.canonical_summary, d.canonical_summary_hash
+                           FROM trace_derived_records d
+                           JOIN trace_submissions s
+                             ON s.tenant_id = d.tenant_id AND s.submission_id = d.submission_id
+                          WHERE d.tenant_id = $1 AND d.submission_id <> $2
+                            AND (s.received_at, s.submission_id) < ($3, $2)
+                            AND (d.canonical_summary IS NOT NULL
+                                 OR d.canonical_summary_hash IS NOT NULL)",
+                        &[&run.tenant_id, &run.submission_id, &received_at],
+                    )
+                    .await?;
+                let candidates = candidates
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.get::<_, Option<String>>(0),
+                            row.get::<_, Option<String>>(1),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let duplicate_score =
+                    crate::trace_summary_similarity::trace_summary_duplicate_score(
+                        &summary,
+                        &summary_hash,
+                        candidates
+                            .iter()
+                            .map(|(summary, hash)| (summary.as_deref(), hash.as_deref())),
+                    );
+                // `main`'s conversion, from the same `f32`.
+                let duplicate_micros = (duplicate_score * 1_000_000.0) as i64;
+                if duplicate_micros >= controls.skip_duplicate_threshold_micros {
+                    return Ok(Some(PIPELINE_SKIPPED_DUPLICATE_LABEL));
+                }
+            }
+        }
+        let summary_hash: Option<String> = target.get("canonical_summary_hash");
+        if let Some(summary_hash) = summary_hash {
+            // A legacy submission carries its hash on the submission row and
+            // its precheck derived record; a pipeline submission on its
+            // Review derived record only.
+            let cached: bool = tx
+                .query_one(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM trace_gate_decisions g
+                           JOIN trace_submissions o
+                             ON o.tenant_id = g.tenant_id AND o.submission_id = g.submission_id
+                          WHERE g.tenant_id = $1 AND g.submission_id <> $3
+                            AND (o.received_at, o.submission_id) < ($4, $3)
+                            AND (o.canonical_summary_hash = $2
+                                 OR EXISTS (
+                                     SELECT 1 FROM trace_derived_records od
+                                      WHERE od.tenant_id = o.tenant_id
+                                        AND od.submission_id = o.submission_id
+                                        AND od.canonical_summary_hash = $2)))",
+                    &[
+                        &run.tenant_id,
+                        &summary_hash,
+                        &run.submission_id,
+                        &received_at,
+                    ],
+                )
+                .await?
+                .get(0);
+            if cached {
+                return Ok(Some(PIPELINE_CACHED_DUPLICATE_LABEL));
+            }
+        }
+        Ok(None)
     }
 
     /// Fails the run terminally under its live lease. When the
@@ -8097,6 +8274,10 @@ pub struct PipelineNearPayoutControls {
 ///   `settlement_max_micros_per_account` its
 ///   `TRACE_COMMONS_CREDIT_SETTLEMENT_MAX_POINTS_PER_ACCOUNT` in
 ///   microcredits. Either refuses an enabled payout.
+/// - `duplicate_controls` is `main`'s perplexity-driver duplicate cost
+///   controls ([`PipelineDuplicateControls`]), which a compatibility run's
+///   gate decision row and Trace Credit leg apply. `None` applies neither
+///   rule; ingest always passes `Some` for an assembled runtime.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PipelineNoveltyUtilityChecks {
     pub central_issuer_principal_refs: std::collections::BTreeSet<String>,
@@ -8106,6 +8287,51 @@ pub struct PipelineNoveltyUtilityChecks {
     pub settlement_require_issuer_approval: bool,
     pub settlement_require_rollout_smoke_ready: bool,
     pub settlement_max_micros_per_account: Option<i64>,
+    pub duplicate_controls: Option<PipelineDuplicateControls>,
+}
+
+/// `main`'s two duplicate short-circuits in the perplexity-scoring driver
+/// (`score_one_submission` in `trace-commons-ingest.rs`), which record a
+/// gate decision with credit withheld instead of scoring:
+///
+/// - `skipped_duplicate`, when `skip_duplicates` and the submission's
+///   duplicate score, in micros, is at or above
+///   `skip_duplicate_threshold_micros`
+///   (`TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATES`, default `true`, and
+///   `TRACE_COMMONS_PERPLEXITY_DRIVER_SKIP_DUPLICATE_THRESHOLD_MICROS`,
+///   default `900000`);
+/// - `cached`, unconditionally, when another submission with the same
+///   canonical summary hash already has a gate decision.
+///
+/// The contributor status reads either label as "duplicates an earlier
+/// submission" and shows no pending credit. A compatibility run applies
+/// both, in that order, to its gate decision row
+/// (`PgPipelineStore::duplicate_withheld_reason_on_tx`): the row keeps its
+/// Score values, records the label, and holds no credit quality, and the
+/// run's `NoveltyUtility` leg is withheld under the same label, as `main`
+/// never emits that event for a submission it did not score. The Score
+/// evidence is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PipelineDuplicateControls {
+    pub skip_duplicates: bool,
+    pub skip_duplicate_threshold_micros: i64,
+}
+
+impl PipelineDuplicateControls {
+    /// `main`'s defaults, with neither variable set.
+    pub const MAIN_DEFAULT: Self = Self {
+        skip_duplicates: true,
+        skip_duplicate_threshold_micros: 900_000,
+    };
+}
+
+/// `main`'s `credit_withheld_reason` for its skip-duplicate short-circuit.
+pub const PIPELINE_SKIPPED_DUPLICATE_LABEL: &str = "skipped_duplicate";
+/// `main`'s `credit_withheld_reason` for its canonical-hash cache.
+pub const PIPELINE_CACHED_DUPLICATE_LABEL: &str = "cached";
+
+fn is_duplicate_withheld_label(label: &str) -> bool {
+    label == PIPELINE_SKIPPED_DUPLICATE_LABEL || label == PIPELINE_CACHED_DUPLICATE_LABEL
 }
 
 /// `main`'s withheld-reason labels for a `NoveltyUtility` credit its checks
@@ -12162,6 +12388,8 @@ impl PipelineService {
                                 .await?;
                         self.inject_crash(PipelineCrashPoint::AfterReviewArtifactStorage)?;
                         written_receipt = Some(receipt.clone());
+                        let (canonical_summary, canonical_summary_hash) =
+                            approved_canonical_summary(content.bytes());
                         Some(ApprovedRevision {
                             revision_id: *registry_revision_id,
                             object_ref: approved_object_ref(
@@ -12173,6 +12401,8 @@ impl PipelineService {
                             content_hash: content.content_hash().to_string(),
                             source_content_hash,
                             worker_identity: content.worker_identity().to_string(),
+                            canonical_summary,
+                            canonical_summary_hash,
                         })
                     }
                     (ReviewDecision::Rejected { .. }, None) => None,
@@ -13670,7 +13900,12 @@ impl PipelineService {
         let outcome = StoredPhaseResult::from_result(Phase::Settle, &result)?;
         let updated = match self
             .store
-            .commit_settle(run, outcome, final_membership)
+            .commit_settle(
+                run,
+                outcome,
+                final_membership,
+                self.novelty_utility_checks.duplicate_controls.as_ref(),
+            )
             .await
         {
             Ok(updated) => updated,
@@ -14194,6 +14429,17 @@ impl PipelineService {
         authority: Option<&crate::trace_authority::SubmissionAuthority>,
     ) -> anyhow::Result<Option<&'static str>> {
         let checks = &self.novelty_utility_checks;
+        // `main` records a duplicate without scoring it, so it never reaches
+        // the credit checks below or emits the event.
+        if let Some(label) = PgPipelineStore::duplicate_withheld_reason_on_tx(
+            tx,
+            run,
+            checks.duplicate_controls.as_ref(),
+        )
+        .await?
+        {
+            return Ok(Some(label));
+        }
         if checks.require_production_gate {
             let qualification = self.dependency_qualification();
             if !(qualification.scorer && qualification.embedder) {

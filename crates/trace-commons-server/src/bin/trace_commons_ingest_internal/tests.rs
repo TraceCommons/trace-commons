@@ -12524,6 +12524,11 @@ async fn pipeline_runtime_refuses_an_assembly_that_drops_the_novelty_utility_che
         settlement_require_issuer_approval: true,
         settlement_require_rollout_smoke_ready: true,
         settlement_max_micros_per_account: Some(5_000_000),
+        // `main`'s duplicate short-circuits travel in it as well.
+        duplicate_controls: Some(PipelineDuplicateControls {
+            skip_duplicates: false,
+            skip_duplicate_threshold_micros: 750_000,
+        }),
     };
     let assemble = |forward: bool| {
         assemble_ingest_pipeline_runtime(
