@@ -393,12 +393,20 @@ pub const PIPELINE_SCORE_LOCK_BUSY_LABEL: &str = "score_lock_busy";
 /// Score, so the lock holder has likely committed, and short, since the run
 /// waited for nothing of its own.
 pub const PIPELINE_SCORE_LOCK_BUSY_RETRY_MILLISECONDS: i64 = 2_000;
-/// The fence margin of Settle's index writes (multi-lens review L4-3): an
-/// index writer call must return within it. A write stops issuing calls at
-/// its lease's end, so a withdrawal that finds a `pending` write a lease may
-/// still be making queues the revision's invalidation no earlier than that
-/// lease's end plus this margin, which also covers clock skew between
-/// replicas.
+/// The fence margin of Settle's index writes (multi-lens review L4-3). A
+/// write stops issuing calls at its lease's end, so a withdrawal that finds
+/// a `pending` write a lease may still be making queues the revision's
+/// invalidation no earlier than that lease's end plus this margin, which
+/// also covers clock skew between replicas, and a dispatch or a rebuilt run
+/// past its deadline waits this long for the call in flight before it lets
+/// its run go.
+///
+/// Since issue #1233 the margin is a release bound, not the safety bound:
+/// an index call may take any time. A call still running once the margin
+/// has passed is awaited by a task of its own, which reopens the revision's
+/// invalidation when the call returns
+/// (`PgPipelineStore::reopen_index_invalidation_after_late_write`), so an
+/// entry that lands after a withdrawal's removal is removed again.
 pub const PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS: i64 = 60;
 /// The longest Settle's index dispatch holds the run and submission rows
 /// (multi-lens review L4-1): past the earlier of its lease's end and this
@@ -4646,14 +4654,21 @@ impl PgPipelineStore {
     }
 
     /// Records that `claim`'s attempt removed the revision from the index:
-    /// the invalidation becomes `complete`. The invalidation must still be
-    /// `pending`; the claim's lease need not be current, since a removal
-    /// that succeeded is a fact about the index whoever holds the row now
-    /// (`invalidate_revision` is idempotent, and nothing writes the
-    /// revision again once its invalidation is queued). `false`, with
-    /// nothing written, when the invalidation is no longer `pending` (or is
-    /// gone with its run). It touches only the invalidation row, so it
-    /// takes no run lock (Zaki review 1, round 2, simplification).
+    /// the invalidation becomes `complete`. Fenced as
+    /// `fail_index_invalidation` is: the invalidation must still be
+    /// `pending` with `next_attempt_at` at `claim`'s lease end. `false`,
+    /// with nothing written, otherwise (or when the invalidation is gone
+    /// with its run). It touches only the invalidation row, so it takes no
+    /// run lock (Zaki review 1, round 2, simplification).
+    ///
+    /// The fence is issue #1233's: an index write that started before the
+    /// withdrawal can land after this claim's removal ran, and the task
+    /// that awaited it then reopens the invalidation
+    /// (`reopen_index_invalidation_after_late_write`), which moves
+    /// `next_attempt_at`. This claim's removal may predate that write, so
+    /// it must not end the reopened row; the next claim removes the
+    /// revision again. A claim whose lease merely passed, with no other
+    /// claim since, still completes the row.
     pub async fn complete_index_invalidation(
         &self,
         claim: &PipelineIndexInvalidationClaim,
@@ -4664,12 +4679,62 @@ impl PgPipelineStore {
             .execute(
                 "UPDATE pipeline_index_invalidations
                     SET state = 'complete', completed_at = NOW(), last_error_label = NULL
-                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'pending'",
-                &[&claim.tenant_id, &claim.run_id],
+                  WHERE tenant_id = $1 AND run_id = $2 AND state = 'pending'
+                    AND next_attempt_at = $3",
+                &[&claim.tenant_id, &claim.run_id, &claim.lease_expires_at],
             )
             .await?;
         tx.commit().await?;
         Ok(completed > 0)
+    }
+
+    /// Reopens the index invalidation of `run_id`, if it has one, after an
+    /// index write of that run returned late (issue #1233): a Settle
+    /// dispatch or a rebuilt run whose deadline and fence margin passed
+    /// with an index call still in flight. That call may have written its
+    /// entry after a withdrawal's removal ran, so the removal must run
+    /// again. Called only once the write has returned, so any invalidation
+    /// this statement does not see is queued after the write landed, and
+    /// runs after it.
+    ///
+    /// A `complete` invalidation goes back to `pending`, due at once. A
+    /// `pending` one stays `pending`, and its `next_attempt_at` moves one
+    /// millisecond past the later of its current value and now: never
+    /// earlier than a due time a withdrawal set, but always away from the
+    /// token of a claim that may be removing the revision right now, so
+    /// that claim cannot record the row `complete`
+    /// (`complete_index_invalidation`) with a removal that may have run
+    /// before the write landed. A `failed` invalidation is left as it is:
+    /// the operator's requeue (`requeue_failed_index_invalidations`) runs
+    /// the removal from the start, which removes the late entry too.
+    ///
+    /// Returns whether a row was reopened. One statement in a READ
+    /// COMMITTED tenant transaction of its own, so it waits for a claim or
+    /// a completion that holds the row and then updates the row as it now
+    /// is.
+    pub async fn reopen_index_invalidation_after_late_write(
+        &self,
+        tenant_id: &str,
+        run_id: Uuid,
+    ) -> Result<bool, DatabaseError> {
+        let mut client = self.backend.trace_pool().get().await?;
+        let tx = Self::read_committed_tenant_transaction(&mut client, tenant_id).await?;
+        let reopened = tx
+            .execute(
+                "UPDATE pipeline_index_invalidations
+                    SET next_attempt_at = CASE
+                            WHEN state = 'complete' THEN NOW()
+                            ELSE GREATEST(next_attempt_at, NOW()) + INTERVAL '1 millisecond'
+                        END,
+                        state = 'pending',
+                        completed_at = NULL
+                  WHERE tenant_id = $1 AND run_id = $2
+                    AND state IN ('pending', 'complete')",
+                &[&tenant_id, &run_id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(reopened > 0)
     }
 
     /// Records that the index was unavailable for `claim`'s attempt (it
@@ -5106,11 +5171,15 @@ impl PgPipelineStore {
                     // Multi-lens review L4-3: on a run still `leased`, a
                     // dispatch that lost its row locks (a lost session, a
                     // process exit) may still be writing. It starts no upsert
-                    // after the lease's end, and one in flight returns within
-                    // the fence margin, so the invalidation is not due
-                    // before then. A run that is not leased has no dispatch
-                    // writing: a dispatch releases its run only once its
-                    // writes ended.
+                    // after the lease's end, and one in flight usually
+                    // returns within the fence margin, so the invalidation
+                    // is not due before then. A dispatch releases its run
+                    // once its writes ended or the margin passed. A call
+                    // still running after that is awaited by a task that
+                    // reopens this invalidation when it returns (issue
+                    // #1233, `reopen_invalidation_after_index_writes`), so
+                    // the margin bounds when the removal first runs, not
+                    // whether a late entry is removed.
                     let not_before = (run.state == PipelineRunState::Leased)
                         .then_some(run.lease_expires_at)
                         .flatten()
@@ -8926,6 +8995,7 @@ pub struct PipelineServiceBuilder {
     novelty_utility_checks: PipelineNoveltyUtilityChecks,
     unqualified_routing: bool,
     index_rebuild_fence_margin: std::time::Duration,
+    index_write_fence_margin: std::time::Duration,
     privacy_pass_timeout_ceiling: std::time::Duration,
 }
 
@@ -8959,6 +9029,9 @@ impl PipelineServiceBuilder {
             novelty_utility_checks: PipelineNoveltyUtilityChecks::default(),
             unqualified_routing: false,
             index_rebuild_fence_margin: std::time::Duration::from_secs(
+                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
+            ),
+            index_write_fence_margin: std::time::Duration::from_secs(
                 PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
             ),
             privacy_pass_timeout_ceiling: PIPELINE_PRIVACY_PASS_MAX_TIMEOUT,
@@ -9063,11 +9136,23 @@ impl PipelineServiceBuilder {
     /// run's deadline its committed fence reaches. Defaults to
     /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, the margin every index
     /// writer call must return within. For tests only: a shorter margin lets
-    /// a test see a lost rebuild's fence expire. Settle's own fence keeps the
-    /// constant.
+    /// a test see a lost rebuild's fence expire. Settle's own margin is
+    /// `with_index_write_fence_margin`.
     #[doc(hidden)]
     pub fn with_index_rebuild_fence_margin(mut self, margin: std::time::Duration) -> Self {
         self.index_rebuild_fence_margin = margin;
+        self
+    }
+
+    /// The write fence margin of Settle's index dispatch
+    /// (`dispatch_index_write`): how long a dispatch past its deadline waits
+    /// for the index call in flight before it releases the run. Defaults to
+    /// `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`. For tests only: a
+    /// shorter margin lets a test hold an index call past it without
+    /// waiting a minute.
+    #[doc(hidden)]
+    pub fn with_index_write_fence_margin(mut self, margin: std::time::Duration) -> Self {
+        self.index_write_fence_margin = margin;
         self
     }
 
@@ -9190,6 +9275,7 @@ impl PipelineServiceBuilder {
             novelty_utility_checks: self.novelty_utility_checks,
             unqualified_routing: self.unqualified_routing,
             index_rebuild_fence_margin: self.index_rebuild_fence_margin,
+            index_write_fence_margin: self.index_write_fence_margin,
             privacy_pass_timeout,
             follow_ups: std::sync::Mutex::new(BTreeMap::new()),
         };
@@ -9318,6 +9404,9 @@ pub struct PipelineService {
     /// The index rebuild's write fence margin
     /// (`PipelineServiceBuilder::with_index_rebuild_fence_margin`).
     index_rebuild_fence_margin: std::time::Duration,
+    /// Settle's index dispatch write fence margin
+    /// (`PipelineServiceBuilder::with_index_write_fence_margin`).
+    index_write_fence_margin: std::time::Duration,
     /// The bound on one privacy pass classifier call, computed at build
     /// (`privacy_pass_timeout_for`, decision P8).
     privacy_pass_timeout: std::time::Duration,
@@ -11916,7 +12005,11 @@ impl PipelineService {
     /// these cases: no worker, in this process or in another replica,
     /// claims that invalidation until the fence has expired, and it expires
     /// only after the last write the deadline let start has returned, as
-    /// long as each index call returns within the margin. Withdrawals come
+    /// long as each index call returns within the margin. A call that does
+    /// not is awaited by a task of its own, which reopens the run's
+    /// invalidation once it returns (issue #1233,
+    /// `reopen_invalidation_after_index_writes`), so its entry is removed
+    /// again even though the fence expired first. Withdrawals come
     /// from clients, from `main`'s retention maintenance and from the
     /// revocation-propagation reconciler, so the guarantee is not that none
     /// happens: it is that none is removed from the index before the
@@ -12030,13 +12123,23 @@ impl PipelineService {
                 }
                 Err(_) => {
                     // Past the deadline: roll back at once, so the rows are
-                    // free, then wait (bounded by the fence margin) for the
-                    // call in flight to return. A call that has not returned
-                    // by then is reported as such, so the rebuild leaves its
-                    // fence to expire rather than clearing it.
+                    // free. A task of its own awaits the call in flight,
+                    // however long it runs, and then reopens the run's
+                    // invalidation (issue #1233,
+                    // `reopen_invalidation_after_index_writes`). The rebuild
+                    // waits for that task, bounded by the fence margin. A
+                    // call that has not returned by then is reported as such,
+                    // so the rebuild leaves its fence to expire rather than
+                    // clearing it.
                     drop(tx);
                     drop(client);
-                    if tokio::time::timeout(margin, writes).await.is_err() {
+                    let reopen = tokio::spawn(reopen_invalidation_after_index_writes(
+                        self.store.clone(),
+                        run.tenant_id.clone(),
+                        run.run_id,
+                        writes,
+                    ));
+                    if tokio::time::timeout(margin, reopen).await.is_err() {
                         return Err(anyhow::Error::new(IndexRebuildWriteInFlight));
                     }
                     return Err(anyhow::anyhow!(PIPELINE_INDEX_UNAVAILABLE_LABEL));
@@ -13524,6 +13627,7 @@ impl PipelineService {
                 command,
                 crash_point: self.crash_point,
                 crash_pending: self.crash_pending.clone(),
+                margin: self.index_write_fence_margin,
             }))
             .await
             .map_err(|_| anyhow::anyhow!(PIPELINE_BLOCKING_CALL_FAILED_LABEL))??;
@@ -16275,6 +16379,10 @@ struct IndexDispatch {
     command: anyhow::Result<Option<SealedIndexCommand>>,
     crash_point: Option<PipelineCrashPoint>,
     crash_pending: Arc<AtomicBool>,
+    /// How long a dispatch past its deadline waits for the call in flight
+    /// before it releases the run
+    /// (`PipelineServiceBuilder::with_index_write_fence_margin`).
+    margin: std::time::Duration,
 }
 
 /// How Settle's index dispatch ended. `WriteFailed`'s transaction was rolled
@@ -16287,6 +16395,78 @@ enum IndexDispatchOutcome {
     /// status row's lock (GRD-004): no upsert started, the transaction wrote
     /// nothing, and `pending` stays.
     PolicyNotRunnable,
+}
+
+/// The safe label logged when a late index write reopened its run's
+/// invalidation (`reopen_invalidation_after_index_writes`).
+const PIPELINE_INDEX_WRITE_LANDED_LATE_LABEL: &str = "pipeline_index_write_landed_late";
+/// The safe label logged when that reopen could not be written and is
+/// tried again.
+const PIPELINE_INDEX_WRITE_REOPEN_RETRY_LABEL: &str = "pipeline_index_write_reopen_retry";
+/// The longest wait between two tries of a reopen that failed.
+const PIPELINE_INDEX_WRITE_REOPEN_MAX_BACKOFF: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Awaits index writes that outlasted their deadline and their fence margin
+/// (a Settle dispatch's, or a rebuilt run's), however long they take, and
+/// then reopens the run's index invalidation
+/// (`PgPipelineStore::reopen_index_invalidation_after_late_write`).
+///
+/// The invariant (issue #1233): a withdrawal or revocation is never undone
+/// by an index write that started before it, however long that write
+/// takes. A write holds the run's row locks while it is inside its
+/// deadline, so a withdrawal waits for it (or commits first, and the write
+/// is cancelled). Past the deadline the locks go while the call may still
+/// be running, and no clock bounds that call: an index call has no time
+/// limit of its own. So the guarantee does not rest on a margin or on any
+/// clock. Each such write is awaited here until it returns, and only then
+/// is the run's invalidation reopened, so a removal that ran while the call
+/// was in flight runs again after the entry landed. An invalidation queued
+/// after the reopen's statement was queued after the write returned, and
+/// runs after it. The window in which a late entry is searchable is from
+/// its landing to the next invalidation pass.
+///
+/// The reopen is tried until it is written, with a doubling backoff capped
+/// at `PIPELINE_INDEX_WRITE_REOPEN_MAX_BACKOFF`. What this does not cover:
+/// a process that exits between the late write's landing and the reopen's
+/// commit. An in-process index call ends with the process; a remote one
+/// that lands after the process is gone is outside what the pipeline can
+/// observe.
+async fn reopen_invalidation_after_index_writes<T>(
+    store: PgPipelineStore,
+    tenant_id: String,
+    run_id: Uuid,
+    writes: tokio::task::JoinHandle<T>,
+) {
+    // The writes' own result does not matter: an error or a panic may
+    // follow an entry that was written.
+    let _ = writes.await;
+    let mut backoff = std::time::Duration::from_secs(1);
+    loop {
+        match store
+            .reopen_index_invalidation_after_late_write(&tenant_id, run_id)
+            .await
+        {
+            Ok(reopened) => {
+                if reopened {
+                    tracing::warn!(
+                        label = PIPELINE_INDEX_WRITE_LANDED_LATE_LABEL,
+                        "an index write returned after its fence margin; its run's index \
+                         invalidation runs again"
+                    );
+                }
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    label = PIPELINE_INDEX_WRITE_REOPEN_RETRY_LABEL,
+                    "could not reopen a late index write's invalidation; retrying"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(PIPELINE_INDEX_WRITE_REOPEN_MAX_BACKOFF);
+            }
+        }
+    }
 }
 
 /// Settle's index dispatch (Step 5), run in a task of its own (multi-lens
@@ -16308,13 +16488,21 @@ enum IndexDispatchOutcome {
 /// writes go on -- so the writes also stop at the deadline: no upsert starts
 /// once the earlier of `lease_expires_at` and the dispatch budget
 /// (`PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS`, multi-lens review L4-1) has
-/// passed. At the deadline the transaction rolls back at once, so the rows
-/// are free, and the run is released only once the upsert in flight has
-/// returned (or the fence margin has passed). An upsert in flight then must
-/// return within `PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`, which a
-/// withdrawal waits out before the revision's invalidation runs
-/// (`end_runs_of_inoperable_submission_on_tx`). A task that did not return
-/// may have written part of the command, as an `Uncertain` answer may.
+/// passed. The deadline is on the monotonic clock (`std::time::Instant`),
+/// and the lease's remaining time is read from the database's clock, the
+/// one that set `lease_expires_at`, so a step of the process's wall clock
+/// cannot move it (issue #1233). At the deadline the transaction rolls back
+/// at once, so the rows are free, and the run is released once the upsert
+/// in flight has returned, or once the fence margin has passed. A task
+/// that did not return may have written part of the command, as an
+/// `Uncertain` answer may.
+///
+/// An upsert has no time limit of its own, so one still running once the
+/// margin has passed is not fenced by any clock: it is awaited by a task of
+/// its own, which reopens the run's invalidation when it returns
+/// (`reopen_invalidation_after_index_writes`, which states the invariant).
+/// A withdrawal that commits while it runs therefore cannot leave its entry
+/// in the index.
 async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDispatchOutcome> {
     let IndexDispatch {
         backend,
@@ -16323,6 +16511,7 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         command,
         crash_point,
         crash_pending,
+        margin,
     } = dispatch;
     let mut client = backend.trace_pool().get().await?;
     let tx = PgPipelineStore::tenant_transaction(&mut client, &run.tenant_id).await?;
@@ -16361,11 +16550,25 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
     }
     let command = command?.ok_or_else(|| anyhow::anyhow!("index_command_invalid"))?;
     // Multi-lens review L4-1: the rows are held no longer than the earlier
-    // of the lease's end and the dispatch budget.
-    let deadline = run
-        .lease_expires_at
-        .ok_or_else(stale_lease_error)?
-        .min(Utc::now() + Duration::seconds(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS));
+    // of the lease's end and the dispatch budget. Issue #1233: the lease's
+    // remaining time is read from the database's clock, which set
+    // `lease_expires_at`, and the deadline is on the monotonic clock, so the
+    // process's wall clock plays no part.
+    let lease_expires_at = run.lease_expires_at.ok_or_else(stale_lease_error)?;
+    let lease_remaining_milliseconds: i64 = tx
+        .query_one(
+            "SELECT GREATEST(
+                        0,
+                        (EXTRACT(EPOCH FROM ($1::timestamptz - clock_timestamp())) * 1000)::bigint
+                    )",
+            &[&lease_expires_at],
+        )
+        .await?
+        .get(0);
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(lease_remaining_milliseconds.unsigned_abs()).min(
+            std::time::Duration::from_secs(PIPELINE_INDEX_DISPATCH_BUDGET_SECONDS.unsigned_abs()),
+        );
     let tenant = pipeline_tenant_storage_ref(&run.tenant_id);
     // Each entry is written under its own key: the command pairs them, so
     // one entry is never stored under another's key.
@@ -16375,27 +16578,31 @@ async fn dispatch_index_write(dispatch: IndexDispatch) -> anyhow::Result<IndexDi
         .collect::<Vec<_>>();
     let mut writes = tokio::task::spawn_blocking(move || {
         for (key, embedding, content_hash) in &entries {
-            if Utc::now() >= deadline {
+            if std::time::Instant::now() >= deadline {
                 return Err(IndexWriteError::Uncertain);
             }
             writer.upsert(key, embedding, content_hash)?;
         }
         Ok(())
     });
-    let budget = (deadline - Utc::now()).to_std().unwrap_or_default();
+    let budget = deadline.saturating_duration_since(std::time::Instant::now());
     let written = match tokio::time::timeout(budget, &mut writes).await {
         Ok(joined) => joined.unwrap_or(Err(IndexWriteError::Uncertain)),
         Err(_) => {
-            // Past the deadline: roll back at once, so the rows are free,
-            // then wait (bounded by the fence margin) for the call in flight
-            // to return before the run is released, so that a run that is
-            // not leased has no write in flight.
+            // Past the deadline: roll back at once, so the rows are free.
+            // A task of its own awaits the call in flight, however long it
+            // runs, and then reopens the run's invalidation (issue #1233).
+            // The run is released once that task ended or the fence margin
+            // passed; dropping the handle leaves the task running.
             drop(tx);
             drop(client);
-            let margin = std::time::Duration::from_secs(
-                PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS.unsigned_abs(),
-            );
-            let _ = tokio::time::timeout(margin, writes).await;
+            let reopen = tokio::spawn(reopen_invalidation_after_index_writes(
+                PgPipelineStore::new(backend.clone()),
+                run.tenant_id.clone(),
+                run.run_id,
+                writes,
+            ));
+            let _ = tokio::time::timeout(margin, reopen).await;
             return Ok(IndexDispatchOutcome::WriteFailed(
                 IndexWriteError::Uncertain,
             ));
