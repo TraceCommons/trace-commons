@@ -173,3 +173,83 @@ int tc_macos_set_login_item(int enabled) {
         return 3;
     }
 }
+
+// ── Glass regions ───────────────────────────────────────────────────────
+// The window is transparent and the webview draws no background, so a
+// native material view placed under the webview shows through wherever the
+// page leaves a pane translucent. The shell reports each glass pane's rect
+// (CSS pixels from the webview's top-left, which are points) and corner
+// radius; one material view sits under each, in the order given. Modals are
+// not regions: a view under the webview cannot blur the panes a modal
+// covers, so the page gives a modal its own solid backing.
+//
+// macOS 26 has the Liquid Glass view (NSGlassEffectView); earlier systems
+// get the HUD vibrancy material, clipped to the same rounded rect. The class
+// is looked up at run time so the bridge still builds against older SDKs.
+
+static NSMutableArray<NSView *> *tc_glass_views = nil;
+
+static NSView *tc_glass_view_make(void) {
+    Class glass = NSClassFromString(@"NSGlassEffectView");
+    if (glass != Nil) {
+        return [[glass alloc] initWithFrame:NSZeroRect];
+    }
+    NSVisualEffectView *effect = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    effect.material = NSVisualEffectMaterialHUDWindow;
+    effect.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    effect.state = NSVisualEffectStateActive;
+    effect.wantsLayer = YES;
+    effect.layer.masksToBounds = YES;
+    return effect;
+}
+
+static void tc_glass_view_round(NSView *view, CGFloat radius) {
+    if ([view respondsToSelector:NSSelectorFromString(@"setCornerRadius:")]) {
+        [view setValue:@(radius) forKey:@"cornerRadius"];
+    } else {
+        view.wantsLayer = YES;
+        view.layer.cornerRadius = radius;
+        view.layer.masksToBounds = YES;
+    }
+}
+
+// rects: count groups of five doubles, x y width height radius. Must run on
+// the main thread. Returns 1 when the regions were applied, 0 when the
+// window has no content view to stack under.
+int tc_macos_set_glass_regions(void *ns_window, const double *rects, int count) {
+    NSWindow *window = (__bridge NSWindow *)ns_window;
+    NSView *content = window.contentView;
+    NSView *host = content.superview;
+    if (content == nil || host == nil || count < 0) {
+        return 0;
+    }
+    // The app is dark-only; the material follows the window's appearance.
+    window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+    if (tc_glass_views == nil) {
+        tc_glass_views = [NSMutableArray array];
+    }
+    while ((int)tc_glass_views.count > count) {
+        [tc_glass_views.lastObject removeFromSuperview];
+        [tc_glass_views removeLastObject];
+    }
+    CGFloat height = content.bounds.size.height;
+    for (int index = 0; index < count; index++) {
+        const double *rect = rects + index * 5;
+        NSRect local = content.isFlipped
+            ? NSMakeRect(rect[0], rect[1], rect[2], rect[3])
+            : NSMakeRect(rect[0], height - rect[1] - rect[3], rect[2], rect[3]);
+        NSView *view;
+        if (index < (int)tc_glass_views.count) {
+            view = tc_glass_views[index];
+        } else {
+            view = tc_glass_view_make();
+            [tc_glass_views addObject:view];
+        }
+        view.frame = [content convertRect:local toView:host];
+        tc_glass_view_round(view, rect[4]);
+        // Each view goes directly under the webview, so a later region ends
+        // up above the earlier ones.
+        [host addSubview:view positioned:NSWindowBelow relativeTo:content];
+    }
+    return 1;
+}

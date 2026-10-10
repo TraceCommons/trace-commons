@@ -1,12 +1,10 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { WitnessStatus } from "../api/witness-api";
 import { type WitnessFormValues, witnessFormSchema } from "../forms";
+import { ButtonPrimary, GlassButton, Input, TertiaryLink, TextArea } from "@/design-system";
 
 export function WitnessPanel({
   data,
@@ -63,30 +61,29 @@ export function WitnessPanel({
     }
   };
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px] block">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card block">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             REDACTION WITNESS
           </span>
           <h2>Certificate boundary</h2>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={busy}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         A witness receives raw traces only after local consent and measurement
         verification. A configured witness without a valid pin refuses
         submissions; no witness keeps local redaction.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
@@ -95,8 +92,8 @@ export function WitnessPanel({
           className={`mt-5 grid gap-[6px] border-l-[3px] p-3.5 ${
             data.state.startsWith("refusing_") ||
             data.state === "settings_unreadable"
-              ? "border-destructive/40 bg-destructive/10"
-              : "border-primary bg-primary/10"
+              ? "border-tc-outside/40 bg-tc-outside/10"
+              : "border-tc-purple bg-tc-purple/10"
           }`}
         >
           <strong>{data.state_line}</strong>
@@ -141,7 +138,7 @@ export function WitnessPanel({
         </label>
         <label htmlFor="witness-measurements">
           Expected measurements
-          <Textarea
+          <TextArea
             id="witness-measurements"
             {...form.register("measurements")}
             rows={4}
@@ -161,22 +158,21 @@ export function WitnessPanel({
           />
         </label>
         <div className="mt-2 flex gap-2.5">
-          <Button
-            className="rounded-lg border-0 bg-primary px-3.5 py-2.5 text-[12px] font-bold text-primary-foreground hover:bg-primary/80"
+          <ButtonPrimary size="sm"
             type="submit"
             disabled={busy || !form.formState.isValid}
           >
             Save witness
-          </Button>
+          </ButtonPrimary>
           {configured && (
-            <Button
-              className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+            <GlassButton
+              className="tc-text-outside"
               type="button"
               onClick={() => void onClear()}
               disabled={busy}
             >
               Return to local redaction
-            </Button>
+            </GlassButton>
           )}
         </div>
       </form>

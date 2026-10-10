@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import { ProjectModeField } from "./project-mode-field";
 import { ProjectAutomaticDisclosure } from "./project-automatic-disclosure";
 import type { Project, ProjectMode } from "../api/projects-api";
+import { TertiaryLink } from "@/design-system";
 
 export function ProjectsPanel({
   projects,
@@ -19,52 +19,51 @@ export function ProjectsPanel({
   allowAutoUpload?: boolean;
 }) {
   return (
-    <section className="rounded-2xl border border-border bg-card/80 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             PROJECT POLICY
           </span>
           <h2>{allowAutoUpload ? "Projects" : "What to watch"}</h2>
         </div>
-        <Button
-          className="border-0 bg-transparent p-0 text-[11px] font-bold text-primary"
+        <TertiaryLink
           type="button"
           onClick={() => void onRefresh()}
           disabled={state === "loading" || state === "busy"}
         >
           Refresh
-        </Button>
+        </TertiaryLink>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Every project starts at ask-first. Ignore a project to leave it out
         entirely.
       </p>
       {error && (
-        <p className="-mt-[18px] mb-[18px] rounded-[9px] border border-destructive/30 bg-destructive/10 px-3.5 py-3 text-[12px] text-destructive">
+        <p className="tc-alert">
           {error}
         </p>
       )}
       {state === "loading" && (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Reading projects…
         </p>
       )}
       {state === "error" && (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           Project policy unavailable.
         </p>
       )}
       {state === "ready" && projects.length === 0 && (
-        <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+        <p className="mt-3 mb-1 tc-body tc-text-tertiary">
           No projects seen yet. Traces appear here after discovery.
         </p>
       )}
       {state === "ready" && projects.length > 0 && (
-        <div className="mt-5 grid gap-px border-t border-border">
+        <div className="mt-3 grid gap-px">
           {projects.map((project) => (
             <div
-              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[18px] border-b border-border py-[15px]"
+              className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-[18px] border-b border-tc-hairline py-[15px]"
               key={project.project_id}
             >
               <div>

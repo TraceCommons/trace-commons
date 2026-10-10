@@ -1,7 +1,7 @@
 import type { UseFormReturn } from "react-hook-form";
-import { Input } from "@/components/ui/input";
 import { FormFieldError } from "../../../components/form-field-error";
 import type { ComparisonSpecificationFormValues } from "../forms";
+import { Input } from "@/design-system";
 
 export function ComparisonSpecificationFields({
   form,

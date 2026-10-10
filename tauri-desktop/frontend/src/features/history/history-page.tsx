@@ -51,48 +51,31 @@ export function HistoryPage() {
     [heldRowFallback, records],
   );
   return (
-    <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14">
+    <div className="tc-page">
       <PageHeader
-        eyebrow="WORKSPACE / RECORD"
         title="History"
         description="What you have contributed, and what is still being reviewed."
-        phase="PHASE 1"
+        titleHidden
       />
-      <div className="mb-4 grid grid-cols-4 gap-3 max-[860px]:grid-cols-1">
+      <div className="grid grid-cols-3 gap-1.5">
         <StatCard
-          label="In the commons"
+          label="Credit pending"
+          value={rollup ? rollup.credit_pending.toFixed(1) : "—"}
+        />
+        <StatCard
+          label="Contributed"
           value={rollup ? `${rollup.all_time.accepted}` : "—"}
-          detail="Server-confirmed contributions"
-          tone="green"
         />
         <StatCard
           label="Held"
           value={rollup ? `${rollup.all_time.quarantined}` : "—"}
-          detail="Privacy review, not rejection"
-          tone="gold"
-        />
-        <StatCard
-          label="Waiting to be scored"
-          value={rollup ? `${rollup.all_time.submitted}` : "—"}
-          detail="Recorded submissions"
-          tone="blue"
-        />
-        <StatCard
-          label="Final credit points"
-          value={rollup ? `${rollup.credit_final.toFixed(1)}` : "—"}
-          detail={
-            rollup
-              ? `Final: ${rollup.credit_final.toFixed(1)} · Pending: ${rollup.credit_pending.toFixed(1)} · not currency`
-              : "Final and pending credit points; not currency"
-          }
-          tone="gold"
         />
       </div>
       {rollup?.community && <CommunityPanel standing={rollup.community} />}
-      <section className="p-[26px] rounded-2xl border border-border bg-card/80">
-        <div className="flex items-start justify-between gap-[18px]">
+      <section className="tc-card">
+        <div className="flex items-start justify-between gap-3">
           <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+            <span className="mb-1.5 block tc-eyebrow">
               SUBMISSIONS
             </span>
             <h2>Contribution history</h2>
@@ -100,17 +83,17 @@ export function HistoryPage() {
           <HistoryRefreshControl />
         </div>
         {history.state === "loading" && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             Reading local history…
           </p>
         )}
         {history.state === "error" && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             {lines.readUnavailable}
           </p>
         )}
         {history.state === "ready" && records.length === 0 && (
-          <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+          <p className="mt-3 mb-1 tc-body tc-text-tertiary">
             No submissions recorded on this device yet.
           </p>
         )}
@@ -122,19 +105,19 @@ export function HistoryPage() {
               onChange={setFilter}
             />
             {visibleRecords.length === 0 ? (
-              <p className="mt-[30px] mb-1 text-[13px] text-muted-foreground">
+              <p className="mt-3 mb-1 tc-body tc-text-tertiary">
                 No submissions match this filter.
               </p>
             ) : (
               <div className="mt-[22px] grid gap-6">
                 {groupedRecords.map((group) => (
                   <section
-                    className="border-t border-border pt-[18px] first:border-t-0 first:pt-0"
+                    className="border-t border-tc-hairline pt-[18px] first:border-t-0 first:pt-0"
                     key={group.id}
                   >
                     <div className="flex items-end justify-between gap-[18px]">
                       <div>
-                        <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+                        <span className="mb-1.5 block tc-eyebrow">
                           PROJECT
                         </span>
                         <h3>{group.label}</h3>
@@ -144,7 +127,7 @@ export function HistoryPage() {
                         {group.records.length === 1 ? "" : "s"}
                       </span>
                     </div>
-                    <div className="mt-[22px] grid gap-px border-t border-border">
+                    <div className="mt-3 grid gap-px">
                       {group.records.map((item) => (
                         <HistoryRow
                           key={item.submission_id}
@@ -193,8 +176,8 @@ export function HistoryPage() {
       {history.state === "ready" &&
         rollup &&
         rollup.all_time.quarantined > 0 && (
-          <section className="rounded-2xl border border-border bg-card/80 mt-4 p-[26px]">
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <section className="tc-card mt-2.5">
+            <span className="mb-1.5 block tc-eyebrow">
               PRIVACY REVIEW
             </span>
             <h2>{rollup.all_time.quarantined} held for privacy review</h2>
@@ -204,14 +187,14 @@ export function HistoryPage() {
             </p>
             {explanations.map((explanation) => (
               <p
-                className="m-0 text-[11px] leading-[1.55] text-muted-foreground"
+                className="m-0 tc-caption tc-text-tertiary"
                 key={explanation}
               >
                 {explanation}
               </p>
             ))}
             {explanations.length === 0 && !heldRowFallback && (
-              <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+              <p className="m-0 tc-caption tc-text-tertiary">
                 Shared hold explanation unavailable.
               </p>
             )}

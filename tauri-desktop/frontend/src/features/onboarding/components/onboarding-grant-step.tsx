@@ -1,10 +1,10 @@
-import { Button } from "@/components/ui/button";
 import {
   useAutomaticGrantCopy,
   useContributorDisclosureCopy,
 } from "../../../lib/tauri/use-contributor-copy";
 import { useCoreStatus } from "../../../lib/tauri/use-core-status";
 import type { OnboardingStepProps } from "./onboarding-step-types";
+import { GlassButton } from "@/design-system";
 
 // The Flow 1 grant. Reachable only after connect, a chosen scope, the
 // automatic path and both disclosure screens; the button stays off while any
@@ -25,8 +25,8 @@ export function OnboardingGrantStep({
   const copyFailed = grantCopy.isError || disclosure.isError;
   const blocked = onboarding.grantBlockers.length > 0;
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+    <section className="tc-card mb-2.5">
+      <span className="mb-1.5 block tc-eyebrow">
         AUTOMATIC CONTRIBUTING
       </span>
       <h2>Turn on automatic contributing?</h2>
@@ -37,7 +37,7 @@ export function OnboardingGrantStep({
         </div>
       ) : (
         <p
-          className={`m-0 text-[12px] ${copyFailed ? "text-destructive" : "text-muted-foreground"}`}
+          className={`m-0 text-[12px] ${copyFailed ? "text-tc-outside" : "text-tc-secondary"}`}
           role={copyFailed ? "alert" : "status"}
         >
           {copyFailed
@@ -46,32 +46,29 @@ export function OnboardingGrantStep({
         </p>
       )}
       <div className="mt-6 flex flex-wrap gap-2.5">
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        <GlassButton
           type="button"
           onClick={onboarding.back}
           disabled={busy}
         >
           Back
-        </Button>
-        <Button
+        </GlassButton>
+        <GlassButton
           type="button"
-          variant="outline"
           onClick={onboarding.skipGrant}
           disabled={busy || !modes}
         >
           {modes?.notify_only}
-        </Button>
-        <Button
+        </GlassButton>
+        <GlassButton
           type="button"
-          variant="outline"
           onClick={() => void onboarding.grant()}
           disabled={busy || !copy || blocked}
         >
           {onboarding.grantMutation.isPending
             ? "Turning on…"
             : modes?.auto_upload}
-        </Button>
+        </GlassButton>
       </div>
     </section>
   );

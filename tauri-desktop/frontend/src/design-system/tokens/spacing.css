@@ -1,0 +1,33 @@
+/* Trace Commons · WYSIWYG glass · spacing & sizing */
+:root {
+  --tc-space-1: 2px;
+  --tc-space-2: 4px;
+  --tc-space-3: 6px;
+  --tc-space-4: 8px;
+  --tc-space-5: 10px;
+  --tc-space-6: 12px;
+  --tc-space-7: 14px;
+  --tc-space-8: 16px;
+  --tc-space-9: 20px;
+  --tc-space-10: 24px;
+
+  --tc-pad-window: 10px; /* window inset around panes */
+  --tc-pad-pane: 12px;
+  --tc-pad-card: 12px 14px;
+  --tc-gap-cards: 10px;
+  --tc-gap-inline: 6px;
+
+  --tc-size-control: 26px; /* round/pill toolbar buttons */
+  --tc-size-control-lg: 28px;
+  --tc-size-toggle: 40px 24px;
+  --tc-size-checkbox: 15px;
+  --tc-size-dot: 7px;
+  --tc-size-tab: 26px;
+  --tc-size-glyph: 16px;
+  --tc-size-tool-tile: 22px;
+
+  --tc-width-pane-left: 400px;
+  --tc-width-map: 600px;
+  --tc-width-inspector: 300px;
+  --tc-height-window: 760px;
+}

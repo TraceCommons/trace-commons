@@ -10,19 +10,19 @@ export function InsightSummary({ summary }: { summary: InsightSummaryData }) {
       .map((item) => `${item.outcome} ${item.snapshots}`)
       .join(" · ") || "None yet";
   return (
-    <section className="rounded-2xl border border-border bg-card/80 mb-4 p-[26px]">
-      <div className="flex items-start justify-between gap-[18px]">
+    <section className="tc-card mb-2.5">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
+          <span className="mb-1.5 block tc-eyebrow">
             SAVED HISTORY
           </span>
           <h2>Local analysis summary</h2>
         </div>
-        <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
+        <span className="tc-chip tc-chip--glass self-start">
           Rust-provided
         </span>
       </div>
-      <div className="mt-7 grid grid-cols-3 gap-px border-y border-border">
+      <div className="mt-7 grid grid-cols-3 gap-px border-y border-tc-hairline">
         <div>
           <span>Saved snapshots</span>
           <strong>{summary.saved_snapshots}</strong>
@@ -50,7 +50,7 @@ export function InsightSummary({ summary }: { summary: InsightSummaryData }) {
             : "No observed metrics"}
         </p>
       </div>
-      <p className="m-0 text-[11px] leading-[1.55] text-muted-foreground">
+      <p className="m-0 tc-caption tc-text-tertiary">
         Assessments are user-reported. Saved traces are not independently
         verified tasks; unknown values are not zero.
       </p>

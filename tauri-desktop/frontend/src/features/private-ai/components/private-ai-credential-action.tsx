@@ -1,7 +1,7 @@
-import { Button } from "@/components/ui/button";
 import type { UseFormReturn } from "react-hook-form";
 import type { PrivateAiProviderValues } from "../forms";
 import type { usePrivateAi } from "../hooks/use-private-ai";
+import { GlassButton } from "@/design-system";
 
 type PrivateAiController = ReturnType<typeof usePrivateAi>;
 
@@ -17,26 +17,25 @@ export function PrivateAiCredentialAction({
   const action = privateAi.credential?.view?.action;
   if (action === "cancel") {
     return (
-      <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+      <GlassButton
         type="button"
         onClick={() => void privateAi.cancel()}
         disabled={privateAi.busy}
       >
         Cancel sign-in
-      </Button>
+      </GlassButton>
     );
   }
   if (action === "forget") {
     return (
-      <Button
-        className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary text-destructive"
+      <GlassButton
+        className="tc-text-outside"
         type="button"
         onClick={() => void privateAi.forget()}
         disabled={privateAi.busy}
       >
         Forget local credential
-      </Button>
+      </GlassButton>
     );
   }
   if (action === "migrate") {
@@ -48,26 +47,24 @@ export function PrivateAiCredentialAction({
     if (!label || !explains) return null;
     return (
       <div className="flex flex-col gap-2">
-        <p className="text-[11px] text-muted-foreground">{explains}</p>
-        <Button
-          className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+        <p className="m-0 text-[11px] text-tc-secondary">{explains}</p>
+        <GlassButton
           type="button"
           onClick={() => void privateAi.migrate()}
           disabled={privateAi.busy}
         >
           {label}
-        </Button>
+        </GlassButton>
       </div>
     );
   }
   if (action !== "obtain") return null;
   return (
-    <Button
-      className="rounded-[7px] border border-border bg-background px-[11px] py-2 text-[11px] font-bold text-foreground hover:border-primary hover:text-primary"
+    <GlassButton
       type="submit"
       disabled={privateAi.busy || !form.formState.isValid || !copyReady}
     >
       Connect credential
-    </Button>
+    </GlassButton>
   );
 }

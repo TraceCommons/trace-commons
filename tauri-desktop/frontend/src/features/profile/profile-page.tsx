@@ -49,19 +49,10 @@ export function ProfilePage({
 
   return (
     <FormProvider {...form}>
-      <div className="mx-auto max-w-[1080px] px-4 pb-12 pt-8 sm:px-8 sm:pb-16 sm:pt-10 lg:px-16 lg:pt-14 block">
-        <header className="mb-[38px] flex items-start justify-between gap-6">
-          <div>
-            <span className="mb-3 block font-mono text-[10px] font-extrabold leading-none tracking-[.16em] text-primary">
-              ACCOUNT / PROFILE
-            </span>
-            <h1>Your profile</h1>
-            <p>A small public surface for work you choose to share.</p>
-          </div>
-          <span className="whitespace-nowrap rounded-full bg-primary/10 px-2.5 py-[7px] font-mono text-[10px] font-extrabold tracking-[.08em] text-primary max-[860px]:col-start-2 max-[860px]:justify-self-start">
-            PHASE 1
-          </span>
-        </header>
+      <div className="tc-page">
+        <p className="m-0 tc-label font-normal leading-[17px] tc-text-secondary">
+          A small public surface for work you choose to share.
+        </p>
         <ProfileSummary
           coreStatus={coreStatus}
           coreStatusState={coreStatusState}

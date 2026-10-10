@@ -29,7 +29,7 @@ export function ProjectAutomaticDisclosure({
     ) : null;
   }
   return (
-    <div className="mt-2 grid gap-1.5 text-[11px] leading-[1.55] text-muted-foreground">
+    <div className="mt-2 grid gap-1.5 text-[11px] leading-[1.55] text-tc-secondary">
       {scrubDisclosureLines(copy).map((line) => (
         <p className="m-0" key={line}>
           {line}
