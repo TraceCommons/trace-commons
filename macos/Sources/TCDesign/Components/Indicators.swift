@@ -582,8 +582,9 @@ public struct GlassMapStage<Content: View>: View {
 /// is tested.
 enum GlassMapMarks {
     /// The tile's cell: two marks to a cell, on its diagonal, so rows
-    /// stagger. Opened from 18 (owner, 2026-10-10).
-    static let pitch: CGFloat = 21
+    /// stagger. Opened from 18, then to 24 with the larger mark (owner,
+    /// 2026-10-10).
+    static let pitch: CGFloat = 24
     /// A mark's width and height: the explorations' 7pt mark at 0.8
     /// (owner, 2026-10-10; it was 0.6, 4.2pt).
     static let size: CGFloat = 5.6
