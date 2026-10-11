@@ -558,7 +558,7 @@ final class InferenceParityTests: XCTestCase {
         let source = try Self.text("Views/ManagedSessionsView.swift")
         // The re-read icon sits after the title once the list is read
         // (owner, 2026-10-10: the icon card's own place for it).
-        for needle in ["refresh: snapshot == nil ? nil : .init(",
+        for needle in ["let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(",
                        "Text(model.managedText(\"add\")).lineLimit(1)",
                        "Text(model.managedText(\"launch\")).lineLimit(1)",
                        "return ViewThatFits(in: .horizontal) {",

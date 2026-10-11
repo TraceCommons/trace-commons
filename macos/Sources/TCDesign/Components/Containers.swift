@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A rule one device pixel thick, as a browser draws #1146's 0.5px border:
@@ -88,6 +89,28 @@ public struct GlassRefreshButton: View {
     }
 }
 
+/// An icon card's re-read control: its name and what it does.
+public struct GlassCardRefresh {
+    let label: String
+    let isDisabled: Bool
+    let action: () -> Void
+
+    public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
+        self.label = label
+        self.isDisabled = isDisabled
+        self.action = action
+    }
+}
+
+extension VerticalAlignment {
+    /// An icon card's head: the icon's top on the title's cap height.
+    private enum IconTitleTop: AlignmentID {
+        static func defaultValue(in context: ViewDimensions) -> CGFloat { context[.top] }
+    }
+
+    static let iconTitleTop = VerticalAlignment(IconTitleTop.self)
+}
+
 /// A card headed by an icon (owner, 2026-10-10), laid out the same on
 /// every card:
 /// - the icon in a fixed column at the top left, level with the title;
@@ -98,17 +121,7 @@ public struct GlassRefreshButton: View {
 /// - anything else the card holds under the head, aligned with the title.
 public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// The card's re-read control.
-    public struct Refresh {
-        let label: String
-        let isDisabled: Bool
-        let action: () -> Void
-
-        public init(_ label: String, isDisabled: Bool = false, action: @escaping () -> Void) {
-            self.label = label
-            self.isDisabled = isDisabled
-            self.action = action
-        }
-    }
+    public typealias Refresh = GlassCardRefresh
 
     private let systemImage: String
     private let title: String
@@ -122,6 +135,15 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// The icon's point size, and the column it sits in.
     public static var iconSize: CGFloat { 22 }
     static var iconColumn: CGFloat { 26 }
+    /// The clear space an SF Symbol at `iconSize` keeps above its drawn
+    /// top, measured from a render: the drawn top, not the frame, meets the
+    /// title's capitals.
+    static var iconTopInset: CGFloat { 2.25 }
+    /// The title face's cap height: from its baseline to the top of its
+    /// capitals.
+    static var titleCapHeight: CGFloat {
+        NSFont.systemFont(ofSize: GlassTokens.TypeScale.bodyStrong.size, weight: .semibold).capHeight
+    }
 
     /// `subtitle` is drawn line by line under the title, empty lines left
     /// out; `info` goes behind the info icon after it.
@@ -142,11 +164,14 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
         GlassCard {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
-                    HStack(alignment: .top, spacing: GlassTokens.Space.s5) {
+                    HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
+                        // The icon's top on the title's cap height, the top
+                        // of its letters (owner, 2026-10-10), on every card.
                         Image(systemName: systemImage)
                             .glassGlyph(Self.iconSize, weight: .regular)
                             .foregroundStyle(GlassColor.textSecondary)
-                            .frame(width: Self.iconColumn, height: Self.iconColumn)
+                            .frame(width: Self.iconColumn)
+                            .alignmentGuide(.iconTitleTop) { $0[.top] + Self.iconTopInset }
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: GlassTokens.Space.s1) {
                             HStack(alignment: .center, spacing: GlassTokens.Space.s2) {
@@ -154,6 +179,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                                     .glassType(GlassTokens.TypeScale.bodyStrong)
                                     .foregroundStyle(GlassColor.textPrimary)
                                     .fixedSize(horizontal: false, vertical: true)
+                                    .alignmentGuide(.iconTitleTop) { $0[.firstTextBaseline] - Self.titleCapHeight }
                                     .accessibilityAddTraits(.isHeader)
                                 if let refresh {
                                     GlassRefreshButton(refresh.label, size: 12, action: refresh.action)
@@ -172,9 +198,6 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
                                 }
                             }
                         }
-                        // Level with the icon's column: the title's line sits
-                        // across the icon's upper half.
-                        .padding(.top, 3)
                     }
                     Spacer(minLength: GlassTokens.Space.s4)
                     accessory

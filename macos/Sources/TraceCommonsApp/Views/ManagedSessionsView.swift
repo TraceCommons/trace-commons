@@ -57,51 +57,77 @@ struct ManagedSessionsSection: View {
     /// Launch on the right of the head (Retry there while the list has not
     /// been read). A failure, a missing terminal and the accounts sit under
     /// the head.
+    @ViewBuilder
     private var accountsCard: some View {
         let snapshot = model.managedSnapshot
-        return GlassIconCard(
-            systemImage: "person.crop.circle.badge.checkmark",
-            title: model.managedText("accounts_title"),
-            subtitle: [model.managedText("description")],
-            info: snapshot?.capabilities.terminalDestination.map {
-                model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: $0)
-            },
-            refresh: snapshot == nil ? nil : .init(
-                PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title")),
-                isDisabled: model.managedBusy, action: { model.refreshManagedSessions() }),
-            accessory: {
-                if let snapshot {
-                    accountActions(snapshot)
-                } else {
-                    Button { model.refreshManagedSessions() } label: {
-                        Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
-                    }
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    .fixedSize()
+        let info = snapshot?.capabilities.terminalDestination.map {
+            model.managedText("terminal_scope").replacingOccurrences(of: "{destination}", with: $0)
+        }
+        let refresh: GlassCardRefresh? = snapshot == nil ? nil : .init(
+            PrivateAIPanelHeader.refreshName(model.managedText("refresh"), title: model.managedText("accounts_title")),
+            isDisabled: model.managedBusy, action: { model.refreshManagedSessions() })
+        // Nothing under the head: a head-only card, so its actions centre
+        // on the whole card rather than on a head above an empty body.
+        if Self.accountsBodyEmpty(snapshot, failing: model.managedErrorKey != nil) {
+            GlassIconCard(
+                systemImage: "person.crop.circle.badge.checkmark",
+                title: model.managedText("accounts_title"),
+                subtitle: [model.managedText("description")], info: info, refresh: refresh,
+                trailing: { AnyView(accountsAccessory(snapshot)) })
+        } else {
+            GlassIconCard(
+                systemImage: "person.crop.circle.badge.checkmark",
+                title: model.managedText("accounts_title"),
+                subtitle: [model.managedText("description")], info: info, refresh: refresh,
+                accessory: { AnyView(accountsAccessory(snapshot)) },
+                content: { AnyView(accountsBody(snapshot)) })
+        }
+    }
+
+    /// Whether the accounts card has nothing to draw under its head: the
+    /// list was read, nothing failed, there is a terminal, and no account.
+    static func accountsBodyEmpty(_ snapshot: ManagedSnapshot?, failing: Bool) -> Bool {
+        guard let snapshot else { return false }
+        return !failing && snapshot.capabilities.terminalDestination != nil && snapshot.accounts.isEmpty
+    }
+
+    /// Add and Launch once the list is read; Retry until then.
+    @ViewBuilder
+    private func accountsAccessory(_ snapshot: ManagedSnapshot?) -> some View {
+        if let snapshot {
+            accountActions(snapshot)
+        } else {
+            Button { model.refreshManagedSessions() } label: {
+                Label(model.managedText("retry"), systemImage: "arrow.clockwise").lineLimit(1)
+            }
+            .buttonStyle(GlassButtonStyle(.glass, small: true))
+            .fixedSize()
+        }
+    }
+
+    /// Under the head: connecting, a failure, a missing terminal, and the
+    /// accounts.
+    private func accountsBody(_ snapshot: ManagedSnapshot?) -> some View {
+        VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
+            if snapshot == nil {
+                Text(model.managedText("connecting"))
+                    .glassType(GlassTokens.TypeScale.caption)
+                    .foregroundStyle(GlassColor.textTertiary)
+            }
+            actionFailure
+            if let snapshot {
+                if snapshot.capabilities.terminalDestination == nil {
+                    GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
                 }
-            },
-            content: {
-                VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
-                    if snapshot == nil {
-                        Text(model.managedText("connecting"))
-                            .glassType(GlassTokens.TypeScale.caption)
-                            .foregroundStyle(GlassColor.textTertiary)
-                    }
-                    actionFailure
-                    if let snapshot {
-                        if snapshot.capabilities.terminalDestination == nil {
-                            GlassNotice(tone: .ask, title: model.managedText("terminal_unavailable")) { EmptyView() }
-                        }
-                        if !snapshot.accounts.isEmpty {
-                            VStack(spacing: 0) {
-                                ForEach(Array(snapshot.accounts.enumerated()), id: \.element.id) { index, account in
-                                    GlassTableRow(first: index == 0) { accountRow(account, snapshot: snapshot) }
-                                }
-                            }
+                if !snapshot.accounts.isEmpty {
+                    VStack(spacing: 0) {
+                        ForEach(Array(snapshot.accounts.enumerated()), id: \.element.id) { index, account in
+                            GlassTableRow(first: index == 0) { accountRow(account, snapshot: snapshot) }
                         }
                     }
                 }
-            })
+            }
+        }
     }
 
     /// A failed request: the failed request's red lines, unboxed, under
