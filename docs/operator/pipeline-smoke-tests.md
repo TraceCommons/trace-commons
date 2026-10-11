@@ -126,7 +126,7 @@ Pass, from the reports under `.local/`: every fixture completed,
 and `changed_content_refused_count` equal to the fixture count, and
 `tenant_isolation` true. The built-in corpus covers an admitted plan, a locally
 redacted secret, an approved and a rejected privacy quarantine, and a
-high-risk rejection; the harness also refuses any report that carries a
+high-risk receipt held for review and then rejected by the reviewer; the harness also refuses any report that carries a
 fixture's secret probe.
 
 What this does not show:

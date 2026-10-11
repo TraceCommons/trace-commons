@@ -1799,11 +1799,16 @@ merged basis (`privacy_pass_residual_risk_basis`, for example
 risk back to the submission row, and the run goes on to the Review policy,
 so a run Admission admitted ends `accepted` on the redacted content, with
 its gate decision row and credit like any accepted run. A run Admission
-quarantined (at Medium) escalates at High only, and otherwise keeps
+quarantined at Medium escalates at High only, and otherwise keeps
 Admission's hold. A pass-time High (what redaction did not resolve: a key
 finding, a coverage gap, a survivor, a residual scan that could not run) is
-held for a human, never rejected by the pass; a receipt-time High is still
-rejected by Admission (`privacy_risk_rejected`). The server parks an escalated run for a
+held for a human, never rejected by the pass. A receipt-time High is held
+for a human too, never rejected (owner decision PC-D27, 2026-10-11, as
+`main`'s legacy path quarantines it): Admission quarantines it under
+`privacy_risk_high_review_required`, distinct from a Medium's
+`privacy_review_required`. The pass cannot escalate it (its risk is not
+above the receipt's), so it is `cleared`, and the run keeps Admission's
+hold whatever the pass clears. The server parks an escalated run for a
 human, whatever Admission decided ("Quarantined runs and human review"). A
 `cleared` run goes to the Review policy with the pass output, as an
 Admission-admitted or Admission-quarantined run did before.
@@ -2001,7 +2006,9 @@ answers `404` when no pipeline runtime is injected:
   reason label in `reason`: 1 to 64 characters of lowercase letters, digits
   and `_`. Free text is refused with `422` (`invalid reason code`). An
   approval must list in `resolved_quarantine_reasons` every hold that applies: the Admission reason (for a privacy quarantine,
-  `privacy_review_required`), if Admission quarantined the run, and
+  `privacy_review_required` at Medium or
+  `privacy_risk_high_review_required` at High), if Admission quarantined
+  the run, and
   `privacy_pass_review_required`, if the privacy pass escalated it. An
   approval that leaves one out is refused with `422`
   (`quarantine reason is unresolved`). A stale claim is `409`. The route

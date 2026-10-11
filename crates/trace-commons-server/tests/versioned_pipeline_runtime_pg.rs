@@ -4652,11 +4652,51 @@ async fn submission_status(
     status
 }
 
-/// Admission Reject (a high-risk envelope): the receipt stores the
-/// submission as `rejected`, records the Reject decision, and completes the
-/// run at Admission -- there is no Review work to claim.
+/// The reason label Admission quarantines a receipt-time High under (owner
+/// decision PC-D27, 2026-10-11: a High is held for a human, never rejected).
+const HIGH_RISK_ADMISSION_REASON: &str = "privacy_risk_high_review_required";
+
+/// A High-risk envelope whose basis is a key finding (not only the consent
+/// content flag), receipted: Admission quarantines it for a human under
+/// `privacy_risk_high_review_required`. Returns the run, still `pending` at
+/// Review.
+async fn high_risk_and_pending(service: &PipelineService, tenant: &str) -> PipelineRunRecord {
+    let mut env = envelope(uuid::Uuid::new_v4()).await;
+    env.privacy.residual_pii_risk = ResidualPiiRisk::High;
+    let raw = serde_json::to_vec(&env).unwrap();
+    let key = env.submission_id.to_string();
+    let request = PipelineReceiptRequest {
+        residual_risk_basis: &[ResidualRiskCondition::KeyFinding],
+        ..receipt(tenant, &key, &raw, &env, NO_LIMITS)
+    };
+    let PipelineReceiptResult::Created(created) =
+        submit_registered(service, request).await.unwrap()
+    else {
+        panic!("a High-risk receipt creates its run record")
+    };
+    assert_eq!(
+        created.admission_decision, "quarantine",
+        "PC-D27: a receipt-time High is held for review, not rejected"
+    );
+    assert_eq!(created.state, PipelineRunState::Pending);
+    assert_eq!(created.next_phase, Some(Phase::Review));
+    assert_eq!(
+        created.admission_reason.as_deref(),
+        Some(HIGH_RISK_ADMISSION_REASON)
+    );
+    created
+}
+
+/// PC-D27 (2026-10-11): a receipt-time High is quarantined for a human,
+/// exactly as a Medium is, under its own reason label, and the submission
+/// reads `quarantined`. The one Review attempt parks it uncharged under
+/// `review_assessment_required`: the Review-start privacy pass does not
+/// escalate a High it was already given (`privacy_pass_outcome` is
+/// `cleared`) and does not lift Admission's hold. It earns no credit while
+/// it waits, the review queue lists it with the High reason, and an
+/// approval that resolves that reason completes it.
 #[tokio::test]
-async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
+async fn a_high_risk_receipt_is_held_for_review_and_completes_on_approval() {
     let Some(backend) = runtime_backend(4).await else {
         return;
     };
@@ -4668,50 +4708,187 @@ async fn a_rejected_receipt_records_the_decision_and_creates_no_review_work() {
         None,
     )
     .await;
-    let tenant = format!("admission-reject-{}", uuid::Uuid::new_v4());
-    let mut env = envelope(uuid::Uuid::new_v4()).await;
-    env.privacy.residual_pii_risk = ResidualPiiRisk::High;
-    let raw = serde_json::to_vec(&env).unwrap();
-    let key = env.submission_id.to_string();
-    let PipelineReceiptResult::Created(created) =
-        submit_registered(&service, receipt(&tenant, &key, &raw, &env, NO_LIMITS))
-            .await
-            .unwrap()
-    else {
-        panic!("a rejected receipt still creates its run record")
-    };
-    assert_eq!(created.admission_decision, "reject");
-    assert_eq!(created.state, PipelineRunState::Complete);
-    assert_eq!(created.next_phase, None);
+    let tenant = format!("admission-high-hold-{}", uuid::Uuid::new_v4());
+    let created = high_risk_and_pending(&service, &tenant).await;
     assert_eq!(
-        submission_status(&backend, &tenant, env.submission_id).await,
-        "rejected"
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "quarantined"
     );
-
     let outcomes = service
         .store()
         .list_outcomes(&tenant, created.run_id)
         .await
         .unwrap();
-    assert_eq!(outcomes.len(), 1, "only the Admission outcome");
-    assert_eq!(outcomes[0].phase, Phase::Admission);
+    assert_eq!(outcomes.len(), 1, "only the Admission outcome so far");
     let decision: AdmissionDecision = serde_json::from_value(outcomes[0].decision.clone()).unwrap();
     match decision {
-        AdmissionDecision::Reject { reason } => {
-            assert_eq!(reason.as_str(), "privacy_risk_rejected");
+        AdmissionDecision::Quarantine { reason } => {
+            assert_eq!(reason.as_str(), HIGH_RISK_ADMISSION_REASON);
         }
-        other => panic!("expected an Admission Reject, got {other:?}"),
+        other => panic!("expected an Admission Quarantine, got {other:?}"),
     }
 
-    // No Review work: nothing is claimable, for this run or the tenant.
+    let parked = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review runs and parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(parked.next_phase, Some(Phase::Review));
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required"),
+        "Admission's hold parks it, not a privacy pass escalation"
+    );
+    assert_eq!(parked.attempt_count, 0, "parking is not a charged attempt");
+    assert_eq!(
+        parked.privacy_pass_outcome,
+        Some(PrivacyPassOutcome::Cleared),
+        "the pass does not escalate a High it was already given"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0,
+        "a held run earns no credit"
+    );
     assert!(
         service
             .process_run(&tenant, created.run_id)
             .await
             .unwrap()
-            .is_none()
+            .is_none(),
+        "a run awaiting review is never claimed on its own"
     );
-    assert!(service.process_one(&tenant).await.unwrap().is_none());
+
+    let store = service.store();
+    let queue = store.list_review_queue(&tenant, 10).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].run.run_id, created.run_id);
+    assert_eq!(
+        queue[0].run.admission_reason.as_deref(),
+        Some(HIGH_RISK_ADMISSION_REASON)
+    );
+
+    let claim = store
+        .claim_review(
+            &tenant,
+            created.run_id,
+            &reviewer_principal_ref('a'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the held run is claimable");
+    let reason = ReasonCode::new(HIGH_RISK_ADMISSION_REASON).unwrap();
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Approve,
+            reason.clone(),
+            vec![reason],
+        )
+        .await
+        .expect("an approval that resolves the High reason succeeds");
+
+    process_until_idle(&service, &tenant).await;
+    let done = store
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run still exists");
+    assert_eq!(done.state, PipelineRunState::Complete);
+    assert_eq!(done.next_phase, None);
+    let outcomes = store.list_outcomes(&tenant, created.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    let decision: ReviewDecision = serde_json::from_value(review_outcome.decision.clone()).unwrap();
+    assert!(matches!(decision, ReviewDecision::Approved { .. }));
+    assert!(
+        outcomes.iter().any(|outcome| outcome.phase == Phase::Score),
+        "an approved High goes on to Score"
+    );
+}
+
+/// PC-D27: a reviewer's rejection of a High-risk run Admission held ends
+/// it -- Review `Rejected`, no Score, no credit, submission `rejected`.
+#[tokio::test]
+async fn a_high_risk_receipt_held_for_review_is_rejected_by_the_reviewer() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(false),
+        None,
+    )
+    .await;
+    let tenant = format!("admission-high-reject-{}", uuid::Uuid::new_v4());
+    let created = high_risk_and_pending(&service, &tenant).await;
+    let parked = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review parks the run awaiting a human assessment");
+    assert_eq!(parked.state, PipelineRunState::AwaitingReview);
+    assert_eq!(
+        parked.last_error_label.as_deref(),
+        Some("review_assessment_required")
+    );
+
+    let store = service.store();
+    let claim = store
+        .claim_review(
+            &tenant,
+            created.run_id,
+            &reviewer_principal_ref('b'),
+            chrono::Duration::minutes(30),
+        )
+        .await
+        .unwrap()
+        .claimed()
+        .expect("the held run is claimable");
+    store
+        .record_review_assessment(
+            &claim,
+            ReviewRecommendation::Reject,
+            ReasonCode::new("reviewer_declined").unwrap(),
+            vec![],
+        )
+        .await
+        .expect("a rejection needs no resolved reason");
+
+    let ended = service
+        .process_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("Review now ends the run with the rejection");
+    assert_eq!(ended.state, PipelineRunState::Complete);
+    assert_eq!(ended.next_phase, None);
+    assert_eq!(
+        submission_status(&backend, &tenant, created.submission_id).await,
+        "rejected"
+    );
+    let outcomes = store.list_outcomes(&tenant, created.run_id).await.unwrap();
+    let review_outcome = outcomes
+        .iter()
+        .find(|outcome| outcome.phase == Phase::Review)
+        .expect("Review committed an outcome");
+    let decision: ReviewDecision = serde_json::from_value(review_outcome.decision.clone()).unwrap();
+    assert!(matches!(decision, ReviewDecision::Rejected { .. }));
+    assert!(
+        !outcomes.iter().any(|outcome| outcome.phase == Phase::Score),
+        "Score never runs after a Review rejection"
+    );
+    assert_eq!(
+        count_credit_ledger_rows_for_run(&backend, &tenant, created.run_id).await,
+        0,
+        "a rejected High earns no credit"
+    );
 }
 
 /// Admission Quarantine (a Medium-risk envelope): the receipt stores the
