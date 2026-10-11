@@ -186,6 +186,31 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         XCTAssertEqual(lever.enabled, true)
     }
 
+    /// The real core, through the router the card uses, against a scratch
+    /// store: `comparisons` with no weeks answers the switch, and a
+    /// `lever_card` reply carries `lever_card_off`, both in shapes the
+    /// bridge decodes. A decode slip here would leave the switch undrawn.
+    func test_theRealCoreAnswersTheLeverSwitchRoundTrip() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let router = InsightsServiceRouter(selection: .custom(root.path))
+        let lever = InsightsLeverCardSwitch(service: { try await router.call($0) })
+
+        await lever.load()
+        XCTAssertEqual(lever.enabled, true, "a fresh store reads the card as on")
+        let off = try await router.call(.init(operation: .init("lever_card", enabled: false)))
+        XCTAssertEqual(off.state?.lever_card_off, true)
+        await lever.load()
+        XCTAssertEqual(lever.enabled, false)
+        await lever.set(true)
+        XCTAssertEqual(lever.enabled, true)
+        XCTAssertNil(lever.refusal)
+        await lever.load()
+        XCTAssertEqual(lever.enabled, true, "the write reached the store")
+    }
+
     // MARK: Source rules
 
     static func card() throws -> String {
@@ -217,6 +242,11 @@ final class InsightsSettingsSwitchesTests: XCTestCase {
         XCTAssertTrue(card.contains("model.refreshSettings()"))
         XCTAssertTrue(card.contains("await lever.load()"))
         XCTAssertEqual(card.components(separatedBy: "GlassToggleStyle(.settings)").count - 1, 3)
+        // No headed card without a switch in it (an older daemon and core).
+        XCTAssertTrue(card.contains(
+            "if model.daemonSettings?.insightsCounterPass != nil\n"
+                + "                || model.daemonSettings?.insightsRecapCardEnabled != nil\n"
+                + "                || lever.enabled != nil {"))
 
         // Drawn under Tools, after its card, inside the modal's gate.
         let content = try SettingsParityTests.text("Views/Settings/GlassSettingsContent.swift")
@@ -287,10 +317,10 @@ private final class LeverCore: @unchecked Sendable {
     }
 
     func call(_ request: InsightsRequest) async throws -> InsightsResponse {
-        lock.lock()
-        sent.append(request)
-        let answer = answers.isEmpty ? nil : answers.removeFirst()
-        lock.unlock()
+        let answer: InsightsResponse? = lock.withLock {
+            sent.append(request)
+            return answers.isEmpty ? nil : answers.removeFirst()
+        }
         guard let answer else { throw InsightsError.invalidResponse }
         return answer
     }

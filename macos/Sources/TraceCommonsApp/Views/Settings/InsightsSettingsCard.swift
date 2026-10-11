@@ -62,7 +62,10 @@ struct InsightsSettingsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if model.daemonSettings != nil || lever.enabled != nil {
+            // No headed card without a switch in it.
+            if model.daemonSettings?.insightsCounterPass != nil
+                || model.daemonSettings?.insightsRecapCardEnabled != nil
+                || lever.enabled != nil {
                 GlassEyebrowCard(text("title")) {
                     VStack(alignment: .leading, spacing: GlassTokens.Space.s3) {
                         if let settings = model.daemonSettings {
