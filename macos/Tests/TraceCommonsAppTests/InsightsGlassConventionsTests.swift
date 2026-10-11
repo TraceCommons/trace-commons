@@ -40,6 +40,17 @@ final class InsightsGlassConventionsTests: XCTestCase {
                 + "                .buttonStyle(GlassButtonStyle(.link))"))
     }
 
+    /// A tab that cannot be used is hidden, not drawn greyed (Ron's #1287
+    /// review): no Spend tab and no "Later" chip (owner decision D5, no
+    /// money in Insights).
+    func test_noSpendTabOrLaterChip() throws {
+        for file in Self.files {
+            let source = try Self.text(file)
+            XCTAssertFalse(source.contains("analytics_tab_spend"), "\(file) draws the Spend tab")
+            XCTAssertFalse(source.contains("analytics_later"), "\(file) draws the Later chip")
+        }
+    }
+
     func test_noLiteralWhiteOrBlackInk() throws {
         for file in Self.files {
             let source = try Self.text(file)

@@ -86,8 +86,10 @@ struct InsightsView: View {
         }
     }
 
-    /// The tab container. Spend is shown disabled with its Later chip.
-    /// The models open and close with the container, not with a tab.
+    /// The tab container. No Spend tab: a tab that cannot be used is
+    /// hidden, not drawn greyed, and Insights shows no money (owner
+    /// decision D5). The models open and close with the container, not with
+    /// a tab.
     private var tabs: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: GlassTokens.Space.s6) {
@@ -98,11 +100,6 @@ struct InsightsView: View {
                     GlassSegment(model.text("analytics_tab_analyze"), value: InsightsTab.analyze),
                 ])
                 .frame(maxWidth: 480)
-                HStack(spacing: GlassTokens.Space.s3) {
-                    Text(model.text("analytics_tab_spend")).foregroundStyle(GlassColor.textTertiary)
-                    GlassChip(glass: model.text("analytics_later"), muted: true)
-                }
-                .accessibilityElement(children: .combine)
                 Spacer()
             }
             .padding(.horizontal, 24).padding(.top, 16)
