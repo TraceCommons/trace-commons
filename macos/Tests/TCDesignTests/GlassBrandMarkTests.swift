@@ -50,9 +50,8 @@ final class GlassBrandMarkTests: XCTestCase {
     }
 
     /// A pass starts and ends with the band off the field, crosses its
-    /// middle halfway, runs top-left to bottom-right, and lies turned
-    /// counterclockwise from square to the diagonal, on a usual map and on
-    /// a very wide one.
+    /// middle halfway, and runs left to right as a slanted band, on a usual
+    /// map and on a very wide one.
     func test_theShimmerCrossesTheDiagonal() {
         for size in [CGSize(width: 400, height: 300), CGSize(width: 1600, height: 220)] {
             let corners = [CGPoint.zero, CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height),
@@ -71,14 +70,13 @@ final class GlassBrandMarkTests: XCTestCase {
             let middle = GlassMapMarks.shimmerBand(sweep: 0.5, size: size)
             let centre = CGPoint(x: size.width / 2, y: size.height / 2)
             XCTAssertEqual(position(centre, middle), 0.5, accuracy: 0.001)
-            // The axis is the diagonal turned counterclockwise: up on
-            // screen, a smaller angle below the horizontal.
+            // It travels rightward, square to a band that leans its top to
+            // the right by the slant.
+            XCTAssertGreaterThan(middle.end.x, middle.start.x)
             let axis = atan2(middle.end.y - middle.start.y, middle.end.x - middle.start.x) * 180 / .pi
-            let diagonal = atan2(size.height, size.width) * 180 / .pi
-            XCTAssertEqual(diagonal - axis, GlassMapMarks.shimmerTilt, accuracy: 0.001)
+            XCTAssertEqual(axis, GlassMapMarks.shimmerSlant, accuracy: 0.001)
             XCTAssertEqual(GlassMapMarks.shimmerBand(sweep: 3.5, size: size).start, middle.start)
         }
-        XCTAssertEqual(GlassMapMarks.shimmerTilt, 15)
     }
 
     /// One dot to a cell, halfway between two marks of a row, every other

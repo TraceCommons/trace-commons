@@ -650,29 +650,26 @@ enum GlassMapMarks {
         return result
     }
 
-    /// How far the shimmer band is turned counterclockwise from square to
-    /// the field's diagonal (owner, 2026-10-10: 5 degrees, then 15).
-    static let shimmerTilt: Double = 15
+    /// How far the shimmer band leans from upright, its top toward the
+    /// right (owner, 2026-10-10: a slanted band crossing left to right, in
+    /// place of a sweep along the diagonal).
+    static let shimmerSlant: Double = 20
 
     /// The shimmer band at `sweep` (its fractional part; each whole step is
-    /// one pass): the gradient's start and end. Its axis is the field's
-    /// diagonal turned `shimmerTilt` degrees counterclockwise on screen, so
-    /// the band lies off square to its path; it travels that axis from
-    /// wholly before the field's nearest corner to wholly past its farthest,
-    /// so a pass starts and ends off the field whatever the field's shape.
+    /// one pass): the gradient's start and end. The band leans
+    /// `shimmerSlant` degrees from upright and travels left to right, from
+    /// wholly before the field's first corner to wholly past its last, so a
+    /// pass starts and ends off the field whatever the field's shape.
     static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
         let progress = CGFloat(sweep - sweep.rounded(.down))
-        let angle = shimmerTilt * .pi / 180
-        // The diagonal turned counterclockwise on screen, where y runs down.
-        let axis = CGVector(
-            dx: size.width * CGFloat(cos(angle)) + size.height * CGFloat(sin(angle)),
-            dy: -size.width * CGFloat(sin(angle)) + size.height * CGFloat(cos(angle)))
-        let length = max(hypot(axis.dx, axis.dy), 1)
-        let unit = CGVector(dx: axis.dx / length, dy: axis.dy / length)
+        let angle = shimmerSlant * .pi / 180
+        // Square to the band: rightward, tipped down by the slant (y runs
+        // down), so the band itself leans with its top to the right.
+        let unit = CGVector(dx: CGFloat(cos(angle)), dy: CGFloat(sin(angle)))
         let corners = [CGPoint.zero, CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height),
                        CGPoint(x: size.width, y: size.height)]
         let along = corners.map { $0.x * unit.dx + $0.y * unit.dy }
-        let half = shimmerHalfWidth * length
+        let half = shimmerHalfWidth * max(hypot(size.width, size.height), 1)
         let from = (along.min() ?? 0) - half
         let to = (along.max() ?? 0) + half
         let centre = from + (to - from) * progress
