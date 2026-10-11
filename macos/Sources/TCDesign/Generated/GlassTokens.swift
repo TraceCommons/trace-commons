@@ -19,7 +19,7 @@ public enum GlassTokens {
         /// Toggles on, the kept data series, selection.
         public static let blue: GlassRGBA = GlassRGBA(0x3A7BD5, alpha: 1, light: GlassRGBA(0x2F6BC4, alpha: 1))
         public static var textPrimary: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF2F2F4, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1)), flat: GlassRGBA(0xF2F3F8, alpha: 1, light: GlassRGBA(0x1D1D1F, alpha: 1))) }
-        public static var textSecondary: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9C9D0, alpha: 1, light: GlassRGBA(0x48484F, alpha: 1)), flat: GlassRGBA(0xF2F3F8, alpha: 0.88, light: GlassRGBA(0x3C3C43, alpha: 1))) }
+        public static var textSecondary: GlassRGBA { GlassTheme.pick(GlassRGBA(0xC9C9D0, alpha: 1, light: GlassRGBA(0x48484F, alpha: 1)), flat: GlassRGBA(0xF2F3F8, alpha: 0.91, light: GlassRGBA(0x36363C, alpha: 1))) }
         /// Raised from #a9a9b0 for 4.5:1 on glass. Light: 4.8:1 or more on every light ground it is drawn on (the scene, a well, the map field); #6a6a71 was 4.12 on mapFieldOuter.
         public static var textTertiary: GlassRGBA { GlassTheme.pick(GlassRGBA(0xB4B4BC, alpha: 1, light: GlassRGBA(0x5C5C63, alpha: 1)), flat: GlassRGBA(0xF2F3F8, alpha: 0.84, light: GlassRGBA(0x3D3D43, alpha: 1))) }
         /// textSecondary under Increase Contrast.
@@ -45,11 +45,11 @@ public enum GlassTokens {
         /// Leaves for an outside model, no proof.
         public static let statusOutside: GlassRGBA = GlassRGBA(0xFF6B6B, alpha: 1, light: GlassRGBA(0xD0342C, alpha: 1))
         /// statusOn as text (a pill label, the submit-done label): 4.5:1 or more on every light ground and on its own tint. Dark is statusOn.
-        public static var statusOnText: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x11613A, alpha: 1)), flat: GlassRGBA(0xACEDBC, alpha: 1, light: GlassRGBA(0x0B4628, alpha: 1))) }
+        public static var statusOnText: GlassRGBA { GlassTheme.pick(GlassRGBA(0x3DDC84, alpha: 1, light: GlassRGBA(0x11613A, alpha: 1)), flat: GlassRGBA(0xC4F2CF, alpha: 1, light: GlassRGBA(0x0A3F24, alpha: 1))) }
         /// statusAsk as text: 4.5:1 or more on every light ground and on its own tint. Dark is statusAsk.
-        public static var statusAskText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x7A4A06, alpha: 1)), flat: GlassRGBA(0xFFD585, alpha: 1, light: GlassRGBA(0x573403, alpha: 1))) }
+        public static var statusAskText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xF5C142, alpha: 1, light: GlassRGBA(0x7A4A06, alpha: 1)), flat: GlassRGBA(0xFFE2AB, alpha: 1, light: GlassRGBA(0x4F2F03, alpha: 1))) }
         /// statusOutside as text: 4.5:1 or more on every light ground and on its own tint. Dark is lighter than statusOutside: on tintOutside over every card stop on paneOpaque it clears 4.73:1, where #ff6b6b was 3.61.
-        public static var statusOutsideText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFF9494, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1)), flat: GlassRGBA(0xFFD3D3, alpha: 1, light: GlassRGBA(0x771814, alpha: 1))) }
+        public static var statusOutsideText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFF9494, alpha: 1, light: GlassRGBA(0xA3221C, alpha: 1)), flat: GlassRGBA(0xFFDEDE, alpha: 1, light: GlassRGBA(0x6B1612, alpha: 1))) }
         /// The destructive button's label (GlassButtonKind.destructive): the outside red lifted so it clears 4.5:1 on the glass control fill over the pane (5.0; statusOutsideText there is 4.1). The same values as menuNoProof. #1146 has no destructive button.
         public static var destructiveText: GlassRGBA { GlassTheme.pick(GlassRGBA(0xFF8A8A, alpha: 1, light: GlassRGBA(0xC62828, alpha: 1)), flat: GlassRGBA(0xFFD0D0, alpha: 1, light: GlassRGBA(0x791313, alpha: 1))) }
         /// The decisions-owed badge behind textOnStatus. Dark is statusOutside; light is lighter so the dark count clears 4.5:1 (4.86), and the fill 3:1 on the pane.

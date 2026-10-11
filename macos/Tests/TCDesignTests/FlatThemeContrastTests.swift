@@ -1,6 +1,8 @@
 import Foundation
 import XCTest
 
+@testable import TCDesign
+
 /// The flat glass theme's text contrast, from the token values
 /// (design-tokens/glass.tokens.json, `themes`).
 ///
@@ -62,6 +64,40 @@ final class FlatThemeContrastTests: XCTestCase {
             let ratio = Self.contrast(Self.over(fill, onSelected), fill)
             XCTAssertGreaterThanOrEqual(ratio, Self.floor, "\(theme): textOnSelected on a selection over \(name)")
         }
+    }
+
+    // MARK: Chips
+
+    /// A status chip's inks: `GlassChip` sets its title in the status's
+    /// text colour, or textSecondary with no status; `.off` (Paused, a
+    /// sample) is textSecondary too.
+    static let chipInks = ["textSecondary", "statusOnText", "statusAskText", "statusOutsideText"]
+
+    /// A flat chip is filled with tintNeutral, on the pane or on a card, and
+    /// its title clears 4.5:1 on that fill over the worst desktop.
+    func test_flatChipInksClearTheFloorOnTheChipFill() throws {
+        for theme in ["flatLight", "flatDark"] {
+            let tint = try Self.colour("tintNeutral", theme: theme)
+            let grounds = Dictionary(uniqueKeysWithValues: try Self.grounds(theme))
+            let chipGrounds = [
+                ("pane + tintNeutral", Self.over(try XCTUnwrap(grounds["pane"]), tint)),
+                ("card + tintNeutral", Self.over(try XCTUnwrap(grounds["card"]), tint)),
+            ]
+            for token in Self.chipInks {
+                let ink = try Self.colour(token, theme: theme)
+                for (name, ground) in chipGrounds {
+                    let ratio = Self.contrast(Self.over(ground, ink), ground)
+                    XCTAssertGreaterThanOrEqual(
+                        ratio, Self.floor,
+                        "\(theme): \(token) on \(name) is \(String(format: "%.2f", ratio)):1 over the worst desktop")
+                }
+            }
+        }
+    }
+
+    /// statusOff is never for text: an off chip's title is textSecondary.
+    func test_anOffChipIsSetInATextSafeInk() {
+        XCTAssertEqual(GlassStatus.off.textRGBA, GlassTokens.Color.textSecondary)
     }
 
     // MARK: Non-text
