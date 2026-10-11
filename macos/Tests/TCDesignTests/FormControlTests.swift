@@ -134,6 +134,24 @@ final class FormControlTests: XCTestCase {
         XCTAssertEqual(choices.map(\.value), [nil, "a", "c"])
     }
 
+    /// The pure functions above are what the row's body runs: Space and
+    /// Return go through `keyPressed`, the arrow keys through `moved`, and
+    /// the picker for assistive tech lists `choices` and passes its change
+    /// through `picked`. Read from the source, as there is no UI driver,
+    /// so a body that stops calling them fails here rather than passing.
+    func test_theRadioRowsBodyRunsItsChooseLogic() throws {
+        let sources = Dictionary(uniqueKeysWithValues: try DesignSources.components())
+        let forms = try XCTUnwrap(sources["Forms.swift"])
+        let start = try XCTUnwrap(forms.range(of: "public struct GlassRadioRow"))
+        let end = try XCTUnwrap(forms.range(of: "// MARK: - Check row", range: start.upperBound..<forms.endIndex))
+        let row = String(forms[start.lowerBound..<end.lowerBound])
+        XCTAssertTrue(row.contains(".onKeyPress(keys: [.space, .return])"), "Space or Return no longer reaches the row")
+        XCTAssertTrue(row.contains("Self.keyPressed(selection)"), "the key press does not take the answer back")
+        XCTAssertTrue(row.contains("Self.moved(selection, by: step, in: options)"), "the arrow keys bypass `moved`")
+        XCTAssertTrue(row.contains("Self.picked($0, selection: selection)"), "the picker ignores a clear")
+        XCTAssertTrue(row.contains("Self.choices(none: none, options: options)"), "the picker offers no none choice")
+    }
+
     func test_theRadioIsTheCheckboxSize() {
         XCTAssertEqual(GlassTokens.Size.radio, GlassTokens.Size.checkbox)
         let radio = size(GlassRadio(checked: true))
