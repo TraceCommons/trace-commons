@@ -624,9 +624,8 @@ the build profile that made it: `compare --corpus` always uses Cargo's
 optimized build. The first one is the run of 2026-10-11:
 [`2026-10-11-pipeline-comparison-10k.md`](../superpowers/reports/2026-10-11-pipeline-comparison-10k.md),
 with its `.json`, `.result.json`, and `.evidence.json` files. Of 10,000
-traces, 9,852 pairs are equal, 148 pairs are permitted (147 by
-`medium_risk_privacy_review` and 1 by `high_risk_admission_reject`), and no
-pair is unexplained.
+traces, 9,853 pairs are equal, 147 pairs are permitted by
+`medium_risk_privacy_review`, and no pair is unexplained.
 
 The full run is long (see [Time and memory](#time-and-memory)):
 
@@ -744,20 +743,20 @@ build and a full cache.
 |---|---|
 | `--limit 100`, no build | 59 s |
 | `--limit 1000`, no build | 6 min 14 s |
-| The full run (10,000 traces), no build | 1 h 4 min 34 s |
+| The full run (10,000 traces), no build | 1 h 4 min 25 s |
 
 - A run that must build the optimized test binary first takes 3.5 to 5
   minutes more.
 - The calibration of the 1,000 bootstrap traces takes about 7 s. Each run
   does it, also with `--limit`.
 - The peak memory of the largest child process of a run with no build is
-  139 MB, for 100 traces and for 1,000 traces, and 141 MB for the full run.
+  139 MB, for 100 traces and for 1,000 traces, and 140 MB for the full run.
 
-The full run of 2026-10-11 took 1 h 4 min 34 s. The two index scans grow
+The full run of 2026-10-11 took 1 h 4 min 25 s. The two index scans grow
 with the number of traces, and so do two reads of the old path: the audit
 log file and the credit event file of the tenant. In that run the growth
-was small: the measured steps of the last 1,000 traces took 398 s, and
-those of the first 1,000 traces took 384 s.
+was small: the measured steps of the last 1,000 traces took 396 s, and
+those of the first 1,000 traces took 383 s.
 
 ### Disk space
 
