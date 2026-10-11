@@ -584,8 +584,9 @@ enum GlassMapMarks {
     /// The tile's cell: two marks to a cell, on its diagonal, so rows
     /// stagger. Opened from 18 (owner, 2026-10-10).
     static let pitch: CGFloat = 21
-    /// A mark's width and height.
-    static let size: CGFloat = 4.2
+    /// A mark's width and height: the explorations' 7pt mark at 0.8
+    /// (owner, 2026-10-10; it was 0.6, 4.2pt).
+    static let size: CGFloat = 5.6
     /// The marks at rest: white over the dark field, black over the light.
     static let ink = GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08))
     /// The marks at the centre of the light: about twice their resting
