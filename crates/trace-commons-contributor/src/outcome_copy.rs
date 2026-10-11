@@ -4,6 +4,9 @@ pub const VERDICT_QUESTION: &str = "Did this trace do what you asked?";
 pub const VERDICT_WORKED: &str = "Worked";
 pub const VERDICT_PARTLY: &str = "Partly";
 pub const VERDICT_FAILED: &str = "Failed";
+/// The verdict's empty answer, as assistive tech offers it beside the three:
+/// the verdict is optional, and choosing this takes an answer back.
+pub const VERDICT_NONE: &str = "No answer";
 pub const VERDICT_CAPTION: &str = "Optional. Recorded with the trace; not shown in the preview.";
 pub const CORRECTION_QUESTION: &str = "What did it get wrong?";
 pub const CORRECTION_PLACEHOLDER: &str = "Optional";
@@ -21,6 +24,7 @@ pub struct OutcomeCopy {
     pub worked: &'static str,
     pub partly: &'static str,
     pub failed: &'static str,
+    pub verdict_none: &'static str,
     pub verdict_caption: &'static str,
     pub correction_question: &'static str,
     pub correction_placeholder: &'static str,
@@ -39,6 +43,7 @@ pub fn outcome_copy() -> OutcomeCopy {
         worked: VERDICT_WORKED,
         partly: VERDICT_PARTLY,
         failed: VERDICT_FAILED,
+        verdict_none: VERDICT_NONE,
         verdict_caption: VERDICT_CAPTION,
         correction_question: CORRECTION_QUESTION,
         correction_placeholder: CORRECTION_PLACEHOLDER,

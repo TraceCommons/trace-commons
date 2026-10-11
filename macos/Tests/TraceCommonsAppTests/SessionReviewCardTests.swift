@@ -323,6 +323,8 @@ final class SessionReviewCardTests: XCTestCase {
         let card = try Self.text(Self.card)
         // The answers are radios, one at most (owner, 2026-10-10).
         XCTAssertTrue(card.contains("GlassRadioRow(\n                outcome.verdictQuestion, selection: draft.verdict,"))
+        // Assistive tech's "none" choice is named in the core's words.
+        XCTAssertTrue(card.contains("none: outcome.verdictNone"), "the verdict's none choice is not the core's word")
         XCTAssertFalse(card.contains(".buttonStyle(GlassButtonStyle(.glass, selected: selected))"), "the pressed-button answers are back")
         XCTAssertFalse(card.contains(".glassTier(selected ? .controlSelected : .control)"), "the custom verdict pill is back")
         XCTAssertFalse(card.contains("Image(systemName: \"checkmark\")"), "the chosen answer is a radio, not a mark")

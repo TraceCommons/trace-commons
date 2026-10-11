@@ -175,21 +175,58 @@ public struct GlassRadioGroup<Value: Hashable>: View {
 /// One choice of a few short ones, as radios in a row (owner, 2026-10-10):
 /// an optional answer, so nothing is chosen until the person picks one,
 /// and picking the chosen one again clears it. One keyboard stop; the
-/// arrow keys move the choice. To assistive tech it is a native
-/// radio-group picker with a "none" choice, so the system says the choice.
+/// arrow keys move the choice, and Space or Return presses the chosen one
+/// again, as the pointer does. To assistive tech it is a native
+/// radio-group picker with a "none" choice, so the system says the choice
+/// and the answer can be taken back.
 public struct GlassRadioRow<Value: Hashable>: View {
     private let label: String
     private let selection: Value?
     private let options: [GlassRadioOption<Value>]
+    private let none: String
     private let choose: (Value) -> Void
 
     /// `choose` receives the option pressed; the caller decides what a
-    /// press on the chosen one does.
-    public init(_ label: String, selection: Value?, options: [GlassRadioOption<Value>], choose: @escaping (Value) -> Void) {
+    /// press on the chosen one does. `none` names the picker's empty
+    /// choice for assistive tech.
+    public init(
+        _ label: String, selection: Value?, options: [GlassRadioOption<Value>], none: String,
+        choose: @escaping (Value) -> Void
+    ) {
         self.label = label
         self.selection = selection
         self.options = options
+        self.none = none
         self.choose = choose
+    }
+
+    /// One of the picker's choices: "none" (`value` nil) or an answer.
+    struct Choice: Hashable {
+        let title: String
+        let value: Value?
+    }
+
+    /// The picker's choices: "none" first, then each answer.
+    static func choices(none: String, options: [GlassRadioOption<Value>]) -> [Choice] {
+        [Choice(title: none, value: nil)] + options.map { Choice(title: $0.title, value: $0.value) }
+    }
+
+    /// What Space or Return sends to `choose`: the chosen answer again,
+    /// which the caller takes back, or nothing when none is chosen.
+    static func keyPressed(_ selection: Value?) -> Value? { selection }
+
+    /// What the picker's change sends to `choose`: the answer picked, or
+    /// for "none" the chosen answer again, which the caller takes back;
+    /// nothing when the pick is no change.
+    static func picked(_ picked: Value?, selection: Value?) -> Value? {
+        picked == selection ? nil : picked ?? selection
+    }
+
+    /// What an arrow key sends to `choose`: the next enabled answer, or
+    /// with nothing chosen the first enabled one.
+    static func moved(_ selection: Value?, by step: Int, in options: [GlassRadioOption<Value>]) -> Value? {
+        guard let current = selection ?? options.first(where: \.isEnabled)?.value else { return nil }
+        return GlassRadioGroup.moved(current, by: selection == nil ? 0 : step, in: options)
     }
 
     public var body: some View {
@@ -216,20 +253,25 @@ public struct GlassRadioRow<Value: Hashable>: View {
         }
         .focusable()
         .onMoveCommand { direction in
-            let current = selection ?? options.first(where: \.isEnabled)?.value
-            guard let current else { return }
+            let step: Int
             switch direction {
-            case .down, .right: choose(GlassRadioGroup.moved(current, by: selection == nil ? 0 : 1, in: options))
-            case .up, .left: choose(GlassRadioGroup.moved(current, by: selection == nil ? 0 : -1, in: options))
-            @unknown default: break
+            case .down, .right: step = 1
+            case .up, .left: step = -1
+            @unknown default: return
             }
+            if let next = Self.moved(selection, by: step, in: options) { choose(next) }
+        }
+        .onKeyPress(keys: [.space, .return]) { _ in
+            guard let pressed = Self.keyPressed(selection) else { return .ignored }
+            choose(pressed)
+            return .handled
         }
         .accessibilityRepresentation {
             Picker(label, selection: Binding<Value?>(
                 get: { selection },
-                set: { if let value = $0, value != selection { choose(value) } })) {
-                ForEach(options) { option in
-                    Text(option.title).tag(Optional(option.value))
+                set: { if let value = Self.picked($0, selection: selection) { choose(value) } })) {
+                ForEach(Self.choices(none: none, options: options), id: \.self) { choice in
+                    Text(choice.title).tag(choice.value)
                 }
             }
             .pickerStyle(.radioGroup)

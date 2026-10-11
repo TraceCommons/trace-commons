@@ -90,6 +90,50 @@ final class FormControlTests: XCTestCase {
         XCTAssertEqual(GlassRadioGroup<String>.moved("b", by: 1, in: none), "b")
     }
 
+    /// The radio row's answer is optional, and the keyboard and assistive
+    /// tech can take it back as the pointer can: Space or Return on the
+    /// row presses the chosen radio again, and the picker it reads as
+    /// passes a "none" choice through as that same press.
+    func test_aRadioRowsAnswerCanBeTakenBackWithoutAPointer() {
+        typealias Row = GlassRadioRow<String>
+        // Space or Return: the chosen answer again, which the caller takes
+        // back; with nothing chosen there is nothing to take back.
+        XCTAssertEqual(Row.keyPressed("b"), "b")
+        XCTAssertNil(Row.keyPressed(nil))
+        // The picker: none sends the chosen answer again, another answer
+        // is sent as it is, and the chosen one again is no change.
+        XCTAssertEqual(Row.picked(nil, selection: "b"), "b")
+        XCTAssertEqual(Row.picked("c", selection: "b"), "c")
+        XCTAssertEqual(Row.picked("c", selection: nil), "c")
+        XCTAssertNil(Row.picked("b", selection: "b"))
+        XCTAssertNil(Row.picked(nil, selection: nil))
+    }
+
+    /// The arrow keys move the row's answer through the enabled radios;
+    /// with nothing chosen, the first one is chosen.
+    func test_theArrowKeysMoveARadioRowsAnswer() {
+        typealias Row = GlassRadioRow<String>
+        let options = [
+            GlassRadioOption("A", value: "a"),
+            GlassRadioOption("B", value: "b", isEnabled: false),
+            GlassRadioOption("C", value: "c"),
+        ]
+        XCTAssertEqual(Row.moved(nil, by: 1, in: options), "a")
+        XCTAssertEqual(Row.moved(nil, by: -1, in: options), "a")
+        XCTAssertEqual(Row.moved("a", by: 1, in: options), "c")
+        XCTAssertEqual(Row.moved("a", by: -1, in: options), "c")
+        XCTAssertNil(Row.moved(nil, by: 1, in: [GlassRadioOption("B", value: "b", isEnabled: false)]))
+    }
+
+    /// To assistive tech the row is a radio-group picker that offers
+    /// "none" first, under the caller's word, then each answer.
+    func test_aRadioRowsPickerOffersNone() {
+        let choices = GlassRadioRow<String>.choices(
+            none: "Nothing", options: [GlassRadioOption("A", value: "a"), GlassRadioOption("C", value: "c")])
+        XCTAssertEqual(choices.map(\.title), ["Nothing", "A", "C"])
+        XCTAssertEqual(choices.map(\.value), [nil, "a", "c"])
+    }
+
     func test_theRadioIsTheCheckboxSize() {
         XCTAssertEqual(GlassTokens.Size.radio, GlassTokens.Size.checkbox)
         let radio = size(GlassRadio(checked: true))

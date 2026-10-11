@@ -313,7 +313,8 @@ struct SessionReviewCard: View {
                     GlassRadioOption(outcome.worked, value: ContributorVerdict.worked),
                     GlassRadioOption(outcome.partly, value: ContributorVerdict.partly),
                     GlassRadioOption(outcome.failed, value: ContributorVerdict.failed),
-                ]
+                ],
+                none: outcome.verdictNone
             ) { option in
                 var next = draft
                 next.choose(option)
