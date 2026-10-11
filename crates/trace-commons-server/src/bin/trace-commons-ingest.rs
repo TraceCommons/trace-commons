@@ -1778,6 +1778,9 @@ struct AppState {
     /// pass) to `pipeline_runtime::PIPELINE_WORKER_MAX_CONCURRENCY`
     /// (`pipeline_runtime::spawn_pipeline_worker`).
     pipeline_worker_concurrency: usize,
+    /// The tenants a pipeline receipt woke for the concurrent worker
+    /// (`pipeline_runtime::PipelineWorkerWake`).
+    pipeline_worker_wake: Arc<pipeline_runtime::PipelineWorkerWake>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4754,6 +4757,7 @@ impl AppState {
             pipeline_default_routing,
             pipeline_worker_pass_stats: Arc::default(),
             pipeline_worker_concurrency,
+            pipeline_worker_wake: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -15169,6 +15173,7 @@ async fn route_pipeline_receipt(
         .map_err(pipeline_receipt_error)?;
     match result {
         PipelineReceiptResult::Created(run) => {
+            state.pipeline_worker_wake.wake(tenant.tenant_id());
             // `main`'s upload appends this event after its submission writes,
             // and answers 500 when the append fails. The receipt has
             // committed and the run exists; a retry replays and appends

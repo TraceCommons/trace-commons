@@ -19,9 +19,9 @@ use super::pipeline_http_pg_tests::{
 };
 use crate::pipeline_default_routing::PipelineWorkerPassStats;
 use crate::pipeline_runtime::{
-    PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL, PipelineWorkerStep,
-    drain_pipeline_tenant_runs_concurrently, parse_pipeline_worker_concurrency,
-    run_concurrent_pipeline_worker,
+    PIPELINE_WORKER_CONCURRENCY_INVALID_LABEL, PipelineFollowUpCadence, PipelineWorkerStep,
+    PipelineWorkerWake, drain_pipeline_tenant_runs_concurrently, drain_tenant_then_follow_ups,
+    parse_pipeline_worker_concurrency, run_concurrent_pipeline_worker, run_pipeline_worker_pass,
 };
 use trace_commons_gate_api::SettlementAdapter;
 use trace_commons_gate_api::pipeline::InstrumentId;
@@ -301,20 +301,26 @@ async fn the_supervisor_drains_other_tenants_while_one_is_stuck() {
                             "tenant-a" => {
                                 a_drains.fetch_add(1, Ordering::SeqCst);
                                 let _ = release_a.acquire().await;
+                                false
                             }
                             "tenant-b" => {
+                                // Busy: a drain that advanced runs again on
+                                // the next tick.
                                 b_drains.fetch_add(1, Ordering::SeqCst);
+                                true
                             }
                             _ => {
                                 if panicking.load(Ordering::SeqCst) {
                                     panic!("test-only panic in a tenant drain");
                                 }
+                                false
                             }
                         }
                     }
                 },
                 ready,
                 stats,
+                Arc::default(),
                 stop_rx,
             )
             .await;
@@ -366,6 +372,284 @@ async fn the_supervisor_drains_other_tenants_while_one_is_stuck() {
         .unwrap();
 }
 
+/// Review of #1356, finding 2: an idle tenant costs one claim even when the
+/// pool is busy. The ramp counts from when the first lane holds its permit
+/// and is claiming, not from the drain's start, so a drain that waited for
+/// a permit does not start its other lanes before its first claim answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_idle_tenant_costs_one_claim_while_the_pool_is_busy() {
+    let permits = Arc::new(tokio::sync::Semaphore::new(2));
+    let held = permits.clone().acquire_many_owned(2).await.unwrap();
+    tokio::spawn(async move {
+        tokio::time::sleep(StdDuration::from_millis(400)).await;
+        drop(held);
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let step_calls = calls.clone();
+    let advanced = drain_pipeline_tenant_runs_concurrently(
+        "tenant-a".to_string(),
+        2,
+        permits,
+        stop_rx,
+        move |_tenant_id| {
+            let calls = step_calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+                PipelineWorkerStep::Idle
+            }
+        },
+    )
+    .await;
+    assert_eq!(advanced, 0);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "one claim for an idle tenant"
+    );
+}
+
+/// Review of #1356, finding 3: a drain whose stop fired while its runs ran
+/// does not go on to its follow-up steps, so a shutdown is not held by
+/// every in-flight tenant's follow-ups.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_stopped_during_its_runs_skips_its_follow_ups() {
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let stop_tx = Arc::new(stop_tx);
+    let follow_ups = Arc::new(AtomicUsize::new(0));
+    let step_stop = stop_tx.clone();
+    let follow_up_count = follow_ups.clone();
+    let advanced = drain_tenant_then_follow_ups(
+        "tenant-a".to_string(),
+        2,
+        Arc::new(tokio::sync::Semaphore::new(2)),
+        stop_rx,
+        move |_tenant_id| {
+            let stop = step_stop.clone();
+            async move {
+                stop.send_replace(true);
+                PipelineWorkerStep::Advanced
+            }
+        },
+        move || async move {
+            follow_up_count.fetch_add(1, Ordering::SeqCst);
+        },
+    )
+    .await;
+    assert!(advanced, "the run in flight finished");
+    assert_eq!(
+        follow_ups.load(Ordering::SeqCst),
+        0,
+        "no follow-up steps after stop"
+    );
+}
+
+/// Review of #1356, finding 3, second form: stop fires while the drain
+/// waits for its follow-up permit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_drain_stopped_while_waiting_for_its_follow_up_permit_skips_them() {
+    let permits = Arc::new(tokio::sync::Semaphore::new(1));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let follow_ups = Arc::new(AtomicUsize::new(0));
+    let follow_up_count = follow_ups.clone();
+    let step_permits = permits.clone();
+    let held = Arc::new(std::sync::Mutex::new(None));
+    let step_held = held.clone();
+    let drain = tokio::spawn(drain_tenant_then_follow_ups(
+        "tenant-a".to_string(),
+        1,
+        permits.clone(),
+        stop_rx,
+        move |_tenant_id| {
+            let (permits, held) = (step_permits.clone(), step_held.clone());
+            async move {
+                // Another tenant queues for the only permit before this run
+                // gives it back, and holds it.
+                tokio::spawn(async move {
+                    let permit = permits.acquire_owned().await.unwrap();
+                    *held.lock().unwrap() = Some(permit);
+                });
+                tokio::time::sleep(StdDuration::from_millis(50)).await;
+                PipelineWorkerStep::Idle
+            }
+        },
+        move || async move {
+            follow_up_count.fetch_add(1, Ordering::SeqCst);
+        },
+    ));
+    eventually("the other tenant holds the permit", || {
+        held.lock().unwrap().is_some()
+    })
+    .await;
+    stop_tx.send_replace(true);
+    drop(held.lock().unwrap().take());
+    tokio::time::timeout(StdDuration::from_secs(5), drain)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(follow_ups.load(Ordering::SeqCst), 0);
+}
+
+/// Review of #1356, finding 1: a tenant whose last drain found nothing to
+/// do is not drained again on every 200 ms tick, but a receipt for it
+/// (`PipelineWorkerWake`) brings it back at once, and a tenant whose drain
+/// did work is drained again on the next tick.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_concurrent_worker_backs_off_an_idle_tenant_until_a_receipt_wakes_it() {
+    let drains = Arc::new(std::sync::Mutex::new(BTreeMap::<String, usize>::new()));
+    let wake = Arc::new(PipelineWorkerWake::default());
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let supervisor = {
+        let drains = drains.clone();
+        let wake = wake.clone();
+        tokio::spawn(run_concurrent_pipeline_worker(
+            2,
+            || async { Ok(()) },
+            || vec!["tenant-busy".to_string(), "tenant-idle".to_string()],
+            move |tenant_id, _permits| {
+                *drains.lock().unwrap().entry(tenant_id.clone()).or_default() += 1;
+                async move { tenant_id == "tenant-busy" }
+            },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(PipelineWorkerPassStats::default()),
+            wake,
+            stop_rx,
+        ))
+    };
+    let count = |tenant: &str| drains.lock().unwrap().get(tenant).copied().unwrap_or(0);
+    tokio::time::sleep(StdDuration::from_millis(1500)).await;
+    let (busy, idle) = (count("tenant-busy"), count("tenant-idle"));
+    assert!(busy >= 5, "a busy tenant is drained on every tick: {busy}");
+    assert!(
+        idle <= 2,
+        "an idle tenant backs off: {idle} drains in 1.5 s"
+    );
+    wake.wake("tenant-idle");
+    let woken_at = std::time::Instant::now();
+    eventually("the woken tenant is drained", || {
+        count("tenant-idle") > idle
+    })
+    .await;
+    assert!(
+        woken_at.elapsed() < StdDuration::from_millis(500),
+        "the wake did not wait out the backoff"
+    );
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(StdDuration::from_secs(5), supervisor)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// Review of #1356, finding 1, pinned: idle tenants cost the concurrent
+/// worker at concurrency 2 no more database work than the sequential pass.
+/// Each test-double operation -- a claim, or one of the two sweeps --
+/// takes 5 ms, as a small query does. The sequential pass runs a claim and
+/// both sweeps for every tenant on every pass
+/// (`PipelineWorkerSweeps::EveryPass`); the concurrent worker's sweeps go
+/// through the real cadence gate (`PipelineFollowUpCadence::sweeps_due`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn idle_tenants_cost_no_more_at_concurrency_two_than_the_sequential_pass() {
+    const TENANTS: usize = 20;
+    const WINDOW: StdDuration = StdDuration::from_secs(3);
+    const OPERATION: StdDuration = StdDuration::from_millis(5);
+    let tenants = (0..TENANTS)
+        .map(|index| format!("tenant-idle-{index:02}"))
+        .collect::<Vec<_>>();
+
+    // The sequential pass, as `spawn_pipeline_worker` runs it at 1.
+    let sequential = Arc::new(AtomicUsize::new(0));
+    let ready = AtomicBool::new(false);
+    let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let started = std::time::Instant::now();
+    while started.elapsed() < WINDOW {
+        let operations = sequential.clone();
+        run_pipeline_worker_pass(
+            async { Ok(()) },
+            tenants.clone(),
+            move |_tenant_id| {
+                let operations = operations.clone();
+                async move {
+                    // The claim, then the receipt and attempt sweeps.
+                    for _ in 0..3 {
+                        operations.fetch_add(1, Ordering::SeqCst);
+                        tokio::time::sleep(OPERATION).await;
+                    }
+                }
+            },
+            &ready,
+            &stop_rx,
+        )
+        .await;
+        tokio::time::sleep(StdDuration::from_millis(200)).await;
+    }
+    let sequential = sequential.load(Ordering::SeqCst);
+
+    // The concurrent worker at 2, over the same window.
+    let concurrent = Arc::new(AtomicUsize::new(0));
+    let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let supervisor = {
+        let (operations, tenants) = (concurrent.clone(), tenants.clone());
+        let drain_stop = stop_rx.clone();
+        tokio::spawn(run_concurrent_pipeline_worker(
+            2,
+            || async { Ok(()) },
+            move || tenants.clone(),
+            move |tenant_id, permits| {
+                let (claims, sweeps, cadence) =
+                    (operations.clone(), operations.clone(), cadence.clone());
+                drain_tenant_then_follow_ups(
+                    tenant_id.clone(),
+                    2,
+                    permits,
+                    drain_stop.clone(),
+                    move |_tenant_id| {
+                        let claims = claims.clone();
+                        async move {
+                            claims.fetch_add(1, Ordering::SeqCst);
+                            tokio::time::sleep(OPERATION).await;
+                            PipelineWorkerStep::Idle
+                        }
+                    },
+                    move || async move {
+                        let due = cadence
+                            .lock()
+                            .unwrap()
+                            .sweeps_due(&tenant_id, std::time::Instant::now());
+                        if due {
+                            for _ in 0..2 {
+                                sweeps.fetch_add(1, Ordering::SeqCst);
+                                tokio::time::sleep(OPERATION).await;
+                            }
+                        }
+                    },
+                )
+            },
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(PipelineWorkerPassStats::default()),
+            Arc::default(),
+            stop_rx,
+        ))
+    };
+    tokio::time::sleep(WINDOW).await;
+    let concurrent_count = concurrent.load(Ordering::SeqCst);
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(StdDuration::from_secs(5), supervisor)
+        .await
+        .unwrap()
+        .unwrap();
+    println!(
+        "idle operations over {WINDOW:?} for {TENANTS} tenants: sequential {sequential}, \
+         concurrency 2 {concurrent_count}"
+    );
+    assert!(
+        concurrent_count <= sequential,
+        "concurrency 2 ran {concurrent_count} idle operations, the sequential pass {sequential}"
+    );
+}
+
 /// A failing readiness probe reports not ready.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_supervisor_reports_not_ready_when_its_probe_fails() {
@@ -377,9 +661,10 @@ async fn the_supervisor_reports_not_ready_when_its_probe_fails() {
             2,
             || async { Err(anyhow::anyhow!("probe failed (test double)")) },
             Vec::new,
-            |_tenant_id, _permits| async {},
+            |_tenant_id, _permits| async { false },
             ready,
             Arc::new(PipelineWorkerPassStats::default()),
+            Arc::default(),
             stop_rx,
         ))
     };
@@ -853,6 +1138,66 @@ async fn forty_runs_across_three_tenants_each_complete_once() {
                 )
                 .await,
             "each included run's entries, once"
+        );
+    }
+}
+
+/// Review of #1356, finding 1, against PostgreSQL: the database's committed
+/// transactions over a window with only idle tenants, for the sequential
+/// pass and for concurrency 2 and 4. Statistics reach `pg_stat_database`
+/// up to 10 s late, so each read waits for them; a measurement, not a check
+/// (the check is
+/// `idle_tenants_cost_no_more_at_concurrency_two_than_the_sequential_pass`).
+/// Run by hand:
+///
+/// `cargo test -p trace-commons-server --bin trace-commons-ingest --
+/// --ignored --nocapture measure_idle_worker_commits_by_concurrency`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement for the operator docs, not a check"]
+async fn measure_idle_worker_commits_by_concurrency() {
+    const WINDOW: StdDuration = StdDuration::from_secs(10);
+    const STATS_SETTLE: StdDuration = StdDuration::from_secs(12);
+    let suffix = Uuid::new_v4().simple().to_string();
+    let tenants = (0..100)
+        .map(|index| format!("tenant-worker-conc-idle-{suffix}-{index:03}"))
+        .collect::<Vec<_>>();
+    let names = tenants.iter().map(String::as_str).collect::<Vec<_>>();
+    let Some(mut fixture) =
+        WorkerFixture::new(SlowPrivacyBoundary::new(StdDuration::ZERO), &names, 1).await
+    else {
+        return;
+    };
+    let url = super::pipeline_http_pg_tests::pipeline_http_database_url()
+        .await
+        .expect("the same variable runtime_backend read is set");
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .unwrap();
+    tokio::spawn(connection);
+    let commits = || async {
+        tokio::time::sleep(STATS_SETTLE).await;
+        client
+            .query_one(
+                "SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0)
+    };
+    for concurrency in [1, 2, 4] {
+        Arc::make_mut(&mut fixture.state).pipeline_worker_concurrency = concurrency;
+        let before = commits().await;
+        let worker = pipeline_runtime::spawn_pipeline_worker(fixture.state.clone())
+            .expect("a runtime, so a worker");
+        tokio::time::sleep(WINDOW).await;
+        stop_worker(worker).await;
+        let after = commits().await;
+        println!(
+            "idle_worker_commits tenants={} concurrency={concurrency} window_s={} commits={}",
+            tenants.len(),
+            WINDOW.as_secs(),
+            after - before
         );
     }
 }
