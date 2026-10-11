@@ -130,6 +130,9 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     private let refresh: Refresh?
     private let accessory: Accessory
     private let content: Content
+    /// Whether the whole card is a control (its caller wraps it in one): it
+    /// then lifts under the pointer, as an interactive `GlassCard` does.
+    private let interactive: Bool
     @State private var infoOpen = false
 
     /// The icon's point size, and the column it sits in.
@@ -149,8 +152,10 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     /// out; `info` goes behind the info icon after it.
     public init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
+        interactive: Bool = false,
         @ViewBuilder accessory: () -> Accessory, @ViewBuilder content: () -> Content
     ) {
+        self.interactive = interactive
         self.systemImage = systemImage
         self.title = title
         self.subtitle = subtitle.filter { !$0.isEmpty }
@@ -161,7 +166,7 @@ public struct GlassIconCard<Accessory: View, Content: View>: View {
     }
 
     public var body: some View {
-        GlassCard {
+        GlassCard(interactive: interactive) {
             VStack(alignment: .leading, spacing: GlassTokens.Space.s4) {
                 HStack(alignment: .center, spacing: GlassTokens.Space.s5) {
                     HStack(alignment: .iconTitleTop, spacing: GlassTokens.Space.s5) {
@@ -268,10 +273,10 @@ public extension GlassIconCard where Content == EmptyView {
     /// A head-only card: `trailing` is the control on its right.
     init(
         systemImage: String, title: String, subtitle: [String] = [], info: String? = nil, refresh: Refresh? = nil,
-        @ViewBuilder trailing: () -> Accessory
+        interactive: Bool = false, @ViewBuilder trailing: () -> Accessory
     ) {
         self.init(systemImage: systemImage, title: title, subtitle: subtitle, info: info, refresh: refresh,
-                  accessory: trailing) { EmptyView() }
+                  interactive: interactive, accessory: trailing) { EmptyView() }
     }
 }
 

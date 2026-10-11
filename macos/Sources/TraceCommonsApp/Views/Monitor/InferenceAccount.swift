@@ -110,22 +110,29 @@ struct PrivateAISettingsPanels: View {
 /// The card at the foot of the Private AI tab that opens the Private AI
 /// section of Settings, where the standard settings, the local tools and
 /// the connection are (owner, 2026-10-10): a medium gear on the left, the
-/// title over its sentence, and the button on the right, centred on the
-/// card's height. Every word is the core's.
+/// title over its sentence, and a chevron on the right, centred on the
+/// card's height. The whole card opens the section, as Home's cards do
+/// (owner, 2026-10-10: a chevron, no Open button); VoiceOver hears the
+/// core's name for where it goes. Every word is the core's.
 struct PrivateAISettingsLinkCard: View {
     let copy: PrivateInferenceCopy
     let onOpen: () -> Void
 
     var body: some View {
-        GlassIconCard(
-            systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
-            trailing: {
-                Button(copy.panelSettingsOpen, action: onOpen)
-                    .buttonStyle(GlassButtonStyle(.glass, small: true))
-                    .lineLimit(1)
-                    .fixedSize()
-                    .accessibilityLabel(copy.panelSettingsOpenAccessibility)
-            })
+        Button(action: onOpen) {
+            GlassIconCard(
+                systemImage: "gearshape", title: copy.panelSettingsTitle, subtitle: [copy.panelSettingsBody],
+                interactive: true,
+                trailing: {
+                    // Home's chevron (`HomeChevron`), drawn here too.
+                    Image(systemName: "chevron.right")
+                        .glassGlyph(10, weight: .semibold)
+                        .foregroundStyle(GlassColor.textTertiary)
+                        .accessibilityHidden(true)
+                })
+        }
+        .buttonStyle(GlassPressStyle())
+        .accessibilityHint(copy.panelSettingsOpenAccessibility)
     }
 }
 

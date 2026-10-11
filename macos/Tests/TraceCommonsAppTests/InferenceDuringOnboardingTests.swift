@@ -30,7 +30,8 @@ final class InferenceDuringOnboardingTests: XCTestCase {
             InferenceAccountSection(store: InferenceStore(client: nil))
                 .environmentObject(model)
                 .environment(\.colorScheme, .light)))
-        XCTAssertTrue(tab.contains(copy.panelSettingsOpen),
+        // The foot card is the way there: the whole card opens the section.
+        XCTAssertTrue(tab.contains(copy.panelSettingsTitle),
                       "the Private AI tab must lead to sign-in before Commons enrollment")
         let settings = try recognizedWords(render(
             PrivateAISettingsPanels(store: InferenceStore(client: nil))
