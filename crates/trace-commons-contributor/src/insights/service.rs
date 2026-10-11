@@ -1644,7 +1644,7 @@ mod tests {
             ),
             (
                 "analytics_route_split",
-                "{v} verified \u{b7} {u} not verified \u{b7} {o} outside \u{b7} {n} unrecorded proxy tokens",
+                "Tokens: {v} verified \u{b7} {u} not verified \u{b7} {f} check failed \u{b7} {o} outside \u{b7} {n} not recorded",
             ),
             (
                 "analytics_route_measure_note",
@@ -1710,6 +1710,18 @@ mod tests {
                 assert!(ANALYTICS_PLACEHOLDERS.contains(&name), "{key}: {{{name}}}");
                 rest = &rest[close + 1..];
             }
+        }
+        // The route split has a slot for each of the five buckets, the
+        // failed-check one included (Ron's review of #1287), so the line is
+        // shown whatever the buckets hold and never reads as if nothing
+        // went to one it leaves out.
+        let split = ANALYTICS_COPY
+            .iter()
+            .find(|(key, _)| *key == "analytics_route_split")
+            .unwrap()
+            .1;
+        for slot in ["{v}", "{u}", "{f}", "{o}", "{n}"] {
+            assert_eq!(split.matches(slot).count(), 1, "route split: {slot}");
         }
         // Every coverage reason and state has its words, so a shell never
         // shows a wire label.

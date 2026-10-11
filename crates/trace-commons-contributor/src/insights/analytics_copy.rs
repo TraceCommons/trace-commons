@@ -47,7 +47,8 @@ pub const ANALYTICS_PLACEHOLDERS: &[&str] = &[
     "span",
     "label",
     "tokens",
-    // The route split's verified and outside proxy tokens.
+    // The route split's verified and outside proxy tokens. Its
+    // failed-check tokens are `f`, shared with the file counts.
     "v",
     "o",
 ];
@@ -222,7 +223,7 @@ pub const ANALYTICS_COPY: &[(&str, &str)] = &[
     ),
     (
         "analytics_route_split",
-        "{v} verified · {u} not verified · {o} outside · {n} unrecorded proxy tokens",
+        "Tokens: {v} verified · {u} not verified · {f} check failed · {o} outside · {n} not recorded",
     ),
     (
         "analytics_route_measure_note",

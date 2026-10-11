@@ -892,19 +892,18 @@ enum InsightsRouteWords {
         }
     }
 
-    /// The split in proxy tokens, each bucket the daemon's figure or the
-    /// dash. `nil` with no figures (no proxy record), and while the
-    /// failed-check bucket holds tokens or an unknown number of them: the
-    /// line has no place for that bucket, and without it the line would
-    /// read as if nothing went there.
+    /// The split in proxy tokens, each of the five buckets the daemon's
+    /// figure or the dash, the failed-check one included. `nil` only with
+    /// no figures (no proxy record).
     static func split(_ routing: DaemonData.InsightsWeekRouting?, copy: [String: String]) -> String? {
-        guard let tokens = routing?.tokens, tokens.checkFailed == 0 else { return nil }
+        guard let tokens = routing?.tokens else { return nil }
         let figure = { (value: Int64?) in
             InsightsOverviewWords.figure(value.flatMap { UInt64(exactly: $0) }, copy: copy)
         }
         return InsightsOverviewWords.fill(text("analytics_route_split", copy), [
             "v": figure(tokens.verified),
             "u": figure(tokens.routedUnverified),
+            "f": figure(tokens.checkFailed),
             "o": figure(tokens.outside),
             "n": figure(tokens.unrecorded),
         ])

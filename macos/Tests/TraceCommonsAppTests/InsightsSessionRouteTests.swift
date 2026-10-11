@@ -200,18 +200,26 @@ final class InsightsSessionRouteTests: XCTestCase {
         let mixed = try XCTUnwrap(rows.compactMap(\.routing).first { $0.category == "mixed" })
         let line = try XCTUnwrap(InsightsRouteWords.split(mixed, copy: copy))
         let template = try XCTUnwrap(copy["analytics_route_split"])
-        XCTAssertEqual(line, InsightsOverviewWords.fill(template, ["v": "110", "u": "0", "o": "\u{2014}", "n": "0"]))
-        XCTAssertTrue(line.hasSuffix("proxy tokens"))
+        XCTAssertEqual(line, InsightsOverviewWords.fill(template,
+                                                         ["v": "110", "u": "0", "f": "0", "o": "\u{2014}", "n": "0"]))
+        XCTAssertFalse(line.contains("{"), "every slot filled: \(line)")
     }
 
-    func testTheSplitIsLeftOutWhileCheckFailedTokensHaveNoPlaceInIt() throws {
-        // The split carries four of the five buckets; a session whose
-        // failed-check calls hold tokens, or an unknown number of them,
-        // draws no split rather than one that reads as nothing there.
+    func testTheSplitIsShownWhateverTheCheckFailedTokens() throws {
+        // The split carries all five buckets (Ron's review of #1287), so a
+        // session whose failed-check calls hold tokens still draws it, and
+        // an unknown number of them reads as the dash, never as zero.
         let copy = try Self.coreCopy()
-        XCTAssertNil(InsightsRouteWords.split(try Self.route("check_failed", checkFailed: 40), copy: copy))
-        XCTAssertNil(InsightsRouteWords.split(try Self.route("check_failed", checkFailed: NSNull()), copy: copy))
-        XCTAssertNotNil(InsightsRouteWords.split(try Self.route("routed_verified", checkFailed: 0), copy: copy))
+        let template = try XCTUnwrap(copy["analytics_route_split"])
+        let fill = { (f: String) in
+            InsightsOverviewWords.fill(template, ["v": "110", "u": "0", "f": f, "o": "\u{2014}", "n": "0"])
+        }
+        XCTAssertEqual(InsightsRouteWords.split(try Self.route("check_failed", checkFailed: 40), copy: copy),
+                       fill("40"))
+        XCTAssertEqual(InsightsRouteWords.split(try Self.route("check_failed", checkFailed: NSNull()), copy: copy),
+                       fill("\u{2014}"))
+        XCTAssertEqual(InsightsRouteWords.split(try Self.route("routed_verified", checkFailed: 0), copy: copy),
+                       fill("0"))
     }
 
     func testTheSomeCallsUnrecordedReasonHasItsWords() throws {
