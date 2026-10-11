@@ -11,7 +11,7 @@ use futures::stream::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::privacy_filter_spans::{
-    ClassifySpan, WindowClassifier, apply_windowed_spans, chunk_token_ranges, redact_items_batched,
+    ClassifySpan, WindowClassifier, apply_windowed_spans, redact_items_batched, window_ranges,
 };
 use crate::trace_contribution::{
     PRIVACY_FILTER_SIDECAR_DEFAULT_MAX_INPUT_BYTES, PrivacyFilterAdapter, PrivacyFilterConfigError,
@@ -172,6 +172,10 @@ pub struct NearAiPrivacyFilterAdapter {
     /// The key is a hash and the value is offsets and labels, so the cache
     /// holds no plaintext.
     window_cache: std::sync::Mutex<ClassifyWindowCache>,
+    /// Token budget for packing several whole texts into one request, from
+    /// [`PACK_MAX_TOKENS_ENV`]. `None` (the default) sends one text per
+    /// request -- see that constant for why.
+    pack_max_tokens: Option<usize>,
 }
 
 /// Per-adapter memo table. The adapter is constructed once per driver tick,
@@ -287,7 +291,61 @@ impl NearAiPrivacyFilterAdapter {
             max_input_bytes,
             max_input_tokens,
             window_cache: std::sync::Mutex::new(ClassifyWindowCache::default()),
+            pack_max_tokens: None,
         })
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// Pack whole texts into requests of up to `pack_max_tokens` tokens
+    /// (`None`: one text per request). See [`PACK_MAX_TOKENS_ENV`].
+    pub fn with_pack_max_tokens(mut self, pack_max_tokens: Option<usize>) -> Self {
+        self.pack_max_tokens = pack_max_tokens;
+        self
+    }
+}
+
+/// Operator setting: pack several whole texts (events, payload leaves and
+/// keys) into one `privacy/classify` request, up to this many o200k_base
+/// tokens per request. **Unset, blank or `0` -- the default -- sends one text
+/// per request**, the request pattern this adapter always had. Accepted
+/// values are `1..=MAX_CLASSIFY_INPUT_TOKENS`; anything else refuses to
+/// build the adapter with an `InvalidEnv` naming this variable.
+///
+/// **Off by default because packing costs recall.** A live shadow comparison
+/// on 30 real sessions (2026-10-11, counts only) at 32,000-token packs:
+/// packed classification MISSED 115 of the 335 entities (34%) that
+/// classifying each text alone found, and partly missed 8 more, while
+/// finding 25 that the per-text run did not. The model reads a long pack
+/// differently from a short field. Leave this unset until a pack size has
+/// been shown, by the same comparison, to keep recall.
+///
+/// Packing changes request count, not coverage: every text is still
+/// classified, spans are mapped back to the text they fall in by codepoint
+/// offset and clipped at text boundaries, and a text over the token or body
+/// budget is still windowed on its own. NEAR AI only: the self-hosted
+/// backend always sends one text per request.
+pub const PACK_MAX_TOKENS_ENV: &str = "TRACE_NEAR_AI_PRIVACY_PACK_MAX_TOKENS";
+
+/// Parse [`PACK_MAX_TOKENS_ENV`]: unset, blank or `0` is `None` (one text per
+/// request); a whole number in `1..=MAX_CLASSIFY_INPUT_TOKENS` is the pack
+/// budget; anything else refuses. The refusal names the variable and the
+/// accepted range, never the value.
+pub fn parse_pack_max_tokens(raw: Option<&str>) -> Result<Option<usize>, PrivacyFilterConfigError> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(None);
+    };
+    let invalid = || PrivacyFilterConfigError::InvalidEnv {
+        var: PACK_MAX_TOKENS_ENV,
+        reason: format!(
+            "must be unset, 0 (off), or a whole number of tokens from 1 to {MAX_CLASSIFY_INPUT_TOKENS}"
+        ),
+    };
+    let parsed = raw.parse::<usize>().map_err(|_| invalid())?;
+    match parsed {
+        0 => Ok(None),
+        1..=MAX_CLASSIFY_INPUT_TOKENS => Ok(Some(parsed)),
+        _ => Err(invalid()),
     }
 }
 
@@ -359,6 +417,17 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Err(_) => MAX_CLASSIFY_INPUT_TOKENS,
     };
 
+    let pack_max_tokens = match std::env::var(PACK_MAX_TOKENS_ENV) {
+        Ok(value) => parse_pack_max_tokens(Some(&value))?,
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(PrivacyFilterConfigError::InvalidEnv {
+                var: PACK_MAX_TOKENS_ENV,
+                reason: "must be valid UTF-8".to_string(),
+            });
+        }
+    };
+
     let adapter = NearAiPrivacyFilterAdapter::with_max_input_tokens(
         base_url,
         model,
@@ -366,7 +435,8 @@ pub fn build_from_env() -> Result<Arc<dyn PrivacyFilterAdapter>, PrivacyFilterCo
         Duration::from_millis(timeout_ms),
         max_input_bytes,
         max_input_tokens,
-    )?;
+    )?
+    .with_pack_max_tokens(pack_max_tokens);
     Ok(Arc::new(adapter))
 }
 
@@ -422,7 +492,17 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         // are reported in that window's own codepoint coordinates; shift
         // them into full-text codepoints before merging so the single
         // apply_spans pass validates and redacts against the whole field.
-        let ranges = chunk_token_ranges(text, self.max_input_tokens);
+        //
+        // Windows are bounded by the request BODY as well as by tokens (see
+        // MAX_CLASSIFY_REQUEST_BODY_BYTES): for ordinary text the windows
+        // are exactly the token windows; a window of escape- or
+        // whitespace-heavy text that would be refused with a 413 is cut
+        // further.
+        let ranges = window_ranges(
+            text,
+            self.max_input_tokens,
+            self.max_pack_input_json_bytes(),
+        );
 
         // Accumulate each window's starting codepoint in ONE pass over the
         // field. This used to be `text[..range.start].chars().count()` inside
@@ -468,10 +548,13 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         apply_windowed_spans("near-ai", text, &windows)
     }
 
-    /// Packs many texts into each request, up to the same token budget a
-    /// single field's windows use, instead of one round trip per text.
+    /// One text per request -- each exactly as `redact_text` -- unless the
+    /// operator set [`PACK_MAX_TOKENS_ENV`]. It is off by default because
+    /// packing measurably lowered recall; see that constant.
     ///
-    /// Each text keeps the limits `redact_text` applies to it: a blank text
+    /// With packing on, whole texts are packed into requests of up to that
+    /// many tokens instead of one round trip per text. Each text keeps the
+    /// limits `redact_text` applies to it: a blank text
     /// is not sent, a text over `max_input_bytes` fails the call with the
     /// same error (after the texts before it, never sending those after it),
     /// and a text over the token budget is windowed alone as `redact_text`
@@ -493,6 +576,13 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         &self,
         texts: &[&str],
     ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
+        let Some(pack_max_tokens) = self.pack_max_tokens else {
+            let mut results = Vec::with_capacity(texts.len());
+            for text in texts {
+                results.push(self.redact_text(text).await?);
+            }
+            return Ok(results);
+        };
         // A text over `max_input_bytes` fails the call with the error
         // `redact_text` gives it -- but only after the texts before it, as
         // when each text was its own request, so an earlier text's failure
@@ -505,6 +595,7 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
             "near-ai",
             self,
             classify,
+            pack_max_tokens,
             self.max_input_tokens,
             self.max_pack_input_json_bytes(),
             MAX_CONCURRENT_CLASSIFY_WINDOWS,
@@ -864,7 +955,9 @@ mod tests {
     // module because both backends window. The tests stayed here rather than
     // moving with them: they are written against this backend's token budget
     // and its measured endpoint behaviour.
-    use crate::privacy_filter_spans::{chunk_byte_ranges, classifier_token_count};
+    use crate::privacy_filter_spans::{
+        chunk_byte_ranges, chunk_token_ranges, classifier_token_count,
+    };
 
     fn span(category: &str, start: usize, end: usize, score: f64) -> ClassifySpan {
         ClassifySpan {
@@ -873,6 +966,31 @@ mod tests {
             end,
             score,
             text: None,
+        }
+    }
+
+    /// Packing is opt-in: unset, blank or 0 keeps one text per request; a
+    /// value outside 1..=MAX_CLASSIFY_INPUT_TOKENS refuses, naming the
+    /// variable and nothing else.
+    #[test]
+    fn pack_max_tokens_is_off_unless_set_and_bounded() {
+        for off in [None, Some(""), Some("  "), Some("0")] {
+            assert_eq!(parse_pack_max_tokens(off).unwrap(), None, "{off:?}");
+        }
+        assert_eq!(parse_pack_max_tokens(Some("250")).unwrap(), Some(250));
+        assert_eq!(parse_pack_max_tokens(Some(" 1 ")).unwrap(), Some(1));
+        assert_eq!(
+            parse_pack_max_tokens(Some("32000")).unwrap(),
+            Some(MAX_CLASSIFY_INPUT_TOKENS)
+        );
+        for bad in ["32001", "-1", "abc", "1.5", "99999999999999999999"] {
+            match parse_pack_max_tokens(Some(bad)) {
+                Err(PrivacyFilterConfigError::InvalidEnv { var, reason }) => {
+                    assert_eq!(var, PACK_MAX_TOKENS_ENV, "{bad}");
+                    assert!(!reason.contains(bad), "the value is not echoed: {reason}");
+                }
+                other => panic!("{bad:?} must refuse, got {other:?}"),
+            }
         }
     }
 

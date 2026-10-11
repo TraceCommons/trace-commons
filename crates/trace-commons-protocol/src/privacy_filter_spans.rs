@@ -382,7 +382,7 @@ fn batch_token_cost(text: &str) -> usize {
 /// fits -- with any window whose JSON-escaped size exceeds
 /// `max_input_json_bytes` cut further, after its last newline under the cap
 /// where there is one, so no request goes out over the body limit.
-fn window_ranges(
+pub(crate) fn window_ranges(
     text: &str,
     max_tokens: usize,
     max_input_json_bytes: usize,
@@ -521,13 +521,15 @@ pub(crate) async fn redact_items_batched(
     backend: &'static str,
     classifier: &dyn WindowClassifier,
     items: &[&str],
-    max_tokens: usize,
+    pack_max_tokens: usize,
+    window_max_tokens: usize,
     max_input_json_bytes: usize,
     max_concurrent_requests: usize,
 ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
     use futures::stream::{StreamExt, TryStreamExt};
 
-    let max_tokens = max_tokens.max(1);
+    let window_max_tokens = window_max_tokens.max(1);
+    let max_tokens = pack_max_tokens.clamp(1, window_max_tokens);
     let max_input_json_bytes = max_input_json_bytes.max(1);
 
     // Unique non-blank texts, in first-appearance order.
@@ -582,7 +584,9 @@ pub(crate) async fn redact_items_batched(
                 open_codepoints = 0;
             }
             let mut codepoint_start = 0usize;
-            for range in window_ranges(text, max_tokens, max_input_json_bytes) {
+            // Alone, it gets exactly `redact_text`'s windows: the window
+            // budget, not the (possibly smaller) pack budget.
+            for range in window_ranges(text, window_max_tokens, max_input_json_bytes) {
                 let codepoints = text[range.clone()].chars().count();
                 units.push(BatchUnit::Window {
                     unique,
@@ -744,9 +748,10 @@ mod tests {
             .collect();
         let items: Vec<&str> = owned.iter().map(String::as_str).collect();
         let classifier = RecordingClassifier::default();
-        let results = redact_items_batched("test", &classifier, &items, 32_000, BODY_CAP, 1)
-            .await
-            .unwrap();
+        let results =
+            redact_items_batched("test", &classifier, &items, 32_000, 32_000, BODY_CAP, 1)
+                .await
+                .unwrap();
         let requests = classifier.requests.lock().unwrap().clone();
         let largest = requests.iter().map(|r| json_escaped_len(r)).max().unwrap();
         assert!(
@@ -775,9 +780,10 @@ mod tests {
             .collect();
         assert!(json_escaped_len(&text) > 2 * BODY_CAP);
         let classifier = RecordingClassifier::default();
-        let results = redact_items_batched("test", &classifier, &[&text], 32_000, BODY_CAP, 1)
-            .await
-            .unwrap();
+        let results =
+            redact_items_batched("test", &classifier, &[&text], 32_000, 32_000, BODY_CAP, 1)
+                .await
+                .unwrap();
         let requests = classifier.requests.lock().unwrap().clone();
         let largest = requests.iter().map(|r| json_escaped_len(r)).max().unwrap();
         assert!(

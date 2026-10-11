@@ -15763,6 +15763,7 @@ mod tests {
                         self,
                         texts,
                         self.max_tokens,
+                        self.max_tokens,
                         self.max_input_json_bytes,
                         1,
                     )

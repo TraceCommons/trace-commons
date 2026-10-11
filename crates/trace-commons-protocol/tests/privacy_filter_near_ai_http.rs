@@ -28,6 +28,20 @@ fn adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
     .expect("adapter builds")
 }
 
+/// The adapter with packing turned on at the window budget, the largest
+/// setting `TRACE_NEAR_AI_PRIVACY_PACK_MAX_TOKENS` accepts.
+fn packing_adapter(base_url: String) -> NearAiPrivacyFilterAdapter {
+    adapter(base_url).with_pack_max_tokens(Some(MAX_CLASSIFY_INPUT_TOKENS))
+}
+
+/// A padded table with escaped cells: runs of spaces and `=` carry ~64-128
+/// body bytes per token, so one token-budget window is megabytes of body.
+fn padded_table(rows: usize) -> String {
+    (0..rows)
+        .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
+        .collect()
+}
+
 /// Responder that finds the test email inside whichever window carries it and
 /// spans it at that window's own codepoint offsets.
 ///
@@ -699,7 +713,7 @@ async fn many_short_texts_are_packed_into_few_requests() {
         .mount(&server)
         .await;
 
-    let adapter = adapter(server.uri());
+    let adapter = packing_adapter(server.uri());
     let owned: Vec<String> = (0..500)
         .map(|i| match i % 3 {
             0 => format!("事件 {i} 😀: Zoë reviewed it"),
@@ -789,34 +803,108 @@ async fn packed_and_windowed_request_bodies_stay_under_the_body_cap() {
         .mount(&server)
         .await;
 
-    let adapter = adapter(server.uri());
-    // Many small whitespace-heavy fields (padded tables, logs) ...
-    let mut owned: Vec<String> = (0..2_000)
+    // Many small whitespace-heavy fields (padded tables, logs) and one large
+    // padded, escaped table.
+    let mut owned: Vec<String> = (0..300)
         .map(|i| format!("| row {i} |{}|{}|", " ".repeat(120), "\t\n".repeat(60)))
         .collect();
-    // ... and one escape-heavy field (escaped JSON tool output).
-    owned.push(
-        (0..6_000)
-            .map(|i| format!("{{\\\"k{i}\\\":\\\"v\\\\\\\\\"}}\n"))
-            .collect(),
-    );
+    owned.push(padded_table(1_200));
     let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let results = adapter.redact_texts(&texts).await.expect("call succeeds");
-    for (text, result) in texts.iter().zip(&results) {
-        assert_eq!(&result.as_ref().unwrap().redacted_text, text);
-    }
 
+    // With and without packing: the cap holds in both modes.
+    for packing in [false, true] {
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/privacy/classify"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] })),
+            )
+            .mount(&server)
+            .await;
+        let adapter = if packing {
+            packing_adapter(server.uri())
+        } else {
+            adapter(server.uri())
+        };
+        let results = adapter.redact_texts(&texts).await.expect("call succeeds");
+        for (text, result) in texts.iter().zip(&results) {
+            assert_eq!(&result.as_ref().unwrap().redacted_text, text);
+        }
+
+        let requests = server.received_requests().await.expect("recording on");
+        let largest = requests.iter().map(|r| r.body.len()).max().unwrap();
+        assert!(
+            largest <= MAX_CLASSIFY_REQUEST_BODY_BYTES,
+            "packing={packing}: a request body was {largest} bytes, over the \
+             {MAX_CLASSIFY_REQUEST_BODY_BYTES} cap"
+        );
+        if packing {
+            assert!(requests.len() < 100, "still packed: {}", requests.len());
+        } else {
+            assert!(
+                requests.len() > 300,
+                "one text per request: {}",
+                requests.len()
+            );
+        }
+    }
+}
+
+/// The single-field path is capped too: `redact_text` windows a field whose
+/// token windows would each be megabytes of body.
+#[tokio::test]
+async fn a_single_field_is_windowed_under_the_body_cap() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] })),
+        )
+        .mount(&server)
+        .await;
+    let text = padded_table(1_200);
+    let result = adapter(server.uri())
+        .redact_text(&text)
+        .await
+        .expect("call succeeds")
+        .expect("non-blank");
+    assert_eq!(result.redacted_text, text);
     let requests = server.received_requests().await.expect("recording on");
     let largest = requests.iter().map(|r| r.body.len()).max().unwrap();
     assert!(
         largest <= MAX_CLASSIFY_REQUEST_BODY_BYTES,
         "a request body was {largest} bytes, over the {MAX_CLASSIFY_REQUEST_BODY_BYTES} cap"
     );
-    assert!(
-        requests.len() < 100,
-        "still packed: {} requests",
-        requests.len()
-    );
+    let inputs: String = requests
+        .iter()
+        .map(|r| {
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            body["input"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert_eq!(inputs, text, "the windows cover the field exactly");
+}
+
+/// Packing is off unless an operator sets it: every text is its own
+/// request, the request pattern before packing existed.
+#[tokio::test]
+async fn by_default_each_text_is_its_own_request() {
+    let server = server_with(shifted_name_spans(0, Some("Zoë"))).await;
+    let owned: Vec<String> = (0..50).map(|i| format!("event {i}: Zoë")).collect();
+    let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let results = adapter(server.uri()).redact_texts(&texts).await.unwrap();
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 50, "one request per text");
+    for (i, request) in requests.iter().enumerate() {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["input"], format!("event {i}: Zoë"));
+    }
+    for (i, result) in results.iter().enumerate() {
+        assert_eq!(
+            result.as_ref().unwrap().redacted_text,
+            format!("event {i}: [REDACTED:private_person]")
+        );
+    }
 }
 
 /// Responder that reports every "Zoë" with the given codepoint shift and the
@@ -887,9 +975,15 @@ async fn a_span_whose_text_matches_its_offsets_is_applied() {
 async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
     let server = server_with(shifted_name_spans(1, Some("Zoë"))).await;
     let adapter = adapter(server.uri());
+    let packing = packing_adapter(server.uri());
     for error in [
+        // A single text, alone in its request: the unpacked path.
         adapter.redact_text("say hi to Zoë now").await.unwrap_err(),
         adapter
+            .redact_texts(&["first text", "say hi to Zoë now", "third"])
+            .await
+            .unwrap_err(),
+        packing
             .redact_texts(&["first text", "say hi to Zoë now", "third"])
             .await
             .unwrap_err(),
