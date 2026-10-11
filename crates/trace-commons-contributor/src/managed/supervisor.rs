@@ -233,7 +233,8 @@ async fn run_native(
     }
     if final_report.is_err() && persisted.is_err() {
         eprintln!(
-            "Native session exited; Trace Commons status is unknown until the daemon reconnects."
+            "Native session exited; {} status is unknown until the daemon reconnects.",
+            crate::brand::APP_NAME
         );
     }
     if let Some(route) = route {

@@ -2309,7 +2309,7 @@ pub fn present_local<F: Fn() + 'static>(application: &adw::Application, contribu
     super::style::install();
     let window = adw::ApplicationWindow::builder()
         .application(application)
-        .title("Trace Commons · Insights")
+        .title(concat!(crate::copy::app_name!(), " · Insights"))
         .default_width(840)
         .default_height(760)
         .build();

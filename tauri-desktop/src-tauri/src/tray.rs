@@ -161,7 +161,7 @@ fn tray_menu<R: TauriRuntime, M: Manager<R>>(
         );
     }
     if snapshot.projects.len() > 8 {
-        builder = builder.text("project-more", "More waiting traces in Trace Commons");
+        builder = builder.text("project-more", "More waiting traces in Near.ai");
     };
 
     if let Some(state) = snapshot.private_inference_state.as_deref() {
@@ -201,10 +201,10 @@ fn tray_menu<R: TauriRuntime, M: Manager<R>>(
         .separator()
         .item(&pause_menu)
         .separator()
-        .text("open", "Open Trace Commons")
+        .text("open", "Open Near.ai")
         .text("settings", "Settings")
         .separator()
-        .text("quit", "Quit Trace Commons")
+        .text("quit", "Quit Near.ai")
         .build()
 }
 
@@ -312,7 +312,7 @@ pub(crate) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
     TrayIconBuilder::with_id("main")
         .menu(&menu)
         .icon(icon)
-        .tooltip("Trace Commons")
+        .tooltip("Near.ai")
         .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .build(app)?;
     Ok(())
@@ -334,9 +334,9 @@ pub(crate) fn start_tray_refresh<R: TauriRuntime>(app: AppHandle<R>) {
                 {
                     let _ = tray.set_menu(Some(menu));
                     let tooltip = match snapshot.decisions_owed {
-                        Some(0) => "Trace Commons · nothing waiting",
-                        Some(_) => "Trace Commons · review waiting traces",
-                        None => "Trace Commons · decisions unavailable",
+                        Some(0) => "Near.ai · nothing waiting",
+                        Some(_) => "Near.ai · review waiting traces",
+                        None => "Near.ai · decisions unavailable",
                     };
                     let _ = tray.set_tooltip(Some(tooltip));
                 }

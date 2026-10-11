@@ -68,11 +68,11 @@ echo "tauri:  $TAURI_GROUPS"
 test "$NATIVE_GROUPS" = "$TAURI_GROUPS" \
   || { echo "FAIL: macos/ and tauri-desktop/ entitlements request different access groups"; exit 1; }
 
-GOOD="$WORK/good/TraceCommons.app"
+GOOD="$WORK/good/Near.ai.app"
 make_bundle "$GOOD"
 codesign --force --sign - --entitlements "$ROOT/macos/entitlements.plist" "$GOOD"
 
-BARE="$WORK/bare/TraceCommons.app"
+BARE="$WORK/bare/Near.ai.app"
 make_bundle "$BARE"
 codesign --force --sign - "$BARE"
 
@@ -85,7 +85,7 @@ TC_VERIFY_STATIC_ONLY=1 bash "$VERIFY" "$GOOD"
 echo "=== fixture: entitled bundle, /bin/bash"
 TC_VERIFY_STATIC_ONLY=1 /bin/bash "$VERIFY" "$GOOD"
 
-NO_DOMAIN="$WORK/no-domain/TraceCommons.app"
+NO_DOMAIN="$WORK/no-domain/Near.ai.app"
 make_bundle "$NO_DOMAIN"
 cp "$ROOT/macos/entitlements.plist" "$WORK/no-domain.plist"
 /usr/libexec/PlistBuddy -c 'Delete :com.apple.developer.associated-domains' "$WORK/no-domain.plist"

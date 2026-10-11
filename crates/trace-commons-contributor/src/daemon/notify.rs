@@ -374,14 +374,15 @@ pub fn emit_local(text: &str) {
     let attempt = std::process::Command::new("osascript")
         .arg("-e")
         .arg(format!(
-            "display notification {} with title \"Trace Commons\"",
-            applescript_string(text)
+            "display notification {} with title {}",
+            applescript_string(text),
+            applescript_string(crate::brand::APP_NAME)
         ))
         .output();
 
     #[cfg(target_os = "linux")]
     let attempt = std::process::Command::new("notify-send")
-        .arg("Trace Commons")
+        .arg(crate::brand::APP_NAME)
         .arg(text)
         .output();
 

@@ -487,8 +487,9 @@ pub fn settings_words() -> SettingsWords {
         state_no: "{title}: no",
         waiting_on_approval: "Waiting on approval in System Settings.",
         turn_on_in_system_settings: concat!(
-            "Turn it on in System Settings -> General -> Login Items to let Trace Commons ",
-            "start automatically."
+            "Turn it on in System Settings -> General -> Login Items to let ",
+            crate::app_name!(),
+            " start automatically."
         ),
         could_not_turn_on: "Couldn't turn this on: {message}",
         could_not_turn_off: "Couldn't turn this off: {message}",
@@ -496,7 +497,10 @@ pub fn settings_words() -> SettingsWords {
         check_now: "Check Now",
         copy: "Copy",
         checks_daily: "Checks daily",
-        checks_automatically: "Trace Commons checks for updates automatically and asks before installing.",
+        checks_automatically: concat!(
+            crate::app_name!(),
+            " checks for updates automatically and asks before installing."
+        ),
         managed_by_homebrew: "Updates managed by Homebrew",
         homebrew_replaces: "Homebrew installed this copy, so Homebrew replaces it. Run this in a terminal:",
         updates_unavailable: "Updates unavailable",

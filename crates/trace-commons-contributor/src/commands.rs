@@ -612,7 +612,7 @@ pub(crate) fn logout_summary_lines(inv: &LogoutInventory) -> Vec<String> {
             .unwrap_or_else(|| "unknown (unreadable state)".to_string())
     };
     vec![
-        "about to log out and delete this device's local Trace Commons state:".to_string(),
+        concat!("about to log out and delete this device's local ", crate::app_name!(), " state:").to_string(),
         format!(
             "  receipts   : {} receipt(s), the local record of what this device submitted",
             inv.receipts

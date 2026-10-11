@@ -35,7 +35,7 @@ public static class UnresolvedBucketCopy
     /// nothing in it is a contributor's to fix.
     /// </summary>
     public const string Note =
-        "Trace Commons can't tell which folder these ran in, so they can never be "
+        "Near.ai can't tell which folder these ran in, so they can never be "
         + "contributed automatically. You'll always be asked.";
 
     /// <summary>

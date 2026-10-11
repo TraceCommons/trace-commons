@@ -118,7 +118,11 @@ mod tests {
     /// Only the hosting process may say quitting stops the watcher.
     #[test]
     fn only_hosting_claims_quitting_stops_watching() {
-        assert!(QUIT_HOSTING_BODY.starts_with("Quitting stops Trace Commons watching"));
+        assert!(QUIT_HOSTING_BODY.starts_with(concat!(
+            "Quitting stops ",
+            crate::app_name!(),
+            " watching"
+        )));
         for role in [QuitRole::Attached, QuitRole::Unavailable] {
             let body = quit_prompt(role).body;
             assert!(
@@ -176,7 +180,7 @@ mod tests {
     fn role_serializes_as_a_fixed_label() {
         let value = serde_json::to_value(quit_prompt(QuitRole::Unavailable)).unwrap();
         assert_eq!(value["role"], "unavailable");
-        assert_eq!(value["title"], "Quit Trace Commons?");
+        assert_eq!(value["title"], concat!("Quit ", crate::app_name!(), "?"));
         assert_eq!(value["confirm"], "Quit");
         assert_eq!(value["cancel"], "Cancel");
         assert_eq!(serde_json::to_value(QuitRole::Hosting).unwrap(), "hosting");

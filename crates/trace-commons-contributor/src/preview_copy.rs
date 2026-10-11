@@ -1349,7 +1349,7 @@ pub fn monitor_screens_copy() -> MonitorScreensCopy {
             pause_hour: "1 hour",
             pause_morning: "Until morning",
             pause_until_resumed: "Until resumed",
-            start_at_login: "Start Trace Commons at login",
+            start_at_login: concat!("Start ", crate::app_name!(), " at login"),
             projects_empty: "No projects seen yet. Traces appear here after discovery.",
             changes_heading: "Change log",
             tab_home: "Home",
