@@ -15614,11 +15614,12 @@ async fn a_run_that_exhausts_review_on_a_missing_source_rejects_its_submission()
     );
 }
 
-/// #1346: a run that fails after its submission stopped being operable (the
-/// contributor withdrew it) leaves the submission as it is: a failure never
-/// moves a withdrawn or revoked submission, and sets no audit marker.
+/// #1346: a run that fails after its submission stopped being operable (it
+/// was revoked) leaves the submission as it is: a failure never moves a
+/// revoked, purged, withdrawn or expired submission, and sets no audit
+/// marker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_failed_run_never_moves_a_withdrawn_submission() {
+async fn a_failed_run_never_moves_a_revoked_submission() {
     let Some(fixture) = submitted_audit_fixture().await else {
         return;
     };
@@ -15693,8 +15694,8 @@ async fn a_failed_run_never_moves_a_withdrawn_submission() {
 /// #1346: a run that the `claim_next` sweep fails (its worker died holding
 /// the last attempt) moves its `received` submission to `rejected`, as a
 /// worker's own exhausted retry does. The audit event follows the run's
-/// record of the move, so a revocation between the move and the audit pass
-/// does not lose it.
+/// record of the move, so a withdrawal through the account route between
+/// the move and the audit pass does not lose it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_swept_run_rejects_its_received_submission() {
     let Some(fixture) = submitted_audit_fixture().await else {
@@ -15750,20 +15751,27 @@ async fn a_swept_run_rejects_its_received_submission() {
         Some("pipeline_processing_failed")
     );
     assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
-    // A revocation before the audit pass rewrites the row's status and
-    // reason; the run's own record of the move (V123) still yields the event.
-    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
-    let tx = tenant_tx(&mut client, &tenant).await;
-    tx.execute(
-        "UPDATE trace_submissions
-            SET status = 'revoked', revoked_at = NOW(), last_status_reason = 'other'
-          WHERE tenant_id = $1 AND submission_id = $2",
-        &[&tenant, &envelope.submission_id],
+    // The contributor withdraws the rejected trace before the audit pass:
+    // the withdrawal rewrites the row's status and reason, and leaves the
+    // failed run (and its V123 record) as it is, so the run's own record of
+    // the move still yields the event.
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let (status, withdrawal) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/account/traces/{}/withdraw", envelope.submission_id),
+        session,
+        None,
     )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    drop(client);
+    .await;
+    assert_eq!(status, StatusCode::OK, "{withdrawal}");
+    let withdrawn = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    assert_ne!(withdrawn.status, StorageTraceCorpusStatus::Rejected);
     run_review_audit_pass(&fixture)
         .await
         .expect("the pass runs");
