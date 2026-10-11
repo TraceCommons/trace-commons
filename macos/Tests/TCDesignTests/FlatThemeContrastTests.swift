@@ -1,6 +1,8 @@
 import Foundation
 import XCTest
 
+@testable import TCDesign
+
 /// The flat glass theme's text contrast, from the token values
 /// (design-tokens/glass.tokens.json, `themes`).
 ///
@@ -61,6 +63,62 @@ final class FlatThemeContrastTests: XCTestCase {
             let fill = Self.over(ground, selected)
             let ratio = Self.contrast(Self.over(fill, onSelected), fill)
             XCTAssertGreaterThanOrEqual(ratio, Self.floor, "\(theme): textOnSelected on a selection over \(name)")
+        }
+    }
+
+    // MARK: Chips
+
+    /// A status chip's inks: `GlassChip` sets its title in the status's
+    /// text colour, or textSecondary with no status; `.off` (Paused, a
+    /// sample) is textSecondary too.
+    static let chipInks = ["textSecondary", "statusOnText", "statusAskText", "statusOutsideText"]
+
+    /// A flat chip is filled with tintNeutral, on the pane or on a card, and
+    /// its title clears 4.5:1 on that fill over the worst desktop.
+    func test_flatChipInksClearTheFloorOnTheChipFill() throws {
+        for theme in ["flatLight", "flatDark"] {
+            let tint = try Self.colour("tintNeutral", theme: theme)
+            let grounds = Dictionary(uniqueKeysWithValues: try Self.grounds(theme))
+            let chipGrounds = [
+                ("pane + tintNeutral", Self.over(try XCTUnwrap(grounds["pane"]), tint)),
+                ("card + tintNeutral", Self.over(try XCTUnwrap(grounds["card"]), tint)),
+            ]
+            for token in Self.chipInks {
+                let ink = try Self.colour(token, theme: theme)
+                for (name, ground) in chipGrounds {
+                    let ratio = Self.contrast(Self.over(ground, ink), ground)
+                    XCTAssertGreaterThanOrEqual(
+                        ratio, Self.floor,
+                        "\(theme): \(token) on \(name) is \(String(format: "%.2f", ratio)):1 over the worst desktop")
+                }
+            }
+        }
+    }
+
+    /// statusOff is never for text: an off chip's title is textSecondary.
+    func test_anOffChipIsSetInATextSafeInk() {
+        XCTAssertEqual(GlassStatus.off.textRGBA, GlassTokens.Color.textSecondary)
+    }
+
+    // MARK: Non-text
+
+    /// The selected main-window tab is marked by the ember alone, so its
+    /// peak, where the line is at full strength, is a non-text indicator
+    /// and clears 3:1 against the pane over the worst desktop, in focus and
+    /// out of focus (where inactiveDim darkens the pane). Taken over the
+    /// bare pane, without the halo or the rule under it, both of which
+    /// deepen the ember. Light only: Dark's ember is about 1.5:1 and
+    /// reaching 3:1 there would turn it a pale lavender, so it is left as
+    /// the owner chose it.
+    func test_flatLightTabEmberPeakClearsTheNonTextFloor() throws {
+        let theme = "flatLight"
+        let ember = try Self.colour("tabEmber", theme: theme)
+        let pane = try XCTUnwrap(Self.grounds(theme).first { $0.0 == "pane" }?.1)
+        let outOfFocus = Self.over(pane, try Self.colour("inactiveDim", theme: theme))
+        for (name, ground) in [("in focus", pane), ("out of focus", outOfFocus)] {
+            let ratio = Self.contrast(Self.over(ground, ember), ground)
+            XCTAssertGreaterThanOrEqual(
+                ratio, 3, "\(theme): the tab ember \(name) is \(String(format: "%.2f", ratio)):1 over the worst desktop")
         }
     }
 

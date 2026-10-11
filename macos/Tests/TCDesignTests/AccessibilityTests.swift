@@ -35,6 +35,18 @@ final class AccessibilityTests: XCTestCase {
             GlassRGBA.increasesContrast(dark), NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast)
     }
 
+    /// An off status (a Paused chip) is set in textSecondary, and deepens
+    /// under Increase Contrast with it, as a chip with no status does: its
+    /// text colour is the adaptive `GlassColor.textSecondary`, not the
+    /// fixed token. Read from the source, as a SwiftUI colour cannot be
+    /// resolved under a forced Increase Contrast here.
+    func test_anOffStatusTextFollowsIncreaseContrast() throws {
+        let style = try XCTUnwrap(DesignSources.all().first { $0.0 == "GlassStyle.swift" }?.1)
+        XCTAssertTrue(
+            style.contains("public var textColor: Color { self == .off ? GlassColor.textSecondary : textRGBA.color }"),
+            "an off status's text does not follow Increase Contrast")
+    }
+
     /// The Increase Contrast values are more contrasting on the dark panes:
     /// lighter text, a more opaque hairline.
     func test_increasedValuesAreMoreContrasting() {

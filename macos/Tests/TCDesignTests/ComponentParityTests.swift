@@ -71,15 +71,35 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertNotNil(GlassTokens.Color.controlSelectedFloating.lightRGB)
     }
 
-    /// The bar graph's labels are `statusOff`, primary under the pointer,
-    /// and its track has #1146's inner top highlight.
-    func test_theBarGraphTrackAndLabels() {
+    /// The bar graph's labels are `statusOff`, primary under the pointer.
+    func test_theBarGraphLabels() {
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: false), GlassTokens.Color.statusOff)
         XCTAssertEqual(GlassBarGraph.labelInk(hovered: true), GlassTokens.Color.textPrimary)
-        let edge = GlassTokens.Shadow.barTrackEdge
-        XCTAssertEqual(edge.count, 1)
-        XCTAssertTrue(edge[0].inset)
-        XCTAssertEqual(edge[0].y, 1)
+    }
+
+    /// The tapered matrix: nothing lit for nothing, one dot for a count of
+    /// one, a full column at the maximum brightening to the tip, and a
+    /// partial last dot that keeps 9 apart from 11.
+    func test_theBarGraphTapersItsDots() {
+        XCTAssertEqual(GlassBarGraph.dotAlphas(0, of: 40), Array(repeating: 0, count: 7))
+        let one = GlassBarGraph.dotAlphas(1, of: 40)
+        XCTAssertEqual(one.filter { $0 > 0 }.count, 1)
+        XCTAssertEqual(one[0], 1, accuracy: 0.0001)
+        let full = GlassBarGraph.dotAlphas(40, of: 40)
+        XCTAssertEqual(full.count, 7)
+        XCTAssertEqual(full.last ?? 0, 1, accuracy: 0.0001)
+        XCTAssertEqual(full, full.sorted())
+        XCTAssertNotEqual(GlassBarGraph.dotAlphas(9, of: 40), GlassBarGraph.dotAlphas(11, of: 40))
+        XCTAssertTrue(GlassBarGraph.dotAlphas(.infinity, of: 40).allSatisfy { $0 <= 1 })
+    }
+
+    /// A thin graph's outer labels hug its edges, so a label wider than its
+    /// column is never cut; a wide graph centres every label.
+    func test_theBarGraphKeepsItsOuterLabelsInside() {
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 0, count: 42, thin: true), .leading)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 41, count: 42, thin: true), .trailing)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 6, count: 42, thin: true), .center)
+        XCTAssertEqual(GlassBarGraph.labelAlignment(index: 0, count: 11, thin: false), .center)
     }
 
     /// A later window slides in from the trailing side, an earlier one from
@@ -88,6 +108,22 @@ final class ComponentParityTests: XCTestCase {
         XCTAssertEqual(GlassBarSlide(from: -1, to: 0), .fromTrailing)
         XCTAssertEqual(GlassBarSlide(from: 0, to: -1), .fromLeading)
         XCTAssertEqual(GlassBarSlide(from: 0, to: 0), .none)
+    }
+
+    /// The main tabs' ember: a title in primary ink when selected or under
+    /// the pointer, secondary otherwise; a 2pt line reaching 30% past the
+    /// tab each side; the line full in dark and lower in light, the halo
+    /// faint in both.
+    func test_theRuleTabsEmber() {
+        XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: true, hovering: false))
+        XCTAssertTrue(GlassRuleTabs<Int>.inksPrimary(selected: false, hovering: true))
+        XCTAssertFalse(GlassRuleTabs<Int>.inksPrimary(selected: false, hovering: false))
+        XCTAssertEqual(GlassRuleTabs<Int>.emberReach, 0.3)
+        XCTAssertEqual(GlassRuleTabs<Int>.emberLine, 2)
+        XCTAssertEqual(GlassTokens.Color.tabEmber.alpha, 1)
+        XCTAssertLessThan(GlassTokens.Color.tabEmber.light.alpha, 1)
+        XCTAssertLessThan(GlassTokens.Color.tabEmberHalo.alpha, 0.5)
+        XCTAssertLessThan(GlassTokens.Color.tabEmberHalo.light.alpha, 0.5)
     }
 
     /// The map field is #1146's ellipse: 80% by 60%, centred at 50% / 55%.

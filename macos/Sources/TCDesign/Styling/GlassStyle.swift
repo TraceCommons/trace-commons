@@ -43,17 +43,21 @@ public enum GlassStatus: Sendable, Equatable {
 
     /// The colour for this status drawn as text. On, ask and outside have
     /// text-safe variants that reach 4.5:1 in light (their glyph colours
-    /// are tested only at the 3:1 non-text floor); dark is the same value.
+    /// are tested only at the 3:1 non-text floor). Off is textSecondary, as
+    /// statusOff is never for text (a Paused chip was 2.59:1 in flat Light).
     public var textRGBA: GlassRGBA {
         switch self {
         case .on: GlassTokens.Color.statusOnText
         case .ask: GlassTokens.Color.statusAskText
         case .outside: GlassTokens.Color.statusOutsideText
-        case .off, .shared, .kept, .inference: rgba
+        case .off: GlassTokens.Color.textSecondary
+        case .shared, .kept, .inference: rgba
         }
     }
 
-    public var textColor: Color { textRGBA.color }
+    /// Off is the adaptive textSecondary, so a Paused chip deepens under
+    /// Increase Contrast as a chip with no status does.
+    public var textColor: Color { self == .off ? GlassColor.textSecondary : textRGBA.color }
 }
 
 // MARK: - Type
