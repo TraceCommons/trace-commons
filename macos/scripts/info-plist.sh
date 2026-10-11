@@ -61,7 +61,7 @@ cat <<PLIST
     <key>CFBundleShortVersionString</key><string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key><string>${BUILD_VERSION}</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
-    <key>NSHumanReadableCopyright</key><string>Trace Commons</string>
+    <key>NSHumanReadableCopyright</key><string>K&amp;Z Partners LLC</string>
     <!-- There is no LSUIElement here, and its absence is the decision.
 
          This app was a menu-bar-only utility until a contributor could not

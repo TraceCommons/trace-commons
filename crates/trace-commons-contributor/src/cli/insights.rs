@@ -1293,7 +1293,7 @@ fn render(insight: &LocalInsight, json: bool) -> Result<()> {
     if json {
         println!("{}", serde_json::to_string_pretty(insight)?);
     } else {
-        println!("Trace Commons Insights — {}", insight.id);
+        println!("{} Insights — {}", crate::brand::APP_NAME, insight.id);
         println!("One selected session; task boundaries have not been verified.");
         println!(
             "Snapshot analyzed at {}. Reimport to refresh.",

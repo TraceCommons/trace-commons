@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Trace Commons",
+  "productName": "Near.ai",
   "version": "0.1.0",
   "identifier": "ai.tracecommons.tauri.prototype",
   "build": {
