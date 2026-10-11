@@ -64,10 +64,16 @@ real remote export. No PR 4 check makes a network call.
 
 Every PR 4 pin, including this one, names the dataset
 `jedisct1/security-audits` as its `repository` field for consistency with
-the eventual remote pin. The real network pin -- the one an export actually
-downloads from Hugging Face -- arrives with the PR that needs the network
-canary (ruling HF-1), and this runbook does not print `pin-local.json`'s
-digest fields; read the file itself if you need them.
+the network pin. This runbook does not print `pin-local.json`'s digest
+fields; read the file itself if you need them.
+
+The network pin -- the one whose export downloads from Hugging Face -- is
+[`versioned-pipeline-comparison-hf-pin-v1.json`](../superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json),
+the 10,000-trace sample of `pipeline.py compare`; see
+[pipeline-comparison.md](pipeline-comparison.md#the-full-run). It is for
+`compare` only. `pipeline.py run --corpus` cannot use it: the run fails at
+the corpus digest check (`hf_bootstrap_corpus_digest_mismatch`), because
+the corpus digests of that pin are those of the `--with-events` export.
 
 ## Build a package
 

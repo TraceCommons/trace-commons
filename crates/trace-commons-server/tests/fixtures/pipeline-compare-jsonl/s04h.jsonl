@@ -1,0 +1,3 @@
+{"type":"session","id":"s04h-session","timestamp":"2026-02-01T09:00:00Z","cwd":"/work/synthetic"}
+{"type":"message","id":"s04h-session-m1","timestamp":"2026-02-01T09:00:01Z","message":{"role":"user","content":"Can you give me a short checklist for closing up a holiday cabin at the end of the season?"}}
+{"type":"message","id":"s04h-session-m2","timestamp":"2026-02-01T09:00:02Z","message":{"role":"assistant","content":"Turn off the water at the main valve and open every tap so that the pipes drain. Empty the refrigerator and leave its door open. Unplug small appliances, cover the furniture, and close the shutters. Take out all the food, since mice find even a few crumbs. Lock the doors and leave a spare key with a neighbor you trust."}}

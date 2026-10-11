@@ -491,6 +491,8 @@ kept for 7 days, so the failing step's protected log, the results, the
 evidence, and the report can be read without reproducing the run. Every
 value in them comes from the synthetic fixtures and test constants; the
 artifact master key only ever reaches a child process's environment.
+The job also runs `pipeline.py compare --self-test` after `qualify`; see
+[pipeline-comparison.md](pipeline-comparison.md#--self-test).
 
 ## `--archive` and the catalog
 

@@ -30,6 +30,8 @@ the link.
 | Cutting the pilot over from `5f239be4`/V74 to `main`/V91 (go/no-go, pre-checks, rollback, withdrawal tombstone repair) | [`./pilot-cutover-2026-09.md`](./pilot-cutover-2026-09.md) |
 | Running a versioned pipeline corpus locally | [`./pipeline-lab.md`](./pipeline-lab.md) |
 | Qualifying a versioned pipeline candidate locally | [`./pipeline-qualification.md`](./pipeline-qualification.md) |
+| Comparing the old gate path with the versioned pipeline | [`./pipeline-comparison.md`](./pipeline-comparison.md) |
+| Reading a failure label of `pipeline.py compare` | [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) |
 | Activating, rolling back, or containing the versioned pipeline for a tenant, suspending a policy, or reading the legacy drain report | [`./pipeline-activation.md`](./pipeline-activation.md) |
 | Arming, re-arming, or disarming default routing of every tenant to the versioned pipeline | [`./pipeline-activation.md`](./pipeline-activation.md) ("Default routing") and [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) (stage 4a) |
 | Smoke-testing a move to the versioned pipeline, stage by stage | [`./pipeline-smoke-tests.md`](./pipeline-smoke-tests.md) |
@@ -210,6 +212,13 @@ Every runbook in this directory, with a one-line description.
   suspension, routing, and the legacy drain report), default routing of
   every tenant once an operator arms it for the running revision, and the
   rules for the receipt, settlement, payout, withdrawal, and rebuild paths.
+- [`./pipeline-comparison.md`](./pipeline-comparison.md) — running
+  `pipeline.py compare`: the same traces through the old gate path and the
+  versioned pipeline, the pins, what is compared, the alignment, the
+  floors, the report, the limits, how a failure shows, and the full run on
+  the network pin.
+- [`./pipeline-comparison-labels.md`](./pipeline-comparison-labels.md) —
+  each failure label of `pipeline.py compare` with its cause.
 - [`./pipeline-lab.md`](./pipeline-lab.md) — running a versioned pipeline
   corpus locally with `pipeline.py run` and `pipeline.py package`: the HF
   pin, report fields, isolation and privacy, and failure labels.
