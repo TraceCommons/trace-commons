@@ -8135,6 +8135,8 @@ class CompareCommandTests(_CorpusRunCase):
             # The old behavior: the pipeline rejects the High trace.
             ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
+            # A reject on the candidate with the right `quarantine` count.
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=5, quarantine=2, reject=1))}}, "compare_self_test_risk_fields"),
             # A wrong count of held traces.
             ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=2))}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=7, quarantine=1))}}, "compare_self_test_risk_fields"),

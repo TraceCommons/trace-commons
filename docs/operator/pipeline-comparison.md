@@ -130,8 +130,8 @@ it passes only when each run gives its expected result:
    `medium_risk_privacy_review` permits this pair. The two sides quarantine
    the declared `high` trace, and this pair is equal. The `quarantine` count
    is 1 on the baseline and 2 on the candidate, and no side rejects a trace.
-   The report has no unexplained difference. The alignment keeps the two indexes
-   equal, so no later trace differs and the run does not stop early.
+   The report has no unexplained difference. The alignment keeps the two
+   indexes equal, so no later trace differs and the run does not stop early.
 3. `pin-local.json` with the baseline's quality floor changed fails. The
    report names the skew (`skew: "baseline_quality_floor"`), the pair at
    which the run stopped, and `quality_passed`.
@@ -631,14 +631,12 @@ pair is unexplained.
 The full run is long (see [Time and memory](#time-and-memory)):
 
 - Commit your work first, and change no file of the checkout during the run.
-  The code revision hash covers the files that can change what the server
-  does or what a qualification run finds: the crates that
-  `crates/trace-commons-server` is built from, the files that they include,
-  the migrations, the workspace manifests, and the qualification tooling and
-  its fixtures. The list is in the entry `pipeline.py revision` of
+  The code revision hash covers each file that can change what the server
+  does or what a qualification run finds. The list is in the entry
+  `pipeline.py revision` of
   [Signed check results](pipeline-qualification.md#signed-check-results).
-  The command computes the hash at its start and at its end, and a run that
-  passed fails with `code_revision_changed` if the two values differ.
+  A run that passed fails with `code_revision_changed` if the hash at its
+  end differs from the hash at its start.
 - The command prints nothing until its end. For the progress, count the
   lines of `compare_run-timing.jsonl` in the newest run directory: one line
   for the calibration, then one line for each trace.

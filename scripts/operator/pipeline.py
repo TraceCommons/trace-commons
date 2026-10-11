@@ -874,13 +874,13 @@ def _compare_self_test(args, run):
 
     1. The local pin passes, and compares each of its traces
        (`compare_self_test_pass_incomplete`).
-    2. The risk pin passes, and compares each of its traces, with its
-       declared medium risk as one pair that the rule
-       `medium_risk_privacy_review` permits and its declared high risk as
-       one pair that both sides quarantine and that compares equal (PC-D27),
-       and nothing else (the `quarantine` count is 1 on the baseline and 2
-       on the candidate, and no side rejects a trace): no unexplained difference, no other rule, no refused
-       receipt, no alignment loss. A wrong count of permitted pairs gives
+    2. The risk pin passes, and compares each of its traces. Its declared
+       medium risk is one pair that the rule `medium_risk_privacy_review`
+       permits. Its declared high risk is one pair that both sides
+       quarantine and that compares equal (PC-D27). The `quarantine` count
+       is 1 on the baseline and 2 on the candidate, and no side rejects a
+       trace. Nothing else is allowed: no unexplained difference, no other
+       rule, no refused receipt, no alignment loss. A wrong count gives
        `compare_self_test_risk_fields`. The other failures give the label
        of a run that must pass: `comparison_has_unexplained_differences`,
        `comparison_receipt_refused`, `comparison_alignment_lost`,

@@ -2897,11 +2897,13 @@ async fn a_declared_high_trace_is_aligned() {
     );
     assert_eq!(pair.baseline.admission, AdmissionLabel::Quarantine);
     assert_eq!(pair.candidate.admission, AdmissionLabel::Quarantine);
-    assert_eq!(pair.baseline.review, pair.candidate.review);
-    assert_eq!(pair.baseline.review_source, ReviewSource::HashRule);
-    assert_eq!(pair.candidate.review_source, ReviewSource::HashRule);
-    assert!(pair.baseline.terminal);
-    assert!(pair.candidate.terminal);
+    // A held High trace that the reviewer approves is scored on the two sides.
+    for record in [&pair.baseline, &pair.candidate] {
+        assert_eq!(record.review, ReviewLabel::Approve);
+        assert_eq!(record.review_source, ReviewSource::HashRule);
+        assert!(record.terminal);
+        assert!(record.scored);
+    }
     assert_eq!(pair.baseline.privacy_basis, pair.candidate.privacy_basis);
     // No rule exists for a High pair: the two sides are equal.
     assert_eq!(
