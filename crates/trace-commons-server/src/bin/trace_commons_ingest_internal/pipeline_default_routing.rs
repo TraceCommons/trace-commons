@@ -1121,14 +1121,23 @@ pub(crate) fn pipeline_tenant_served(state: &AppState, tenant_id: &str) -> bool 
             .is_some_and(|routing| routing.serves(tenant_id))
 }
 
-/// The upload path's step before the route decision: when this process is
-/// armed, the upload is not a remediation, and the tenant has no routing
-/// row, routes the tenant to the pipeline first, so a new signup's first
-/// upload is a pipeline receipt. Returns the routing the decision uses:
-/// `routing` when nothing changed, the routing read again after an
-/// activation (or after another process's), or `None` when a read failed,
-/// so that `decide_upload_route` reads it and answers its own refusal.
-/// A refusal never fails the upload: it goes on with its current routing.
+/// The upload path's step before the route decision, with the mode on.
+///
+/// A tenant whose routing row is `pipeline` or `contained` and that this
+/// process has not cached (another replica routed it, or an operator did,
+/// since the last refresh) is admitted first, once its bundles pass the
+/// start checks here, so its upload is not refused as not served while the
+/// cache catches up. This holds armed or not.
+///
+/// When this process is armed, the upload is not a remediation, and the
+/// tenant has no routing row, it routes the tenant to the pipeline first, so
+/// a new signup's first upload is a pipeline receipt.
+///
+/// Returns the routing the decision uses: `routing` when nothing changed,
+/// the routing read again after an activation (or after another process's),
+/// or `None` when a read failed, so that `decide_upload_route` reads it and
+/// answers its own refusal. A refusal never fails the upload: it goes on with
+/// its current routing.
 pub(crate) async fn route_before_first_upload(
     state: &AppState,
     tenant_id: &str,
@@ -1138,7 +1147,7 @@ pub(crate) async fn route_before_first_upload(
     let Some(default_routing) = state.pipeline_default_routing.as_deref() else {
         return routing;
     };
-    if remediating || default_routing.serves(tenant_id) || !default_routing.is_armed() {
+    if default_routing.serves(tenant_id) {
         return routing;
     }
     let (Some(activation), Some(service)) = (
@@ -1159,6 +1168,10 @@ pub(crate) async fn route_before_first_upload(
         },
     };
     if routing.routing.is_some() {
+        admit_if_routed(default_routing, state, service, tenant_id, &routing).await;
+        return Some(routing);
+    }
+    if remediating || !default_routing.is_armed() {
         return Some(routing);
     }
     match default_routing.default_route_tenant(state, tenant_id).await {
@@ -1174,6 +1187,19 @@ pub(crate) async fn route_before_first_upload(
     };
     // Another process may have activated the tenant: admit it here too
     // before the decision, so the upload is not refused as not served.
+    admit_if_routed(default_routing, state, service, tenant_id, &routing).await;
+    Some(routing)
+}
+
+/// Admits `tenant_id` to the cache when `routing` says `pipeline` or
+/// `contained` and the cache does not hold it yet.
+async fn admit_if_routed(
+    default_routing: &PipelineDefaultRouting,
+    state: &AppState,
+    service: &PipelineService,
+    tenant_id: &str,
+    routing: &NewReceiptRouting,
+) {
     let routed = routing.routing.as_ref().is_some_and(|row| {
         matches!(
             row.routing_state,
@@ -1183,7 +1209,6 @@ pub(crate) async fn route_before_first_upload(
     if routed && !default_routing.serves(tenant_id) {
         default_routing.admit(state, service, tenant_id).await;
     }
-    Some(routing)
 }
 
 /// The loop of the mode `all`, beside the worker: one `run_pass` every

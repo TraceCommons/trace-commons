@@ -1,7 +1,15 @@
 # Pipeline default routing: design
 
-Status: design, 2026-10-10. Implementation follows in a separate PR on branch
-`pipeline-default-routing`.
+Status: design, 2026-10-10. Implemented on branch `pipeline-default-routing`.
+
+Implementation note: the single scope predicate below is two in the code.
+`pipeline_tenant_in_activation_scope` (the receipts list, or the mode is
+`all`) is the activation gate's scope check. `pipeline_tenant_served` (the
+receipts list, or the routed-tenant cache) decides "served", replay, and the
+worker's list, so a process serves only tenants whose bundles it checked. An
+upload of a routed tenant the cache does not hold yet admits it on demand.
+Re-qualification after a deploy covers only rows default routing wrote (owner
+decision in the PR). The operator docs are authoritative for behaviour.
 
 ## Why
 

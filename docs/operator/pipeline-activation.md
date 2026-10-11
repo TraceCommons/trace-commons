@@ -1252,7 +1252,9 @@ Without the mode, a process serves the tenants on its receipts list. With
 `all`, it also serves each tenant whose routing row is `pipeline` or
 `contained` and whose bundles passed the startup checks in this process. It
 keeps those tenants in a cache that the loop reads again when it is older
-than 30 seconds, and it adds a tenant at once when it activates it. The
+than 30 seconds. It adds a tenant at once when it activates it, and when an
+upload arrives for a routed tenant it has not cached yet (another replica,
+or an operator, routed it since the last refresh), armed or not. The
 worker builds its tenant list on every pass from the receipts list, the
 drain list, and this cache, so it processes a tenant routed after start
 without a restart.

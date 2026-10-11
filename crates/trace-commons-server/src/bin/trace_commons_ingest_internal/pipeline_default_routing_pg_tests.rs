@@ -943,3 +943,26 @@ async fn measure_idle_worker_pass_by_routed_tenant_count() {
         );
     }
 }
+
+/// A replica that has not yet seen a tenant another replica routed serves
+/// its upload at once: a `pipeline` row it has not cached is admitted (its
+/// bundles are checked here) before the route decision, armed or not, rather
+/// than refused as not served until the next cache refresh.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_replica_serves_a_tenant_another_replica_routed_without_waiting() {
+    let Some(fixture) = DefaultRoutingFixture::new().await else {
+        return;
+    };
+    fixture.rearm().await;
+    let (_, receipt) = fixture.newcomer_upload("on_replica_a").await;
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+    // Replica B: its own cache, never refreshed, and not armed.
+    let replica_b = fixture.process(|_| {});
+    assert!(!DefaultRoutingFixture::routing_of(&replica_b).serves(&fixture.newcomer));
+    let (status, receipt) = fixture
+        .upload_as(&replica_b, &fixture.newcomer_contributor, "on_replica_b")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{receipt}");
+    assert!(is_pipeline_receipt(&receipt), "{receipt}");
+    assert!(DefaultRoutingFixture::routing_of(&replica_b).serves(&fixture.newcomer));
+}
