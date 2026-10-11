@@ -351,7 +351,7 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("model_record_index", "Record index"),
         ("model_coordinates_jsonl_physical_lines_one_based", "JSONL line numbers, starting at 1"),
         ("model_coordinates_trajectory_array_indexes_zero_based", "Trajectory array indexes, starting at 0"),
-        ("model_kind_codex_session_metadata", "Session metadata"),
+        ("model_kind_codex_session_metadata", "Trace metadata"),
         ("model_kind_codex_turn_context", "Turn context"),
         ("model_kind_codex_assistant_message", "Assistant message metadata"),
         ("model_kind_claude_assistant_message", "Claude assistant message metadata"),
@@ -420,10 +420,10 @@ pub fn ui_copy() -> std::collections::BTreeMap<String, String> {
         ("summary_open_snapshot", "Open snapshot"),
         ("summary_no_evidence", "No snapshots contribute a known value."),
         ("summary_limitations", "How to read this summary"),
-        ("summary_unit_session_snapshots", "session snapshots"),
+        ("summary_unit_session_snapshots", "trace snapshots"),
         ("summary_unit_normalized_events", "normalized events"),
         ("summary_unit_tool_results", "tool results"),
-        ("summary_limitation_selected_saved_sessions_are_not_verified_tasks", "This summary covers saved sessions. They are not independently verified completed tasks."),
+        ("summary_limitation_selected_saved_sessions_are_not_verified_tasks", "This summary covers saved traces. They are not independently verified completed tasks."),
         ("summary_limitation_assessments_are_user_reported", "Categories and outcomes are your assessments. Unknown and not assessed are separate."),
         ("summary_limitation_observed_sums_require_both_coverages", "Totals include available observations. Check both missing snapshots and recognized evidence for incomplete coverage."),
         ("summary_limitation_analysis_dates_are_not_activity_time", "Dates show when snapshots were analyzed, not when the work happened."),
@@ -1788,6 +1788,16 @@ mod tests {
         for key in INSIGHTS_FEED_LINE_KEYS {
             assert!(!copy[*key].to_lowercase().contains("session"), "{key}");
         }
+        // The rule covers every Insights word, not only the analytics
+        // table: the saved-history summary and the model declarations too.
+        let saying_session: Vec<&String> = copy
+            .iter()
+            .filter(|(key, words)| {
+                !exceptions.contains(&key.as_str()) && words.to_lowercase().contains("session")
+            })
+            .map(|(key, _)| key)
+            .collect();
+        assert!(saying_session.is_empty(), "{saying_session:?}");
         assert_eq!(
             copy["analytics_tip_context"],
             "Context is at {ctx} in your current session."
