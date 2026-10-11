@@ -373,3 +373,54 @@ Then, for the first week:
 - Never install a build older than the routing rule while any tenant's row
   says `pipeline` or `contained`: it ignores the row. Deactivate first
   ("Binary rollback to an older build" in [deployment.md](deployment.md)).
+
+### 4a. Default routing for every tenant
+
+Arm default routing only after the first real tenant has run cleanly. Once
+armed, it routes every tenant that has no routing row, so new signups go to
+the pipeline from their first upload. The details are in "Default routing" in
+[pipeline-activation.md](pipeline-activation.md).
+
+**Arm.**
+
+1. Run the qualification and the promote cycle on the deployed revision, and
+   sign both runs with `--evidence-max-age-seconds 604800` (the 7-day
+   maximum). `pipeline.py promote assemble --output DIR` writes the set.
+2. Put the set on the host in the results directory, owned by the service
+   user, mode 0700.
+3. Set `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING=all` and
+   `TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING_RESULTS_DIR` in the service's
+   environment and restart once. A missing piece refuses the start with its
+   label.
+4. Check `GET /v1/admin/config-status`: `pipeline_default_routing_armed` is
+   `true`, `pipeline_default_routing_label` is `null`, and
+   `pipeline_default_routing_expires_in_seconds` is close to 7 days.
+5. Watch `pipeline_default_routing_last_pass.activated` over the next passes,
+   and `GET /v1/admin/pipeline/routing` of one new signup: one `activate`
+   event with reason code `pipeline_default_routing`.
+
+**Re-arm after every deploy, and before the set expires.** A new build
+starts unarmed with `pipeline_default_routing_revision_mismatch`. Until it is
+re-armed, new signups stay on the legacy path and routed tenants answer
+`503 pipeline_bundle_not_qualified`. Run the qualification and the promote
+cycle on the new revision, write the new set to a sibling directory, and
+rename it over the results directory. No restart: the next pass arms and
+re-qualifies the tenants default routing activated. A tenant activated by
+hand needs its own `POST qualifications`, as before. From 24 hours before
+expiry each pass logs `pipeline_default_routing_results_expiring`.
+
+**Disarm.** Remove the set from the directory (the next pass disarms), or
+set the mode to `off` and restart. Tenants already routed stay routed.
+
+**The abort rule still applies, one tenant at a time.** `contain` and then
+`deactivate` of one tenant work as before and write their rows. Default
+routing never activates a tenant that has a routing row in any state, so it
+never undoes a containment or a deactivation. To stop all automatic
+activation at once, disarm first, then contain or deactivate the affected
+tenants.
+
+**Throughput.** Each routed tenant adds its drain queries to every worker
+pass, and a pooled tenant advances at most 32 runs per pass. Watch
+`GET /v1/pipeline/readiness` (`worker_last_pass_tenant_count`,
+`worker_last_pass_duration_ms`) and the per-tenant queue age in the
+operational summary.

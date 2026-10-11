@@ -876,3 +876,70 @@ async fn the_loop_routes_a_tenant_that_has_not_uploaded_yet() {
     let (_, receipt) = fixture.newcomer_upload("after_loop").await;
     assert!(is_pipeline_receipt(&receipt), "{receipt}");
 }
+
+/// Spec "Throughput": the idle cost of the worker's pass with 1, 100, and
+/// 500 routed tenants, none with work. A pass drains its tenants one after
+/// another, so this is the floor of the pass time default routing adds as
+/// tenants are routed. Prints the timings and asserts nothing about them
+/// (wall-clock asserts flake); run by hand:
+///
+/// `cargo test -p trace-commons-server --bin trace-commons-ingest --
+/// --ignored --nocapture measure_idle_worker_pass_by_routed_tenant_count`
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "a measurement for the operator docs, not a check"]
+async fn measure_idle_worker_pass_by_routed_tenant_count() {
+    let Some(fixture) = RouteFixture::new().await else {
+        return;
+    };
+    let service = fixture
+        .state
+        .pipeline_service
+        .clone()
+        .expect("the fixture holds a runtime");
+    let prefix = format!("tenant-defroute-measure-{}-", Uuid::new_v4().simple());
+    let mut tenants = Vec::new();
+    for count in [1usize, 100, 500] {
+        while tenants.len() < count {
+            let tenant = format!("{prefix}{:04}", tenants.len());
+            write_routing_as_operator(&tenant, "pipeline").await;
+            tenants.push(tenant);
+        }
+        let cadence = Arc::new(std::sync::Mutex::new(
+            pipeline_runtime::PipelineFollowUpCadence::default(),
+        ));
+        let ready = std::sync::atomic::AtomicBool::new(false);
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        // A first pass warms the pool and the cadence; the second is timed.
+        let mut timings = Vec::new();
+        for _ in 0..2 {
+            let started = std::time::Instant::now();
+            let state = fixture.state.clone();
+            let probe = service.clone();
+            let drain_service = service.clone();
+            let cadence = cadence.clone();
+            pipeline_runtime::run_pipeline_worker_pass(
+                async move { probe.readiness().await },
+                tenants.clone(),
+                move |tenant_id| {
+                    pipeline_runtime::drain_pipeline_tenant(
+                        state.clone(),
+                        drain_service.clone(),
+                        tenant_id,
+                        cadence.clone(),
+                    )
+                },
+                &ready,
+                &stop_rx,
+            )
+            .await;
+            timings.push(started.elapsed());
+        }
+        let pass = timings[1];
+        println!(
+            "idle_worker_pass routed_tenants={count} first_pass_ms={} pass_ms={} per_tenant_ms={:.2}",
+            timings[0].as_millis(),
+            pass.as_millis(),
+            pass.as_secs_f64() * 1000.0 / count as f64
+        );
+    }
+}
