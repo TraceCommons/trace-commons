@@ -2888,24 +2888,25 @@ async fn a_declared_high_trace_is_aligned() {
         return;
     };
     let pair = drive_pair(&app, &risk_fixture("declared_high", "high"), 0).await;
-    assert_eq!(pair.action, AlignmentAction::RejectBaseline);
+    // PC-D27 is "hold": the pipeline quarantines a High trace, as `main` does.
+    // The pair is (`Quarantine`, `Quarantine`), so the hash rule decides both
+    // sides in the same way.
+    assert_eq!(
+        pair.action,
+        AlignmentAction::HashRuleBoth(ReviewLabel::Approve)
+    );
     assert_eq!(pair.baseline.admission, AdmissionLabel::Quarantine);
-    assert_eq!(pair.baseline.review, ReviewLabel::Reject);
-    assert_eq!(pair.baseline.review_source, ReviewSource::Alignment);
+    assert_eq!(pair.candidate.admission, AdmissionLabel::Quarantine);
+    assert_eq!(pair.baseline.review, pair.candidate.review);
+    assert_eq!(pair.baseline.review_source, ReviewSource::HashRule);
+    assert_eq!(pair.candidate.review_source, ReviewSource::HashRule);
     assert!(pair.baseline.terminal);
-    assert!(!pair.baseline.scored);
-    assert_eq!(pair.candidate.admission, AdmissionLabel::Reject);
-    assert_eq!(pair.candidate.review, ReviewLabel::None);
     assert!(pair.candidate.terminal);
-    assert!(!pair.candidate.scored);
-    // The two sides are not scored, so the admission is the one difference.
-    // The risk is high on each side with an equal basis, so PC-D27 permits it.
     assert_eq!(pair.baseline.privacy_basis, pair.candidate.privacy_basis);
+    // No rule exists for a High pair: the two sides are equal.
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
-        TraceComparison::Permitted {
-            rules: vec!["high_risk_admission_reject"]
-        }
+        TraceComparison::Equal
     );
     app.shutdown().await;
 }
@@ -2924,23 +2925,23 @@ async fn a_large_tool_argument_keeps_its_risk_on_both_sides() {
         assert_eq!(record.privacy_basis, ["consent_content_flag"]);
     }
     assert_eq!(pair.baseline.admission, AdmissionLabel::Quarantine);
-    assert_eq!(pair.candidate.admission, AdmissionLabel::Reject);
-    assert_eq!(pair.action, AlignmentAction::RejectBaseline);
-    assert_eq!(pair.baseline.review, ReviewLabel::Reject);
-    assert_eq!(pair.baseline.review_source, ReviewSource::Alignment);
-    assert_eq!(pair.candidate.review, ReviewLabel::None);
+    assert_eq!(pair.candidate.admission, AdmissionLabel::Quarantine);
+    assert_eq!(
+        pair.action,
+        AlignmentAction::HashRuleBoth(ReviewLabel::Reject)
+    );
+    // The hash rule of this trace gives `Reject` on the two sides.
     for record in [&pair.baseline, &pair.candidate] {
+        assert_eq!(record.review, ReviewLabel::Reject);
+        assert_eq!(record.review_source, ReviewSource::HashRule);
         assert!(record.terminal);
         assert!(!record.scored);
         assert!(!record.member);
     }
-    // The risk is high on each side with an equal basis, so PC-D27 permits
-    // the admission difference.
+    // No rule exists for a High pair: the two sides are equal.
     assert_eq!(
         compare_records(&pair.baseline, &pair.candidate),
-        TraceComparison::Permitted {
-            rules: vec!["high_risk_admission_reject"]
-        }
+        TraceComparison::Equal
     );
     app.shutdown().await;
 }

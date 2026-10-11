@@ -134,7 +134,6 @@ _BRANCH_GAPS = frozenset(
 # does not write is not evidence.
 PERMITTED_RULES = (
     {"rule": "medium_risk_privacy_review", "source": "ruling.PC-D22", "fields": ["admission"]},
-    {"rule": "high_risk_admission_reject", "source": "ruling.PC-D27", "fields": ["admission"]},
 )
 # The exclusions of spec section 10.2 (`ComparisonRule::ALL`, in order). A
 # report holds exactly this list.

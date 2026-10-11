@@ -195,38 +195,26 @@ pub enum PermittedDifference {
     /// `["consent_content_flag"]`", so an empty basis also meets it: a
     /// declared risk has no basis label (the self-test's permitted pair).
     MediumRiskPrivacyReview,
-    /// PC-D27. The server-side risk is `high` on each side with an equal
-    /// basis. The old path quarantines the trace and a reviewer decides. The
-    /// pipeline rejects it at Admission and runs no Review, so no reviewer
-    /// sees it. The basis clause is "equal" only: the content of the basis
-    /// does not matter.
-    HighRiskAdmissionReject,
 }
 
 impl PermittedDifference {
-    pub const ALL: [PermittedDifference; 2] = [
-        PermittedDifference::MediumRiskPrivacyReview,
-        PermittedDifference::HighRiskAdmissionReject,
-    ];
+    pub const ALL: [PermittedDifference; 1] = [PermittedDifference::MediumRiskPrivacyReview];
 
     pub fn id(self) -> &'static str {
         match self {
             PermittedDifference::MediumRiskPrivacyReview => "medium_risk_privacy_review",
-            PermittedDifference::HighRiskAdmissionReject => "high_risk_admission_reject",
         }
     }
 
     pub fn source(self) -> &'static str {
         match self {
             PermittedDifference::MediumRiskPrivacyReview => "ruling.PC-D22",
-            PermittedDifference::HighRiskAdmissionReject => "ruling.PC-D27",
         }
     }
 
     pub fn fields(self) -> &'static [&'static str] {
         match self {
             PermittedDifference::MediumRiskPrivacyReview => &["admission"],
-            PermittedDifference::HighRiskAdmissionReject => &["admission"],
         }
     }
 
@@ -249,15 +237,6 @@ impl PermittedDifference {
                     && baseline.privacy_basis != ["consent_content_flag"]
                     && baseline.admission == AdmissionLabel::Admit
                     && candidate.admission == AdmissionLabel::Quarantine
-            }
-            PermittedDifference::HighRiskAdmissionReject => {
-                let high =
-                    |record: &ComparisonRecord| record.privacy_risk.as_deref() == Some("high");
-                high(baseline)
-                    && high(candidate)
-                    && baseline.privacy_basis == candidate.privacy_basis
-                    && baseline.admission == AdmissionLabel::Quarantine
-                    && candidate.admission == AdmissionLabel::Reject
             }
         }
     }
@@ -1659,107 +1638,24 @@ mod tests {
         assert_eq!(compare_records(&b, &c), unexplained(&["chunk_count"]));
     }
 
-    /// A pair that holds the exact condition of `HighRiskAdmissionReject`.
-    fn high_pair(basis: &[&str]) -> (ComparisonRecord, ComparisonRecord) {
-        let (mut b, mut c) = pair();
-        for r in [&mut b, &mut c] {
-            r.privacy_risk = Some("high".into());
-            r.privacy_basis = basis.iter().map(|label| label.to_string()).collect();
-        }
-        b.admission = AdmissionLabel::Quarantine;
-        c.admission = AdmissionLabel::Reject;
-        (b, c)
-    }
-
-    fn permitted_high() -> TraceComparison {
-        TraceComparison::Permitted {
-            rules: vec!["high_risk_admission_reject"],
-        }
-    }
-
+    /// PC-D27 is "hold": a High pair has no rule. The old pipeline rejected it
+    /// at Admission; that must stay a difference.
     #[test]
-    fn the_high_risk_rule_permits_its_exact_condition() {
-        for basis in [
-            &["consent_content_flag", "found_and_removed"][..],
-            &["found_and_removed"][..],
-            &["consent_content_flag"][..],
-            &[][..],
-        ] {
-            let (b, c) = high_pair(basis);
-            assert_eq!(compare_records(&b, &c), permitted_high(), "{basis:?}");
-        }
-    }
-
-    #[test]
-    fn the_high_risk_rule_permits_nothing_near_its_condition() {
-        let only_admission = unexplained(&["admission"]);
-        // The sides exchanged.
-        let (mut b, mut c) = high_pair(&["found_and_removed"]);
-        b.admission = AdmissionLabel::Reject;
-        c.admission = AdmissionLabel::Quarantine;
-        assert_eq!(compare_records(&b, &c), only_admission);
-        // High on one side only.
-        let (b, mut c) = high_pair(&["found_and_removed"]);
-        c.privacy_risk = Some("medium".into());
-        assert_eq!(
-            compare_records(&b, &c),
-            unexplained(&["privacy_risk", "admission"])
-        );
-        let (mut b, c) = high_pair(&["found_and_removed"]);
-        b.privacy_risk = Some("medium".into());
-        assert_eq!(
-            compare_records(&b, &c),
-            unexplained(&["privacy_risk", "admission"])
-        );
-        // An unequal basis.
-        let (b, mut c) = high_pair(&["found_and_removed"]);
-        c.privacy_basis = vec!["entropy_flag".into()];
-        assert_eq!(
-            compare_records(&b, &c),
-            unexplained(&["privacy_basis", "admission"])
-        );
-        // The other admission directions.
-        let directions = [
-            (AdmissionLabel::Admit, AdmissionLabel::Reject),
-            (AdmissionLabel::Quarantine, AdmissionLabel::Admit),
-            (AdmissionLabel::Reject, AdmissionLabel::Admit),
-        ];
-        for (baseline, candidate) in directions {
-            let (mut b, mut c) = high_pair(&["found_and_removed"]);
+    fn a_high_risk_pair_has_no_rule() {
+        let high_pair = |baseline, candidate| {
+            let (mut b, mut c) = pair();
+            for r in [&mut b, &mut c] {
+                r.privacy_risk = Some("high".into());
+                r.privacy_basis = vec!["found_and_removed".to_string()];
+            }
             b.admission = baseline;
             c.admission = candidate;
-            assert_eq!(compare_records(&b, &c), only_admission, "{baseline:?}");
-        }
-        // Equal admission: no difference, so no rule fires.
-        let (b, mut c) = high_pair(&["found_and_removed"]);
-        c.admission = AdmissionLabel::Quarantine;
+            (b, c)
+        };
+        let (b, c) = high_pair(AdmissionLabel::Quarantine, AdmissionLabel::Reject);
+        assert_eq!(compare_records(&b, &c), unexplained(&["admission"]));
+        let (b, c) = high_pair(AdmissionLabel::Quarantine, AdmissionLabel::Quarantine);
         assert_eq!(compare_records(&b, &c), TraceComparison::Equal);
-    }
-
-    #[test]
-    fn the_high_risk_rule_does_not_hide_another_field() {
-        let (b, mut c) = high_pair(&["found_and_removed"]);
-        gate(&mut c).chunk_count += 1;
-        assert_eq!(compare_records(&b, &c), unexplained(&["chunk_count"]));
-    }
-
-    #[test]
-    fn each_risk_rule_meets_only_its_own_pair() {
-        // A medium pair does not meet the high rule.
-        let (mut b, mut c) = medium_pair(&["found_and_removed"]);
-        b.admission = AdmissionLabel::Quarantine;
-        c.admission = AdmissionLabel::Reject;
-        assert_eq!(compare_records(&b, &c), unexplained(&["admission"]));
-        // A high pair in the shape of the medium pair does not meet the medium rule.
-        let (mut b, mut c) = high_pair(&["found_and_removed"]);
-        b.admission = AdmissionLabel::Admit;
-        c.admission = AdmissionLabel::Quarantine;
-        assert_eq!(compare_records(&b, &c), unexplained(&["admission"]));
-        // Each rule gives its own id.
-        let (b, c) = medium_pair(&["found_and_removed"]);
-        assert_eq!(compare_records(&b, &c), permitted_medium());
-        let (b, c) = high_pair(&["found_and_removed"]);
-        assert_eq!(compare_records(&b, &c), permitted_high());
     }
 
     #[test]
@@ -1786,23 +1682,8 @@ mod tests {
             PermittedDifference::MediumRiskPrivacyReview.fields(),
             &["admission"]
         );
-        assert_eq!(
-            PermittedDifference::HighRiskAdmissionReject.id(),
-            "high_risk_admission_reject"
-        );
-        assert_eq!(
-            PermittedDifference::HighRiskAdmissionReject.source(),
-            "ruling.PC-D27"
-        );
-        assert_eq!(
-            PermittedDifference::HighRiskAdmissionReject.fields(),
-            &["admission"]
-        );
         let ids: Vec<&str> = PermittedDifference::ALL.iter().map(|r| r.id()).collect();
-        assert_eq!(
-            ids,
-            ["medium_risk_privacy_review", "high_risk_admission_reject"]
-        );
+        assert_eq!(ids, ["medium_risk_privacy_review"]);
     }
 
     #[test]
@@ -1861,11 +1742,6 @@ mod tests {
                 {
                     "rule": "medium_risk_privacy_review",
                     "source": "ruling.PC-D22",
-                    "fields": ["admission"],
-                },
-                {
-                    "rule": "high_risk_admission_reject",
-                    "source": "ruling.PC-D27",
                     "fields": ["admission"],
                 },
             ])

@@ -6673,10 +6673,8 @@ def _comparison_side(compared=10, **overrides):
 
 
 _PERMITTED_RULE = "medium_risk_privacy_review"
-_PERMITTED_RULE_HIGH = "high_risk_admission_reject"
 _PERMITTED_RULES = [
     {"rule": _PERMITTED_RULE, "source": "ruling.PC-D22", "fields": ["admission"]},
-    {"rule": _PERMITTED_RULE_HIGH, "source": "ruling.PC-D27", "fields": ["admission"]},
 ]
 # `ComparisonRule::ALL` of `versioned_pipeline_comparison.rs`, in order.
 _EXCLUDED_RULES = [
@@ -7069,19 +7067,15 @@ class ComparisonReportValidationTests(unittest.TestCase):
         self.assertEqual(comparison._COMPARED_FIELDS, frozenset(names) | {"record_pair"})
 
     def test_each_permitted_rule_is_counted_and_bounded(self):
-        medium, high = _PERMITTED_RULE, _PERMITTED_RULE_HIGH
-        # The counts name only the two rules, in any combination.
-        for permitted in ({medium: 1}, {high: 1}, {medium: 1, high: 1}, {high: 2}):
+        medium = _PERMITTED_RULE
+        # The counts name only the one rule.
+        for permitted in ({medium: 1}, {medium: 3}):
             with self.subTest(permitted=permitted):
                 comparison.validate_comparison_report(
                     _comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted=permitted))
                 )
-        # A pair that both rules permit is one pair, and a rule permits at
-        # most each permitted pair.
-        comparison.validate_comparison_report(
-            _comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted={medium: 1, high: 1}, permitted_total=1))
-        )
-        for permitted, total in (({medium: 1, high: 1}, 3), ({medium: 2, high: 1}, 1), ({high: 1}, 0), ({high: 1}, 2)):
+        # The rule permits at most each permitted pair.
+        for permitted, total in (({medium: 1}, 0), ({medium: 1}, 2), ({medium: 2}, 1)):
             with self.subTest(permitted=permitted, total=total):
                 self._refused(
                     _comparison_report(
@@ -7089,20 +7083,17 @@ class ComparisonReportValidationTests(unittest.TestCase):
                     ),
                     "comparison_report_malformed",
                 )
-        # The list holds both rules in this order.
+        # The list holds the one rule.
         for rules in (
-            _PERMITTED_RULES[:1],
-            _PERMITTED_RULES[1:],
-            _PERMITTED_RULES[::-1],
-            [_PERMITTED_RULES[0], {**_PERMITTED_RULES[1], "source": "ruling.PC-D22"}],
-            [_PERMITTED_RULES[0], {**_PERMITTED_RULES[1], "fields": ["admission", "member"]}],
+            [],
+            [*_PERMITTED_RULES, *_PERMITTED_RULES],
+            [{**_PERMITTED_RULES[0], "source": "ruling.PC-D27"}],
+            [{**_PERMITTED_RULES[0], "fields": ["admission", "member"]}],
         ):
             with self.subTest(rules=[rule["rule"] for rule in rules]):
                 self._refused(_comparison_report(_COMPARE_LOCAL, permitted_rules=rules), "comparison_report_malformed")
-        text = comparison.markdown(
-            _comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted={medium: 1, high: 1}))
-        )
-        self.assertIn(f"- `{high}` (ruling.PC-D27): 1", text)
+        text = comparison.markdown(_comparison_report(_COMPARE_LOCAL, **_compared_fields(10, permitted={medium: 1})))
+        self.assertIn(f"- `{medium}` (ruling.PC-D22): 1", text)
 
     def test_the_excluded_rules_are_the_closed_list(self):
         self.assertEqual(list(comparison.EXCLUDED_RULES), _EXCLUDED_RULES)
@@ -7450,7 +7441,15 @@ class CompareExportTests(unittest.TestCase):
 class CompareCommandTests(_CorpusRunCase):
     _SELF_TEST = {
         "compare_self_pass": {},
-        "compare_self_risk": {"permitted": {_PERMITTED_RULE: 1, _PERMITTED_RULE_HIGH: 1}},
+        "compare_self_risk": {
+            "permitted": {_PERMITTED_RULE: 1},
+            # The declared high trace is held on the two sides (PC-D27), and
+            # the declared medium trace on the candidate side only.
+            "distribution": {
+                "baseline": _comparison_side(8, admit=7, quarantine=1),
+                "candidate": _comparison_side(8, admit=6, quarantine=2),
+            },
+        },
         # The skew stops the run at its first pair (PC-D20).
         "compare_self_skew": {
             "fail": True,
@@ -8104,7 +8103,15 @@ class CompareCommandTests(_CorpusRunCase):
     def test_self_test_fails_when_an_expected_failure_passes(self):
         risk = self._SELF_TEST["compare_self_risk"]
         skew = self._SELF_TEST["compare_self_skew"]
-        both = risk["permitted"]
+
+        def held(**sides):
+            """The distribution of the risk scenario, with the counts of the
+            named sides replaced."""
+            return {
+                "baseline": _comparison_side(8, admit=7, quarantine=1),
+                "candidate": _comparison_side(8, admit=6, quarantine=2),
+                **{side: _comparison_side(8, **counts) for side, counts in sides.items()},
+            }
 
         def refused(side):
             # The risk pin has 8 traces, and the risk scenario compares each.
@@ -8119,16 +8126,19 @@ class CompareCommandTests(_CorpusRunCase):
             ({"compare_self_repeat": {"records_digest": _fake_hash("other-records")}}, "compare_self_test_not_deterministic"),
             # The risk scenario has one exact result: a run that compares
             # each trace and passes, with the declared medium risk as one pair
-            # of the first rule and the declared high risk as one pair of the
-            # second rule. A run that finds one of the two, or one pair
-            # twice, is another result.
+            # of the rule, and the declared high risk held on the two sides
+            # (PC-D27). The `quarantine` count is 1 on the baseline and 2 on
+            # the candidate, and no side rejects a trace.
             ({"compare_self_risk": {}}, "compare_self_test_risk_fields"),
             ({"compare_self_risk": {"permitted": {_PERMITTED_RULE: 1}}}, "compare_self_test_risk_fields"),
-            ({"compare_self_risk": {"permitted": {_PERMITTED_RULE_HIGH: 1}}}, "compare_self_test_risk_fields"),
-            ({"compare_self_risk": {"permitted": {_PERMITTED_RULE: 2}}}, "compare_self_test_risk_fields"),
-            ({"compare_self_risk": {"permitted": {**both, _PERMITTED_RULE_HIGH: 2}}}, "compare_self_test_risk_fields"),
-            # A run that passes with one more pair in a rule is not exact.
-            ({"compare_self_risk": {"permitted": {_PERMITTED_RULE: 2, _PERMITTED_RULE_HIGH: 2}}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "permitted": {_PERMITTED_RULE: 2}}}, "compare_self_test_risk_fields"),
+            # The old behavior: the pipeline rejects the High trace.
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=1, reject=1))}}, "compare_self_test_risk_fields"),
+            # A wrong count of held traces.
+            ({"compare_self_risk": {**risk, "distribution": held(baseline=dict(admit=6, quarantine=2))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=7, quarantine=1))}}, "compare_self_test_risk_fields"),
+            ({"compare_self_risk": {**risk, "distribution": held(candidate=dict(admit=5, quarantine=3))}}, "compare_self_test_risk_fields"),
             # A scenario that must pass and names a failure is refused with
             # the label of that failure.
             ({"compare_self_risk": {**risk, "unexplained": {"admission": 1}}}, "comparison_has_unexplained_differences"),
@@ -8138,8 +8148,8 @@ class CompareCommandTests(_CorpusRunCase):
             ({"compare_self_risk": {**risk, "distribution": refused("baseline")}}, "comparison_receipt_refused"),
             ({"compare_self_risk": {**risk, "distribution": refused("candidate")}}, "comparison_receipt_refused"),
             # The risk scenario compares each trace of its pin.
-            ({"compare_self_risk": {**risk, "compared": 3}}, "compare_self_test_pass_incomplete"),
-            ({"compare_self_risk": {**risk, "compared": 7}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_risk": {**risk, "compared": 3, "distribution": {side: _comparison_side(3) for side in pipeline.SIDES}}}, "compare_self_test_pass_incomplete"),
+            ({"compare_self_risk": {**risk, "compared": 7, "distribution": {side: _comparison_side(7) for side in pipeline.SIDES}}}, "compare_self_test_pass_incomplete"),
             # A scenario that must pass compares each trace of its pin.
             ({"compare_self_pass": {"compared": 0}}, "compare_self_test_pass_incomplete"),
             ({"compare_self_pass": {"compared": 9}}, "compare_self_test_pass_incomplete"),

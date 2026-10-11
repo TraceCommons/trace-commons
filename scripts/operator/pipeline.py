@@ -875,10 +875,11 @@ def _compare_self_test(args, run):
     1. The local pin passes, and compares each of its traces
        (`compare_self_test_pass_incomplete`).
     2. The risk pin passes, and compares each of its traces, with its
-       declared high risk as one pair that the rule
-       `high_risk_admission_reject` permits and its declared medium risk as
-       one pair that the rule `medium_risk_privacy_review` permits, and
-       nothing else: no unexplained difference, no other rule, no refused
+       declared medium risk as one pair that the rule
+       `medium_risk_privacy_review` permits and its declared high risk as
+       one pair that both sides quarantine and that compares equal (PC-D27),
+       and nothing else (the `quarantine` count is 1 on the baseline and 2
+       on the candidate, and no side rejects a trace): no unexplained difference, no other rule, no refused
        receipt, no alignment loss. A wrong count of permitted pairs gives
        `compare_self_test_risk_fields`. The other failures give the label
        of a run that must pass: `comparison_has_unexplained_differences`,
@@ -932,11 +933,16 @@ def _compare_self_test(args, run):
         require(
             risk["unexplained_counts"] == {}
             and risk["unexplained_total"] == 0
-            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1, "high_risk_admission_reject": 1}
-            and risk["permitted_total"] == 2
+            and risk["permitted_counts"] == {"medium_risk_privacy_review": 1}
+            and risk["permitted_total"] == 1
             and not risk["partial"]
             and risk["alignment_lost_position"] is None
-            and not any(risk["distribution"][side]["refused"] for side in SIDES),
+            and not any(risk["distribution"][side]["refused"] for side in SIDES)
+            # The declared high trace is held on the two sides (PC-D27); the
+            # declared medium trace is held on the candidate side only.
+            and not any(risk["distribution"][side]["reject"] for side in SIDES)
+            and risk["distribution"]["baseline"]["quarantine"] == 1
+            and risk["distribution"]["candidate"]["quarantine"] == 2,
             "compare_self_test_risk_fields",
         )
         skewed = scenario(
