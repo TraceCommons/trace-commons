@@ -1664,6 +1664,13 @@ pub async fn submit(store: &ConfigStore, sel: &SubmitSelection<'_>) -> Result<()
                     println!("{preview_prefix}refused ({reason_label}) session={session_ref}");
                 }
             }
+            SubmitOutcome::Failed { reason_label }
+                if reason_label == submit::REASON_RATE_LIMITED =>
+            {
+                // Not a verdict on the session, and nothing was recorded for
+                // it, so running `submit` again sends it.
+                println!("{preview_prefix}{}", submit::RATE_LIMITED_CLI_LINE);
+            }
             SubmitOutcome::Failed { reason_label } => {
                 println!("{preview_prefix}failed ({reason_label})");
             }

@@ -754,9 +754,10 @@ impl QueueEntry {
             && self.reason_label.as_deref() == Some(REASON_RETURNED_FROM_KEEP)
     }
 
-    /// A paced retry -- a transient classifier outage, or a witness at
-    /// capacity -- stays approved, but cannot be claimed before its
-    /// persisted deadline. A missing deadline fails closed.
+    /// A paced retry -- a transient classifier outage, a witness at
+    /// capacity, or ingest's upload rate limit -- stays approved, but cannot
+    /// be claimed before its persisted deadline. A missing deadline fails
+    /// closed.
     pub(crate) fn ready_for_upload(&self, now: DateTime<Utc>) -> bool {
         self.state == QueueState::Approved
             && (!self.waiting_on_a_retry() || self.retry_after.is_some_and(|due| due <= now))
@@ -768,7 +769,9 @@ impl QueueEntry {
         matches!(
             self.reason_label.as_deref(),
             Some(
-                crate::submit::REASON_TRANSIENT_REDACTION | crate::submit::REASON_WITNESS_SATURATED
+                crate::submit::REASON_TRANSIENT_REDACTION
+                    | crate::submit::REASON_WITNESS_SATURATED
+                    | crate::submit::REASON_RATE_LIMITED
             )
         )
     }
@@ -3777,6 +3780,37 @@ mod tests {
         assert!(
             !q.claim_for_upload(id, at("2026-08-08T13:00:00Z")),
             "other Failed outcomes remain terminal"
+        );
+    }
+
+    /// A rate-limited approval is paced like a transient one: it cannot be
+    /// claimed before the server's retry time, can be once it passes, and a
+    /// missing deadline fails closed.
+    #[test]
+    fn rate_limited_approval_waits_for_its_retry_time() {
+        let mut q = Queue::new();
+        let mut e = entry("sha256:aa", "2026-08-08T12:00:00Z");
+        e.state = QueueState::Approved;
+        e.reason_label = Some(crate::submit::REASON_RATE_LIMITED.into());
+        e.retry_after = Some(at("2026-08-08T12:00:30Z"));
+        let id = e.entry_id;
+        q.upsert(e, 500).unwrap();
+
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-08T12:00:29Z")),
+            "a rate-limited retry cannot jump its deadline"
+        );
+        assert!(q.claim_for_upload(id, at("2026-08-08T12:00:30Z")));
+
+        let mut e = entry("sha256:bb", "2026-08-08T12:00:00Z");
+        e.state = QueueState::Approved;
+        e.reason_label = Some(crate::submit::REASON_RATE_LIMITED.into());
+        e.retry_after = None;
+        let id = e.entry_id;
+        q.upsert(e, 500).unwrap();
+        assert!(
+            !q.claim_for_upload(id, at("2026-08-09T12:00:00Z")),
+            "no deadline fails closed"
         );
     }
 

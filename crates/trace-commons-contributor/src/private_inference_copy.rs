@@ -2873,6 +2873,9 @@ pub fn queue_outcome_line(label: &str) -> &'static str {
         crate::submit::REASON_TRANSIENT_REDACTION => {
             "Waiting for the privacy scan; it will be tried again, not sent yet"
         }
+        crate::submit::REASON_RATE_LIMITED => {
+            "Uploads paused for a moment; it will be tried again, not sent yet"
+        }
         crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED => {
             "The privacy scan kept failing; not sent. Approve it again to retry"
         }
@@ -3085,11 +3088,17 @@ mod tests {
             health::LABEL_WITNESS_SATURATED,
             crate::submit::REASON_TRANSIENT_REDACTION,
             crate::submit::REASON_TRANSIENT_REDACTION_EXHAUSTED,
+            crate::submit::REASON_RATE_LIMITED,
         ] {
             let line = queue_outcome_line(label);
             assert_ne!(line, "Status unavailable", "{label}");
             assert!(!line.contains(label), "raw label: {label}");
         }
+        // A rate-limited entry is still approved and goes on its own; the
+        // line says so and does not read as a refusal.
+        let paused = queue_outcome_line(crate::submit::REASON_RATE_LIMITED);
+        assert!(paused.contains("tried again"), "{paused}");
+        assert!(paused.contains("not sent yet"), "{paused}");
         for label in ["", "unknown-future-label", "admission-refused"] {
             assert_eq!(queue_outcome_line(label), "Status unavailable");
         }

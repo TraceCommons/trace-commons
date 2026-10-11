@@ -181,9 +181,14 @@ pub fn health_copy_for_label(label: &str, max_queue_entries: Option<u64>) -> Hea
         // The upload servers, not the app's own background service, are out
         // of reach; "Trace Commons" read as the app (owner ruling, 2026-10-08).
         health::LABEL_CLAIM_MINT_FAILED | health::LABEL_INGEST_UNREACHABLE => {
+            // The upload that set either label ended `Failed`, and nothing
+            // re-sends a failed entry, so this must not promise a retry.
+            // A rate-limited upload, which is kept and re-sent, never sets
+            // either label (`uploader::health_label_for`).
             HealthLineCopy::waiting(
                 "Can't upload right now.",
-                "Your queue is safe; it'll retry on its own.",
+                "A trace that didn't upload won't be retried on its own. New traces will \
+                 still be tried.",
             )
         }
         health::LABEL_OPENCODE_EXPORT_VERSION_UNSUPPORTED => {
@@ -362,6 +367,28 @@ mod tests {
             assert!(
                 health_copy_for_label(label, None).action.is_none(),
                 "{label} has no button and must not offer a dead one"
+            );
+        }
+    }
+
+    /// The upload that set these labels ended terminal `Failed`; nothing
+    /// re-sends it. The banner must not promise that it will.
+    #[test]
+    fn an_upload_failure_banner_does_not_promise_an_automatic_retry() {
+        for label in [
+            health::LABEL_INGEST_UNREACHABLE,
+            health::LABEL_CLAIM_MINT_FAILED,
+        ] {
+            let copy = health_copy_for_label(label, None);
+            assert!(
+                !copy.detail.contains("it'll retry on its own"),
+                "{label}: {}",
+                copy.detail
+            );
+            assert!(
+                copy.detail.contains("won't be retried on its own"),
+                "{label} says what happens to the trace: {}",
+                copy.detail
             );
         }
     }

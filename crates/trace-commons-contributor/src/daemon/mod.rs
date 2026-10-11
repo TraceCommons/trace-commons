@@ -1036,8 +1036,16 @@ async fn drain_approved(
     // is held until then instead of being sent, so a busy witness is asked
     // once per pass rather than once per waiting session.
     let mut witness_busy_until: Option<(chrono::DateTime<Utc>, u32)> = None;
+    // Entries this pass has claimed for upload, against
+    // `MAX_UPLOADS_PER_PASS`, and whether ingest's rate limit has refused
+    // one. Either ends the pass; what is left stays approved for the next.
+    let mut claimed_this_pass: usize = 0;
+    let mut rate_limited = false;
 
     for entry in approved {
+        if claimed_this_pass >= MAX_UPLOADS_PER_PASS {
+            break;
+        }
         if let Some((until, retry_after_secs)) = witness_busy_until
             && !entry.holds_witness_certificate()
         {
@@ -1084,6 +1092,7 @@ async fn drain_approved(
             if !q.claim_for_upload(entry.entry_id, now) {
                 continue;
             }
+            claimed_this_pass += 1;
         }
 
         // Re-resolve the session through its own adapter, so the uploader can
@@ -1394,12 +1403,39 @@ async fn drain_approved(
                 );
                 witness_busy_until = Some((until, retry_after_secs));
             }
+            uploader::UploadDecision::RateLimited { retry_after_secs } => {
+                // Sending too fast is not a verdict on the session: it keeps
+                // its approval, with the attempt recorded, and is not
+                // claimable again until the server's wait has passed. No
+                // per-session attempt limit, for the reason the witness
+                // capacity retry has none.
+                let observed_at = now
+                    + chrono::Duration::from_std(tick_started.elapsed())
+                        .expect("daemon pass elapsed time fits chrono duration");
+                let wait = retry_after_secs.clamp(1, crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+                q.record_attempt(
+                    entry.entry_id,
+                    Some(observed_at + chrono::Duration::seconds(i64::from(wait))),
+                );
+                q.set_state(
+                    entry.entry_id,
+                    queue::QueueState::Approved,
+                    Some(crate::submit::REASON_RATE_LIMITED.to_string()),
+                );
+                rate_limited = true;
+            }
             uploader::UploadDecision::CapReached => {
                 // Leave it approved: the cap lifts when the day rolls over.
                 break;
             }
         }
         changed = true;
+        if rate_limited {
+            // The limit is per device, not per session: every entry after
+            // this one would be refused the same way. They stay approved,
+            // untouched, for the next pass.
+            break;
+        }
     }
 
     // Nothing may be left claimed. Every entry that reached a decision above
@@ -1496,6 +1532,19 @@ fn witness_capacity_jitter(entry_id: uuid::Uuid, retry_after_secs: u32) -> chron
 /// refused: an outage longer than that still does not consume the trace, but
 /// a failure that only looks transient stops being re-sent to the classifier.
 const MAX_TRANSIENT_REDACTION_FAILURES: u32 = 24;
+
+/// Most sessions one upload pass puts on the wire.
+///
+/// Ingest limits each principal to 30 uploads per 60 s window by default
+/// (`TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN`), and a pass runs once
+/// per `poll_interval_secs` (60 by default). A first-run backfill approves
+/// every past session at once; without a cap one pass sent them all back to
+/// back. Twenty leaves headroom under 30 for a pass that runs late and
+/// shares a window with the one before it, and for the CLI. The cap alone
+/// cannot guarantee the server's window -- an operator can lower the limit
+/// -- so a rate-limit refusal also ends the pass
+/// ([`uploader::UploadDecision::RateLimited`]).
+const MAX_UPLOADS_PER_PASS: usize = 20;
 
 /// One minute, doubling per failed attempt and capped at one hour.
 fn transient_redaction_retry_delay(attempts: u32) -> chrono::Duration {
@@ -3794,6 +3843,223 @@ mod tests {
                 "expected {floor}s plus at most 15s of jitter: {delays:?}"
             );
         }
+    }
+
+    /// Ingest's per-principal rate limit judged nothing, so it refuses
+    /// nothing: the session keeps its approval, waits the server's
+    /// `retry_after_seconds`, and goes out on a later pass. Before this, the
+    /// 429 read as an unknown server label, the entry went terminal
+    /// `Failed`, and a first-run backfill past 30 a minute lost sessions.
+    #[tokio::test]
+    async fn a_rate_limited_upload_stays_approved_and_goes_out_when_due() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 17}),
+        ));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "ingest was asked");
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        assert_eq!(held.attempts, 1, "the attempt is recorded");
+        let due = held.retry_after.expect("a retry time");
+        assert!(
+            due >= now + chrono::Duration::seconds(17)
+                && due <= now + pass_took + chrono::Duration::seconds(17),
+            "the server's own hint: {due}"
+        );
+        assert_ne!(
+            h.shared.health.lock().unwrap().last_error_label.as_deref(),
+            Some(health::LABEL_INGEST_UNREACHABLE),
+            "a self-clearing pause is not an outage"
+        );
+
+        // Not before it is due.
+        h.pass(now + chrono::Duration::seconds(10)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+
+        // Due, and the server has room: it goes.
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(now + chrono::Duration::seconds(60)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 2);
+        assert_eq!(h.entry().state, queue::QueueState::Uploaded);
+    }
+
+    /// A server without the labelled refusal answers a bare
+    /// `{"error":"rate limited"}` with no hint. Same handling, with the
+    /// server's whole window as the wait.
+    #[tokio::test]
+    async fn a_legacy_bare_rate_limited_upload_waits_a_window_and_is_kept() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "rate limited"}),
+        ));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+
+        let held = h.entry();
+        assert_eq!(held.state, queue::QueueState::Approved, "{held:?}");
+        assert_eq!(
+            held.reason_label.as_deref(),
+            Some(crate::submit::REASON_RATE_LIMITED)
+        );
+        let due = held.retry_after.expect("a retry time");
+        let window = i64::from(crate::submit::RATE_LIMIT_DEFAULT_RETRY_SECS);
+        assert!(
+            due >= now + chrono::Duration::seconds(window)
+                && due <= now + pass_took + chrono::Duration::seconds(window),
+            "{due}"
+        );
+    }
+
+    /// A hint past the cap is clamped rather than parking the session.
+    #[tokio::test]
+    async fn a_rate_limit_hint_is_capped() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 86_400}),
+        ));
+        let now = TransientRetryHarness::now();
+        let started = std::time::Instant::now();
+        h.pass(now).await;
+        let pass_took = chrono::Duration::from_std(started.elapsed()).unwrap();
+        let due = h.entry().retry_after.expect("a retry time");
+        let cap = i64::from(crate::submit::RATE_LIMIT_MAX_RETRY_SECS);
+        assert!(
+            due <= now + pass_took + chrono::Duration::seconds(cap),
+            "{due}"
+        );
+        assert_eq!(h.entry().state, queue::QueueState::Approved);
+    }
+
+    /// One refusal ends the pass: the rest of the approved sessions are not
+    /// sent into a limit that has just said no, and none of them is touched.
+    #[tokio::test]
+    async fn a_rate_limit_stops_the_pass_and_leaves_the_rest_approved() {
+        let h = TransientRetryHarness::new().await;
+        h.add_session(
+            "9e9e9e9e-9e9e-9e9e-9e9e-9e9e9e9e9e9e",
+            "tidy the lexer too, then mail alice.smith@example.org",
+        )
+        .await;
+        assert_eq!(h.entries().len(), 2);
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "submit_rate_limited", "retry_after_seconds": 30}),
+        ));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 1, "stopped at the first");
+        let entries = h.entries();
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved),
+            "{entries:?}"
+        );
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|e| e.reason_label.as_deref() == Some(crate::submit::REASON_RATE_LIMITED))
+                .count(),
+            1,
+            "only the session that was refused is marked"
+        );
+
+        *h.ingest_reply.lock().unwrap() = None;
+        h.pass(now + chrono::Duration::seconds(120)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), 3);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+    }
+
+    /// A first-run backfill approves every past session at once. One pass
+    /// sends no more than `MAX_UPLOADS_PER_PASS`, below the server's default
+    /// of 30 a minute, and the rest go on the next pass.
+    #[tokio::test]
+    async fn a_pass_sends_no_more_than_the_per_pass_cap() {
+        let h = TransientRetryHarness::new().await;
+        let extra = MAX_UPLOADS_PER_PASS + 1;
+        for index in 0..extra {
+            h.add_session(
+                &format!("{index:08x}-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                // Something to remove, so the Scrub check lets it go.
+                &format!("backfill session {index}, then mail alice.smith@example.org"),
+            )
+            .await;
+        }
+        let total = h.entries().len();
+        assert_eq!(total, extra + 1);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Approved)
+        );
+        // Below the server's default of 30 a minute.
+        const { assert!(MAX_UPLOADS_PER_PASS < 30) };
+
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), MAX_UPLOADS_PER_PASS);
+        h.pass(now + chrono::Duration::seconds(60)).await;
+        assert_eq!(h.uploads.load(Ordering::SeqCst), total);
+        assert!(
+            h.entries()
+                .iter()
+                .all(|e| e.state == queue::QueueState::Uploaded)
+        );
+    }
+
+    /// The control: an unrecognised refusal is still terminal.
+    #[tokio::test]
+    async fn an_unrecognised_ingest_refusal_stays_terminal() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error": "invalid envelope"}),
+        ));
+        h.pass(TransientRetryHarness::now()).await;
+        let failed = h.entry();
+        assert_eq!(failed.state, queue::QueueState::Failed, "{failed:?}");
+        assert_eq!(failed.retry_after, None);
+    }
+
+    /// The past-sessions picker drops failed entries; a rate-limited one
+    /// is still listed, as approved.
+    #[tokio::test]
+    async fn a_rate_limited_session_stays_in_the_past_sessions_picker() {
+        let h = TransientRetryHarness::new().await;
+        *h.ingest_reply.lock().unwrap() = Some((
+            StatusCode::TOO_MANY_REQUESTS,
+            serde_json::json!({"error": "rate limited"}),
+        ));
+        let now = TransientRetryHarness::now();
+        h.pass(now).await;
+        let project_key = policy::project_key_for(Some(&h.project_cwd));
+        let rows = past_sessions::list_past_sessions(&h.shared, &project_key, now);
+        let entry_id = h.entry().entry_id;
+        let row = rows
+            .iter()
+            .find(|row| row.entry_id == Some(entry_id))
+            .unwrap_or_else(|| panic!("the session is still listed: {rows:?}"));
+        assert_eq!(row.state, past_sessions::PastSessionState::Approved);
     }
 
     /// Nothing a contributor can do moves a busy witness, so like an outage
