@@ -63,9 +63,11 @@ final class MonitorShellTests: XCTestCase {
         let window = try Self.text("Views/MonitorWindowView.swift")
         for needle in [
             "GlassPane(padding: 0) {",
-            ".padding([.horizontal, .top], GlassTokens.Space.panePadding)",
+            // The inspector's side inset, every row and tab (owner, 2026-10-10).
+            "static let mainInset: CGFloat = GlassTokens.Space.inspectorPaddingHorizontal",
+            ".padding(.horizontal, MonitorWindowView.mainInset)\n                .padding(.top, GlassTokens.Space.panePadding)",
             ".padding(Self.contentInsets(shown))",
-            "EdgeInsets(top: 0, leading: GlassTokens.Space.treeInset, bottom: 0, trailing: GlassTokens.Space.treeInset)",
+            "top: 0, leading: side, bottom: tab == .traces ? 0 : GlassTokens.Space.panePadding, trailing: side)",
             "GlassHairline(GlassTokens.Color.rule.color)",
             ".transition(.move(edge: .bottom).combined(with: .opacity))",
             // The inspector's 16 by 18, on the column it scrolls.

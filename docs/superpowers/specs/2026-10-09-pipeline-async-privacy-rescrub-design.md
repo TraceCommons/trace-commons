@@ -170,7 +170,10 @@ not run: what redaction did not resolve) is still held for a human and the
 submission stored `quarantined` (#1326), never rejected automatically.
 Admission is unchanged: a receipt-time Medium that Admission quarantined
 keeps Admission's hold whatever the pass clears, and a receipt-time High is
-still rejected by Admission. The text below describes the hold mechanics,
+still rejected by Admission (superseded by owner decision PC-D27,
+2026-10-11: Admission now holds a receipt-time High for review under
+`privacy_risk_high_review_required`, and it keeps that hold whatever the
+pass clears, as a Medium does). The text below describes the hold mechanics,
 which apply unchanged to a High escalation.
 
 Admission's decision is committed and is not rewritten, and the bundle's
@@ -219,7 +222,8 @@ stays held, fail-closed.
 High is held for a human, not rejected automatically (owner decision).
 Legacy's backstop quarantines and never rejects. And a classifier-only
 finding with no deterministic signal is the case where a human look is worth
-most. A receipt-time High is still rejected by Admission.
+most. A receipt-time High is still rejected by Admission (superseded by
+PC-D27, 2026-10-11: Admission holds it for review instead).
 
 This keeps the bundle untouched: `ReviewInput`, the Review policy and the
 qualification fixtures do not change.

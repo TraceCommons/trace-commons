@@ -1759,6 +1759,15 @@ struct AppState {
     /// (`POST /v1/workers/pipeline/index-rebuild`): one per tenant at a time,
     /// drained at shutdown (`pipeline_runtime::PipelineIndexRebuilds`).
     pipeline_index_rebuilds: Arc<pipeline_runtime::PipelineIndexRebuilds>,
+    /// Pipeline default routing (`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING=all`,
+    /// spec 2026-10-10): `None` without the mode, and then nothing of it runs.
+    /// With it, the arming from the results directory, the routed-tenant
+    /// cache the worker and the upload path serve from, and the loop's state
+    /// (`pipeline_default_routing::PipelineDefaultRouting`).
+    pipeline_default_routing: Option<Arc<pipeline_default_routing::PipelineDefaultRouting>>,
+    /// The tenant count and the duration of the worker's last pass, reported
+    /// by `GET /v1/pipeline/readiness`.
+    pipeline_worker_pass_stats: Arc<pipeline_default_routing::PipelineWorkerPassStats>,
     db_contributor_reads: bool,
     db_reviewer_reads: bool,
     db_reviewer_require_object_refs: bool,
@@ -4013,10 +4022,17 @@ impl AppState {
         let pipeline_lease_config = parse_pipeline_lease_config_from_env()?;
         let pipeline_drain_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_PIPELINE_DRAIN_TENANT_IDS)?;
+        // Spec 2026-10-10: pipeline default routing. Off unless the mode is
+        // `all`; a bad variable refuses the start with its label.
+        let pipeline_default_routing_config =
+            pipeline_default_routing::default_routing_config_from_env()?;
+        // With default routing on, every tenant may be processed, so the
+        // assembly's refusals for a runtime that processes tenants (no
+        // credit issuer, dependencies not production-qualified) apply.
         let pipeline_tenants_processed = pipeline_runtime::pipeline_tenants_processed(
             &tenant_rollout_gates,
             &pipeline_drain_tenant_ids,
-        );
+        ) || pipeline_default_routing_config.is_some();
         let novelty_utility_require_production_gate =
             env_truthy(TRACE_COMMONS_NOVELTY_UTILITY_REQUIRE_PRODUCTION_GATE);
         // Ruling T15-6: the configuration of `main`'s NoveltyUtility credit
@@ -4151,6 +4167,35 @@ impl AppState {
         // refuses the start.
         let pipeline_code_revision_hash =
             pipeline_activation::deployed_code_revision(DEPLOYED_CODE_REVISION_HASH)?;
+        // Spec 2026-10-10: the mode `all` needs the production runtime, both
+        // trust stores, a revision, the routing stores, and no test
+        // dependencies, and the runtime role must be able to call the V124
+        // enumeration; each missing piece refuses the start with its label.
+        pipeline_default_routing::validate_default_routing_start(
+            pipeline_default_routing_config.as_ref(),
+            pipeline_default_routing::DefaultRoutingStartFacts {
+                production_runtime: pipeline_runtime_selection
+                    == PipelineRuntimeSelection::Production
+                    && pipeline_service.is_some(),
+                trust_stores: pipeline_trust_stores.package.is_some()
+                    && pipeline_trust_stores.check.is_some(),
+                code_revision: pipeline_code_revision_hash.is_some(),
+                routing_store: pipeline_activation.is_some()
+                    && pipeline_qualification.is_some()
+                    && pipeline_product.is_some(),
+                allow_test_dependencies: pipeline_allow_test_dependencies,
+            },
+        )?;
+        if pipeline_default_routing_config.is_some() {
+            if let Some(activation) = pipeline_activation.as_deref() {
+                pipeline_default_routing::validate_default_routing_enumeration(activation).await?;
+            }
+        }
+        let pipeline_default_routing = pipeline_default_routing_config.map(|config| {
+            Arc::new(pipeline_default_routing::PipelineDefaultRouting::new(
+                config,
+            ))
+        });
         // Review round 1, point 3: a new upload of a `pipeline` tenant needs
         // a qualification of its active bundle on this revision. Say at the
         // start which listed tenants have none; this only logs, and all
@@ -4695,6 +4740,8 @@ impl AppState {
             pipeline_worker_ready,
             pipeline_drain_tenant_ids: Arc::new(pipeline_drain_tenant_ids),
             pipeline_index_rebuilds: Arc::default(),
+            pipeline_default_routing,
+            pipeline_worker_pass_stats: Arc::default(),
             db_contributor_reads,
             db_reviewer_reads,
             db_reviewer_require_object_refs,
@@ -12938,6 +12985,27 @@ struct TraceCommonsConfigStatusResponse {
     /// key id, or a key.
     pipeline_package_trust_store_loaded: bool,
     pipeline_check_trust_store_loaded: bool,
+    /// Pipeline default routing (spec 2026-10-10): `off` or `all`
+    /// (`TRACE_COMMONS_PIPELINE_DEFAULT_ROUTING`).
+    pipeline_default_routing_mode: &'static str,
+    /// Whether this process holds a verified result set for its revision
+    /// that has not expired, and so activates tenants with no routing row.
+    pipeline_default_routing_armed: bool,
+    /// Why it is not armed, a safe label (`null` when armed or off).
+    pipeline_default_routing_label: Option<String>,
+    /// Seconds until the armed set's earliest result expires.
+    pipeline_default_routing_expires_in_seconds: Option<i64>,
+    /// The counts and the duration of the loop's last pass.
+    pipeline_default_routing_last_pass: Option<pipeline_default_routing::DefaultRoutingPassReport>,
+    /// The tenants in the routed-tenant cache. Never their ids.
+    pipeline_default_routing_routed_tenant_count: usize,
+    /// The tenants the pipeline worker's last pass drained, and how long it
+    /// took (spec 2026-10-10): a pass drains its tenants one after another,
+    /// so its time grows with the number of routed tenants. Here, behind
+    /// admin auth, and not on the unauthenticated readiness probe: with
+    /// default routing the count rises as each new signup is routed.
+    pipeline_worker_last_pass_tenant_count: u64,
+    pipeline_worker_last_pass_duration_ms: u64,
     signed_token_auth_enabled: bool,
     signed_token_key_count: usize,
     signed_token_eddsa_key_count: usize,
@@ -13196,6 +13264,10 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
     let central_issuer_profile_missing_controls =
         credit_settlement_central_issuer_profile_missing_config(&central_issuer_profile_config);
     let central_issuer_profile_ready = central_issuer_profile_missing_controls.is_empty();
+    let default_routing = state.pipeline_default_routing.as_deref().map_or_else(
+        pipeline_default_routing::DefaultRoutingStatus::off,
+        pipeline_default_routing::PipelineDefaultRouting::status,
+    );
     TraceCommonsConfigStatusResponse {
         schema_version: TRACE_CONTRIBUTION_SCHEMA_VERSION,
         db_mirror_configured: state.db_mirror.is_some(),
@@ -13210,6 +13282,20 @@ fn trace_commons_config_status_response(state: &AppState) -> TraceCommonsConfigS
         pipeline_code_revision_configured: state.pipeline_code_revision_hash.is_some(),
         pipeline_package_trust_store_loaded: state.pipeline_package_trust.is_some(),
         pipeline_check_trust_store_loaded: state.pipeline_check_trust.is_some(),
+        pipeline_default_routing_mode: default_routing.mode,
+        pipeline_default_routing_armed: default_routing.armed,
+        pipeline_default_routing_label: default_routing.label,
+        pipeline_default_routing_expires_in_seconds: default_routing.expires_in_seconds,
+        pipeline_default_routing_last_pass: default_routing.last_pass,
+        pipeline_default_routing_routed_tenant_count: default_routing.routed_tenant_count,
+        pipeline_worker_last_pass_tenant_count: state
+            .pipeline_worker_pass_stats
+            .tenant_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        pipeline_worker_last_pass_duration_ms: state
+            .pipeline_worker_pass_stats
+            .duration_ms
+            .load(std::sync::atomic::Ordering::Relaxed),
         signed_token_auth_enabled: state.signed_token_verifier.is_some(),
         signed_token_key_count: signed_token_verifier
             .as_ref()
@@ -14491,11 +14577,9 @@ fn pipeline_runtime_for_tenant<'a>(
     state: &'a AppState,
     tenant: &TenantCtx,
 ) -> Option<&'a Arc<PipelineService>> {
-    if !state.tenant_rollout_gates.enabled_for(
-        TraceTenantRolloutFeature::PipelineReceipts,
-        false,
-        tenant.tenant_id(),
-    ) {
+    // The receipts list, or (spec 2026-10-10) a tenant pipeline default
+    // routing admitted to this process's routed-tenant cache.
+    if !pipeline_default_routing::pipeline_tenant_served(state, tenant.tenant_id()) {
         return None;
     }
     state.pipeline_service.as_ref()
@@ -14548,7 +14632,9 @@ fn pipeline_content_conflict() -> (StatusCode, Json<ApiError>) {
 
 /// The label a retried upload gets for a submission id that a pipeline run
 /// owns when no pipeline runtime may replay it: the tenant is on neither
-/// pipeline list, or no runtime is injected (Zaki review 1, round 2, N-3).
+/// pipeline list and pipeline default routing is not configured, or no
+/// runtime is injected (Zaki review 1, round 2, N-3;
+/// `pipeline_runtime_for_owned_retry`).
 const SUBMISSION_OWNED_BY_PIPELINE_RUN: &str = "submission_owned_by_pipeline_run";
 
 /// The 409 label of a `main` route that refuses a submission a pipeline run
@@ -14568,7 +14654,9 @@ const PIPELINE_RUN_OWNS_SUBMISSION: &str = "pipeline_run_owns_submission";
 /// receipt, and a different body is refused as the pipeline refuses it
 /// (`pipeline_content_conflict`). With no such runtime, a run found
 /// through the database (`PgPipelineStore`) refuses the upload with
-/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`. `Ok(None)` when no pipeline run owns
+/// `SUBMISSION_OWNED_BY_PIPELINE_RUN`, unless pipeline default routing is
+/// configured: then the run's receipt is replayed the same way
+/// (`owned_retry_receipt`). `Ok(None)` when no pipeline run owns
 /// the id: the upload takes `main`'s path.
 async fn pipeline_owned_submission_receipt(
     state: &AppState,
@@ -14578,39 +14666,14 @@ async fn pipeline_owned_submission_receipt(
     ownership_conflict: &'static str,
 ) -> ApiResult<Option<TraceSubmissionReceipt>> {
     if let Some(pipeline_service) = pipeline_runtime_for_replay(state, tenant) {
-        let idempotency_key = submission_id.to_string();
-        let Some(PipelineReplayReceipt {
-            result,
-            auth_principal_ref,
-        }) = pipeline_service
-            .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
-            .await
-            .map_err(internal_error)?
-        else {
-            return Ok(None);
-        };
-        if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
-            return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
-        }
-        return match result {
-            PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
-            PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
-            // `replay_receipt` only ever builds a `Replayed` or a
-            // `ContentConflict` result (`replay_result`, over a run it
-            // found); any other variant fails closed rather than letting
-            // the upload reach the legacy upsert.
-            // Neither routing result is ever built by `replay_receipt`: a
-            // replay is answered in every routing state, so it names no
-            // routing and no legacy owner.
-            PipelineReceiptResult::Created(_)
-            | PipelineReceiptResult::Tombstoned
-            | PipelineReceiptResult::QuotaExceeded(_)
-            | PipelineReceiptResult::SourceSessionWithdrawn
-            | PipelineReceiptResult::LegacyOwned
-            | PipelineReceiptResult::NotRouted(_) => {
-                Err(internal_error("pipeline_replay_result_unexpected"))
-            }
-        };
+        return replay_pipeline_receipt(
+            pipeline_service,
+            tenant,
+            submission_id,
+            raw_body,
+            ownership_conflict,
+        )
+        .await;
     }
     if let Some(store) = state.pipeline_store.as_ref() {
         if store
@@ -14618,13 +14681,104 @@ async fn pipeline_owned_submission_receipt(
             .await
             .map_err(internal_error)?
         {
-            return Err(api_error(
-                StatusCode::CONFLICT,
-                SUBMISSION_OWNED_BY_PIPELINE_RUN,
-            ));
+            return owned_retry_receipt(state, tenant, submission_id, raw_body, ownership_conflict)
+                .await;
         }
     }
     Ok(None)
+}
+
+/// The runtime that replays a retry of a submission id a pipeline run owns
+/// when `pipeline_runtime_for_replay` has none for the tenant: with pipeline
+/// default routing configured (spec 2026-10-10), the injected runtime. Under
+/// that mode a tenant may have been routed by another replica, or routed and
+/// then deactivated to `legacy`, without ever being on an env list, so this
+/// process's routed-tenant cache does not say whether its earlier uploads
+/// went through the pipeline: the run that owns the id does. The replay only
+/// reads that run (`PipelineService::replay_receipt`, tenant-scoped); it runs
+/// no bundle and routes nothing.
+fn pipeline_runtime_for_owned_retry(state: &AppState) -> Option<&Arc<PipelineService>> {
+    state
+        .pipeline_default_routing
+        .as_ref()
+        .and(state.pipeline_service.as_ref())
+}
+
+/// The answer to a retry of a submission id that a pipeline run owns, in a
+/// process `pipeline_runtime_for_replay` gives no runtime for the tenant: the
+/// replayed receipt through `pipeline_runtime_for_owned_retry` when there is
+/// one, else `409 SUBMISSION_OWNED_BY_PIPELINE_RUN`. Never `Ok(None)`: the
+/// legacy path never writes an id a run owns.
+async fn owned_retry_receipt(
+    state: &AppState,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let owned = || api_error(StatusCode::CONFLICT, SUBMISSION_OWNED_BY_PIPELINE_RUN);
+    let Some(pipeline_service) = pipeline_runtime_for_owned_retry(state) else {
+        return Err(owned());
+    };
+    match replay_pipeline_receipt(
+        pipeline_service,
+        tenant,
+        submission_id,
+        raw_body,
+        ownership_conflict,
+    )
+    .await?
+    {
+        Some(receipt) => Ok(Some(receipt)),
+        None => Err(owned()),
+    }
+}
+
+/// Replays the pipeline receipt of `submission_id` through `pipeline_service`
+/// for the principal the pipeline recorded: the same body replays the
+/// receipt, a different body is refused as the pipeline refuses it
+/// (`pipeline_content_conflict`), and another principal is refused with
+/// `ownership_conflict`. `Ok(None)` when no run holds the key.
+async fn replay_pipeline_receipt(
+    pipeline_service: &PipelineService,
+    tenant: &TenantCtx,
+    submission_id: Uuid,
+    raw_body: &[u8],
+    ownership_conflict: &'static str,
+) -> ApiResult<Option<TraceSubmissionReceipt>> {
+    let idempotency_key = submission_id.to_string();
+    let Some(PipelineReplayReceipt {
+        result,
+        auth_principal_ref,
+    }) = pipeline_service
+        .replay_receipt(tenant.tenant_id(), &idempotency_key, raw_body)
+        .await
+        .map_err(internal_error)?
+    else {
+        return Ok(None);
+    };
+    if !can_access_submission_ref(tenant.auth(), &auth_principal_ref) {
+        return Err(api_error(StatusCode::CONFLICT, ownership_conflict));
+    }
+    match result {
+        PipelineReceiptResult::Replayed(_) => Ok(Some(pipeline_processing_receipt())),
+        PipelineReceiptResult::ContentConflict => Err(pipeline_content_conflict()),
+        // `replay_receipt` only ever builds a `Replayed` or a
+        // `ContentConflict` result (`replay_result`, over a run it
+        // found); any other variant fails closed rather than letting
+        // the upload reach the legacy upsert.
+        // Neither routing result is ever built by `replay_receipt`: a
+        // replay is answered in every routing state, so it names no
+        // routing and no legacy owner.
+        PipelineReceiptResult::Created(_)
+        | PipelineReceiptResult::Tombstoned
+        | PipelineReceiptResult::QuotaExceeded(_)
+        | PipelineReceiptResult::SourceSessionWithdrawn
+        | PipelineReceiptResult::LegacyOwned
+        | PipelineReceiptResult::NotRouted(_) => {
+            Err(internal_error("pipeline_replay_result_unexpected"))
+        }
+    }
 }
 
 /// `pipeline_owned_submission_receipt` for a new upload (the call before the
@@ -14636,7 +14790,10 @@ async fn pipeline_owned_submission_receipt(
 /// the id, as `main` does. With the routing store that one statement also
 /// reads the tenant's routing (`run_and_routing_for_upload`), so the route
 /// decision of such a process adds no transaction to the upload. A run that
-/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before.
+/// owns the id is refused with `SUBMISSION_OWNED_BY_PIPELINE_RUN`, as before,
+/// unless pipeline default routing is configured: then the retry replays its
+/// receipt (`owned_retry_receipt`), after a routed tenant this process has
+/// not cached is admitted.
 ///
 /// A read that fails: a process with no runtime answers as `main` answers its
 /// failed run read (`internal_error`); a process with a runtime answers `503
@@ -14672,10 +14829,16 @@ async fn pipeline_owner_and_routing_for_new_upload(
                     }
                 })?;
             if has_pipeline_run {
-                return Err(api_error(
-                    StatusCode::CONFLICT,
-                    SUBMISSION_OWNED_BY_PIPELINE_RUN,
-                ));
+                // With default routing, a `pipeline` or `contained` tenant
+                // this process has not cached yet is admitted first, so its
+                // worker drains it; the retry then replays its receipt
+                // whatever the tenant's routing is now.
+                pipeline_default_routing::admit_routed_tenant(state, tenant.tenant_id(), &routing)
+                    .await;
+                let receipt =
+                    owned_retry_receipt(state, tenant, submission_id, raw_body, ownership_conflict)
+                        .await?;
+                return Ok((receipt, Some(routing)));
             }
             return Ok((None, Some(routing)));
         }
@@ -15441,6 +15604,17 @@ async fn submit_trace_handler(
         // otherwise the legacy path owns its id.
         // `route_pipeline_receipt` acts on the decision after every legacy
         // check.
+        // Spec 2026-10-10: a process armed for pipeline default routing
+        // routes a tenant with no routing row to the pipeline first, so a new
+        // signup's first upload is a pipeline receipt. A refusal there never
+        // fails the upload: it keeps its current routing.
+        let routing_read = pipeline_default_routing::route_before_first_upload(
+            state.as_ref(),
+            tenant.tenant_id(),
+            remediating_prior.is_some(),
+            routing_read,
+        )
+        .await;
         let upload_route = decide_upload_route(
             state.as_ref(),
             &tenant,
@@ -17263,13 +17437,15 @@ async fn submission_status_handler(
     // credit view above: the account's principal set when the caller is
     // linked to an account, else the caller's own principal. Read only for a
     // tenant on the receipts or the drain list, the tenants whose retried
-    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`); any
-    // other tenant's answer is `main`'s alone, with no pipeline query (Zaki
-    // review 1, round 2, item 6).
-    let pipeline_product = state
-        .pipeline_product
-        .as_ref()
-        .filter(|_| pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some());
+    // uploads replay pipeline receipts (`pipeline_runtime_for_replay`), and,
+    // with pipeline default routing configured, every tenant, since any of
+    // them may have uploaded through the pipeline without being on a list
+    // (`pipeline_runtime_for_owned_retry`); any other tenant's answer is
+    // `main`'s alone, with no pipeline query (Zaki review 1, round 2, item 6).
+    let pipeline_product = state.pipeline_product.as_ref().filter(|_| {
+        pipeline_runtime_for_replay(state.as_ref(), &tenant).is_some()
+            || pipeline_runtime_for_owned_retry(state.as_ref()).is_some()
+    });
     let pipeline_by_submission = match pipeline_product {
         Some(product) => {
             let principal_refs = account_principals.map_or_else(
@@ -17539,6 +17715,15 @@ fn submission_status_from_pipeline(
         | PipelineCreditStatus::NotSettlementEligible => 0.0,
         _ => trace_credit_points,
     };
+    // #1346: a run that failed before Review decided its submission moved
+    // the submission to `rejected`; Review's own rejection completes the run.
+    let explanation = if status.submission_status == "rejected"
+        && status.processing == PipelineProcessingStatus::Failed
+    {
+        vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+    } else {
+        Vec::new()
+    };
     TraceSubmissionStatusUpdate {
         submission_id: status.submission_id,
         trace_id: status.trace_id,
@@ -17548,7 +17733,7 @@ fn submission_status_from_pipeline(
             .then_some(trace_credit_points),
         credit_points_ledger: 0.0,
         credit_points_total: None,
-        explanation: Vec::new(),
+        explanation,
         delayed_credit_explanations: Vec::new(),
         consent_scopes: Vec::new(),
         pipeline: Some(pipeline_status_for_protocol(status)),
@@ -17570,7 +17755,11 @@ fn submission_status_from_pipeline(
 /// failed because its Review-start privacy classification kept failing
 /// (`privacy_classification_failed`, owner decision Q1): its content was
 /// never classified, so it reports `quarantined`, held content, rather
-/// than `accepted`.
+/// than `accepted`. Since #1346 any other run that fails while its stored
+/// row is `received` moves the row to `rejected` in the failing
+/// transaction, so it reports `rejected` through the first arms. A row
+/// stored `quarantined` (Admission quarantine, or a privacy-pass
+/// escalation) is not moved and keeps reporting `quarantined`.
 fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
     match status.submission_status.as_str() {
         "accepted" => "accepted",
@@ -20629,6 +20818,8 @@ use production_assembly::PipelineRuntimeSelection;
 
 #[path = "trace_commons_ingest_internal/pipeline_activation.rs"]
 mod pipeline_activation;
+#[path = "trace_commons_ingest_internal/pipeline_default_routing.rs"]
+mod pipeline_default_routing;
 use pipeline_activation::{
     pipeline_activate_handler, pipeline_admin_body_limit, pipeline_contain_handler,
     pipeline_deactivate_handler, pipeline_legacy_drain_handler,
@@ -64186,6 +64377,22 @@ const GATE_DUPLICATE_WITHHELD_REASONS: [&str; 2] = ["skipped_duplicate", "cached
 const SCORING_IN_PROGRESS_LINE: &str =
     "Scoring in progress; credit is assigned when the gate's evaluation completes.";
 
+/// #1346: the line a contributor sees for a submission whose pipeline run
+/// ended `failed` before Review decided it (status `rejected`, status reason
+/// `pipeline_processing_failed`). It says what happened to the trace, not
+/// why the server failed: the cause is an operator's, and stays in the run.
+const PIPELINE_PROCESSING_FAILED_EXPLANATION: &str =
+    "This trace could not be processed. It was not scored and earns no credit.";
+
+/// Whether `record` is a submission its failed pipeline run rejected
+/// (#1346): status `rejected` under the status reason
+/// `pipeline_processing_failed`.
+fn pipeline_processing_failed_record(record: &TraceCommonsSubmissionRecord) -> bool {
+    record.status == TraceCorpusStatus::Rejected
+        && record.last_status_reason.as_deref()
+            == Some(trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON)
+}
+
 /// The gate's credit quality on the estimate's scale: `round(10 * q, 2)`,
 /// the same expression `compute_value_scorecard` applies to its online
 /// score, so a contributor comparing the two figures compares like with
@@ -64377,6 +64584,9 @@ fn receipt_from_record(
             format!("Attributed to tenant {}", record.tenant_storage_ref),
         ],
         TraceCorpusStatus::Revoked => vec!["Revoked and marked with a tombstone.".to_string()],
+        TraceCorpusStatus::Rejected if pipeline_processing_failed_record(record) => {
+            vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+        }
         TraceCorpusStatus::Rejected => vec!["Rejected by ingestion policy.".to_string()],
         TraceCorpusStatus::Expired => vec!["Expired under the retention policy.".to_string()],
         TraceCorpusStatus::Purged => vec!["Purged under the retention policy.".to_string()],
@@ -78209,6 +78419,11 @@ struct TraceCommonsTraceListItem {
     /// trace list; the account views that share this item leave it out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     witness_provenance_class: Option<TraceWitnessProvenanceClass>,
+    /// Lines that explain the status, when the status alone does not (#1346:
+    /// a submission rejected because its pipeline run failed). Absent
+    /// otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    explanation: Vec<String>,
 }
 
 impl TraceCommonsTraceListItem {
@@ -78217,6 +78432,11 @@ impl TraceCommonsTraceListItem {
         derived_by_submission: &BTreeMap<Uuid, TraceCommonsDerivedRecord>,
     ) -> Self {
         let derived = derived_by_submission.get(&record.submission_id);
+        let explanation = if pipeline_processing_failed_record(&record) {
+            vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+        } else {
+            Vec::new()
+        };
         Self {
             tenant_storage_ref: record.tenant_storage_ref,
             submission_id: record.submission_id,
@@ -78242,6 +78462,7 @@ impl TraceCommonsTraceListItem {
             duplicate_score: derived.map(|record| record.duplicate_score),
             novelty_score: derived.map(|record| record.novelty_score),
             witness_provenance_class: None,
+            explanation,
         }
     }
 }

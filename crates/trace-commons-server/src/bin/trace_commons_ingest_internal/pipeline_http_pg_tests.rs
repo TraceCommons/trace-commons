@@ -577,7 +577,9 @@ pub(super) async fn wait_for_pipeline_ready(client: &reqwest::Client, base: &str
             .expect("readiness request");
         if response.status() == reqwest::StatusCode::OK {
             let body: serde_json::Value = response.json().await.expect("readiness body");
-            if body == serde_json::json!({"status": "ready", "drain_tenant_count": 0}) {
+            // The worker's last-pass counters move with every pass; the
+            // readiness itself is the status and the drain count.
+            if body["status"] == "ready" && body["drain_tenant_count"] == 0 {
                 return;
             }
         }
@@ -8076,7 +8078,7 @@ impl PipelinePrivacyBoundary for FailingPrivacyBoundary {
 /// Polls the state of `submission_id`'s run in `tenant_id` every 100 ms, up
 /// to 60 s, until it is `expected`; the live worker moves the run, never this
 /// test. Panics with the last state it saw when the bound passes.
-async fn wait_for_run_state(
+pub(super) async fn wait_for_run_state(
     backend: &Arc<PgBackend>,
     tenant_id: &str,
     submission_id: Uuid,
@@ -15338,6 +15340,451 @@ async fn the_worker_appends_one_audit_event_for_a_failed_privacy_classification(
     )
     .await;
     assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    assert_audit_verification_is_clean(&fixture).await;
+    // Q1: an exhausted classification is held content, not a processing
+    // failure. The stored row is not moved to `rejected` (#1346).
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the pipeline's submission row");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Received);
+}
+
+/// The file of the stored artifact `object_key` under `root`, wherever the
+/// local store keeps it.
+fn stored_artifact_file(root: &Path, object_key: &str) -> Option<std::path::PathBuf> {
+    let name = format!("{object_key}.json");
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.file_name().and_then(|name| name.to_str()) == Some(name.as_str()) {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// #1346: a run whose Review exhausts its attempt budget on
+/// `artifact_integrity_failed` (its stored source object is gone, as in the
+/// stage 3 fault drill (a)) ends `failed`, and the same transaction moves its
+/// `received` submission to `rejected` with the status reason
+/// `pipeline_processing_failed` and no pending credit. The review audit pass
+/// appends one `lifecycle_status_change` event, status `rejected`, with the
+/// id derived from the run; a second pass adds none; `main`'s audit
+/// verification and reconciliation find no gap. The contributor sees the
+/// trace as `rejected`, with a line that says why, on the account trace list
+/// and on the status route the CLI reads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_run_that_exhausts_review_on_a_missing_source_rejects_its_submission() {
+    let Some(mut fixture) = submitted_audit_fixture_with(|runtime, artifacts| {
+        assemble_compatibility_pipeline_service(
+            runtime,
+            &ConfiguredTraceArtifactStore::legacy(artifacts),
+            IsolatedPipelineIndex::new(),
+            2_500_000,
+            Arc::new(PassThroughPipelinePrivacyBoundary),
+        )
+    })
+    .await
+    else {
+        return;
+    };
+    let runtime = fixture.runtime.clone();
+    Arc::make_mut(&mut fixture.state).pipeline_product =
+        Some(Arc::new(PipelineProductStore::new(runtime)));
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+
+    // The stored source object is deleted.
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let object_key: String = tx
+        .query_one(
+            "SELECT object_key FROM trace_object_refs
+              WHERE tenant_id = $1 AND object_ref_id = $2",
+            &[&tenant, &created.source_object_ref_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    let source = stored_artifact_file(&fixture.state.root, &object_key)
+        .expect("the source object is stored under the fixture root");
+    std::fs::remove_file(source).unwrap();
+
+    let mut run = fixture
+        .service
+        .process_run(&tenant, created.run_id)
+        .await
+        .expect("Review meets the missing object")
+        .expect("the run was claimed");
+    assert_eq!(
+        (run.state, run.last_error_label.as_deref()),
+        (
+            PipelineRunState::Retry,
+            Some(
+                trace_commons_server::versioned_pipeline::PIPELINE_ARTIFACT_INTEGRITY_FAILED_LABEL
+            )
+        ),
+        "{run:?}"
+    );
+    let stored_status = |fixture: &WithdrawalFixture| {
+        let owner = fixture.owner.clone();
+        let tenant = tenant.clone();
+        async move {
+            owner
+                .get_trace_submission(&tenant, envelope.submission_id)
+                .await
+                .unwrap()
+                .expect("the pipeline's submission row")
+        }
+    };
+    assert_eq!(
+        stored_status(&fixture).await.status,
+        StorageTraceCorpusStatus::Received,
+        "a charged retry is not the end of the run"
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    while run.state == PipelineRunState::Retry {
+        let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+        let tx = tenant_tx(&mut client, &tenant).await;
+        tx.execute(
+            "UPDATE pipeline_runs SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &created.run_id],
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        drop(client);
+        run = fixture
+            .service
+            .process_run(&tenant, created.run_id)
+            .await
+            .expect("the retry runs")
+            .expect("the run was claimed");
+    }
+    assert_eq!(
+        (run.state, run.last_error_label.as_deref()),
+        (PipelineRunState::Failed, Some("attempts_exhausted")),
+        "{run:?}"
+    );
+
+    // 1. The submission is terminal, with the reason label and no pending
+    //    credit, and the marker is set.
+    let submission = stored_status(&fixture).await;
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Rejected);
+    assert_eq!(
+        submission.last_status_reason.as_deref(),
+        Some("pipeline_processing_failed")
+    );
+    assert_eq!(submission.credit_points_pending.unwrap_or(0.0), 0.0);
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+
+    // 2. One `lifecycle_status_change` event, `rejected`, with the run's id.
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let failed_id =
+        deterministic_trace_uuid_for("pipeline-processing-failed-audit", &tenant, created.run_id);
+    let events =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].event_id, failed_id);
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert_eq!(
+        events[0].reason.as_deref(),
+        Some("pipeline_processing_failed")
+    );
+    assert_eq!(
+        events[0].actor_principal_ref.as_deref(),
+        Some("pipeline_worker")
+    );
+    let rows = fixture
+        .state
+        .db_mirror
+        .as_ref()
+        .expect("the state has a database")
+        .list_trace_audit_events(&tenant)
+        .await
+        .expect("the audit rows read");
+    let row = rows
+        .iter()
+        .find(|row| row.audit_event_id == failed_id)
+        .expect("the event has its database row");
+    assert_eq!(row.actor_role, "system");
+    assert_eq!(
+        row.metadata,
+        StorageTraceAuditSafeMetadata::ReviewDecision {
+            decision: "rejected".to_string(),
+            resulting_status: StorageTraceCorpusStatus::Rejected,
+            reason_code: Some("pipeline_processing_failed".to_string()),
+        }
+    );
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+    set_review_audit_marker(&fixture, created.run_id).await;
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    assert_eq!(
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change")
+            .len(),
+        1
+    );
+    assert_audit_verification_is_clean(&fixture).await;
+    let caller = fixture
+        .state
+        .tokens
+        .get(&fixture.token)
+        .expect("the upload credential")
+        .clone();
+    let report = reconcile_db_mirror(fixture.state.as_ref(), &caller, &[], &[], true, None)
+        .await
+        .expect("main reconciles the tenant's DB mirror")
+        .expect("a reconciliation report");
+    assert!(report.db_audit_submission_metadata_mismatches.is_empty());
+    assert!(report.db_audit_hash_chain_failures.is_empty());
+
+    // 3. The status route the CLI reads: terminal, explained, no credit.
+    let (status, body) = route_request(
+        fixture.state.clone(),
+        "POST",
+        "/v1/contributors/me/submission-status",
+        auth_headers(&fixture.token),
+        Some(serde_json::json!({ "submission_ids": [envelope.submission_id] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let document = &body[0];
+    assert_eq!(document["status"], "rejected", "{body}");
+    assert_eq!(document["credit_points_pending"], 0.0, "{body}");
+    let explanation = document["explanation"]
+        .as_array()
+        .expect("an explanation")
+        .iter()
+        .filter_map(|line| line.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        explanation.contains(&PIPELINE_PROCESSING_FAILED_EXPLANATION),
+        "{body}"
+    );
+    assert!(
+        !explanation.contains(&"Rejected by ingestion policy."),
+        "a processing failure is not a policy decision: {body}"
+    );
+
+    // 4. The account trace list: terminal, explained, no credit.
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let ext = account_ctx_ext(&fixture.state, &session).await;
+    let Json(page) = account_traces_list_handler(
+        State(fixture.state.clone()),
+        ext,
+        Query(AccountTracesListQuery::default()),
+    )
+    .await
+    .expect("the list succeeds");
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.submission_id == envelope.submission_id)
+        .expect("the trace is listed");
+    assert_eq!(item.status, TraceCorpusStatus::Rejected);
+    assert_eq!(item.credit_points_pending, 0.0);
+    assert_eq!(
+        item.explanation,
+        vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+    );
+}
+
+/// #1346: a run that fails after its submission stopped being operable (it
+/// was revoked) leaves the submission as it is: a failure never moves a
+/// revoked, purged, withdrawn or expired submission, and sets no audit
+/// marker.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_run_never_moves_a_revoked_submission() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    // The submission is revoked behind the run's back, still `received` in
+    // the column the move reads, with `revoked_at` set.
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE trace_submissions SET revoked_at = NOW()
+          WHERE tenant_id = $1 AND submission_id = $2",
+        &[&tenant, &envelope.submission_id],
+    )
+    .await
+    .unwrap();
+    // The run is out of attempts and leased with an expired lease, so the
+    // next claim's sweep fails it as `attempts_exhausted`.
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'leased', lease_token = gen_random_uuid(),
+                lease_expires_at = NOW() - INTERVAL '1 second',
+                attempt_count = max_attempts
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let _ = fixture
+        .service
+        .store()
+        .claim_next(
+            &tenant,
+            trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        )
+        .await
+        .expect("the claim sweeps");
+    let run = fixture
+        .service
+        .store()
+        .get_run(&tenant, created.run_id)
+        .await
+        .unwrap()
+        .expect("the run exists");
+    assert_eq!(run.state, PipelineRunState::Failed, "{run:?}");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Received);
+    assert_eq!(submission.last_status_reason, None);
+    assert!(!review_audit_marker_is_set(&fixture, created.run_id).await);
+}
+
+/// #1346: a run that the `claim_next` sweep fails (its worker died holding
+/// the last attempt) moves its `received` submission to `rejected`, as a
+/// worker's own exhausted retry does. The audit event follows the run's
+/// record of the move, so a withdrawal through the account route between
+/// the move and the audit pass does not lose it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_swept_run_rejects_its_received_submission() {
+    let Some(fixture) = submitted_audit_fixture().await else {
+        return;
+    };
+    let tenant = fixture.tenant.clone();
+    let mut envelope = sample_envelope().await;
+    envelope.submission_id = Uuid::new_v4();
+    make_metadata_only_low_risk(&mut envelope);
+    test_submit(fixture.state.clone(), &fixture.token, envelope.clone())
+        .await
+        .map(|_| ())
+        .expect("the receipt succeeds");
+    let created = run_of_submission(
+        &fixture.service,
+        &fixture.runtime,
+        &tenant,
+        envelope.submission_id,
+    )
+    .await;
+    let mut client = fixture.owner.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    tx.execute(
+        "UPDATE pipeline_runs
+            SET state = 'leased', lease_token = gen_random_uuid(),
+                lease_expires_at = NOW() - INTERVAL '1 second',
+                attempt_count = max_attempts
+          WHERE tenant_id = $1 AND run_id = $2",
+        &[&tenant, &created.run_id],
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    drop(client);
+    let _ = fixture
+        .service
+        .store()
+        .claim_next(
+            &tenant,
+            trace_commons_server::versioned_pipeline::PipelineLeaseConfig::default(),
+        )
+        .await
+        .expect("the claim sweeps");
+    let submission = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    assert_eq!(submission.status, StorageTraceCorpusStatus::Rejected);
+    assert_eq!(
+        submission.last_status_reason.as_deref(),
+        Some("pipeline_processing_failed")
+    );
+    assert!(review_audit_marker_is_set(&fixture, created.run_id).await);
+    // The contributor withdraws the rejected trace before the audit pass:
+    // the withdrawal rewrites the row's status and reason, and leaves the
+    // failed run (and its V123 record) as it is, so the run's own record of
+    // the move still yields the event.
+    let session = account_session_headers(&fixture.state, &fixture.token).await;
+    let (status, withdrawal) = route_request(
+        fixture.state.clone(),
+        "POST",
+        &format!("/v1/account/traces/{}/withdraw", envelope.submission_id),
+        session,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{withdrawal}");
+    let withdrawn = fixture
+        .owner
+        .get_trace_submission(&tenant, envelope.submission_id)
+        .await
+        .unwrap()
+        .expect("the submission row");
+    assert_ne!(withdrawn.status, StorageTraceCorpusStatus::Rejected);
+    run_review_audit_pass(&fixture)
+        .await
+        .expect("the pass runs");
+    let events =
+        audit_file_events_of_kind(&fixture, envelope.submission_id, "lifecycle_status_change");
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0].status, Some(TraceCorpusStatus::Rejected));
+    assert_eq!(
+        events[0].event_id,
+        deterministic_trace_uuid_for("pipeline-processing-failed-audit", &tenant, created.run_id)
+    );
     assert_audit_verification_is_clean(&fixture).await;
 }
 

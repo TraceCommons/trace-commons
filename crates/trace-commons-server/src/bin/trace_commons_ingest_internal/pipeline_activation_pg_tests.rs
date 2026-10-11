@@ -118,7 +118,7 @@ async fn gate_driver_backend() -> PgBackend {
 /// fresh submission id and a distinguishing tool name: the legacy path
 /// accepts it, the pipeline's Admission accepts it, and `main`'s vector index
 /// and delayed credit apply to it.
-async fn clean_envelope(tool_name: &str) -> TraceContributionEnvelope {
+pub(super) async fn clean_envelope(tool_name: &str) -> TraceContributionEnvelope {
     let mut envelope = sample_envelope().await;
     envelope.submission_id = Uuid::new_v4();
     envelope.trace_id = Uuid::new_v4();
@@ -2973,27 +2973,27 @@ const ROUTING_EVENT_FIELDS: [&str; 10] = [
 /// deployment would hold. A, the runtime's default package, and B are signed
 /// by the package key; check results are signed by the check key, which is
 /// another key. `bodies` keeps every answer body of `call`.
-struct RouteFixture {
-    runtime: Arc<PgBackend>,
-    owner: Arc<PgBackend>,
-    state: Arc<AppState>,
-    configured_store: ConfiguredTraceArtifactStore,
-    tenant: String,
-    admin: String,
-    contributor: String,
-    other_tenant: String,
-    other_admin: String,
-    revision: String,
-    a: trace_commons_gate_api::pipeline::BundlePackage,
-    b: trace_commons_gate_api::pipeline::BundlePackage,
-    package_pkcs8: Vec<u8>,
-    check_pkcs8: Vec<u8>,
-    bodies: std::sync::Mutex<Vec<String>>,
-    dir: tempfile::TempDir,
+pub(super) struct RouteFixture {
+    pub(super) runtime: Arc<PgBackend>,
+    pub(super) owner: Arc<PgBackend>,
+    pub(super) state: Arc<AppState>,
+    pub(super) configured_store: ConfiguredTraceArtifactStore,
+    pub(super) tenant: String,
+    pub(super) admin: String,
+    pub(super) contributor: String,
+    pub(super) other_tenant: String,
+    pub(super) other_admin: String,
+    pub(super) revision: String,
+    pub(super) a: trace_commons_gate_api::pipeline::BundlePackage,
+    pub(super) b: trace_commons_gate_api::pipeline::BundlePackage,
+    pub(super) package_pkcs8: Vec<u8>,
+    pub(super) check_pkcs8: Vec<u8>,
+    pub(super) bodies: std::sync::Mutex<Vec<String>>,
+    pub(super) dir: tempfile::TempDir,
 }
 
 impl RouteFixture {
-    async fn new() -> Option<Self> {
+    pub(super) async fn new() -> Option<Self> {
         use trace_commons_server::versioned_pipeline_qualification::trusted_key_for_pkcs8;
 
         let runtime = runtime_backend(6).await?;
@@ -3097,7 +3097,7 @@ impl RouteFixture {
 
     /// The fixture's state with `change` applied, as a second process would
     /// hold it.
-    fn with(&self, change: impl FnOnce(&mut AppState)) -> Arc<AppState> {
+    pub(super) fn with(&self, change: impl FnOnce(&mut AppState)) -> Arc<AppState> {
         let mut state = self.state.clone();
         change(Arc::make_mut(&mut state));
         state
@@ -3105,7 +3105,7 @@ impl RouteFixture {
 
     /// `method path` through a plain router over `state`, with `token` as the
     /// bearer when one is given and `body` as JSON. The answer body is kept.
-    async fn call(
+    pub(super) async fn call(
         &self,
         state: &Arc<AppState>,
         method: &str,
@@ -3123,7 +3123,7 @@ impl RouteFixture {
     }
 
     /// `call` through the fixture's state with the tenant's admin credential.
-    async fn admin_call(
+    pub(super) async fn admin_call(
         &self,
         method: &str,
         path: &str,
@@ -3134,7 +3134,7 @@ impl RouteFixture {
     }
 
     /// `package`, signed by the package key.
-    fn signed(
+    pub(super) fn signed(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
     ) -> trace_commons_server::versioned_pipeline_qualification::SignedBundlePackage {
@@ -3149,7 +3149,7 @@ impl RouteFixture {
     /// A full set of passing check results for `package` on the fixture's
     /// revision, each signed by the check key: the four package checks name
     /// `package`, every other check names none (P5-D15).
-    fn attestations(
+    pub(super) fn attestations(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
     ) -> Vec<trace_commons_server::versioned_pipeline_qualification::PipelineCheckAttestation> {
@@ -3157,7 +3157,7 @@ impl RouteFixture {
     }
 
     /// `attestations`, each signed by the key `pkcs8` under `key_id`.
-    fn attestations_signed_by(
+    pub(super) fn attestations_signed_by(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         key_id: &str,
@@ -3168,7 +3168,7 @@ impl RouteFixture {
 
     /// `attestations`, with the result of each check in `other_run` taken
     /// from a second run (another run id), on the same revision.
-    fn attestations_from_two_runs(
+    pub(super) fn attestations_from_two_runs(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         other_run: &[&str],
@@ -3186,7 +3186,7 @@ impl RouteFixture {
 
     /// `attestations` for a build of another revision: what an operator
     /// signs after a deploy, on the new tree.
-    fn attestations_on(
+    pub(super) fn attestations_on(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         revision: &str,
@@ -3206,7 +3206,7 @@ impl RouteFixture {
     /// `maximum_age_seconds`, and with the result of `stale_check` (when one
     /// is named) observed two hours before now, so that it is stale under a
     /// maximum age of one hour.
-    fn attestations_aged(
+    pub(super) fn attestations_aged(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         maximum_age_seconds: u64,
@@ -3224,7 +3224,7 @@ impl RouteFixture {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn attestations_with(
+    pub(super) fn attestations_with(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         revision: &str,
@@ -3279,7 +3279,7 @@ impl RouteFixture {
     }
 
     /// The body of `POST qualifications` for `package`.
-    fn qualify_body(
+    pub(super) fn qualify_body(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
     ) -> serde_json::Value {
@@ -3294,7 +3294,7 @@ impl RouteFixture {
     /// (`PipelineActivationStore::routing_view`, what `GET routing` answers),
     /// or `none` for a tenant with no routing row. Read through the store, so
     /// the read leaves no answer body and no read audit behind.
-    async fn record_id_in_force(&self, tenant: &str) -> serde_json::Value {
+    pub(super) async fn record_id_in_force(&self, tenant: &str) -> serde_json::Value {
         self.store()
             .routing_view(tenant, 1, None)
             .await
@@ -3309,7 +3309,7 @@ impl RouteFixture {
     /// The body of `POST activate` (and `rollback`) for `package`, with the
     /// record id that is in force for the fixture's tenant when the body is
     /// built (`record_id_in_force`). Build it just before the request.
-    async fn activate_body(
+    pub(super) async fn activate_body(
         &self,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
         reason_code: &str,
@@ -3321,7 +3321,9 @@ impl RouteFixture {
     /// The nine routes, each with a body it accepts, and whether it needs a
     /// pipeline runtime (`GET routing`, `GET legacy-drain`, `POST contain`,
     /// and `POST deactivate` need only the routing store).
-    async fn routes(&self) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
+    pub(super) async fn routes(
+        &self,
+    ) -> Vec<(&'static str, String, Option<serde_json::Value>, bool)> {
         vec![
             ("GET", "/v1/admin/pipeline/routing".to_string(), None, false),
             (
@@ -3385,7 +3387,7 @@ impl RouteFixture {
 
     /// `POST /v1/traces` of a fresh clean envelope by the contributor through
     /// a plain router over `state`.
-    async fn upload(
+    pub(super) async fn upload(
         &self,
         state: &Arc<AppState>,
         tag: &str,
@@ -3400,12 +3402,12 @@ impl RouteFixture {
         (status, body, envelope.submission_id)
     }
 
-    fn store(&self) -> PipelineActivationStore {
+    pub(super) fn store(&self) -> PipelineActivationStore {
         PipelineActivationStore::new(self.runtime.clone())
     }
 
     /// The qualification of `package` for `tenant` on the fixture's revision.
-    async fn qualification(
+    pub(super) async fn qualification(
         &self,
         tenant: &str,
         package: &trace_commons_gate_api::pipeline::BundlePackage,
@@ -3418,7 +3420,7 @@ impl RouteFixture {
     }
 
     /// `tenant` has no routing row, no event, and no qualification of A or B.
-    async fn assert_untouched(&self, tenant: &str, context: &str) {
+    pub(super) async fn assert_untouched(&self, tenant: &str, context: &str) {
         assert_eq!(
             self.store()
                 .routing(tenant)
@@ -3445,7 +3447,7 @@ impl RouteFixture {
     }
 
     /// Qualifies `package` for the tenant through the route.
-    async fn qualify(&self, package: &trace_commons_gate_api::pipeline::BundlePackage) {
+    pub(super) async fn qualify(&self, package: &trace_commons_gate_api::pipeline::BundlePackage) {
         let (status, record) = self
             .admin_call(
                 "POST",
@@ -3461,7 +3463,7 @@ impl RouteFixture {
     /// contain (an upload is `503`), deactivate (an upload gets a legacy
     /// receipt), and read the routing view: `legacy`, A active, and the five
     /// events newest first, each with only the allowed fields.
-    async fn qualify_activate_roll_back_contain_and_deactivate(&self) {
+    pub(super) async fn qualify_activate_roll_back_contain_and_deactivate(&self) {
         let tenant = self.tenant.as_str();
         for package in [&self.a, &self.b] {
             let (status, record) = self
@@ -3614,7 +3616,7 @@ impl RouteFixture {
 
     /// The tenant's control-plane read audit reasons for `surface`, from the
     /// file audit log (`read_all_audit_events`), oldest first.
-    fn read_audits(&self, tenant: &str, surface: &str) -> Vec<String> {
+    pub(super) fn read_audits(&self, tenant: &str, surface: &str) -> Vec<String> {
         let prefix = format!("surface={surface};");
         read_all_audit_events(self.dir.path(), tenant)
             .expect("the audit log reads")
@@ -3629,7 +3631,7 @@ impl RouteFixture {
     /// Score policy, the list of both, the drain report (with reviewer reads
     /// from the database), and the routing view, for a test that reads every
     /// answer and log line.
-    async fn intervene_and_read(&self) {
+    pub(super) async fn intervene_and_read(&self) {
         for (action, resulting) in [("suspend", "suspended"), ("resume", "runnable")] {
             let (status, record) = self
                 .admin_call(
@@ -3680,7 +3682,7 @@ impl RouteFixture {
     /// tenant field, too many attestations, a body above the ingest limit, a
     /// bundle the tenant does not have, `terminate`, the drain precondition,
     /// the drain report, and the bystander's own containment.
-    async fn refuse_every_way(&self) {
+    pub(super) async fn refuse_every_way(&self) {
         let activate = Some(self.activate_body(&self.a, "activate_bundle_a").await);
         let expected = self.record_id_in_force(&self.tenant).await;
         let cases: Vec<(

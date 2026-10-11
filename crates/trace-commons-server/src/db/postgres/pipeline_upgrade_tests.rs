@@ -127,7 +127,7 @@ const PIPELINE_TABLES: [&str; 20] = [
 ];
 
 /// Every privilege the ingest runtime group, `trace_ingest_runtime`, holds on
-/// the pipeline tables once V92 to V95, V105 to V108, V110 to V113, V117, and V118 have run, as
+/// the pipeline tables once V92 to V95, V105 to V108, V110 to V113, V117, V118, and V123 have run, as
 /// `(table, privilege, columns)`; no columns means the whole table. It holds
 /// what the pipeline code reads and writes and nothing broader. The only
 /// other grantee is `trace_gate_driver` (`GATE_DRIVER_PIPELINE_GRANTS`). A
@@ -176,6 +176,8 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
             "privacy_pass_approval_resolved_reasons",
             // V118
             "review_audit_pending_at",
+            // V123 (#1346)
+            "submission_rejected_at",
         ],
     ),
     ("phase_outcomes", "SELECT", &[]),
@@ -340,6 +342,17 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
 const GATE_DRIVER_PIPELINE_GRANTS: &[(&str, &str, &[&str])] =
     &[("pipeline_runs", "SELECT", &["tenant_id", "submission_id"])];
 
+/// What pipeline default routing's enumeration guard,
+/// `trace_pipeline_routing_enumeration_guard`, holds on the pipeline tables
+/// (V124): the two `pipeline_tenant_routing` columns its two `SECURITY
+/// DEFINER` functions read to list tenant ids, and nothing else. The role
+/// cannot log in or bypass row-level security.
+const ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[(
+    "pipeline_tenant_routing",
+    "SELECT",
+    &["tenant_id", "routing_state"],
+)];
+
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and
 /// per column, as sorted `(grantee, table, column, privilege, is_grantable)`
 /// rows; the column is empty for a table-wide privilege. `is_grantable` is
@@ -416,7 +429,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     let latest = super::MIGRATIONS.iter().map(|(v, _, _)| *v).max();
     assert_eq!(version, latest);
     for pipeline_version in [
-        92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113, 117, 118,
+        92, 93, 94, 95, 105, 106, 107, 108, 109, 110, 111, 112, 113, 117, 118, 123,
     ] {
         let recorded: bool = admin
             .query_one(
@@ -459,6 +472,7 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     for (table, column) in [
         ("pipeline_runs", "admission_reason"),
         ("pipeline_runs", "review_audit_pending_at"),
+        ("pipeline_runs", "submission_rejected_at"),
         ("pipeline_run_settlements", "payout_eligible"),
         ("pipeline_run_settlements", "credit_audited_at"),
         ("pipeline_index_invalidations", "next_attempt_at"),
@@ -622,6 +636,10 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     let mut expected: Vec<(String, String, String, String, bool)> = [
         ("trace_ingest_runtime", RUNTIME_PIPELINE_GRANTS),
         ("trace_gate_driver", GATE_DRIVER_PIPELINE_GRANTS),
+        (
+            "trace_pipeline_routing_enumeration_guard",
+            ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS,
+        ),
     ]
     .into_iter()
     .flat_map(|(grantee, grants)| {
@@ -648,8 +666,9 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         pipeline_table_grants(&admin).await,
         expected,
         "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
-         trace_gate_driver its two pipeline_runs columns, nothing to anyone else, and none \
-         of it WITH GRANT OPTION"
+         trace_gate_driver its two pipeline_runs columns, the V124 enumeration guard its two \
+         pipeline_tenant_routing columns, nothing to anyone else, and none of it WITH GRANT \
+         OPTION"
     );
 
     // Isolation as a role that cannot bypass RLS.

@@ -6238,6 +6238,8 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         pipeline_index_rebuilds: Arc::default(),
+        pipeline_default_routing: None,
+        pipeline_worker_pass_stats: Arc::default(),
         db_contributor_reads,
         db_reviewer_reads,
         db_reviewer_require_object_refs: false,
@@ -29242,6 +29244,8 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         pipeline_worker_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pipeline_drain_tenant_ids: Arc::new(BTreeSet::new()),
         pipeline_index_rebuilds: Arc::default(),
+        pipeline_default_routing: None,
+        pipeline_worker_pass_stats: Arc::default(),
         db_contributor_reads: false,
         db_reviewer_reads: false,
         db_reviewer_require_object_refs: false,
@@ -98886,6 +98890,13 @@ mod pipeline_restore_pg_tests;
 #[path = "pipeline_activation_pg_tests.rs"]
 mod pipeline_activation_pg_tests;
 
+/// Pipeline default routing (spec 2026-10-10): the operator-armed mode that
+/// routes every tenant with no routing row to the pipeline. Nested here
+/// beside `pipeline_activation_pg_tests`, whose `pub(super)` route fixture it
+/// reuses.
+#[path = "pipeline_default_routing_pg_tests.rs"]
+mod pipeline_default_routing_pg_tests;
+
 /// The nineteen `validate_*_reason` / `validate_*_purpose` wrappers all reduce
 /// to this, so the trim / reject-empty / reject-over-1024 contract and the two
 /// message templates are pinned here once rather than at each wrapper.
@@ -99691,6 +99702,33 @@ fn a_pipeline_only_submission_reports_mains_status_vocabulary() {
             "the pipeline state stays in the pipeline block"
         );
     }
+}
+
+/// #1346: the pipeline's own document of a submission that its failed run
+/// rejected (the run `failed`, the stored row `rejected`) says why, with no
+/// pending points; a Review rejection (the run `rejected`) does not get that
+/// line.
+#[test]
+fn a_submission_its_failed_run_rejected_is_explained() {
+    use trace_commons_gate_api::pipeline::Phase;
+    use trace_commons_server::versioned_pipeline_product::PipelineProcessingStatus as P;
+    let mut status = pipeline_contributor_status_fixture();
+    status.processing = P::Failed;
+    status.submission_status = "rejected".to_string();
+    status.current_phase = Some(Phase::Review);
+    status.instruments.clear();
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.status, "rejected");
+    assert_eq!(
+        projected.explanation,
+        vec![PIPELINE_PROCESSING_FAILED_EXPLANATION.to_string()]
+    );
+    assert_eq!(projected.credit_points_pending, 0.0);
+
+    status.processing = P::Rejected;
+    let projected = submission_status_from_pipeline(&status);
+    assert_eq!(projected.status, "rejected");
+    assert!(projected.explanation.is_empty(), "{projected:?}");
 }
 
 /// Ruling F-M8: points that will never arrive are not pending. A run whose

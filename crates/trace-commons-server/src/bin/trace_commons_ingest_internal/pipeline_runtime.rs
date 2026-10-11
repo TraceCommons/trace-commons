@@ -460,11 +460,17 @@ pub(crate) async fn pipeline_readiness_handler(
 /// also when the run's locks are released while a write goes on (a lost
 /// database session, an abort past the shutdown grace period, the process
 /// exit): the fence then expires on its own, at most the run deadline plus
-/// the margin (90 seconds at the defaults) after it was last set. This holds
-/// as long as each index call returns within the write fence margin
-/// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`): a write starts only before
-/// the run's deadline, and the fence reaches the deadline plus the margin. A
-/// fence write that fails stops the rebuild with `503`
+/// the margin (90 seconds at the defaults) after it was last set. A write
+/// starts only before the run's deadline, and the fence reaches the deadline
+/// plus the margin (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`). An index
+/// call has no time limit of its own, so one can outlast the fence, and an
+/// invalidation claimed after the fence expired can run before that write
+/// lands. The late write is awaited until it returns and then reopens the
+/// run's invalidation, so the withdrawn revision is removed again (issue
+/// #1233, `reopen_invalidation_after_index_writes` in `versioned_pipeline`,
+/// which states the invariant). The fence keeps the removal from racing the
+/// writes it covers; the reopen covers a write that outlasts it. A fence
+/// write that fails stops the rebuild with `503`
 /// `index_rebuild_fence_unavailable`.
 ///
 /// It still refuses, with `409` `pipeline_index_rebuild_tenant_active`, a
@@ -736,10 +742,10 @@ pub(crate) fn pipeline_index_rebuild_error(error: anyhow::Error) -> (StatusCode,
 /// shutdown grace period -- to confirm it actually did. `ready` is the same
 /// `Arc<AtomicBool>` as `AppState::pipeline_worker_ready`, so the readiness
 /// handler and the worker share one flag rather than needing to agree on two.
-struct PipelineWorkerHandle {
-    stop: tokio::sync::watch::Sender<bool>,
-    join: tokio::task::JoinHandle<()>,
-    ready: Arc<std::sync::atomic::AtomicBool>,
+pub(crate) struct PipelineWorkerHandle {
+    pub(crate) stop: tokio::sync::watch::Sender<bool>,
+    pub(crate) join: tokio::task::JoinHandle<()>,
+    pub(crate) ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How many runs of one tenant's pipeline queue the worker drains before
@@ -1356,7 +1362,11 @@ pub(crate) async fn append_pipeline_credit_audit_events(
 /// `privacy_classification_failed`) are `lifecycle_status_change` events with
 /// the status `quarantined`; their ids derive from the run, with the labels
 /// `pipeline-privacy-pass-hold-audit` and
-/// `pipeline-privacy-classification-failed-audit`. The assessment event's id
+/// `pipeline-privacy-classification-failed-audit`. A run that ended `failed`
+/// before Review decided it, and moved its `received` submission to
+/// `rejected` (#1346), has one `lifecycle_status_change` event with the
+/// status `rejected` and the reason `pipeline_processing_failed`, its id
+/// derived with the label `pipeline-processing-failed-audit`. The assessment event's id
 /// is the assessment's, so the route's own append and this repair of a missed
 /// one are the same event; the automatic Review's event takes the id of the
 /// Review `phase_outcomes` row. Each event is read by id
@@ -1573,6 +1583,25 @@ async fn append_pipeline_review_audit_item(
             TraceCorpusStatus::Quarantined,
             trace_commons_server::versioned_pipeline_authority::PIPELINE_PRIVACY_CLASSIFICATION_FAILED_LABEL,
             "pipeline privacy classification audit event",
+        )
+        .await?;
+    }
+    if item.submission_rejected {
+        // #1346: the run failed before Review decided it, and its
+        // transaction moved the `received` submission to `rejected`.
+        append_pipeline_lifecycle_audit_event(
+            state,
+            db,
+            tenant_id,
+            item.submission_id,
+            deterministic_trace_uuid_for(
+                "pipeline-processing-failed-audit",
+                tenant_id,
+                item.run_id,
+            ),
+            TraceCorpusStatus::Rejected,
+            trace_commons_server::trace_corpus_storage::PIPELINE_PROCESSING_FAILED_STATUS_REASON,
+            "pipeline processing failure audit event",
         )
         .await?;
     }
@@ -1931,11 +1960,18 @@ pub(crate) async fn validate_pipeline_tenant_bundles(
 /// first list onto the second keeps its runs in flight, index
 /// invalidations, payouts and confirmations, and staged receipt sweeps
 /// processed, while no receipt of its is routed (Zaki review 1, item 7).
+///
+/// With pipeline default routing (spec 2026-10-10), the tenants it admitted
+/// to the routed-tenant cache too: the list is built again on every pass, so
+/// a tenant routed after start is drained without a restart.
 pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
     let mut tenant_ids = state
         .tenant_rollout_gates
         .tenant_ids(TraceTenantRolloutFeature::PipelineReceipts);
     tenant_ids.extend(state.pipeline_drain_tenant_ids.iter().cloned());
+    if let Some(default_routing) = state.pipeline_default_routing.as_deref() {
+        tenant_ids.extend(default_routing.routed_tenants());
+    }
     tenant_ids.into_iter().collect()
 }
 
@@ -1944,12 +1980,12 @@ pub(crate) fn pipeline_worker_tenant_ids(state: &AppState) -> Vec<String> {
 /// none.
 ///
 /// Each iteration runs one `run_pipeline_worker_pass` over
-/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants and
-/// the drain list, read once at start), then sleeps
+/// `pipeline_worker_tenant_ids` (the `PipelineReceipts` rollout tenants, the
+/// drain list, and the tenants pipeline default routing admitted, read again
+/// for each pass), records the pass's tenant count and duration, then sleeps
 /// `PIPELINE_WORKER_POLL_INTERVAL` or until `stop` fires.
-fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
+pub(crate) fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
     let service = state.pipeline_service.clone()?;
-    let tenant_ids = pipeline_worker_tenant_ids(&state);
     let cadence = Arc::new(std::sync::Mutex::new(PipelineFollowUpCadence::default()));
     let ready = state.pipeline_worker_ready.clone();
     let worker_ready = ready.clone();
@@ -1958,9 +1994,12 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
         while !*stop_rx.borrow() {
             let probe_service = service.clone();
             let drain_service = service.clone();
+            let tenant_ids = pipeline_worker_tenant_ids(&state);
+            let tenant_count = tenant_ids.len();
+            let started = std::time::Instant::now();
             run_pipeline_worker_pass(
                 async move { probe_service.readiness().await },
-                tenant_ids.clone(),
+                tenant_ids,
                 |tenant_id| {
                     drain_pipeline_tenant(
                         state.clone(),
@@ -1973,6 +2012,9 @@ fn spawn_pipeline_worker(state: Arc<AppState>) -> Option<PipelineWorkerHandle> {
                 &stop_rx,
             )
             .await;
+            state
+                .pipeline_worker_pass_stats
+                .record(tenant_count, started.elapsed());
 
             tokio::select! {
                 _ = tokio::time::sleep(PIPELINE_WORKER_POLL_INTERVAL) => {},
@@ -2056,7 +2098,17 @@ pub async fn run_pipeline_app(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     register_default_bundles_for_rollout_tenants(&state).await?;
+    // Spec 2026-10-10: before the listener opens, pipeline default routing
+    // reads its arming and fills its routed-tenant cache, within the start
+    // check's time limit; then its loop runs beside the worker.
+    super::pipeline_default_routing::prepare_default_routing(
+        &state,
+        super::pipeline_activation::PIPELINE_START_CHECK_TIMEOUT,
+    )
+    .await;
     let worker = spawn_pipeline_worker(state.clone());
+    let default_routing =
+        super::pipeline_default_routing::spawn_default_routing_loop(state.clone());
     let rebuilds = state.pipeline_index_rebuilds.clone();
     let grace = parse_usize_env(
         TRACE_COMMONS_SHUTDOWN_GRACE_SECONDS,
@@ -2077,8 +2129,18 @@ pub async fn run_pipeline_app(
             join_or_abort(worker.join, StdDuration::from_secs(grace)).await;
         }
     };
+    let stop_default_routing = async {
+        if let Some(default_routing) = default_routing {
+            let _ = default_routing.stop.send(true);
+            join_or_abort(default_routing.join, StdDuration::from_secs(grace)).await;
+        }
+    };
     // Zaki's re-review of #1166, Low: an index rebuild whose client has gone
     // still runs; it gets the worker's grace period, at the same time.
-    tokio::join!(stop_worker, rebuilds.drain(StdDuration::from_secs(grace)));
+    tokio::join!(
+        stop_worker,
+        stop_default_routing,
+        rebuilds.drain(StdDuration::from_secs(grace))
+    );
     result
 }

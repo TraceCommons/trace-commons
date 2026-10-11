@@ -25,7 +25,7 @@ public static class VerdictCopy
     /// the contributor. Do not reword, shorten or drop it.
     /// </summary>
     public const string Caption =
-        "Optional. This is recorded as the trace outcome; the preview above does not show it.";
+        "Optional. Recorded with the trace; not shown in the preview.";
 
     /// <summary>
     /// The bulk verdict menu beside "Submit all". The plain button stays a

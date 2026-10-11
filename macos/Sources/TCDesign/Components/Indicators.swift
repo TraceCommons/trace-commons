@@ -843,21 +843,16 @@ private struct GlassMapLight: View {
 public struct GlassNodeCard: View {
     private let title: String
     private let detail: String
-    private let hint: String?
 
-    public init(_ title: String, detail: String, hint: String? = nil) {
+    public init(_ title: String, detail: String) {
         self.title = title
         self.detail = detail
-        self.hint = hint
     }
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).glassType(GlassTokens.TypeScale.bodyStrong).foregroundStyle(GlassColor.textPrimary)
             Text(detail).glassType(GlassTokens.TypeScale.label.weight(.regular)).foregroundStyle(GlassColor.textSecondary)
-            if let hint {
-                Text(hint).glassType(GlassTokens.TypeScale.micro.weight(.regular).monospaced).foregroundStyle(GlassColor.textTertiary).padding(.top, 3)
-            }
         }
         .padding(.vertical, 12)
         .padding(.horizontal, 14)

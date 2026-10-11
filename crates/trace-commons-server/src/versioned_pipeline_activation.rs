@@ -1251,6 +1251,71 @@ impl PipelineActivationStore {
             .map(|(_, routing)| routing)
     }
 
+    /// One page of the tenants that have a `trace_tenants` row and no routing
+    /// row, in byte order after `after` (`None`: from the start), at most
+    /// `limit` (clamped to 0..=1000). The cross-tenant read of pipeline
+    /// default routing (V124, `trace_pipeline_unrouted_tenants`): a
+    /// `SECURITY DEFINER` function that returns tenant ids and nothing else,
+    /// so the caller needs EXECUTE on it and no table privilege.
+    pub async fn unrouted_tenants(
+        &self,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<String>, DatabaseError> {
+        let client = self.backend.trace_pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT tenant_id FROM trace_pipeline_unrouted_tenants($1, $2)",
+                &[&after, &limit.clamp(0, 1000)],
+            )
+            .await?;
+        Ok(rows.into_iter().map(|row| row.get(0)).collect())
+    }
+
+    /// One page of the tenants whose routing row is `pipeline` or
+    /// `contained`, with that state, in the order and bound of
+    /// `unrouted_tenants` (V124, `trace_pipeline_routed_tenants`).
+    pub async fn routed_tenants(
+        &self,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<(String, RoutingState)>, DatabaseError> {
+        let client = self.backend.trace_pool().get().await?;
+        let rows = client
+            .query(
+                "SELECT tenant_id, routing_state FROM trace_pipeline_routed_tenants($1, $2)",
+                &[&after, &limit.clamp(0, 1000)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let state: String = row.get(1);
+                Ok((row.get(0), RoutingState::from_db(&state)?))
+            })
+            .collect()
+    }
+
+    /// Whether the connecting role may call both V124 functions: the start
+    /// check of a process armed for default routing. `false` on a database
+    /// without V124 as well (`to_regprocedure` is null there).
+    pub async fn default_routing_enumeration_ready(&self) -> Result<bool, DatabaseError> {
+        let client = self.backend.trace_pool().get().await?;
+        let row = client
+            .query_one(
+                "SELECT COALESCE(bool_and(COALESCE(
+                     p.oid IS NOT NULL
+                     AND has_function_privilege(current_user, p.oid::oid, 'EXECUTE'),
+                     FALSE)), FALSE)
+                   FROM unnest(ARRAY[
+                       to_regprocedure('public.trace_pipeline_unrouted_tenants(text,bigint)'),
+                       to_regprocedure('public.trace_pipeline_routed_tenants(text,bigint)')
+                   ]) AS p(oid)",
+                &[],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
     /// `routing_for_new_receipt`, and whether a pipeline run owns
     /// `submission_id`, in the same statement (review round 1, amendment
     /// A11). A process that may not replay the tenant's pipeline receipts

@@ -174,6 +174,10 @@ active index. It does not create a credit event.
 ## Privacy, rejection, and zero credit
 
 Admission and Review stay on the authority and privacy policies. A terminal Admission
-rejection has one outcome. A Review rejection has two. Score does not
+rejection has one outcome. A Review rejection has two. Admission does not
+reject on privacy risk: a High-risk receipt is quarantined for a human
+(`privacy_risk_high_review_required`, owner decision PC-D27, 2026-10-11),
+as a Medium one is (`privacy_review_required`), and only a reviewer's
+rejection ends it. Score does not
 run after those rejections. A clean fixture can receive a completed zero
 or positive Score. The report must keep those states distinct.
