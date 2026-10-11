@@ -114,7 +114,7 @@ struct InsightsPatternsTab: View {
         Chart(InsightsPatternsWords.drawnBars(card)) { bar in
             BarMark(x: .value(text("analytics_this_week"), bar.week),
                     y: .value(text("analytics_card_tokens"), bar.tokens ?? 0))
-            .foregroundStyle(GlassColor.accentText.opacity(0.55))
+            .foregroundStyle(GlassColor.accentText.opacity(GlassTokens.Opacity.chartSeriesReduced))
         }
         .chartXScale(domain: InsightsPatternsWords.bars(card).map(\.week))
         .chartXAxis(.hidden)

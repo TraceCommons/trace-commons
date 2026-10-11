@@ -69,6 +69,21 @@ final class InsightsGlassConventionsTests: XCTestCase {
         XCTAssertLessThan(reads.lowerBound, notUseful.lowerBound, "Not useful comes after Show reads")
     }
 
+    /// The lighter accent series (Overview and Sessions cache write, the
+    /// Patterns weekly bars) take the token that clears 3:1 against the
+    /// flat pane (`ChartSeriesContrastTests`), never a literal opacity.
+    func test_reducedAccentSeriesUseTheChartToken() throws {
+        let reduced = "GlassColor.accentText.opacity(GlassTokens.Opacity.chartSeriesReduced)"
+        for file in ["Views/InsightsOverviewTab.swift", "Views/InsightsPatternsTab.swift",
+                     "Views/InsightsSessionsTab.swift"] {
+            let source = try Self.text(file)
+            XCTAssertTrue(source.contains(reduced), "\(file) has no reduced accent series")
+            XCTAssertEqual(source.components(separatedBy: "accentText.opacity(").count - 1,
+                           source.components(separatedBy: reduced).count - 1,
+                           "\(file) dims accentText by a literal")
+        }
+    }
+
     func test_noLiteralWhiteOrBlackInk() throws {
         for file in Self.files {
             let source = try Self.text(file)

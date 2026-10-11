@@ -88,7 +88,7 @@ struct InsightsSessionsTab: View {
             .chartForegroundStyleScale([
                 text("analytics_series_cache_read"): GlassColor.accentText,
                 text("analytics_series_uncached"): GlassColor.textSecondary,
-                text("analytics_series_cache_write"): GlassColor.accentText.opacity(0.4),
+                text("analytics_series_cache_write"): GlassColor.accentText.opacity(GlassTokens.Opacity.chartSeriesReduced),
             ])
             .chartXAxis(.hidden)
             .chartXScale(domain: Int(first)...Int(max(last, first)))

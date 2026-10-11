@@ -529,6 +529,7 @@ public enum GlassTokens {
         public static let disabledCheck: Double = 0.7
         public static let rowOff: Double = 0.6
         public static let skeletonDim: Double = 0.5
+        public static let chartSeriesReduced: Double = 0.75
 
         /// Every opacity token by its JSON name.
         public static let all: [String: Double] = [
@@ -537,6 +538,7 @@ public enum GlassTokens {
             "disabledCheck": disabledCheck,
             "rowOff": rowOff,
             "skeletonDim": skeletonDim,
+            "chartSeriesReduced": chartSeriesReduced,
         ]
     }
 

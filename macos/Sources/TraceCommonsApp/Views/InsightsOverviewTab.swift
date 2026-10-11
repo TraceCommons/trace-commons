@@ -280,7 +280,7 @@ struct InsightsOverviewTab: View {
                     text("analytics_series_uncached"), text("analytics_series_cache_read"),
                     text("analytics_series_cache_write"), text("analytics_series_output"),
                 ], range: [GlassColor.textPrimary, GlassColor.accentText,
-                           GlassColor.accentText.opacity(0.55), GlassColor.textTertiary])
+                           GlassColor.accentText.opacity(GlassTokens.Opacity.chartSeriesReduced), GlassColor.textTertiary])
                 .frame(height: 220)
             } else {
                 Text(text("analytics_unavailable")).insightsNote()
