@@ -1,8 +1,8 @@
 # Pipeline comparison report
 
-- Branch revision: `vp/pipeline-comparison` at `aef9e7fc41b118164c8a751ebb996b86c1473014`.
+- Branch revision: `vp/pipeline-comparison` at `4fbebad7293d15cc97c4841a221a4cb8207a70c9`.
 - Pin: `docs/superpowers/specs/fixtures/versioned-pipeline-comparison-hf-pin-v1.json`.
-- Run time: 3,862 seconds (1 hour 4 minutes), ended 2026-10-11T00:59Z.
+- Run time: 3,853 seconds (1 hour 4 minutes), ended 2026-10-11T03:33Z.
 - Target triple: `x86_64-unknown-linux-gnu`.
 - Build profile: `release`.
 - Local evidence with the reference scorer and embedder; not a production promotion.
@@ -37,32 +37,31 @@ Partial run: no. Skew: none.
 | --- | --- |
 | In the pin | 10000 |
 | Compared | 10000 |
-| Equal | 9852 |
-| Permitted | 148 |
+| Equal | 9853 |
+| Permitted | 147 |
 | Unexplained | 0 |
 
 ## Permitted differences
 
 - `medium_risk_privacy_review` (ruling.PC-D22): 147
-- `high_risk_admission_reject` (ruling.PC-D27): 1
 
 ## Distribution
 
 | Count | Baseline | Candidate |
 | --- | --- | --- |
 | admit | 9999 | 9852 |
-| quarantine | 1 | 147 |
-| reject | 0 | 1 |
+| quarantine | 1 | 148 |
+| reject | 0 | 0 |
 | refused | 0 | 0 |
 | other | 0 | 0 |
-| scored | 9999 | 9999 |
+| scored | 10000 | 10000 |
 | quality_passed | 1811 | 1811 |
-| quality_failed | 8188 | 8188 |
-| novelty_passed | 8264 | 8264 |
+| quality_failed | 8189 | 8189 |
+| novelty_passed | 8265 | 8265 |
 | novelty_failed | 1735 | 1735 |
 | member | 1321 | 1321 |
-| not_member | 8678 | 8678 |
-| chunks_capped | 611 | 611 |
+| not_member | 8679 | 8679 |
+| chunks_capped | 612 | 612 |
 
 ## Unexplained fields
 
