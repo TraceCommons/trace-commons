@@ -97,6 +97,27 @@ const _: () = assert!(
     "MAX_CLASSIFY_INPUT_TOKENS must stay well under the measured token limit"
 );
 
+/// Largest `privacy/classify` request BODY a packed request may have, in
+/// bytes of serialized JSON.
+///
+/// The endpoint's binding limit is the body size, not tokens: measured
+/// 2026-09-03, a 232 KB body classified and a 250 KB body returned
+/// `413 Failed to buffer the request body` (see the table on
+/// [`MAX_CLASSIFY_INPUT_TOKENS`]). A 413 is a permanent failure here, so the
+/// trace is charged for it.
+///
+/// The token budget alone does not bound the body. JSON escaping inflates
+/// some content far past the ~3-5 bytes/token of prose and code: measured
+/// o200k_base tokens of escaped quotes and backslashes carry ~8 body bytes,
+/// `\r\n` ~16, tabs and newlines ~32, runs of `-`/`=` ~64, runs of spaces
+/// ~128. A 32,000-token pack of escaped JSON tool output, padded tables or
+/// whitespace-heavy logs is well past 256 KiB. Packing many fields per
+/// request makes such packs common, so packs are capped by this as well as
+/// by tokens, and a single field over it is windowed until each window fits.
+///
+/// 200 KiB leaves margin under the 232 KB proven success.
+pub const MAX_CLASSIFY_REQUEST_BODY_BYTES: usize = 200 * 1024;
+
 /// How many `privacy/classify` requests for a single field may be in flight
 /// at once.
 ///
@@ -469,25 +490,51 @@ impl PrivacyFilterAdapter for NearAiPrivacyFilterAdapter {
         &self,
         texts: &[&str],
     ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
-        for text in texts {
-            if !text.trim().is_empty() && text.len() > self.max_input_bytes {
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: format!(
-                        "near-ai privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
-                        text.len(),
-                        self.max_input_bytes
-                    ),
-                });
-            }
-        }
-        redact_items_batched(
+        // A text over `max_input_bytes` fails the call with the error
+        // `redact_text` gives it -- but only after the texts before it, as
+        // when each text was its own request, so an earlier text's failure
+        // (and its transient/permanent typing) still wins.
+        let oversized = texts
+            .iter()
+            .position(|text| !text.trim().is_empty() && text.len() > self.max_input_bytes);
+        let classify = &texts[..oversized.unwrap_or(texts.len())];
+        let results = redact_items_batched(
             "near-ai",
             self,
-            texts,
+            classify,
             self.max_input_tokens,
+            self.max_pack_input_json_bytes(),
             MAX_CONCURRENT_CLASSIFY_WINDOWS,
         )
-        .await
+        .await?;
+        if let Some(index) = oversized {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "near-ai privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
+                    texts[index].len(),
+                    self.max_input_bytes
+                ),
+            });
+        }
+        Ok(results)
+    }
+}
+
+impl NearAiPrivacyFilterAdapter {
+    /// The escaped-input budget that keeps a request's whole serialized body
+    /// within [`MAX_CLASSIFY_REQUEST_BODY_BYTES`]: the body is the request
+    /// envelope (model, keys, the input's quotes) plus the input's
+    /// JSON-escaped bytes, and the envelope is measured, not guessed.
+    fn max_pack_input_json_bytes(&self) -> usize {
+        let envelope = serde_json::to_vec(&ClassifyRequest {
+            model: &self.model,
+            input: "",
+        })
+        .map(|body| body.len())
+        .unwrap_or(MAX_CLASSIFY_REQUEST_BODY_BYTES);
+        MAX_CLASSIFY_REQUEST_BODY_BYTES
+            .saturating_sub(envelope)
+            .max(1)
     }
 }
 
@@ -713,9 +760,64 @@ impl NearAiPrivacyFilterAdapter {
                     .ok_or(TraceContributionError::RedactionFailed {
                         reason: "near-ai privacy classifier returned empty data array".to_string(),
                     })?;
+            verify_span_texts(text, &entry.spans)?;
             return Ok(entry.spans);
         }
     }
+}
+
+/// Hash-only label for a response whose span texts disagree with its offsets.
+const SPAN_TEXT_MISMATCH_LABEL: &str = "privacy_filter_span_text_mismatch";
+
+/// Fail closed unless every span's reported `text` is exactly the request
+/// input's codepoints `[start, end)`.
+///
+/// The endpoint reports, with each span, the text it covers (probed live on
+/// 2026-10-11 with a pack of ZWJ emoji, accented and CJK text, CRLF and blank
+/// lines: the codepoint slice equalled `text` on every span). An offset slip
+/// -- the right entity at shifted offsets -- passes every range check and
+/// redacts the wrong characters, leaving the PII in place and reporting
+/// success; with many fields packed into one request it would shift every
+/// later field. This check turns that into a refusal. A span with no `text`
+/// cannot be checked, so it refuses too.
+///
+/// Spans whose offsets are out of range are left for `apply_spans` /
+/// `split_pack_spans`, which refuse them with their own error. Neither the
+/// span text nor the input is ever logged: the failure carries the label and
+/// the input's hash-only fingerprint.
+fn verify_span_texts(input: &str, spans: &[ClassifySpan]) -> Result<(), TraceContributionError> {
+    if spans.is_empty() {
+        return Ok(());
+    }
+    let mut boundaries: Vec<usize> = input.char_indices().map(|(byte, _)| byte).collect();
+    boundaries.push(input.len());
+    let mismatches = spans
+        .iter()
+        .filter(|span| {
+            if span.start > span.end || span.end >= boundaries.len() {
+                return false;
+            }
+            let covered = &input[boundaries[span.start]..boundaries[span.end]];
+            span.text.as_deref() != Some(covered)
+        })
+        .count();
+    if mismatches == 0 {
+        return Ok(());
+    }
+    let diagnostics = classify_input_diagnostics(&[input]);
+    tracing::warn!(
+        classify_input = %diagnostics,
+        mismatched_spans = mismatches,
+        spans = spans.len(),
+        failure = SPAN_TEXT_MISMATCH_LABEL,
+        "near-ai privacy classify failed"
+    );
+    Err(TraceContributionError::RedactionFailed {
+        reason: format!(
+            "near-ai privacy classifier span offsets disagree with span text: {SPAN_TEXT_MISMATCH_LABEL} mismatched_spans={mismatches} spans={} {diagnostics}",
+            spans.len()
+        ),
+    })
 }
 
 /// Hash-only description of the input a failing classify request carried.
@@ -767,6 +869,7 @@ mod tests {
             start,
             end,
             score,
+            text: None,
         }
     }
 

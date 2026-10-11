@@ -89766,6 +89766,7 @@ fn near_ai_spans(input: &str, needles: &[String]) -> Vec<serde_json::Value> {
                 "start": start,
                 "end": end,
                 "score": 0.99,
+                "text": needle,
             }));
             from = byte + needle.len();
         }

@@ -33,6 +33,28 @@ pub(crate) struct ClassifySpan {
     pub(crate) end: usize,
     #[serde(default)]
     pub(crate) score: f64,
+    /// The text the classifier says the span covers, when it reports one.
+    /// NEAR AI always does; that adapter checks it against its own slice of
+    /// the request (see `verify_span_texts` there) so an offset slip fails
+    /// closed instead of redacting the wrong characters. Never logged.
+    #[serde(default)]
+    pub(crate) text: Option<String>,
+}
+
+/// Bytes `text` occupies inside a JSON string literal, quotes excluded --
+/// exactly what `serde_json` writes: `"` and `\` and the short-escape
+/// controls (`\n`, `\r`, `\t`, backspace, form feed) take 2 bytes, every
+/// other control below 0x20 takes 6 (`\u00XX`), and everything else,
+/// including non-ASCII UTF-8, is copied as is. Additive over concatenation,
+/// so a pack's escaped size is the sum of its parts.
+pub(crate) fn json_escaped_len(text: &str) -> usize {
+    text.bytes()
+        .map(|byte| match byte {
+            b'"' | b'\\' | b'\n' | b'\r' | b'\t' | 0x08 | 0x0c => 2,
+            0x00..=0x1f => 6,
+            _ => 1,
+        })
+        .sum()
 }
 pub(crate) fn apply_spans(
     backend: &'static str,
@@ -66,6 +88,7 @@ pub(crate) fn apply_spans(
             start: boundaries[span.start],
             end: boundaries[span.end],
             score: span.score,
+            text: None,
         });
         let label = safe_privacy_filter_label(Some(&span.category), &mut report);
         *by_label.entry(label.clone()).or_insert(0u32) += 1;
@@ -303,6 +326,7 @@ pub(crate) fn apply_windowed_spans(
                 start: codepoint_start + span.start,
                 end: codepoint_start + span.end,
                 score: span.score,
+                text: None,
             });
         }
     }
@@ -351,6 +375,51 @@ pub(crate) trait WindowClassifier: Sync {
 /// fallback [`chunk_token_ranges`] uses when no tokenizer is available.
 fn batch_token_cost(text: &str) -> usize {
     classifier_token_count(text).unwrap_or_else(|| text.len().div_ceil(3))
+}
+
+/// Windows for a text too large for one request: [`chunk_token_ranges`]'s
+/// token windows -- identical to `redact_text`'s when every window's body
+/// fits -- with any window whose JSON-escaped size exceeds
+/// `max_input_json_bytes` cut further, after its last newline under the cap
+/// where there is one, so no request goes out over the body limit.
+fn window_ranges(
+    text: &str,
+    max_tokens: usize,
+    max_input_json_bytes: usize,
+) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    for range in chunk_token_ranges(text, max_tokens) {
+        if json_escaped_len(&text[range.clone()]) <= max_input_json_bytes {
+            ranges.push(range);
+            continue;
+        }
+        let mut start = range.start;
+        while start < range.end {
+            let mut used = 0usize;
+            let mut end = start;
+            let mut last_newline_end: Option<usize> = None;
+            for (offset, character) in text[start..range.end].char_indices() {
+                let mut buffer = [0u8; 4];
+                let cost = json_escaped_len(character.encode_utf8(&mut buffer));
+                if used + cost > max_input_json_bytes && end > start {
+                    break;
+                }
+                used += cost;
+                end = start + offset + character.len_utf8();
+                if character == '\n' {
+                    last_newline_end = Some(end);
+                }
+            }
+            if end < range.end {
+                if let Some(newline_end) = last_newline_end {
+                    end = newline_end;
+                }
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+    }
+    ranges
 }
 
 enum BatchUnit {
@@ -415,6 +484,7 @@ fn split_pack_spans(
                 start: start - range.start,
                 end: end - range.start,
                 score: span.score,
+                text: None,
             });
             if span.start == span.end {
                 break;
@@ -449,11 +519,13 @@ pub(crate) async fn redact_items_batched(
     classifier: &dyn WindowClassifier,
     items: &[&str],
     max_tokens: usize,
+    max_input_json_bytes: usize,
     max_concurrent_requests: usize,
 ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
     use futures::stream::{StreamExt, TryStreamExt};
 
     let max_tokens = max_tokens.max(1);
+    let max_input_json_bytes = max_input_json_bytes.max(1);
 
     // Unique non-blank texts, in first-appearance order.
     let mut unique_index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
@@ -479,18 +551,35 @@ pub(crate) async fn redact_items_batched(
     let mut units: Vec<BatchUnit> = Vec::new();
 
     let separator_cost = batch_token_cost(BATCH_ITEM_SEPARATOR);
+    let separator_json = json_escaped_len(BATCH_ITEM_SEPARATOR);
     let separator_codepoints = BATCH_ITEM_SEPARATOR.chars().count();
     let mut open_text = String::new();
     let mut open_members: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
     let mut open_cost = 0usize;
+    let mut open_json = 0usize;
     let mut open_codepoints = 0usize;
 
+    // Units are emitted in text order -- the open pack is flushed before an
+    // oversized text's windows -- so with requests resolved in order, the
+    // error returned is the one the earliest failing text produces, as when
+    // each text was its own request. Transient vs permanent decides whether
+    // the trace is charged, so which error wins matters.
     for (unique, text) in uniques.iter().enumerate() {
         let cost = batch_token_cost(text);
-        if cost > max_tokens {
+        let json = json_escaped_len(text);
+        if cost > max_tokens || json > max_input_json_bytes {
             oversized[unique] = true;
+            if !open_members.is_empty() {
+                units.push(BatchUnit::Pack {
+                    text: std::mem::take(&mut open_text),
+                    members: std::mem::take(&mut open_members),
+                });
+                open_cost = 0;
+                open_json = 0;
+                open_codepoints = 0;
+            }
             let mut codepoint_start = 0usize;
-            for range in chunk_token_ranges(text, max_tokens) {
+            for range in window_ranges(text, max_tokens, max_input_json_bytes) {
                 let codepoints = text[range.clone()].chars().count();
                 units.push(BatchUnit::Window {
                     unique,
@@ -505,23 +594,29 @@ pub(crate) async fn redact_items_batched(
             packed_spans[unique] = Some(spans);
             continue;
         }
-        if !open_members.is_empty() && open_cost + separator_cost + cost > max_tokens {
+        if !open_members.is_empty()
+            && (open_cost + separator_cost + cost > max_tokens
+                || open_json + separator_json + json > max_input_json_bytes)
+        {
             units.push(BatchUnit::Pack {
                 text: std::mem::take(&mut open_text),
                 members: std::mem::take(&mut open_members),
             });
             open_cost = 0;
+            open_json = 0;
             open_codepoints = 0;
         }
         if !open_members.is_empty() {
             open_text.push_str(BATCH_ITEM_SEPARATOR);
             open_cost += separator_cost;
+            open_json += separator_json;
             open_codepoints += separator_codepoints;
         }
         let codepoints = text.chars().count();
         open_text.push_str(text);
         open_members.push((unique, open_codepoints..open_codepoints + codepoints));
         open_cost += cost;
+        open_json += json;
         open_codepoints += codepoints;
     }
     if !open_members.is_empty() {
@@ -597,8 +692,99 @@ mod tests {
             start,
             end,
             score,
+            text: None,
         }
     }
+
+    /// Records every request and finds nothing.
+    #[derive(Default)]
+    struct RecordingClassifier {
+        requests: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WindowClassifier for RecordingClassifier {
+        async fn classify_window(
+            &self,
+            window: &str,
+        ) -> Result<Vec<ClassifySpan>, TraceContributionError> {
+            self.requests.lock().unwrap().push(window.to_string());
+            Ok(Vec::new())
+        }
+    }
+
+    const BODY_CAP: usize = 200 * 1024;
+
+    #[test]
+    fn json_escaped_len_matches_serde_json() {
+        for text in [
+            "",
+            "plain ascii",
+            "quote \" backslash \\ slash /",
+            "\n\r\t\u{8}\u{c}",
+            "\u{0}\u{1}\u{1f}\u{7f}",
+            "Zoë 李小龍 😀 👨‍👩‍👧",
+        ] {
+            assert_eq!(
+                json_escaped_len(text),
+                serde_json::to_string(text).unwrap().len() - 2,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn whitespace_heavy_texts_pack_under_the_body_cap() {
+        // Few tokens, many escaped bytes: runs of tabs and newlines.
+        let owned: Vec<String> = (0..2_000)
+            .map(|i| format!("row {i}:{}{}|", "\t".repeat(200), "\n".repeat(200)))
+            .collect();
+        let items: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let classifier = RecordingClassifier::default();
+        let results = redact_items_batched("test", &classifier, &items, 32_000, BODY_CAP, 1)
+            .await
+            .unwrap();
+        let requests = classifier.requests.lock().unwrap().clone();
+        let largest = requests.iter().map(|r| json_escaped_len(r)).max().unwrap();
+        assert!(
+            largest <= BODY_CAP,
+            "a pack's escaped input is {largest} bytes, over the {BODY_CAP} cap"
+        );
+        // Still packed, and every text still classified.
+        assert!(requests.len() < items.len() / 10);
+        for (item, result) in items.iter().zip(&results) {
+            assert_eq!(&result.as_ref().unwrap().redacted_text, item);
+            assert_eq!(
+                requests.iter().filter(|r| r.contains(*item)).count(),
+                1,
+                "each text is sent exactly once"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_escape_heavy_text_over_the_body_cap_is_windowed_under_it() {
+        // A padded table with escaped cells: runs of spaces and `=` cost
+        // ~64-128 body bytes per token, and quotes/backslashes 2 body bytes
+        // each, so a window inside the token budget is megabytes of body.
+        let text: String = (0..3_000)
+            .map(|i| format!("| \\\"{i}\\\" |{}|{}|\n", " ".repeat(300), "=".repeat(300)))
+            .collect();
+        assert!(json_escaped_len(&text) > 2 * BODY_CAP);
+        let classifier = RecordingClassifier::default();
+        let results = redact_items_batched("test", &classifier, &[&text], 32_000, BODY_CAP, 1)
+            .await
+            .unwrap();
+        let requests = classifier.requests.lock().unwrap().clone();
+        let largest = requests.iter().map(|r| json_escaped_len(r)).max().unwrap();
+        assert!(
+            largest <= BODY_CAP,
+            "a window's escaped input is {largest} bytes, over the {BODY_CAP} cap"
+        );
+        assert_eq!(requests.concat(), text, "windows cover the text exactly");
+        assert_eq!(results[0].as_ref().unwrap().redacted_text, text);
+    }
+
     #[test]
     fn pack_spans_are_clipped_to_each_text_and_never_cross_a_boundary() {
         // "abc" at 0..3, separator 3..5, "defg" at 5..9, separator 9..11,

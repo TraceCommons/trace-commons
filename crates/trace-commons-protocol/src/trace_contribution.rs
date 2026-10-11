@@ -15675,6 +15675,7 @@ mod tests {
                     start: text[..start].chars().count(),
                     end: text[..end].chars().count(),
                     score: 0.9,
+                    text: None,
                 })
                 .collect()
         }
@@ -15682,6 +15683,7 @@ mod tests {
         struct FakeNameClassifier {
             batching: bool,
             max_tokens: usize,
+            max_input_json_bytes: usize,
             requests: std::sync::Mutex<Vec<String>>,
             fail_on_request: Option<usize>,
         }
@@ -15691,6 +15693,7 @@ mod tests {
                 Self {
                     batching,
                     max_tokens,
+                    max_input_json_bytes: usize::MAX,
                     requests: std::sync::Mutex::new(Vec::new()),
                     fail_on_request: None,
                 }
@@ -15712,6 +15715,16 @@ mod tests {
                 if Some(requests.len()) == self.fail_on_request {
                     return Err(TraceContributionError::TransientRedactionFailed {
                         reason: "fake classifier outage".to_string(),
+                    });
+                }
+                if window.contains("FAIL_TRANSIENT") {
+                    return Err(TraceContributionError::TransientRedactionFailed {
+                        reason: "fake transient failure".to_string(),
+                    });
+                }
+                if window.contains("FAIL_PERMANENT") {
+                    return Err(TraceContributionError::RedactionFailed {
+                        reason: "fake permanent failure".to_string(),
                     });
                 }
                 Ok(name_spans(window))
@@ -15745,7 +15758,15 @@ mod tests {
             ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError>
             {
                 if self.batching {
-                    return redact_items_batched("fake", self, texts, self.max_tokens, 1).await;
+                    return redact_items_batched(
+                        "fake",
+                        self,
+                        texts,
+                        self.max_tokens,
+                        self.max_input_json_bytes,
+                        1,
+                    )
+                    .await;
                 }
                 let mut results = Vec::with_capacity(texts.len());
                 for text in texts {
@@ -16016,7 +16037,11 @@ mod tests {
                 big.len(),
                 "its windows cover it exactly"
             );
-            assert_eq!(packed.requests.len(), windows.len() + 1);
+            assert_eq!(
+                packed.requests.len(),
+                windows.len() + 2,
+                "one pack before the big text, its windows, one pack after"
+            );
         }
 
         #[tokio::test]
@@ -16079,6 +16104,104 @@ mod tests {
             assert_eq!(
                 packed.envelope["privacy"]["redaction_counts"]["privacy_filter:private_person"],
                 serde_json::json!(100)
+            );
+        }
+
+        /// Two failing texts in one call: the error is the one the earlier
+        /// text produces, as when each text was its own request. Which one is
+        /// returned decides whether the trace is charged (transient vs
+        /// permanent), so order matters.
+        #[tokio::test]
+        async fn with_two_failures_the_earlier_text_decides_the_error() {
+            let max_tokens = 64;
+            let big: String = (0..40)
+                .map(|i| format!("line {i}: FAIL_PERMANENT here\n"))
+                .collect();
+            let envelope = envelope_with(vec![
+                message_event("first: FAIL_TRANSIENT"),
+                message_event(&big),
+            ]);
+            let (alone_error, _) = rescrub(&envelope, &FakeNameClassifier::new(false, max_tokens))
+                .await
+                .err()
+                .expect("baseline fails");
+            let (packed_error, _) = rescrub(&envelope, &FakeNameClassifier::new(true, max_tokens))
+                .await
+                .err()
+                .expect("packed run fails");
+            assert!(matches!(
+                alone_error,
+                TraceContributionError::TransientRedactionFailed { .. }
+            ));
+            assert_eq!(packed_error.to_string(), alone_error.to_string());
+        }
+
+        /// A NEAR AI span whose reported text is not the text at its offsets
+        /// fails the whole rescrub closed, and nothing is applied.
+        #[tokio::test]
+        async fn a_near_ai_span_text_mismatch_fails_the_rescrub_and_applies_nothing() {
+            use wiremock::matchers::{method, path};
+            use wiremock::{Mock, MockServer, ResponseTemplate};
+
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/privacy/classify"))
+                .respond_with(|req: &wiremock::Request| {
+                    let body: Value = serde_json::from_slice(&req.body).unwrap();
+                    let input = body["input"].as_str().unwrap();
+                    // Every "Ada" found, but reported one codepoint late: an
+                    // offset slip that the range check alone cannot see.
+                    let spans: Vec<Value> = input
+                        .match_indices("Ada")
+                        .map(|(byte, _)| {
+                            let start = input[..byte].chars().count() + 1;
+                            serde_json::json!({
+                                "category": "private_person",
+                                "start": start,
+                                "end": start + 3,
+                                "score": 0.9,
+                                "text": "Ada",
+                            })
+                        })
+                        .collect();
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({ "data": [{ "spans": spans }] }))
+                })
+                .mount(&server)
+                .await;
+            let adapter = crate::privacy_filter_near_ai::NearAiPrivacyFilterAdapter::new(
+                server.uri(),
+                "openai/privacy-filter",
+                "test-key",
+                std::time::Duration::from_secs(5),
+                1_000_000,
+            )
+            .unwrap();
+
+            let mut envelope = envelope_with(short_events(20));
+            let before = serde_json::to_value(&envelope).unwrap();
+            let error = rescrub_envelope_prose_pii_with(
+                &adapter,
+                &mut envelope,
+                PiiClassifyPolicy::AllEvents,
+            )
+            .await
+            .expect_err("a span text mismatch must fail closed");
+            assert!(matches!(
+                error,
+                TraceContributionError::RedactionFailed { .. }
+            ));
+            assert!(
+                error
+                    .to_string()
+                    .contains("privacy_filter_span_text_mismatch")
+            );
+            assert!(!error.to_string().contains("Ada"), "never echo the text");
+            let after = serde_json::to_value(&envelope).unwrap();
+            assert_eq!(after["events"], before["events"]);
+            assert_eq!(
+                after["privacy"]["redaction_counts"],
+                before["privacy"]["redaction_counts"]
             );
         }
 

@@ -132,6 +132,7 @@ mod tests {
                         start: text[..offset].chars().count(),
                         end: text[..offset + 5].chars().count(),
                         score: 1.0,
+                        text: None,
                     })
                     .collect::<Vec<_>>();
                 crate::privacy_filter_spans::apply_spans("test", text, &spans)
@@ -167,7 +168,8 @@ mod tests {
                         category: "person_name".into(),
                         start: 0,
                         end: 5,
-                        score: 1.0
+                        score: 1.0,
+                        text: None
                     }]
                 )
                 .unwrap()

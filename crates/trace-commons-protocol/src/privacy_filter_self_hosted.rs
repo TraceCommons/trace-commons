@@ -210,25 +210,33 @@ impl PrivacyFilterAdapter for SelfHostedPrivacyFilterAdapter {
         &self,
         texts: &[&str],
     ) -> Result<Vec<Option<SafePrivacyFilterRedaction>>, TraceContributionError> {
-        for text in texts {
-            if !text.trim().is_empty() && text.len() > self.max_input_bytes {
-                return Err(TraceContributionError::RedactionFailed {
-                    reason: format!(
-                        "{BACKEND} privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
-                        text.len(),
-                        self.max_input_bytes
-                    ),
-                });
-            }
-        }
-        redact_items_batched(
+        // A text over `max_input_bytes` fails the call with the error
+        // `redact_text` gives it -- but only after the texts before it, as
+        // when each text was its own request, so an earlier text's failure
+        // (and its transient/permanent typing) still wins.
+        let oversized = texts
+            .iter()
+            .position(|text| !text.trim().is_empty() && text.len() > self.max_input_bytes);
+        let classify = &texts[..oversized.unwrap_or(texts.len())];
+        let results = redact_items_batched(
             BACKEND,
             self,
-            texts,
+            classify,
             self.max_input_tokens,
+            usize::MAX,
             self.max_concurrent_windows,
         )
-        .await
+        .await?;
+        if let Some(index) = oversized {
+            return Err(TraceContributionError::RedactionFailed {
+                reason: format!(
+                    "{BACKEND} privacy classifier input exceeded limit: input_len={} max_input_bytes={}",
+                    texts[index].len(),
+                    self.max_input_bytes
+                ),
+            });
+        }
+        Ok(results)
     }
 }
 

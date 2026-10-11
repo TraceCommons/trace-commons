@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use serde_json::json;
 use trace_commons_protocol::privacy_filter_near_ai::{
-    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS,
+    MAX_CLASSIFY_ATTEMPTS, MAX_CLASSIFY_INPUT_TOKENS, MAX_CLASSIFY_REQUEST_BODY_BYTES,
     MAX_CONCURRENT_CLASSIFY_WINDOWS as CLASSIFY_CONCURRENCY, NearAiPrivacyFilterAdapter,
 };
+use trace_commons_protocol::trace_contribution::TraceContributionError;
 
 /// Roughly the byte span of one full window for this filler, at the sparse
 /// (prose-like) end of token density. Windows are budgeted in TOKENS now, so
@@ -679,6 +680,7 @@ fn name_spans_at_codepoints(req: &wiremock::Request) -> ResponseTemplate {
                 "start": start,
                 "end": start + NAME.chars().count(),
                 "score": 0.9,
+                "text": NAME,
             })
         })
         .collect();
@@ -740,15 +742,15 @@ async fn many_short_texts_are_packed_into_few_requests() {
     );
 }
 
-/// A text over `max_input_bytes` fails the whole call before anything is
-/// sent, with the error `redact_text` gives it.
+/// A text over `max_input_bytes` fails the whole call with the error
+/// `redact_text` gives it. As when each text was its own request, the texts
+/// before it are classified first and nothing after it is sent.
 #[tokio::test]
-async fn an_oversized_text_fails_the_batch_before_any_request() {
+async fn an_oversized_text_fails_the_batch_with_the_redact_text_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/privacy/classify"))
         .respond_with(name_spans_at_codepoints)
-        .expect(0)
         .mount(&server)
         .await;
     let adapter = NearAiPrivacyFilterAdapter::new(
@@ -766,4 +768,190 @@ async fn an_oversized_text_fails_the_batch_before_any_request() {
         .await
         .unwrap_err();
     assert_eq!(batched.to_string(), alone.to_string());
+    let requests = server.received_requests().await.expect("recording on");
+    assert_eq!(requests.len(), 1, "only the text before the oversized one");
+    let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert_eq!(body["input"], "fine");
+}
+
+/// The endpoint's binding limit is the request BODY (~256 KiB, a permanent
+/// 413), not tokens. Escape-heavy and whitespace-heavy content carries many
+/// body bytes per token, so packs and windows are capped by serialized body
+/// size too.
+#[tokio::test]
+async fn packed_and_windowed_request_bodies_stay_under_the_body_cap() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": [] }] })),
+        )
+        .mount(&server)
+        .await;
+
+    let adapter = adapter(server.uri());
+    // Many small whitespace-heavy fields (padded tables, logs) ...
+    let mut owned: Vec<String> = (0..2_000)
+        .map(|i| format!("| row {i} |{}|{}|", " ".repeat(120), "\t\n".repeat(60)))
+        .collect();
+    // ... and one escape-heavy field (escaped JSON tool output).
+    owned.push(
+        (0..6_000)
+            .map(|i| format!("{{\\\"k{i}\\\":\\\"v\\\\\\\\\"}}\n"))
+            .collect(),
+    );
+    let texts: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let results = adapter.redact_texts(&texts).await.expect("call succeeds");
+    for (text, result) in texts.iter().zip(&results) {
+        assert_eq!(&result.as_ref().unwrap().redacted_text, text);
+    }
+
+    let requests = server.received_requests().await.expect("recording on");
+    let largest = requests.iter().map(|r| r.body.len()).max().unwrap();
+    assert!(
+        largest <= MAX_CLASSIFY_REQUEST_BODY_BYTES,
+        "a request body was {largest} bytes, over the {MAX_CLASSIFY_REQUEST_BODY_BYTES} cap"
+    );
+    assert!(
+        requests.len() < 100,
+        "still packed: {} requests",
+        requests.len()
+    );
+}
+
+/// Responder that reports every "Zoë" with the given codepoint shift and the
+/// given `text` field (None omits it).
+fn shifted_name_spans(
+    shift: usize,
+    text: Option<&'static str>,
+) -> impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static {
+    move |req: &wiremock::Request| {
+        let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+        let input = body["input"].as_str().unwrap();
+        let spans: Vec<serde_json::Value> = input
+            .match_indices("Zoë")
+            .map(|(byte, _)| {
+                let start = input[..byte].chars().count() + shift;
+                let mut span = json!({
+                    "category": "private_person",
+                    "start": start,
+                    "end": start + 3,
+                    "score": 0.9,
+                });
+                if let Some(text) = text {
+                    span["text"] = json!(text);
+                }
+                span
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "data": [{ "spans": spans }] }))
+    }
+}
+
+async fn server_with(
+    responder: impl Fn(&wiremock::Request) -> ResponseTemplate + Send + Sync + 'static,
+) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(responder)
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn a_span_whose_text_matches_its_offsets_is_applied() {
+    let server = server_with(shifted_name_spans(0, Some("Zoë"))).await;
+    let adapter = adapter(server.uri());
+    let single = adapter.redact_text("😀 hi Zoë").await.unwrap().unwrap();
+    assert_eq!(single.redacted_text, "😀 hi [REDACTED:private_person]");
+    let packed = adapter
+        .redact_texts(&["李 Zoë", "nothing", "Zoë 👨‍👩‍👧"])
+        .await
+        .unwrap();
+    assert_eq!(
+        packed[0].as_ref().unwrap().redacted_text,
+        "李 [REDACTED:private_person]"
+    );
+    assert_eq!(
+        packed[2].as_ref().unwrap().redacted_text,
+        "[REDACTED:private_person] 👨‍👩‍👧"
+    );
+}
+
+/// An offset slip -- the right entity reported one codepoint late -- passes
+/// every range check and would redact the wrong characters, leaving the name
+/// in place. The span's own `text` exposes it, so the call fails closed.
+#[tokio::test]
+async fn a_span_whose_text_differs_from_its_offsets_fails_closed() {
+    let server = server_with(shifted_name_spans(1, Some("Zoë"))).await;
+    let adapter = adapter(server.uri());
+    for error in [
+        adapter.redact_text("say hi to Zoë now").await.unwrap_err(),
+        adapter
+            .redact_texts(&["first text", "say hi to Zoë now", "third"])
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, TraceContributionError::RedactionFailed { .. }),
+            "permanent, not transient: {error}"
+        );
+        let message = error.to_string();
+        assert!(
+            message.contains("privacy_filter_span_text_mismatch"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("Zoë"),
+            "the text is never echoed: {message}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_span_without_text_fails_closed() {
+    let server = server_with(shifted_name_spans(0, None)).await;
+    let adapter = adapter(server.uri());
+    let error = adapter.redact_text("say hi to Zoë now").await.unwrap_err();
+    assert!(matches!(
+        error,
+        TraceContributionError::RedactionFailed { .. }
+    ));
+    assert!(
+        error
+            .to_string()
+            .contains("privacy_filter_span_text_mismatch")
+    );
+}
+
+/// The oversized-input check must not jump ahead of an earlier field's
+/// failure: classified one at a time, the first field's transient 503 is the
+/// error, and transient vs permanent decides whether the trace is charged.
+#[tokio::test]
+async fn an_earlier_transient_failure_wins_over_a_later_oversized_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/privacy/classify"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    let adapter = NearAiPrivacyFilterAdapter::new(
+        server.uri(),
+        "openai/privacy-filter",
+        "test-api-key-do-not-leak",
+        Duration::from_secs(5),
+        64,
+    )
+    .expect("adapter builds");
+    let big = "x".repeat(65);
+    let error = adapter.redact_texts(&["fine", &big]).await.unwrap_err();
+    assert!(
+        matches!(
+            error,
+            TraceContributionError::TransientRedactionFailed { .. }
+        ),
+        "expected the first field's transient error, got: {error}"
+    );
 }
