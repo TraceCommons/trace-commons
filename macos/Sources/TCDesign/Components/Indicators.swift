@@ -582,8 +582,8 @@ public struct GlassMapStage<Content: View>: View {
 /// is tested.
 enum GlassMapMarks {
     /// The tile's cell: two marks to a cell, on its diagonal, so rows
-    /// stagger.
-    static let pitch: CGFloat = 18
+    /// stagger. Opened from 18 (owner, 2026-10-10).
+    static let pitch: CGFloat = 21
     /// A mark's width and height.
     static let size: CGFloat = 4.2
     /// The marks at rest: white over the dark field, black over the light.
@@ -595,9 +595,17 @@ enum GlassMapMarks {
     static let bloom = GlassRGBA(0xFFFFFF, alpha: 0.035, light: GlassRGBA(0xFFFFFF, alpha: 0.2))
     /// The marks at the crest of the shimmer.
     static let shimmerInk = GlassRGBA(0xFFFFFF, alpha: 0.24, light: GlassRGBA(0x000000, alpha: 0.16))
-    /// How often the shimmer crosses the field, and how long it takes.
+    /// How often the shimmer crosses the field, how soon the first pass
+    /// comes once the map is shown, and how long a pass takes: quick, as
+    /// light glancing off a surface is.
     static let shimmerEvery: Duration = .seconds(40)
-    static let shimmerDuration: Double = 2.4
+    static let shimmerFirst: Duration = .seconds(1)
+    static let shimmerDuration: Double = 1.1
+    /// A fast start that settles, so the band flashes across and slows as
+    /// it leaves.
+    static func shimmerAnimation() -> Animation {
+        .timingCurve(0.3, 0, 0.15, 1, duration: shimmerDuration)
+    }
     /// The shimmer band's half-width, as a fraction of the field's diagonal.
     static let shimmerHalfWidth: CGFloat = 0.1
     /// How far the light reaches from the pointer.
@@ -669,8 +677,9 @@ private struct GlassMapMarkTile: View {
     }
 }
 
-/// Runs the shimmer: one pass across the field every `shimmerEvery`, none
-/// under Reduce Motion. The loop ends with the view.
+/// Runs the shimmer: one pass `shimmerFirst` after the map is shown, so it
+/// is seen on launch, then one every `shimmerEvery`; none under Reduce
+/// Motion. The loop ends with the view.
 private struct GlassMapShimmerHost: View {
     @State private var sweep: Double = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -679,10 +688,12 @@ private struct GlassMapShimmerHost: View {
         GlassMapShimmer(sweep: sweep)
             .task(id: reduceMotion) {
                 guard !reduceMotion else { return }
+                var wait = GlassMapMarks.shimmerFirst
                 while !Task.isCancelled {
-                    try? await Task.sleep(for: GlassMapMarks.shimmerEvery)
+                    try? await Task.sleep(for: wait)
                     guard !Task.isCancelled else { return }
-                    withAnimation(.easeInOut(duration: GlassMapMarks.shimmerDuration)) { sweep += 1 }
+                    withAnimation(GlassMapMarks.shimmerAnimation()) { sweep += 1 }
+                    wait = GlassMapMarks.shimmerEvery
                 }
             }
     }

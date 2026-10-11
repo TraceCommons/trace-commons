@@ -24,11 +24,12 @@ final class GlassBrandMarkTests: XCTestCase {
 
     /// Two marks to a cell, on its diagonal, every cell of the field drawn.
     func test_theTileCoversTheField() {
-        let origins = GlassMapMarks.origins(in: CGSize(width: 35, height: 35))
+        let pitch = GlassMapMarks.pitch
+        let origins = GlassMapMarks.origins(in: CGSize(width: pitch * 2 - 1, height: pitch * 2 - 1))
         XCTAssertEqual(origins.count, 2 * 2 * 2)
         let half = GlassMapMarks.size / 2
-        XCTAssertTrue(origins.contains(CGPoint(x: 4.5 - half, y: 4.5 - half)))
-        XCTAssertTrue(origins.contains(CGPoint(x: 13.5 - half, y: 13.5 - half)))
+        XCTAssertTrue(origins.contains(CGPoint(x: pitch / 4 - half, y: pitch / 4 - half)))
+        XCTAssertTrue(origins.contains(CGPoint(x: pitch * 3 / 4 - half, y: pitch * 3 / 4 - half)))
         XCTAssertEqual(GlassMapMarks.origins(in: .zero), [])
     }
 
@@ -63,6 +64,13 @@ final class GlassBrandMarkTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(after.start.y, 299.9)
         // A later pass is the same pass.
         XCTAssertEqual(GlassMapMarks.shimmerBand(sweep: 3.5, size: size).start, middle.start)
+    }
+
+    /// The first pass comes soon after launch and a pass is quick.
+    func test_theShimmerIsSeenOnLaunchAndIsQuick() {
+        XCTAssertLessThanOrEqual(GlassMapMarks.shimmerFirst, .seconds(2))
+        XCTAssertLessThanOrEqual(GlassMapMarks.shimmerDuration, 1.5)
+        XCTAssertGreaterThan(GlassMapMarks.shimmerEvery, GlassMapMarks.shimmerFirst)
     }
 
     /// The marks are faint at rest and stay translucent when lit.
