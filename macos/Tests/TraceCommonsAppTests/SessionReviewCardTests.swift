@@ -83,7 +83,9 @@ final class SessionReviewCardTests: XCTestCase {
 
     /// The correction field is drawn only under Partly or Failed, and what
     /// was written under them is never sent once the verdict moves to Worked
-    /// or to none. A draft for one session is never another session's.
+    /// or to none. The text is kept, though: the arrow keys step through
+    /// Worked on the way from Partly to Failed, and that step never wipes
+    /// what was typed. A draft for one session is never another session's.
     func test_theCorrectionShowsOnlyUnderPartlyOrFailed() throws {
         var draft = SessionReviewDraft(entryId: "A")
         XCTAssertNil(draft.verdict)
@@ -100,10 +102,16 @@ final class SessionReviewCardTests: XCTestCase {
         draft.choose(.worked)
         XCTAssertFalse(draft.correctionOffered)
         XCTAssertNil(draft.correctionToSend, "a correction is never sent under Worked")
-        XCTAssertEqual(draft.correction, "", "leaving Partly or Failed clears what was written")
+        draft.choose(.failed)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.",
+                       "passing through Worked keeps what was typed")
+        draft.choose(.worked)
         // Choosing the chosen answer again takes it back.
         draft.choose(.worked)
         XCTAssertNil(draft.verdict)
+        XCTAssertNil(draft.correctionToSend, "a correction is never sent with no answer")
+        draft.choose(.partly)
+        XCTAssertEqual(draft.correctionToSend, "It never ran the tests.")
 
         // The core's limit is held at the keyboard.
         var long = SessionReviewDraft(entryId: "A")

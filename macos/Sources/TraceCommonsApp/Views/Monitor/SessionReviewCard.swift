@@ -28,12 +28,14 @@ struct SessionReviewDraft: Equatable {
         correctionOffered ? CorrectionCopy.toSend(correction) : nil
     }
 
-    /// One answer pressed. The chosen answer again takes it back; leaving
-    /// Partly or Failed withdraws what was written under them, so text
-    /// nobody can see any more never rides along on the approval.
+    /// One answer pressed. The chosen answer again takes it back. What was
+    /// written under Partly or Failed is kept when the answer leaves them
+    /// (the arrow keys step through Worked on the way from Partly to
+    /// Failed), but it is sent only while they are chosen
+    /// (`correctionToSend`), so text nobody can see never rides along on
+    /// the approval.
     mutating func choose(_ option: ContributorVerdict) {
         verdict = verdict == option ? nil : option
-        if !correctionOffered { correction = "" }
     }
 
     /// The correction as typed, held to the core's limit at the keyboard so
