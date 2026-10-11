@@ -10581,6 +10581,8 @@ async fn pipeline_readiness_reports_a_label_when_the_worker_is_not_ready() {
             "status": "not_ready",
             "reason": "pipeline_runtime_absent",
             "drain_tenant_count": 0,
+            "worker_last_pass_tenant_count": 0,
+            "worker_last_pass_duration_ms": 0,
         })
     );
 }
@@ -13067,6 +13069,8 @@ async fn pipeline_readiness_reports_not_ready_when_the_worker_probe_fails() {
             "status": "not_ready",
             "reason": "pipeline_worker_not_ready",
             "drain_tenant_count": 0,
+            "worker_last_pass_tenant_count": 0,
+            "worker_last_pass_duration_ms": 0,
         })
     );
 }

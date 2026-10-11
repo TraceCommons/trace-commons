@@ -340,6 +340,17 @@ const RUNTIME_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[
 const GATE_DRIVER_PIPELINE_GRANTS: &[(&str, &str, &[&str])] =
     &[("pipeline_runs", "SELECT", &["tenant_id", "submission_id"])];
 
+/// What pipeline default routing's enumeration guard,
+/// `trace_pipeline_routing_enumeration_guard`, holds on the pipeline tables
+/// (V124): the two `pipeline_tenant_routing` columns its two `SECURITY
+/// DEFINER` functions read to list tenant ids, and nothing else. The role
+/// cannot log in or bypass row-level security.
+const ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS: &[(&str, &str, &[&str])] = &[(
+    "pipeline_tenant_routing",
+    "SELECT",
+    &["tenant_id", "routing_state"],
+)];
+
 /// The privileges non-owner roles hold on the pipeline tables, table-wide and
 /// per column, as sorted `(grantee, table, column, privilege, is_grantable)`
 /// rows; the column is empty for a table-wide privilege. `is_grantable` is
@@ -622,6 +633,10 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
     let mut expected: Vec<(String, String, String, String, bool)> = [
         ("trace_ingest_runtime", RUNTIME_PIPELINE_GRANTS),
         ("trace_gate_driver", GATE_DRIVER_PIPELINE_GRANTS),
+        (
+            "trace_pipeline_routing_enumeration_guard",
+            ROUTING_ENUMERATION_GUARD_PIPELINE_GRANTS,
+        ),
     ]
     .into_iter()
     .flat_map(|(grantee, grants)| {
@@ -648,8 +663,9 @@ async fn pipeline_upgrade_from_v91_installs_forced_rls_storage() {
         pipeline_table_grants(&admin).await,
         expected,
         "the pipeline tables must grant trace_ingest_runtime what the pipeline code uses, \
-         trace_gate_driver its two pipeline_runs columns, nothing to anyone else, and none \
-         of it WITH GRANT OPTION"
+         trace_gate_driver its two pipeline_runs columns, the V124 enumeration guard its two \
+         pipeline_tenant_routing columns, nothing to anyone else, and none of it WITH GRANT \
+         OPTION"
     );
 
     // Isolation as a role that cannot bypass RLS.

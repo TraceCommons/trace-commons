@@ -32,7 +32,9 @@ DO $$ BEGIN
         CREATE ROLE trace_pipeline_routing_enumeration_guard NOLOGIN NOBYPASSRLS;
     END IF;
 END $$;
-ALTER ROLE trace_pipeline_routing_enumeration_guard NOLOGIN NOBYPASSRLS;
+-- NOLOGIN only: changing BYPASSRLS needs a superuser, and the role is
+-- created NOBYPASSRLS above (V85 does the same).
+ALTER ROLE trace_pipeline_routing_enumeration_guard NOLOGIN;
 GRANT trace_pipeline_routing_enumeration_guard TO CURRENT_USER;
 GRANT USAGE ON SCHEMA public TO trace_pipeline_routing_enumeration_guard;
 GRANT SELECT (tenant_id) ON trace_tenants
