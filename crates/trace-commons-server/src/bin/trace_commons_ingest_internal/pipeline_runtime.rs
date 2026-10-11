@@ -2125,12 +2125,7 @@ where
                     return;
                 };
                 // The wait for a permit may have been long.
-                if ended()
-                    || shared
-                        .budget
-                        .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
-                        .is_err()
-                {
+                if ended() || !take_one_claim(&shared.budget) {
                     return;
                 }
                 let outcome = step(tenant_id.clone()).await;
@@ -2359,6 +2354,23 @@ async fn drain_pipeline_tenant_concurrently(
     run_pipeline_tenant_follow_ups(state, service, tenant_id, cadence).await;
 }
 
+/// Takes one claim from a drain's shared budget, refusing at zero. A
+/// compare-exchange loop, not `fetch_update`: newer toolchains deprecate
+/// that name for `try_update`, which older ones lack, and CI builds with
+/// `-D warnings` on stable.
+fn take_one_claim(budget: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut left = budget.load(SeqCst);
+    loop {
+        let Some(next) = left.checked_sub(1) else {
+            return false;
+        };
+        match budget.compare_exchange(left, next, SeqCst, SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => left = actual,
+        }
+    }
+}
 /// Starts the owned pipeline worker loop. `None` when no pipeline runtime is
 /// injected -- there is nothing to drain, and the repository binary injects
 /// none.
