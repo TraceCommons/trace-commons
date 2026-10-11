@@ -6267,6 +6267,7 @@ fn test_state_with_configured_artifact_store_policies_export_guardrails_and_requ
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+        submit_principal_limits: SubmitPrincipalLimits::default(),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,
@@ -6462,6 +6463,268 @@ fn static_submit_rate_limit_key(tenant_id: &str, token: &str) -> String {
         TraceAuthMethod::StaticToken,
         &static_token_principal_ref(token),
     )
+}
+
+/// A per-principal window refusal names itself with the stable label and says
+/// how long until the window frees a slot, never longer than the window.
+fn assert_submit_rate_limited(error: &ApiError) {
+    assert_eq!(error.error, SUBMIT_RATE_LIMITED_LABEL);
+    let retry = error
+        .retry_after_seconds
+        .expect("a rate-limit refusal carries retry_after_seconds");
+    assert!(
+        (1..=ACCOUNT_RATE_WINDOW.as_secs() as i64).contains(&retry),
+        "retry_after_seconds {retry} is within one window"
+    );
+}
+
+/// A concurrency refusal carries the same label and the short fixed hint.
+fn assert_submit_concurrency_limited(error: &ApiError) {
+    assert_eq!(error.error, SUBMIT_RATE_LIMITED_LABEL);
+    assert_eq!(
+        error.retry_after_seconds,
+        Some(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS)
+    );
+}
+
+#[test]
+fn submit_rate_limited_label_is_the_wire_contract() {
+    // Clients match this literal; renaming it strands every deployed client
+    // on the generic failure path.
+    assert_eq!(SUBMIT_RATE_LIMITED_LABEL, "submit_rate_limited");
+}
+
+#[test]
+fn submit_principal_limits_default_to_thirty_per_minute_and_two_in_flight() {
+    let limits = parse_submit_principal_limits(None, None).expect("defaults parse");
+    assert_eq!(limits, SubmitPrincipalLimits::default());
+    assert_eq!(limits.rate_per_window, 30);
+    assert_eq!(limits.concurrency, 2);
+    assert_eq!(SUBMIT_PER_PRINCIPAL_LIMIT, 30);
+    assert_eq!(SUBMIT_PER_PRINCIPAL_CONCURRENCY, 2);
+}
+
+#[test]
+fn submit_principal_limits_take_operator_overrides_within_bounds() {
+    let limits = parse_submit_principal_limits(Some(" 120 "), Some("4")).expect("overrides parse");
+    assert_eq!(
+        limits,
+        SubmitPrincipalLimits {
+            rate_per_window: 120,
+            concurrency: 4,
+        }
+    );
+    let limits = parse_submit_principal_limits(Some("1"), Some("1")).expect("floor parses");
+    assert_eq!(limits.rate_per_window, 1);
+    assert_eq!(limits.concurrency, 1);
+    let limits = parse_submit_principal_limits(
+        Some(&SUBMIT_PER_PRINCIPAL_RATE_MAX.to_string()),
+        Some(&LARGE_BODY_PER_PRINCIPAL_CONCURRENCY.to_string()),
+    )
+    .expect("ceiling parses");
+    assert_eq!(limits.rate_per_window, SUBMIT_PER_PRINCIPAL_RATE_MAX);
+    assert_eq!(limits.concurrency, LARGE_BODY_PER_PRINCIPAL_CONCURRENCY);
+}
+
+#[test]
+fn submit_principal_limits_refuse_out_of_range_or_unparseable_values() {
+    let rate_over = (SUBMIT_PER_PRINCIPAL_RATE_MAX + 1).to_string();
+    let concurrency_over = (LARGE_BODY_PER_PRINCIPAL_CONCURRENCY + 1).to_string();
+    for (rate, concurrency, env) in [
+        (
+            Some("0"),
+            None,
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN,
+        ),
+        (
+            Some(rate_over.as_str()),
+            None,
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN,
+        ),
+        (
+            Some("many"),
+            None,
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN,
+        ),
+        (
+            Some("-3"),
+            None,
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN,
+        ),
+        (
+            None,
+            Some("0"),
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+        ),
+        // Above the large-body middleware's per-principal cap, which runs
+        // first and would answer the refusal before the handler's own check.
+        (
+            None,
+            Some(concurrency_over.as_str()),
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+        ),
+        (
+            None,
+            Some("two"),
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+        ),
+    ] {
+        let error = parse_submit_principal_limits(rate, concurrency)
+            .expect_err("an out-of-range or unparseable limit refuses startup")
+            .to_string();
+        assert!(error.contains(env), "{error} names {env}");
+    }
+}
+
+#[test]
+fn principal_retry_after_reports_the_time_left_in_the_window() {
+    let limiter = AccountRateLimiter::with_max_windows_for_test(4);
+    let start = std::time::Instant::now();
+    assert!(limiter.check_principal_at("submit-principal:retry", 1, start));
+    assert!(!limiter.check_principal_at("submit-principal:retry", 1, start));
+    assert_eq!(
+        limiter.principal_retry_after_seconds_at("submit-principal:retry", start),
+        60
+    );
+    assert_eq!(
+        limiter.principal_retry_after_seconds_at(
+            "submit-principal:retry",
+            start + StdDuration::from_millis(20_500)
+        ),
+        40,
+        "rounds up, so a client never retries before the window turns"
+    );
+    assert_eq!(
+        limiter.principal_retry_after_seconds_at(
+            "submit-principal:retry",
+            start + StdDuration::from_millis(59_999)
+        ),
+        1
+    );
+    assert_eq!(
+        limiter.principal_retry_after_seconds_at(
+            "submit-principal:retry",
+            start + StdDuration::from_secs(61)
+        ),
+        1,
+        "never zero or negative"
+    );
+    assert_eq!(
+        limiter.principal_retry_after_seconds_at("submit-principal:unknown", start),
+        60,
+        "an untracked key (the overflow bucket's caller) gets a full window"
+    );
+}
+
+#[tokio::test]
+async fn submit_rate_limit_follows_the_configured_principal_limits() {
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 2,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+
+    for _ in 0..2 {
+        let (status, _) = test_submit(state.clone(), SUBMIT_RATE_LIMIT_TOKEN_A, invalid.clone())
+            .await
+            .expect_err("under the configured limit the request reaches validation");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, Json(error)) = test_submit(state, SUBMIT_RATE_LIMIT_TOKEN_A, invalid)
+        .await
+        .expect_err("the third request exceeds the configured limit of two");
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_submit_rate_limited(&error);
+}
+
+/// Through the real router: the 429 carries the label and hint in the body
+/// and the same hint as a standard `Retry-After` header.
+#[tokio::test]
+async fn submit_rate_limit_refusal_sends_retry_after_header_through_the_router() {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let _lock = submit_rate_limit_test_lock().lock().await;
+    reset_account_rate_limiter_for_test();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let mut state = submit_rate_limit_test_state(temp.path().to_path_buf());
+    Arc::make_mut(&mut state).submit_principal_limits = SubmitPrincipalLimits {
+        rate_per_window: 1,
+        concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+    };
+    let mut invalid = sample_envelope().await;
+    invalidate_envelope_schema(&mut invalid);
+    let body = serde_json::to_vec(&invalid).expect("envelope serialises");
+    let request = || {
+        axum::http::Request::builder()
+            .method("POST")
+            .uri("/v1/traces")
+            .header(AUTHORIZATION, format!("Bearer {SUBMIT_RATE_LIMIT_TOKEN_A}"))
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.clone()))
+            .expect("submit request builds")
+    };
+
+    let first = app(state.clone())
+        .oneshot(request())
+        .await
+        .expect("first response");
+    assert_eq!(first.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        first
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .is_none()
+    );
+
+    let refused = app(state)
+        .oneshot(request())
+        .await
+        .expect("second response");
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    let header: i64 = refused
+        .headers()
+        .get(axum::http::header::RETRY_AFTER)
+        .expect("a rate-limit refusal carries Retry-After")
+        .to_str()
+        .expect("Retry-After is ASCII")
+        .parse()
+        .expect("Retry-After is delta-seconds");
+    let body = axum::body::to_bytes(refused.into_body(), 4096)
+        .await
+        .expect("refusal body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("refusal body is JSON");
+    assert_eq!(value["error"], SUBMIT_RATE_LIMITED_LABEL);
+    assert_eq!(value["retry_after_seconds"], header);
+    assert!((1..=60).contains(&header), "Retry-After {header}");
+}
+
+#[tokio::test]
+async fn large_body_concurrency_refusal_names_the_rate_limit_and_retry_hint() {
+    let response = large_body_concurrency_refusal();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let expected_header = SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS.to_string();
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some(expected_header.as_str())
+    );
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .expect("refusal body reads");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("refusal body is JSON");
+    assert_eq!(value["error"], SUBMIT_RATE_LIMITED_LABEL);
+    assert_eq!(
+        value["retry_after_seconds"],
+        SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS
+    );
 }
 
 fn append_legacy_calibration_dataset_manifest_conflict(
@@ -7383,7 +7646,7 @@ async fn submit_rate_limit_is_per_authenticated_principal() {
             .await
             .expect_err("principal over the submission rate limit is denied");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(error.error, "rate limited");
+    assert_submit_rate_limited(&error);
 
     let (status, _) = test_submit(state, SUBMIT_RATE_LIMIT_TOKEN_B, invalid)
         .await
@@ -7411,7 +7674,7 @@ async fn submit_rate_limit_handler_honors_explicit_test_override() {
         .await
         .expect_err("second request exceeds the configured test limit");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(error.error, "rate limited");
+    assert_submit_rate_limited(&error);
 }
 
 #[tokio::test]
@@ -7439,7 +7702,7 @@ async fn submit_rate_limit_applies_before_tenant_access_grant_lookup() {
         .await
         .expect_err("grantless authenticated submission over the rate limit is denied early");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(error.error, "rate limited");
+    assert_submit_rate_limited(&error);
 }
 
 #[tokio::test]
@@ -7691,7 +7954,7 @@ async fn submit_rate_limit_caps_in_flight_requests() {
     .expect("request beyond the concurrency cap returns without entering the pause")
     .expect_err("request beyond the concurrency cap is denied");
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(error.error, "rate limited");
+    assert_submit_concurrency_limited(&error);
 
     configure_submit_rate_limit_pause_for_test(None);
     proceed.add_permits(SUBMIT_PER_PRINCIPAL_CONCURRENCY as usize);
@@ -29273,6 +29536,7 @@ async fn maintenance_legal_hold_retention_policy_blocks_expiration_and_purge() {
         community_tenant_ids: Arc::new(Vec::new()),
         tenant_rollout_gates: TraceTenantRolloutGates::default(),
         max_export_items_per_request: DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST,
+        submit_principal_limits: SubmitPrincipalLimits::default(),
         analytics_min_cell_count: 0,
         analytics_broad_release_noise: None,
         analytics_broad_release_privacy_accounting: None,

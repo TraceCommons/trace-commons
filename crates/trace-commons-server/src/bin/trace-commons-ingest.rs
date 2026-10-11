@@ -679,6 +679,13 @@ const TRACE_COMMONS_LEGAL_HOLD_RETENTION_POLICIES: &str =
 const TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: &str =
     "TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST";
 const DEFAULT_TRACE_COMMONS_MAX_EXPORT_ITEMS_PER_REQUEST: usize = 500;
+/// `POST /v1/traces` submissions one principal may make per 60 s window.
+/// See `SubmitPrincipalLimits`.
+const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN: &str =
+    "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN";
+/// `POST /v1/traces` submissions one principal may have in flight at once.
+const TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY: &str =
+    "TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY";
 const TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT: &str = "TRACE_COMMONS_ANALYTICS_MIN_CELL_COUNT";
 const TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY: &str =
     "TRACE_COMMONS_ANALYTICS_BROAD_RELEASE_NOISE_KEY";
@@ -1806,6 +1813,8 @@ struct AppState {
     community_tenant_ids: Arc<Vec<String>>,
     tenant_rollout_gates: TraceTenantRolloutGates,
     max_export_items_per_request: usize,
+    /// Per-principal `POST /v1/traces` rate and in-flight caps.
+    submit_principal_limits: SubmitPrincipalLimits,
     analytics_min_cell_count: usize,
     analytics_broad_release_noise: Option<TraceAnalyticsNoiseConfig>,
     analytics_broad_release_privacy_accounting: Option<TraceAnalyticsPrivacyAccountingConfig>,
@@ -3972,6 +3981,7 @@ impl AppState {
         );
         let require_export_guardrails = env_truthy("TRACE_COMMONS_REQUIRE_EXPORT_GUARDRAILS");
         let max_export_items_per_request = parse_max_export_items_per_request_from_env()?;
+        let submit_principal_limits = parse_submit_principal_limits_from_env()?;
         let analytics_min_cell_count = parse_analytics_min_cell_count_from_env()?;
         let community_tenant_ids =
             parse_trace_rollout_tenant_ids_from_env(TRACE_COMMONS_COMMUNITY_TENANT_IDS)?
@@ -4771,6 +4781,7 @@ impl AppState {
             community_tenant_ids: Arc::new(community_tenant_ids),
             tenant_rollout_gates,
             max_export_items_per_request,
+            submit_principal_limits,
             analytics_min_cell_count,
             analytics_broad_release_noise,
             analytics_broad_release_privacy_accounting,
@@ -8489,7 +8500,7 @@ fn app(state: Arc<AppState>) -> Router {
             get(list_traces_handler)
                 .delete(revoke_trace_body_handler)
                 .merge(
-                    post(submit_trace_handler)
+                    post(submit_trace_route)
                         .layer(DefaultBodyLimit::max(MAX_INGEST_BODY_BYTES))
                         .layer(large_body_auth),
                 ),
@@ -9268,7 +9279,7 @@ async fn authenticate_large_body_request(
         tenant.principal_ref(),
     );
     let Some(_slots) = large_body_slots_for(&ACCOUNT_RATE_LIMITER, &principal_key) else {
-        return api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+        return large_body_concurrency_refusal();
     };
     next.run(request).await
 }
@@ -15337,6 +15348,21 @@ async fn claim_legacy_receipt(
     }
 }
 
+/// `POST /v1/traces`: [`submit_trace_handler`], with a refusal that carries
+/// `retry_after_seconds` (the per-principal rate limit, an account limit)
+/// also answered with the same seconds as a standard `Retry-After` header.
+/// The handler keeps `ApiResult` so its tests can call it directly.
+async fn submit_trace_route(
+    state: State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: SubmitBody,
+) -> axum::response::Response {
+    match submit_trace_handler(state, headers, body).await {
+        Ok(receipt) => receipt.into_response(),
+        Err(error) => api_error_response_with_retry_after(error),
+    }
+}
+
 async fn submit_trace_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -15360,13 +15386,20 @@ async fn submit_trace_handler(
         authenticated_tenant.safe_auth_method(),
         authenticated_tenant.principal_ref(),
     );
-    let (submit_rate_limit, submit_concurrency_limit) = submit_rate_limits(&submit_key);
+    let (submit_rate_limit, submit_concurrency_limit) =
+        submit_rate_limits(&submit_key, state.submit_principal_limits);
+    // Both refusals name themselves (`submit_rate_limited`) and say when to
+    // come back, so a client keeps the upload queued instead of giving it up.
     if !ACCOUNT_RATE_LIMITER.check_principal(&submit_key, submit_rate_limit) {
-        return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited"));
+        return Err(submit_rate_limited(
+            ACCOUNT_RATE_LIMITER.principal_retry_after_seconds(&submit_key),
+        ));
     }
     let _submit_slot = match ACCOUNT_RATE_LIMITER.acquire(&submit_key, submit_concurrency_limit) {
         Some(guard) => guard,
-        None => return Err(api_error(StatusCode::TOO_MANY_REQUESTS, "rate limited")),
+        None => {
+            return Err(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS));
+        }
     };
     #[cfg(test)]
     pause_submit_after_rate_limit_for_test(&submit_key).await;
@@ -21199,6 +21232,133 @@ const SUBMIT_PER_PRINCIPAL_LIMIT: u32 = 30;
 /// Concurrency cap on in-flight submissions per principal. The re-scrub and gate
 /// path gets half the content-read concurrency allowance of 4.
 const SUBMIT_PER_PRINCIPAL_CONCURRENCY: u32 = 2;
+/// Highest per-window submission rate an operator may configure. Ten a second
+/// sustained is far past any contributor's real pace; above it the limit
+/// bounds nothing the deployment-wide caps do not.
+const SUBMIT_PER_PRINCIPAL_RATE_MAX: u32 = 600;
+
+/// The `error` label of every per-principal submission refusal: the window
+/// rate, the handler's in-flight cap, and the large-body upload cap. A client
+/// matches this literal to keep the upload queued and retry after
+/// `retry_after_seconds` rather than giving it up, so it is a wire contract.
+/// The status stays 429.
+const SUBMIT_RATE_LIMITED_LABEL: &str = "submit_rate_limited";
+/// The retry hint for an in-flight (concurrency) refusal. A slot frees when
+/// one of the principal's own uploads returns, which has no deadline to
+/// report, so this is a short constant rather than a computed wait.
+const SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS: i64 = 2;
+
+/// The per-principal submission limits in force, from
+/// `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN` and
+/// `TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY`; the defaults are
+/// `SUBMIT_PER_PRINCIPAL_LIMIT` and `SUBMIT_PER_PRINCIPAL_CONCURRENCY`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SubmitPrincipalLimits {
+    /// Submissions per `ACCOUNT_RATE_WINDOW` (60 s).
+    rate_per_window: u32,
+    /// Submissions in flight at once.
+    concurrency: u32,
+}
+
+impl Default for SubmitPrincipalLimits {
+    fn default() -> Self {
+        Self {
+            rate_per_window: SUBMIT_PER_PRINCIPAL_LIMIT,
+            concurrency: SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+        }
+    }
+}
+
+fn parse_submit_principal_limits_from_env() -> anyhow::Result<SubmitPrincipalLimits> {
+    fn read(name: &str) -> anyhow::Result<Option<String>> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("failed to read {name}")),
+        }
+    }
+    let rate = read(TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN)?;
+    let concurrency = read(TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY)?;
+    parse_submit_principal_limits(rate.as_deref(), concurrency.as_deref())
+}
+
+/// Bounded: the rate is `1..=SUBMIT_PER_PRINCIPAL_RATE_MAX`, and the
+/// concurrency is `1..=LARGE_BODY_PER_PRINCIPAL_CONCURRENCY`, because the
+/// large-body middleware holds its own per-principal slot before this
+/// handler runs: a submit cap above it could never be reached, and the
+/// refusal would come from the middleware instead. Anything else refuses
+/// startup, naming the variable.
+fn parse_submit_principal_limits(
+    rate: Option<&str>,
+    concurrency: Option<&str>,
+) -> anyhow::Result<SubmitPrincipalLimits> {
+    fn bounded(
+        name: &str,
+        configured: Option<&str>,
+        default: u32,
+        max: u32,
+    ) -> anyhow::Result<u32> {
+        let Some(configured) = configured else {
+            return Ok(default);
+        };
+        let parsed = configured
+            .trim()
+            .parse::<u32>()
+            .with_context(|| format!("{name} must be an integer from 1 to {max}"))?;
+        if !(1..=max).contains(&parsed) {
+            anyhow::bail!("{name} must be an integer from 1 to {max}");
+        }
+        Ok(parsed)
+    }
+    Ok(SubmitPrincipalLimits {
+        rate_per_window: bounded(
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_RATE_PER_MIN,
+            rate,
+            SUBMIT_PER_PRINCIPAL_LIMIT,
+            SUBMIT_PER_PRINCIPAL_RATE_MAX,
+        )?,
+        concurrency: bounded(
+            TRACE_COMMONS_SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+            concurrency,
+            SUBMIT_PER_PRINCIPAL_CONCURRENCY,
+            LARGE_BODY_PER_PRINCIPAL_CONCURRENCY,
+        )?,
+    })
+}
+
+/// A per-principal submission refusal: 429, `submit_rate_limited`, and how
+/// long to wait before trying again.
+fn submit_rate_limited(retry_after_seconds: i64) -> (StatusCode, Json<ApiError>) {
+    api_error_with_retry(
+        StatusCode::TOO_MANY_REQUESTS,
+        SUBMIT_RATE_LIMITED_LABEL,
+        Some(retry_after_seconds.max(1)),
+    )
+}
+
+/// An API error as a response, with a standard `Retry-After` header carrying
+/// the same seconds as the body's `retry_after_seconds` when it has one.
+fn api_error_response_with_retry_after(
+    (status, Json(error)): (StatusCode, Json<ApiError>),
+) -> axum::response::Response {
+    let retry_after = error
+        .retry_after_seconds
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| HeaderValue::from_str(&seconds.to_string()).ok());
+    let mut response = (status, Json(error)).into_response();
+    if let Some(retry_after) = retry_after {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, retry_after);
+    }
+    response
+}
+
+/// The large-body middleware's per-principal (or deployment-wide) in-flight
+/// refusal. Same label and header as the handler's own concurrency refusal.
+fn large_body_concurrency_refusal() -> axum::response::Response {
+    api_error_response_with_retry_after(submit_rate_limited(SUBMIT_CONCURRENCY_RETRY_AFTER_SECONDS))
+}
 
 fn submit_principal_rate_limit_key(
     tenant_id: &str,
@@ -21232,9 +21392,8 @@ fn configured_rate_limits(key: &str) -> Option<(u32, u32)> {
     })
 }
 
-fn submit_rate_limits(key: &str) -> (u32, u32) {
-    configured_rate_limits(key)
-        .unwrap_or((SUBMIT_PER_PRINCIPAL_LIMIT, SUBMIT_PER_PRINCIPAL_CONCURRENCY))
+fn submit_rate_limits(key: &str, configured: SubmitPrincipalLimits) -> (u32, u32) {
+    configured_rate_limits(key).unwrap_or((configured.rate_per_window, configured.concurrency))
 }
 
 /// The principal's in-flight upload cap. Shared fixture principals get the
@@ -21377,6 +21536,30 @@ impl AccountRateLimiter {
             now,
             false,
         )
+    }
+
+    /// Whole seconds until `key`'s principal window turns over and frees a
+    /// slot, rounded up and at least 1. A key the table does not hold (one
+    /// that fell into the overflow bucket) gets a full window. Read after a
+    /// refusal from [`Self::check_principal`], whose fixed window keeps its
+    /// start while it counts past the limit.
+    fn principal_retry_after_seconds(&self, key: &str) -> i64 {
+        self.principal_retry_after_seconds_at(key, std::time::Instant::now())
+    }
+
+    fn principal_retry_after_seconds_at(&self, key: &str, now: std::time::Instant) -> i64 {
+        let remaining = self
+            .principal_windows
+            .lock()
+            .ok()
+            .and_then(|table| {
+                table.entries.get(key).map(|window| {
+                    (window.window_start + ACCOUNT_RATE_WINDOW).saturating_duration_since(now)
+                })
+            })
+            .unwrap_or(ACCOUNT_RATE_WINDOW);
+        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        i64::try_from(seconds).unwrap_or(i64::MAX).max(1)
     }
 
     fn check_at(&self, key: &str, limit: u32, now: std::time::Instant) -> bool {
