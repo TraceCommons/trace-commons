@@ -345,6 +345,7 @@ public struct GlassBarGraph: View {
     /// The window last drawn, so a change knows which side it came from.
     @State private var shownPeriod: Int?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     /// `period` names the window the buckets cover (0 is now, -1 the window
     /// before it): when it changes the bars slide in from the side the new
@@ -387,13 +388,13 @@ public struct GlassBarGraph: View {
             ForEach(Array(buckets.enumerated()), id: \.element.id) { index, bucket in
                 let isHovered = hovered == bucket.id
                 VStack(spacing: GlassTokens.Space.s2) {
-                    Canvas { context, size in
+                    Canvas { [dark = colorScheme == .dark] context, size in
                         Self.drawMatrix(
                             in: &context, size: size, columns: thin ? 1 : 3,
                             radius: thin ? 1.5 : 1.9, inset: thin ? 1 : 5, end: Self.matrixEnd,
                             up: Self.dotAlphas(bucket.up, of: maximum),
                             down: Self.dotAlphas(bucket.down, of: maximum),
-                            unlit: GlassColor.ink(isHovered ? 0.2 : 0.09))
+                            unlit: GlassColor.ink(isHovered ? 0.2 : 0.09), dark: dark)
                     }
                     // Under the pointer the column takes a solid wash, never
                     // an outline (owner, 2026-10-10).
@@ -455,11 +456,27 @@ public struct GlassBarGraph: View {
         }
     }
 
+    /// How a lit dot at `level` (from `dotAlphas`) is drawn: the data
+    /// colour at `alpha`, with the ink (white in dark, black in light) laid
+    /// over it at `lift`. Every lit dot clears 3:1 on the pane and 2:1 on an
+    /// unlit dot (GraphDotContrastTests). On a dark pane the data colours
+    /// clear 3:1 only when solid, so there the taper is in lightness: solid,
+    /// lifted toward white more at the tip. On a light pane it stays in
+    /// alpha, from a floor that clears 3:1.
+    static func dotInk(_ level: Double, dark: Bool) -> (alpha: Double, lift: Double) {
+        dark ? (1, darkTipLift * level) : (lightFloor + (1 - lightFloor) * level, 0)
+    }
+
+    /// The most a lit dot is lifted toward white, at the tip, in dark.
+    static let darkTipLift = 0.4
+    /// The alpha a lit dot's level is laid over in light.
+    static let lightFloor = 0.7
+
     /// Shared rises from the axis in purple and kept hangs from it in blue
     /// (#1146 `.tc-bar-graph__down { top: 50% }`), on a 1pt axis rule.
     private static func drawMatrix(
         in context: inout GraphicsContext, size: CGSize, columns: Int, radius: CGFloat, inset: CGFloat,
-        end: CGFloat, up: [Double], down: [Double], unlit: Color
+        end: CGFloat, up: [Double], down: [Double], unlit: Color, dark: Bool
     ) {
         let half = size.height / 2
         // Rows keep one pitch in every column, whatever its width, so a
@@ -472,7 +489,11 @@ public struct GlassBarGraph: View {
         let kept = GlassTokens.Color.dataKept.color
         func dot(_ x: CGFloat, _ y: CGFloat, _ alpha: Double, _ color: Color) {
             let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
-            context.fill(Path(ellipseIn: rect), with: .color(alpha > 0 ? color.opacity(alpha) : unlit))
+            let path = Path(ellipseIn: rect)
+            guard alpha > 0 else { return context.fill(path, with: .color(unlit)) }
+            let ink = dotInk(alpha, dark: dark)
+            context.fill(path, with: .color(color.opacity(ink.alpha)))
+            if ink.lift > 0 { context.fill(path, with: .color(GlassColor.ink(ink.lift))) }
         }
         for column in 0..<columns {
             let x = left + CGFloat(column) * across
