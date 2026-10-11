@@ -1036,6 +1036,12 @@ mod tests {
     /// embed run inline in `execute`, the first await below would hand the
     /// only thread to the Score, and nothing would run until every chunk
     /// was embedded.
+    ///
+    /// A regression guard, not evidence of the #1140 change: the raw
+    /// `spawn_blocking` from N-6 already kept the embed off the runtime, so
+    /// this test passes with or without `run_score_evaluation`. What #1140
+    /// adds, the bound, is pinned by the two burst tests (this module's and
+    /// `versioned_pipeline_compat`'s).
     #[tokio::test(flavor = "current_thread")]
     async fn a_slow_embed_leaves_the_runtime_free_to_serve_http() {
         use tower::ServiceExt;
