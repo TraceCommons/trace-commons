@@ -460,11 +460,17 @@ pub(crate) async fn pipeline_readiness_handler(
 /// also when the run's locks are released while a write goes on (a lost
 /// database session, an abort past the shutdown grace period, the process
 /// exit): the fence then expires on its own, at most the run deadline plus
-/// the margin (90 seconds at the defaults) after it was last set. This holds
-/// as long as each index call returns within the write fence margin
-/// (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`): a write starts only before
-/// the run's deadline, and the fence reaches the deadline plus the margin. A
-/// fence write that fails stops the rebuild with `503`
+/// the margin (90 seconds at the defaults) after it was last set. A write
+/// starts only before the run's deadline, and the fence reaches the deadline
+/// plus the margin (`PIPELINE_INDEX_WRITE_FENCE_MARGIN_SECONDS`). An index
+/// call has no time limit of its own, so one can outlast the fence, and an
+/// invalidation claimed after the fence expired can run before that write
+/// lands. The late write is awaited until it returns and then reopens the
+/// run's invalidation, so the withdrawn revision is removed again (issue
+/// #1233, `reopen_invalidation_after_index_writes` in `versioned_pipeline`,
+/// which states the invariant). The fence keeps the removal from racing the
+/// writes it covers; the reopen covers a write that outlasts it. A fence
+/// write that fails stops the rebuild with `503`
 /// `index_rebuild_fence_unavailable`.
 ///
 /// It still refuses, with `409` `pipeline_index_rebuild_tenant_active`, a

@@ -9623,6 +9623,19 @@ async fn held_index_test_service_with_leases(
     config: PipelineBundleConfig,
     lease_config: PipelineLeaseConfig,
 ) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
+    held_index_test_service_with_margin(backend, artifact_store, config, lease_config, None).await
+}
+
+/// `held_index_test_service_with_leases` with, when given, Settle's index
+/// write fence margin `margin`
+/// (`PipelineServiceBuilder::with_index_write_fence_margin`).
+async fn held_index_test_service_with_margin(
+    backend: Arc<PgBackend>,
+    artifact_store: Arc<dyn TraceArtifactStore>,
+    config: PipelineBundleConfig,
+    lease_config: PipelineLeaseConfig,
+    margin: Option<std::time::Duration>,
+) -> (Arc<PipelineService>, Arc<IsolatedPipelineIndex>, HeldCall) {
     let scorer = Arc::new(ReferencePerplexityScorer::new());
     let embedder = Arc::new(ReferenceEmbedder::new());
     let package = MinimalPolicyBundle::minimal_package(&config, scorer.as_ref(), embedder.as_ref())
@@ -9660,7 +9673,11 @@ async fn held_index_test_service_with_leases(
     .with_authority(allow_all_authority())
     .with_privacy(default_privacy_boundary())
     .with_unqualified_routing(true)
-    .with_lease_config(lease_config)
+    .with_lease_config(lease_config);
+    let service = match margin {
+        Some(margin) => service.with_index_write_fence_margin(margin),
+        None => service,
+    }
     .build()
     .expect("build pipeline service");
     (Arc::new(service), index, held)
@@ -9854,6 +9871,281 @@ async fn an_index_write_past_its_deadline_releases_the_rows() {
         (PipelineRunState::Retry, "pending")
     );
     assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 1);
+}
+
+/// Waits until `index` holds exactly `expected` entries of `tenant_ref`,
+/// running `service`'s invalidation pass between reads when `drain` is set.
+/// `false` when `bound` passes first.
+async fn wait_for_entry_count(
+    service: &PipelineService,
+    index: &IsolatedPipelineIndex,
+    tenant: &str,
+    expected: usize,
+    drain: bool,
+    bound: std::time::Duration,
+) -> bool {
+    let tenant_ref = pipeline_tenant_storage_ref(tenant);
+    tokio::time::timeout(bound, async {
+        loop {
+            if drain {
+                service
+                    .process_index_invalidations(tenant, 10)
+                    .await
+                    .expect("the invalidation pass runs");
+            }
+            if index.entry_count(&tenant_ref, MINIMAL_INDEX_ID) == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+/// Issue #1233: an index call slower than the write fence margin cannot
+/// restore a withdrawn revision. Settle's dispatch gives up on a held call
+/// once its deadline (a one-second lease) and the margin have passed and
+/// releases the run with the call still in flight. The owner then withdraws
+/// the submission, and its invalidation runs at once (the run is not
+/// leased) against an index the held call has not written yet. When the
+/// held call finally writes its entry, the revision's removal runs again,
+/// so the withdrawn entry does not stay in the index.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_write_slower_than_the_fence_margin_cannot_restore_a_withdrawn_revision() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, index, mut held) = held_index_test_service_with_margin(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        PipelineLeaseConfig::new(
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(300),
+            chrono::Duration::seconds(1),
+        )
+        .unwrap(),
+        Some(std::time::Duration::from_millis(500)),
+    )
+    .await;
+    let tenant = format!("dispatch-slow-call-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let (run, _) = run_to_settle_ready(&service, &tenant).await;
+    let settle = tokio::spawn({
+        let service = service.clone();
+        let tenant = tenant.clone();
+        let run_id = run.run_id;
+        async move { service.process_run(&tenant, run_id).await }
+    });
+    held.wait_until_entered().await;
+    let _ = tokio::time::timeout(HELD_CALL_BOUND, settle)
+        .await
+        .expect("Settle gives up on the held call after the deadline and the margin");
+    let store = PgPipelineStore::new(backend.clone());
+    let released = store.get_run(&tenant, run.run_id).await.unwrap().unwrap();
+    assert_eq!(
+        (released.state, released.index_write_state.as_str()),
+        (PipelineRunState::Retry, "pending"),
+        "the run is released with the held call still in flight"
+    );
+    assert_eq!(index.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    service
+        .withdraw_submission(&tenant, run.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    service
+        .process_index_invalidations(&tenant, 10)
+        .await
+        .expect("the invalidation pass runs while the held call is in flight");
+
+    held.release();
+    assert!(
+        wait_for_entry_count(&service, &index, &tenant, 1, false, HELD_CALL_BOUND).await,
+        "the held call writes its entry once released"
+    );
+    assert!(
+        wait_for_entry_count(
+            &service,
+            &index,
+            &tenant,
+            0,
+            true,
+            std::time::Duration::from_secs(10)
+        )
+        .await,
+        "the late write of a withdrawn revision is removed again: {} entries remain",
+        index.entry_count(&tenant_ref, MINIMAL_INDEX_ID)
+    );
+    let (_, state) = index_invalidation_rows(&backend, &tenant, run.run_id).await;
+    assert_eq!(state, "complete");
+}
+
+/// Issue #1233: a claim taken before a late index write reopened the
+/// invalidation cannot record it `complete`. The reopen moves the row's
+/// `next_attempt_at`, the claim's token, so the claim's removal (which may
+/// have run before the late write landed) does not end the row; another
+/// claim removes the revision again.
+#[tokio::test]
+async fn a_claim_taken_before_a_reopen_does_not_complete_the_invalidation() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidation-reopen-token-{}", uuid::Uuid::new_v4());
+    let settled = settled_included_run(&service, &tenant).await;
+    service
+        .withdraw_submission(&tenant, settled.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let store = PgPipelineStore::new(backend.clone());
+    let claims = store
+        .claim_due_index_invalidations(&tenant, 10, chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1, "the withdrawal's invalidation is claimed");
+    owner_client()
+        .await
+        .execute(
+            "UPDATE pipeline_index_invalidations
+                SET next_attempt_at = NOW()
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id],
+        )
+        .await
+        .expect("reopen the claimed invalidation");
+    assert!(
+        !store.complete_index_invalidation(&claims[0]).await.unwrap(),
+        "a claim whose token moved does not complete the invalidation"
+    );
+    let (_, state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(state, "pending");
+}
+
+/// Issue #1233, defect 2: Settle's index dispatch reads the lease's
+/// remaining time on the database's clock, the clock that set
+/// `lease_expires_at`, through the runtime login. A lease ending in five
+/// seconds has at most five seconds left and loses only the round trip; one
+/// that already ended has none (the `GREATEST(0, ..)` clamp), and a far
+/// lease is not clamped. A step of the process's wall clock cannot be made
+/// in a test, so this pins the read the deadline is built from, and
+/// `index_dispatch_deadline`'s own test pins the deadline.
+#[tokio::test]
+async fn the_index_dispatch_reads_the_lease_remaining_on_the_database_clock() {
+    let Some(backend) = runtime_backend(2).await else {
+        return;
+    };
+    let client = backend.trace_pool_for_test().get().await.unwrap();
+    let mut lease_ends = Vec::new();
+    for offset in ["5 seconds", "-30 seconds", "1 day"] {
+        let row = client
+            .query_one("SELECT clock_timestamp() + $1::text::interval", &[&offset])
+            .await
+            .unwrap();
+        lease_ends.push(row.get::<_, chrono::DateTime<chrono::Utc>>(0));
+    }
+    let remaining = index_lease_remaining_on_db_clock(&client, lease_ends[0])
+        .await
+        .unwrap();
+    assert!(
+        remaining <= std::time::Duration::from_secs(5)
+            && remaining > std::time::Duration::from_secs(3),
+        "a lease ending in 5 s has between 3 and 5 s left: {remaining:?}"
+    );
+    assert_eq!(
+        index_lease_remaining_on_db_clock(&client, lease_ends[1])
+            .await
+            .unwrap(),
+        std::time::Duration::ZERO,
+        "a lease that ended has no time left"
+    );
+    let remaining = index_lease_remaining_on_db_clock(&client, lease_ends[2])
+        .await
+        .unwrap();
+    assert!(
+        remaining > std::time::Duration::from_secs(86_400 - 60),
+        "a far lease is not clamped: {remaining:?}"
+    );
+}
+
+/// Issue #1233: the reopen a late index write makes
+/// (`reopen_index_invalidation_after_late_write`). A run with no
+/// invalidation has nothing to reopen. On a `pending` invalidation that a
+/// claim holds, the reopen moves `next_attempt_at` past the claim's lease
+/// end, never earlier, so that claim cannot complete the row and the row
+/// stays `pending` for the next claim.
+#[tokio::test]
+async fn a_late_write_reopens_a_claimed_invalidation_past_the_claims_token() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _, _) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let tenant = format!("invalidation-reopen-claimed-{}", uuid::Uuid::new_v4());
+    let settled = settled_included_run(&service, &tenant).await;
+    let store = PgPipelineStore::new(backend.clone());
+    assert!(
+        !store
+            .reopen_index_invalidation_after_late_write(&tenant, settled.run_id)
+            .await
+            .unwrap(),
+        "a run with no invalidation has nothing to reopen"
+    );
+    service
+        .withdraw_submission(&tenant, settled.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    let claims = store
+        .claim_due_index_invalidations(&tenant, 10, chrono::Duration::minutes(5))
+        .await
+        .unwrap();
+    assert_eq!(claims.len(), 1, "the withdrawal's invalidation is claimed");
+    assert!(
+        store
+            .reopen_index_invalidation_after_late_write(&tenant, settled.run_id)
+            .await
+            .unwrap(),
+        "the late write reopens the claimed invalidation"
+    );
+    let mut client = backend.trace_pool_for_test().get().await.unwrap();
+    let tx = tenant_tx(&mut client, &tenant).await;
+    let due: chrono::DateTime<chrono::Utc> = tx
+        .query_one(
+            "SELECT next_attempt_at FROM pipeline_index_invalidations
+              WHERE tenant_id = $1 AND run_id = $2",
+            &[&tenant, &settled.run_id],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    tx.commit().await.unwrap();
+    drop(client);
+    assert!(
+        due > claims[0].lease_expires_at,
+        "the reopen moves the row past the claim's token, never earlier: {due} vs {}",
+        claims[0].lease_expires_at
+    );
+    assert!(
+        !store.complete_index_invalidation(&claims[0]).await.unwrap(),
+        "the claim taken before the reopen does not complete the invalidation"
+    );
+    let (_, state) = index_invalidation_rows(&backend, &tenant, settled.run_id).await;
+    assert_eq!(state, "pending");
 }
 
 /// Multi-lens review L4-1 and L4-6(a): `claim_next`'s sweep of expired,
@@ -33195,6 +33487,100 @@ async fn an_index_rebuild_past_its_deadline_releases_the_rows() {
         rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID),
         1,
         "only the entry in flight at the deadline is written"
+    );
+}
+
+/// Issue #1233, the rebuild's copy: an index rebuild call slower than the
+/// rebuild's fence margin cannot restore a withdrawn revision. The rebuild
+/// gives up on the held call once the run's deadline and the margin have
+/// passed, and its fence expires. The owner withdraws the submission, its
+/// invalidation runs, and when the held call writes its entry the
+/// revision's removal runs again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_index_rebuild_call_slower_than_the_fence_margin_cannot_restore_a_withdrawn_revision() {
+    let Some(backend) = runtime_backend(4).await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let (service, _index, _adapters) = test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        minimal_config(true),
+        None,
+    )
+    .await;
+    let rebuilt = IsolatedPipelineIndex::new();
+    let rebuilder = fence_test_service(
+        backend.clone(),
+        artifact_store(&dir),
+        rebuilt.clone(),
+        one_second_settle_leases(),
+        Some(std::time::Duration::from_millis(500)),
+    )
+    .await;
+    let tenant = format!("index-rebuild-slow-call-{}", uuid::Uuid::new_v4());
+    let tenant_ref = pipeline_tenant_storage_ref(&tenant);
+    let settled = settled_included_run(&service, &tenant).await;
+
+    let (hold, mut held) = CallHold::new();
+    let writer: Arc<dyn IdentifiedIndexWriter> = Arc::new(BlockingIndexWriter {
+        inner: rebuilt.clone(),
+        hold,
+    });
+    let rebuild = tokio::spawn({
+        let rebuilder = rebuilder.clone();
+        let tenant = tenant.clone();
+        async move {
+            rebuilder
+                .rebuild_index_from_authoritative_commands(&tenant, writer)
+                .await
+        }
+    });
+    held.wait_until_entered().await;
+    tokio::time::timeout(HELD_CALL_BOUND, rebuild)
+        .await
+        .expect("the rebuild gives up on the held call after the deadline and the margin")
+        .expect("the rebuild task did not panic")
+        .expect_err("a rebuild past its deadline fails closed");
+    assert_eq!(rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID), 0);
+
+    service
+        .withdraw_submission(&tenant, settled.submission_id, RECEIPT_PRINCIPAL, None)
+        .await
+        .expect("the owner withdraws the submission");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while rebuild_fence_rows(&tenant)
+            .await
+            .iter()
+            .any(|row| row.unexpired)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the lost rebuild's fence expires");
+    rebuilder
+        .process_index_invalidations(&tenant, 10)
+        .await
+        .expect("the invalidation pass runs while the held call is in flight");
+
+    held.release();
+    assert!(
+        wait_for_entry_count(&rebuilder, &rebuilt, &tenant, 1, false, HELD_CALL_BOUND).await,
+        "the held call writes its entry once released"
+    );
+    assert!(
+        wait_for_entry_count(
+            &rebuilder,
+            &rebuilt,
+            &tenant,
+            0,
+            true,
+            std::time::Duration::from_secs(10)
+        )
+        .await,
+        "the late rebuild write of a withdrawn revision is removed again: {} entries remain",
+        rebuilt.entry_count(&tenant_ref, MINIMAL_INDEX_ID)
     );
 }
 
