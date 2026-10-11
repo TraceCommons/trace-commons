@@ -1285,7 +1285,11 @@ that fails the run. It records the move in `submission_rejected_at` and sets
 the review audit marker, so the worker appends one `lifecycle_status_change`
 event (`rejected`). A revoked, purged, withdrawn or expired submission is
 never moved, and a run failed under `privacy_classification_failed` keeps
-its submission as it is. Runs that failed before this build keep their
+its submission as it is. A `quarantined` submission is not moved either:
+Admission stores a quarantined submission as `quarantined` at receipt, and
+the Review-start privacy pass stores an escalated one the same way, so when
+such a run fails its submission stays `quarantined` with no audit event.
+Runs that failed before this build keep their
 `received` submissions; nothing backfills them.
 
 A build from before V123 runs on a V123 database, and fails runs as before,

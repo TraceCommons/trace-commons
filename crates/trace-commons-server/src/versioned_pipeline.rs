@@ -7178,9 +7178,12 @@ async fn receipt_is_tombstoned(
 /// event for it. Runs in the caller's transaction, after the run UPDATE.
 ///
 /// Only a live `received` row moves (`live_submission_sql!`): a submission
-/// that is revoked, purged, withdrawn or expired, or that a decision already
-/// moved (`accepted`, `rejected`, `quarantined`), is left as it is, and its
-/// run gets no marker. A run failed under `privacy_classification_failed`
+/// that is revoked, purged, withdrawn or expired, or that is stored
+/// `accepted`, `rejected` or `quarantined`, is left as it is, and its run
+/// gets no marker. `quarantined` includes a submission Admission quarantined
+/// (stored `quarantined` at receipt, before Review ran) as well as one the
+/// Review-start privacy pass escalated; neither moves (PR #1351, owner
+/// decision 3). A run failed under `privacy_classification_failed`
 /// does not move either: its content was never classified, which owner
 /// decision Q1 reports as held content (`quarantined`), not as a processing
 /// failure. Idempotent.

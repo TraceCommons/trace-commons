@@ -17579,9 +17579,11 @@ fn submission_status_from_pipeline(
 /// failed because its Review-start privacy classification kept failing
 /// (`privacy_classification_failed`, owner decision Q1): its content was
 /// never classified, so it reports `quarantined`, held content, rather
-/// than `accepted`. Since #1346 any other run that fails before Review
-/// decided it moves its stored row to `rejected` in the failing
-/// transaction, so it reports `rejected` through the first arms.
+/// than `accepted`. Since #1346 any other run that fails while its stored
+/// row is `received` moves the row to `rejected` in the failing
+/// transaction, so it reports `rejected` through the first arms. A row
+/// stored `quarantined` (Admission quarantine, or a privacy-pass
+/// escalation) is not moved and keeps reporting `quarantined`.
 fn main_status_for_pipeline(status: &PipelineContributorStatus) -> &'static str {
     match status.submission_status.as_str() {
         "accepted" => "accepted",
