@@ -47,6 +47,36 @@ pub struct LeverOutcome {
     pub disabled: Vec<PatternKind>,
 }
 
+/// The weeks of `kind`'s "Not useful" since it was last turned back on.
+fn dismissal_weeks(
+    kind: PatternKind,
+    dismissals: &[LeverDismissal],
+    reenables: &[LeverReenable],
+) -> Vec<NaiveDate> {
+    let reenabled_at = reenables
+        .iter()
+        .filter(|r| r.kind == kind)
+        .map(|r| r.week_start)
+        .max();
+    dismissals
+        .iter()
+        .filter(|d| d.kind == kind && reenabled_at.is_none_or(|at| d.week_start > at))
+        .map(|d| d.week_start)
+        .collect()
+}
+
+/// The kinds [`LEVER_DISMISSALS_TO_DISABLE`] "Not useful" turned off, in the
+/// fixed kind order, whatever the weekly history: what the Settings switch
+/// for the lever's card turns back on.
+pub fn kinds_off(dismissals: &[LeverDismissal], reenables: &[LeverReenable]) -> Vec<PatternKind> {
+    PatternKind::ALL
+        .into_iter()
+        .filter(|kind| {
+            dismissal_weeks(*kind, dismissals, reenables).len() >= LEVER_DISMISSALS_TO_DISABLE
+        })
+        .collect()
+}
+
 /// Pick the lever for `this` week from `earlier` weeks (any order).
 ///
 /// A kind's baseline is the median of its figure over the
@@ -89,16 +119,7 @@ pub fn lever(
             continue;
         }
         any_baseline = true;
-        let reenabled_at = reenables
-            .iter()
-            .filter(|r| r.kind == kind)
-            .map(|r| r.week_start)
-            .max();
-        let kind_dismissals: Vec<NaiveDate> = dismissals
-            .iter()
-            .filter(|d| d.kind == kind && reenabled_at.is_none_or(|at| d.week_start > at))
-            .map(|d| d.week_start)
-            .collect();
+        let kind_dismissals = dismissal_weeks(kind, dismissals, reenables);
         if kind_dismissals.len() >= LEVER_DISMISSALS_TO_DISABLE {
             disabled.push(kind);
             continue;
@@ -375,6 +396,24 @@ mod tests {
         .unwrap();
         assert_eq!(back.pick.unwrap().kind, READS);
         assert!(back.disabled.is_empty());
+    }
+
+    #[test]
+    fn the_kinds_off_need_no_history() {
+        let dismissals: Vec<_> = [20, 14, 8]
+            .iter()
+            .map(|ago| LeverDismissal {
+                kind: READS,
+                week_start: monday(*ago),
+            })
+            .collect();
+        assert_eq!(kinds_off(&dismissals, &[]), vec![READS]);
+        assert_eq!(kinds_off(&dismissals[..2], &[]), Vec::<PatternKind>::new());
+        let back = [LeverReenable {
+            kind: READS,
+            week_start: monday(7),
+        }];
+        assert!(kinds_off(&dismissals, &back).is_empty());
     }
 
     #[test]

@@ -57,7 +57,10 @@ pub extern "C" fn tc_insights_copy_json() -> *mut c_char {
 /// without `counter_weeks` nothing is compared. `goal_set` (`goal`, optional
 /// `id`), `goal_delete` (`id`), `lever_feedback` (`kind`, `week_start`,
 /// optional `action`: `not_useful` or `reenable`) and `recap_opened`
-/// (`week_start`) store rule IDs and Monday dates only.
+/// (`week_start`) store rule IDs and Monday dates only. `lever_card`
+/// (`enabled`) is the Settings switch for the lever's card; on, it turns
+/// back on every kind repeated "Not useful" turned off. Its state is
+/// `comparisons`' `lever.card_enabled`.
 /// Whole-snapshot episodes: `{"type":"episode_create","snapshot_ids":["..."]}`;
 /// `episode_list`, and `episode_explain` with an episode UUID `id`.
 /// Edits require `id` and `expected_revision`: `episode_replace_members` also

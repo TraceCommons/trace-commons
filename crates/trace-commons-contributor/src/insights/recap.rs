@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use super::cache_share::best_week_permille;
 use super::goal_store::GoalState;
 use super::goals::{Goal, GoalMarks, ThresholdCount, WeekFigures, WeekMark, goal_marks};
-use super::lever::lever;
+use super::lever::{kinds_off, lever};
 use super::patterns::PatternKind;
 use super::week_rollup::{AnalyticsSource, Feed, Unavailable, change_permille};
 
@@ -62,6 +62,12 @@ pub struct LeverState {
     /// Kinds off after repeated "Not useful", until turned back on.
     pub disabled: Vec<PatternKind>,
     pub unavailable: Option<Unavailable>,
+    /// The Settings switch for the lever's card (`analytics_setting_lever`):
+    /// false while it is switched off, or while any kind is off after
+    /// repeated "Not useful", whatever the weekly history. Turning it on is
+    /// the `lever_card` operation. Switched off, no card is drawn and
+    /// `disabled` is empty.
+    pub card_enabled: bool,
 }
 
 /// One harness's line on the summary card. Never summed with another.
@@ -170,6 +176,15 @@ fn lever_state(
     week_start: NaiveDate,
     state: &GoalState,
 ) -> LeverState {
+    if state.lever_card_off {
+        return LeverState {
+            pick: None,
+            disabled: Vec::new(),
+            unavailable: None,
+            card_enabled: false,
+        };
+    }
+    let card_enabled = kinds_off(&state.lever_dismissals, &state.lever_reenables).is_empty();
     let shown = figures_until(weeks, week_start);
     let outcome = match shown.split_last() {
         _ if feed != Feed::CounterPass => Err(Unavailable::NeedsCounterPass),
@@ -196,11 +211,13 @@ fn lever_state(
             }),
             disabled: outcome.disabled,
             unavailable: None,
+            card_enabled,
         },
         Err(reason) => LeverState {
             pick: None,
             disabled: Vec::new(),
             unavailable: Some(reason),
+            card_enabled,
         },
     }
 }
@@ -474,6 +491,47 @@ mod tests {
         };
         let found = week_comparisons(Some(&weeks), request(monday(0)), &dismissed);
         assert_eq!(found.lever.pick, None);
+        assert_eq!(found.lever.unavailable, None);
+    }
+
+    /// `card_enabled` is the Settings switch for the lever's card: off after
+    /// three "Not useful" turned a kind off, or when switched off, and then
+    /// no card is drawn. Switched off, the "turned off by Not useful" list
+    /// is empty, so the shell draws no line for it either.
+    #[test]
+    fn the_lever_card_switch_reads_off_after_three_not_useful_or_when_switched_off() {
+        let weeks = history(week(0, 1_000_000, 300, 300_000));
+        let on = week_comparisons(Some(&weeks), request(monday(0)), &GoalState::default());
+        assert!(on.lever.card_enabled);
+
+        let three = GoalState {
+            lever_dismissals: [20, 14, 8]
+                .iter()
+                .map(|ago| LeverDismissal {
+                    kind: READS,
+                    week_start: monday(*ago),
+                })
+                .collect(),
+            ..GoalState::default()
+        };
+        let off = week_comparisons(Some(&weeks), request(monday(0)), &three);
+        assert!(!off.lever.card_enabled);
+        assert_eq!(off.lever.disabled, vec![READS]);
+        // Under feed S there is no lever, but the switch still reads off.
+        assert!(
+            !week_comparisons(None, request(monday(0)), &three)
+                .lever
+                .card_enabled
+        );
+
+        let switched_off = GoalState {
+            lever_card_off: true,
+            ..GoalState::default()
+        };
+        let found = week_comparisons(Some(&weeks), request(monday(0)), &switched_off);
+        assert!(!found.lever.card_enabled);
+        assert_eq!(found.lever.pick, None);
+        assert!(found.lever.disabled.is_empty());
         assert_eq!(found.lever.unavailable, None);
     }
 

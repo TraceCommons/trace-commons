@@ -2152,6 +2152,9 @@ char*       tc_call(tc_handle*, const char* method, const char* params_json);
  * without counter_weeks nothing is compared. goal_set {id?,goal},
  * goal_delete {id}, lever_feedback {kind,week_start,action?} and
  * recap_opened {week_start} write rule IDs and Monday dates only.
+ * lever_card {enabled} is the Settings switch for the lever's card; on, it
+ * turns back on every kind repeated "Not useful" turned off. Its state is
+ * comparisons' lever.card_enabled.
  * Episodes: episode_create {snapshot_ids}, episode_list, episode_explain {id}.
  * Episode edits require {id,expected_revision}: episode_replace_members also
  * takes snapshot_ids; episode_annotate takes category,outcome;

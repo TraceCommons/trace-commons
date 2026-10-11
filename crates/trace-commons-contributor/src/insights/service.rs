@@ -663,6 +663,12 @@ pub enum LocalInsightsOperation {
         #[serde(default = "lever_not_useful")]
         action: super::goal_store::LeverFeedbackAction,
     },
+    /// The Settings switch for the lever's card (`analytics_setting_lever`).
+    /// On turns back on every kind repeated "Not useful" turned off; its
+    /// state is `comparisons`' `lever.card_enabled`.
+    LeverCard {
+        enabled: bool,
+    },
     /// "Open recap": the summary card for this closed week (its Monday) was
     /// opened and does not appear again.
     RecapOpened {
@@ -834,6 +840,9 @@ pub enum LocalInsightsResponse {
         state: Box<super::goal_store::GoalState>,
     },
     LeverFeedback {
+        state: Box<super::goal_store::GoalState>,
+    },
+    LeverCard {
         state: Box<super::goal_store::GoalState>,
     },
     RecapOpened {
@@ -1396,6 +1405,9 @@ fn execute_inner(request: LocalInsightsRequest) -> Result<LocalInsightsResponse>
             action,
         } => LocalInsightsResponse::LeverFeedback {
             state: Box::new(store()?.lever_feedback(kind, week_start, action)?),
+        },
+        LocalInsightsOperation::LeverCard { enabled } => LocalInsightsResponse::LeverCard {
+            state: Box::new(store()?.lever_card(enabled)?),
         },
         LocalInsightsOperation::RecapOpened { week_start } => LocalInsightsResponse::RecapOpened {
             state: Box::new(store()?.recap_opened(week_start)?),
@@ -2610,6 +2622,66 @@ mod tests {
                 error
             );
         }
+    }
+
+    /// `lever_card` is the Settings switch for the lever's card: three
+    /// "Not useful" read as off, and turning it on brings the kind back.
+    #[test]
+    fn the_lever_card_switch_turns_the_card_back_on() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("store");
+        let current =
+            super::super::week_rollup::local_week_start(&chrono::Utc::now(), &chrono::Utc);
+        for back in [3, 2, 1] {
+            analytics_call(
+                &directory,
+                serde_json::json!({
+                    "type": "lever_feedback", "kind": "repeated_reads",
+                    "week_start": (current - chrono::Duration::weeks(back)).to_string()
+                }),
+            )
+            .unwrap();
+        }
+        let lever = |directory: &std::path::Path| {
+            analytics_call(
+                directory,
+                serde_json::json!({
+                    "type": "comparisons", "tz": 0,
+                    "counter_weeks": counter_weeks(|_| 1_000_000)
+                }),
+            )
+            .unwrap()["comparisons"]["lever"]
+                .clone()
+        };
+        let off = lever(&directory);
+        assert_eq!(off["card_enabled"], false);
+        assert_eq!(off["disabled"], serde_json::json!(["repeated_reads"]));
+
+        let on = analytics_call(
+            &directory,
+            serde_json::json!({"type": "lever_card", "enabled": true}),
+        )
+        .unwrap();
+        assert_eq!(on["type"], "lever_card");
+        assert_eq!(on["state"]["lever_card_off"], false);
+        let back = lever(&directory);
+        assert_eq!(back["card_enabled"], true);
+        assert_eq!(back["disabled"], serde_json::json!([]));
+
+        let switched = analytics_call(
+            &directory,
+            serde_json::json!({"type": "lever_card", "enabled": false}),
+        )
+        .unwrap();
+        assert_eq!(switched["state"]["lever_card_off"], true);
+        assert_eq!(lever(&directory)["card_enabled"], false);
+
+        assert_eq!(
+            analytics_call(&directory, serde_json::json!({"type": "lever_card"}))
+                .unwrap_err()
+                .to_string(),
+            "insights-request-invalid"
+        );
     }
 
     #[test]

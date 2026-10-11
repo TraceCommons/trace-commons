@@ -309,6 +309,10 @@ public struct InsightsLeverState: Decodable, Sendable, Equatable {
     /// Kinds off after repeated "Not useful".
     public let disabled: [String]
     public let unavailable: String?
+    /// The Settings switch for the lever's card: false while switched off
+    /// or while a kind is off after repeated "Not useful". `nil` from a
+    /// core that does not send it: unknown, not off.
+    public let card_enabled: Bool?
 }
 
 public struct InsightsRecapSource: Decodable, Sendable, Equatable, Identifiable {
