@@ -97,7 +97,10 @@ public struct GlassChip: View {
             .foregroundStyle(ink)
             .padding(.vertical, 3)
             .padding(.horizontal, 9)
-            .overlay(Capsule().strokeBorder(ink.opacity(0.6), lineWidth: 0.5))
+            // Flat pills carry no border (owner, 2026-10-10): a neutral tint
+            // holds the shape in place of the outline.
+            .background(Capsule().fill(GlassTheme.pick(Color.clear, flat: GlassTokens.Color.tintNeutral.color)))
+            .overlay(Capsule().strokeBorder(ink.opacity(GlassTheme.pick(0.6, flat: 0)), lineWidth: 0.5))
             .accessibilityElement(children: .combine)
         }
     }
@@ -588,6 +591,8 @@ enum GlassMapMarks {
     /// A mark's width and height: the explorations' 7pt mark at 0.8
     /// (owner, 2026-10-10; it was 0.6, 4.2pt).
     static let size: CGFloat = 5.6
+    /// The dot set between every other pair of marks along a row.
+    static let dotSize: CGFloat = 1.6
     /// The marks at rest: white over the dark field, black over the light.
     static let ink = GlassRGBA(0xFFFFFF, alpha: 0.096, light: GlassRGBA(0x000000, alpha: 0.08))
     /// The marks at the centre of the light: about twice their resting
@@ -646,29 +651,74 @@ enum GlassMapMarks {
     }
 
     /// How far the shimmer band is turned counterclockwise from square to
-    /// the field's diagonal (owner, 2026-10-10).
-    static let shimmerTilt: Double = 5
+    /// the field's diagonal (owner, 2026-10-10: 5 degrees, then 15).
+    static let shimmerTilt: Double = 15
 
     /// The shimmer band at `sweep` (its fractional part; each whole step is
-    /// one pass): the gradient's start and end. Its centre travels the
-    /// field's diagonal from top-left to bottom-right; its axis is that
+    /// one pass): the gradient's start and end. Its axis is the field's
     /// diagonal turned `shimmerTilt` degrees counterclockwise on screen, so
-    /// the band lies a little off square to its path. The pass starts and
-    /// ends with the whole band off the field.
+    /// the band lies off square to its path; it travels that axis from
+    /// wholly before the field's nearest corner to wholly past its farthest,
+    /// so a pass starts and ends off the field whatever the field's shape.
     static func shimmerBand(sweep: Double, size: CGSize) -> (start: CGPoint, end: CGPoint) {
         let progress = CGFloat(sweep - sweep.rounded(.down))
-        let half = shimmerHalfWidth
-        // Far enough past each corner that the tilted band clears it.
-        let margin = half / CGFloat(cos(shimmerTilt * .pi / 180)) + 0.02
-        let along = -margin + progress * (1 + margin * 2)
         let angle = shimmerTilt * .pi / 180
-        // Counterclockwise on screen, where y runs down.
+        // The diagonal turned counterclockwise on screen, where y runs down.
         let axis = CGVector(
             dx: size.width * CGFloat(cos(angle)) + size.height * CGFloat(sin(angle)),
             dy: -size.width * CGFloat(sin(angle)) + size.height * CGFloat(cos(angle)))
-        let centre = CGPoint(x: size.width * along, y: size.height * along)
-        return (CGPoint(x: centre.x - axis.dx * half, y: centre.y - axis.dy * half),
-                CGPoint(x: centre.x + axis.dx * half, y: centre.y + axis.dy * half))
+        let length = max(hypot(axis.dx, axis.dy), 1)
+        let unit = CGVector(dx: axis.dx / length, dy: axis.dy / length)
+        let corners = [CGPoint.zero, CGPoint(x: size.width, y: 0), CGPoint(x: 0, y: size.height),
+                       CGPoint(x: size.width, y: size.height)]
+        let along = corners.map { $0.x * unit.dx + $0.y * unit.dy }
+        let half = shimmerHalfWidth * length
+        let from = (along.min() ?? 0) - half
+        let to = (along.max() ?? 0) + half
+        let centre = from + (to - from) * progress
+        return (CGPoint(x: unit.dx * (centre - half), y: unit.dy * (centre - half)),
+                CGPoint(x: unit.dx * (centre + half), y: unit.dy * (centre + half)))
+    }
+
+    /// The dots' centres in a field of `size`, from the cells that touch
+    /// `rect` (the whole field when nil): one between every other pair of
+    /// marks along each row, the rows taking turns so the dots stagger.
+    static func dots(in size: CGSize, near rect: CGRect? = nil) -> [CGPoint] {
+        let area = (rect ?? CGRect(origin: .zero, size: size)).intersection(CGRect(origin: .zero, size: size))
+        guard !area.isNull, area.width > 0, area.height > 0 else { return [] }
+        let columns = Int((area.minX / pitch).rounded(.down)) ... Int((area.maxX / pitch).rounded(.down))
+        let rows = Int((area.minY / pitch).rounded(.down)) ... Int((area.maxY / pitch).rounded(.down))
+        var result: [CGPoint] = []
+        for row in rows {
+            for column in columns {
+                let x = CGFloat(column) * pitch
+                let y = CGFloat(row) * pitch
+                // The upper row's marks sit at a quarter, the lower's at
+                // three quarters; halfway between two marks of a row is the
+                // other quarter.
+                if (row + column) % 2 == 0 {
+                    result.append(CGPoint(x: x + pitch * 0.75, y: y + pitch * 0.25))
+                } else {
+                    result.append(CGPoint(x: x + pitch * 0.25, y: y + pitch * 0.75))
+                }
+            }
+        }
+        return result
+    }
+
+    /// A dot centred on `centre`.
+    static func dot(at centre: CGPoint) -> Path {
+        Path(ellipseIn: CGRect(x: centre.x - dotSize / 2, y: centre.y - dotSize / 2, width: dotSize, height: dotSize))
+    }
+
+    /// Every mark and dot in a field of `size`, as one path.
+    static func tile(in size: CGSize) -> Path {
+        var tile = Path()
+        for origin in origins(in: size) {
+            if let mark = GlassBrandMark.path(at: origin, size: self.size) { tile.addPath(mark) }
+        }
+        for centre in dots(in: size) { tile.addPath(dot(at: centre)) }
+        return tile
     }
 
     /// How lit a mark is at `distance` from the pointer: 1 under it, easing
@@ -680,15 +730,12 @@ enum GlassMapMarks {
     }
 }
 
-/// The marks at rest. No inputs, so a pointer move never redraws it.
+/// The marks and dots at rest. No inputs, so a pointer move never
+/// redraws it.
 private struct GlassMapMarkTile: View {
     var body: some View {
         Canvas { context, size in
-            var marks = Path()
-            for origin in GlassMapMarks.origins(in: size) {
-                if let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) { marks.addPath(mark) }
-            }
-            context.fill(marks, with: .color(GlassMapMarks.ink.color))
+            context.fill(GlassMapMarks.tile(in: size), with: .color(GlassMapMarks.ink.color))
         }
     }
 }
@@ -730,14 +777,10 @@ struct GlassMapShimmer: View, Animatable {
         Canvas { context, size in
             let progress = sweep - sweep.rounded(.down)
             guard progress > 0 else { return }
-            var marks = Path()
-            for origin in GlassMapMarks.origins(in: size) {
-                if let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) { marks.addPath(mark) }
-            }
             let band = GlassMapMarks.shimmerBand(sweep: sweep, size: size)
             let crest = GlassMapMarks.shimmerInk.color
             context.fill(
-                marks,
+                GlassMapMarks.tile(in: size),
                 with: .linearGradient(
                     Gradient(colors: [crest.opacity(0), crest, crest.opacity(0)]),
                     startPoint: band.start, endPoint: band.end))
@@ -764,6 +807,11 @@ private struct GlassMapMarkGlow: View {
                 let lit = GlassMapMarks.light(distance: distance)
                 guard lit > 0, let mark = GlassBrandMark.path(at: origin, size: GlassMapMarks.size) else { continue }
                 context.fill(mark, with: .color(GlassMapMarks.litInk.color.opacity(lit)))
+            }
+            for centre in GlassMapMarks.dots(in: size, near: near) {
+                let lit = GlassMapMarks.light(distance: hypot(centre.x - point.x, centre.y - point.y))
+                guard lit > 0 else { continue }
+                context.fill(GlassMapMarks.dot(at: centre), with: .color(GlassMapMarks.litInk.color.opacity(lit)))
             }
         }
         .opacity(pointer == nil ? 0 : 1)

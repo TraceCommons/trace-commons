@@ -332,7 +332,7 @@
     "pulse": 1.6
   },
   "themes": {
-    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; out of focus inactiveDim darkens a window; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards drop the rim and are told apart by fill alone; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light's veil is 55% so the desktop shows through (owner feedback, 2026-10-09). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
+    "$comment": "Exploration (design/visual-theme-exploration): the flat glass theme, from getone.one's glass components. flatDark is its dark appearance: white text on navy-tinted glass. flatLight is its light appearance: dark text on white frosted glass (owner choice, 2026-10-09, over a tinted Light). Settings > General > Appearance picks Light, Dark or System. Each names only what it changes; a colour it leaves alone keeps its classic value for that appearance. Gradients and shadows are named by both or neither. Panes sit on clear Liquid Glass, lightly tinted with the veil, for the system's refraction, with the veil painted over it; out of focus inactiveDim darkens a window; Increase Contrast deepens the veil; Reduce Transparency is left to the system (R14). The map is on the same glass under a light field. Controls, cards, tags and frames are flat: a faint rim, a soft frame shadow, no highlight, shade or glow (owner feedback, 2026-10-09). Cards, panes, wells, controls, pills, menus, popovers and node cards drop the rim and are told apart by fill (and, where they float, a soft shadow) alone; a checkbox keeps its rim, which is the unchecked box; dark cards are the pane's navy, darker than the pane, rather than white over it (owner, 2026-10-10). Selected states are the brand purple, with textOnSelected on them. Every text colour clears 4.5:1 on the pane, a card, a quiet card and a field over the worst desktop -- a near-black #333333 for Light, which light Liquid Glass frosts no darker than, and white for Dark (FlatThemeContrastTests). Light's veil is 55% so the desktop shows through (owner feedback, 2026-10-09). The theme is chosen at launch with TC_GLASS_THEME (flat, the default on this branch, or classic).",
     "flatLight": {
       "color": {
         "glassVeil": { "hex": "#ffffff", "alpha": 0.55 },
@@ -399,44 +399,31 @@
       },
       "shadow": {
         "paneEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true },
           { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "cardEdge": [],
         "cardEdgeQuiet": [],
-        "wellEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true }
-        ],
-        "controlEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true }
-        ],
+        "wellEdge": [],
+        "controlEdge": [],
         "controlSelectedEdge": [],
         "popoverEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true },
           { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "menuEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true },
           { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "nodeCardEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true },
           { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "mapEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true },
           { "y": 14, "blur": 30, "hex": "#000000", "alpha": 0.12 }
         ],
         "ctaEdge": [],
-        "ctaSecondaryEdge": [
-          { "hex": "#000000", "alpha": 0.08, "inset": true }
-        ],
+        "ctaSecondaryEdge": [],
         "checkboxEdge": [
           { "hex": "#000000", "alpha": 0.2, "inset": true }
         ],
-        "barTrackEdge": [
-          { "hex": "#000000", "alpha": 0.06, "inset": true }
-        ],
+        "barTrackEdge": [],
         "consentEdge": []
       },
       "radius": { "pane": 20, "card": 16, "cardQuiet": 14, "control": 11, "menuPanel": 16 }
@@ -523,44 +510,31 @@
       },
       "shadow": {
         "paneEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
         ],
         "cardEdge": [],
         "cardEdgeQuiet": [],
-        "wellEdge": [
-          { "hex": "#ffffff", "alpha": 0.14, "inset": true }
-        ],
-        "controlEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
-        ],
+        "wellEdge": [],
+        "controlEdge": [],
         "controlSelectedEdge": [],
         "popoverEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
         ],
         "menuEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
         ],
         "nodeCardEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
         ],
         "mapEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true },
           { "y": 18, "blur": 36, "hex": "#02030a", "alpha": 0.6 }
         ],
         "ctaEdge": [],
-        "ctaSecondaryEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
-        ],
+        "ctaSecondaryEdge": [],
         "checkboxEdge": [
           { "hex": "#ffffff", "alpha": 0.18, "inset": true }
         ],
-        "barTrackEdge": [
-          { "hex": "#ffffff", "alpha": 0.1, "inset": true }
-        ],
+        "barTrackEdge": [],
         "consentEdge": []
       },
       "radius": { "pane": 20, "card": 16, "cardQuiet": 14, "control": 11, "menuPanel": 16 }

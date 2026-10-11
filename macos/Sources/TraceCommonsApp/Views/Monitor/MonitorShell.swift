@@ -293,11 +293,12 @@ struct TracesGraphFooter: View {
         reduceMotion ? nil : .timingCurve(0.4, 0, 0.2, 1, duration: 0.45)
     }
 
-    /// The range pill's inner edge (#1146: lit above, shaded below).
-    static let rangeEdge: [GlassShadow] = [
+    /// The range pill's inner edge (#1146: lit above, shaded below); none in
+    /// the flat theme, whose pills carry no border (owner, 2026-10-10).
+    static let rangeEdge: [GlassShadow] = GlassTheme.pick([
         GlassShadow(x: 0, y: 1, blur: 0, color: GlassTokens.Color.ink.opacity(0.18), inset: true),
         GlassShadow(x: 0, y: -1, blur: 0, color: GlassTokens.Color.textOnStatus.opacity(0.15), inset: true),
-    ]
+    ], flat: [])
 
     /// The binoculars' glyph (#1146): blue while the map is focused, light
     /// while a tool can be focused, dim with nothing to focus on.
