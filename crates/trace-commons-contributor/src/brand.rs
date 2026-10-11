@@ -27,12 +27,28 @@
 #[macro_export]
 macro_rules! app_name {
     () => {
-        "Trace Commons"
+        "Near.ai"
     };
 }
 
 /// The app's name, for callers that want a value rather than a literal.
 pub const APP_NAME: &str = crate::app_name!();
+
+/// The commons' name as a string literal, usable inside `concat!`.
+///
+/// Not the app. The app is what runs on this device; the commons is where
+/// its traces go -- the hosted service, the account, the server. A sentence
+/// about where a trace ends up names this, and a sentence about what the
+/// device is doing names [`app_name!`].
+#[macro_export]
+macro_rules! commons_name {
+    () => {
+        "Trace Commons"
+    };
+}
+
+/// The commons' name, for callers that want a value rather than a literal.
+pub const COMMONS_NAME: &str = crate::commons_name!();
 
 #[cfg(test)]
 mod tests {
@@ -46,6 +62,7 @@ mod tests {
     #[test]
     fn the_constant_and_the_macro_are_the_same_name() {
         assert_eq!(APP_NAME, crate::app_name!());
+        assert_eq!(COMMONS_NAME, crate::commons_name!());
     }
 
     /// A name with a brace in it would be pasted into `format!` templates
@@ -55,5 +72,16 @@ mod tests {
         assert!(!APP_NAME.contains('{'), "{APP_NAME}");
         assert!(!APP_NAME.contains('}'), "{APP_NAME}");
         assert!(!APP_NAME.is_empty());
+        for name in [APP_NAME, COMMONS_NAME] {
+            assert!(!name.contains('{'), "{name}");
+            assert!(!name.contains('}'), "{name}");
+        }
+    }
+
+    /// The two names are two things, and a sentence that means one must
+    /// not be able to print the other by accident.
+    #[test]
+    fn the_app_and_the_commons_are_named_differently() {
+        assert_ne!(APP_NAME, COMMONS_NAME);
     }
 }

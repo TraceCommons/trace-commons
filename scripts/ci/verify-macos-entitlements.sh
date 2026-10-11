@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Assertions about a signed TraceCommons.app that its own signature cannot make.
+# Assertions about a signed Near.ai.app that its own signature cannot make.
 #
 # The failure this guards against is total: an app carrying the keychain
 # entitlement without a profile that grants it is killed at exec. Every check
@@ -14,7 +14,7 @@
 # read from the bundle's own Info.plist.
 set -euo pipefail
 
-APP="${1:?usage: verify-macos-entitlements.sh <path to a TraceCommons .app>}"
+APP="${1:?usage: verify-macos-entitlements.sh <path to a Near.ai or Trace Commons .app>}"
 PROFILE="$APP/Contents/embedded.provisionprofile"
 ACCESS_GROUP="KXSWJN7WY8.ai.tracecommons.shell"
 TEAM_ID="KXSWJN7WY8"

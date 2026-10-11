@@ -50,7 +50,7 @@ Two families:
 
 | Slug | Artifact | Consumed by |
 |---|---|---|
-| `macos-universal` | `TraceCommons-<v>.dmg` | Sparkle (via the appcast, not this file) |
+| `macos-universal` | `Near.ai-<v>.dmg` | Sparkle (via the appcast, not this file) |
 | `windows-x86_64` | `trace-commons-windows-x86_64-<v>.zip` | winget |
 | `linux-x86_64` | flatpak repo | flatpak portal |
 | `windows-x86_64-cli` | `trace-commons-contributor-x86_64-pc-windows-msvc.exe` | the CLI self-updater |

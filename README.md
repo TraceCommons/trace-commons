@@ -362,8 +362,8 @@ behind:
   instead, which deleting the folder does not touch:
   `Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'Trace Commons'`.
 
-The macOS app itself is `TraceCommons.app` (bundle id `ai.tracecommons.shell`)
-in `/Applications` when installed from the DMG rather than the cask; quit it,
+The macOS app itself is `Near.ai.app` (`TraceCommons.app` if it was installed
+before the rename; bundle id `ai.tracecommons.shell`) in `/Applications` when installed from the DMG rather than the cask; quit it,
 then move it to the Trash. The Windows portable build is just the unzipped
 folder — delete it.
 

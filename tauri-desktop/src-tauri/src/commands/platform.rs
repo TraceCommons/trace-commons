@@ -505,6 +505,14 @@ mod tests {
         assert!(!installed_by_homebrew(Path::new(
             "/Applications/Trace Commons.app/Contents/MacOS/app"
         )));
+        // The bundle was renamed to Near.ai.app; ownership follows the
+        // Caskroom path, so both names resolve the same way.
+        assert!(installed_by_homebrew(Path::new(
+            "/opt/homebrew/Caskroom/trace-commons/0.13.0/Near.ai.app/Contents/MacOS/app"
+        )));
+        assert!(!installed_by_homebrew(Path::new(
+            "/Applications/Near.ai.app/Contents/MacOS/app"
+        )));
         assert!(!installed_by_homebrew(Path::new(
             "/opt/homebrew/Caskroom/other-app/current/app"
         )));

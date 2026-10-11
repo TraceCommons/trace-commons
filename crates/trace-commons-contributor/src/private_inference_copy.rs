@@ -1204,10 +1204,10 @@ pub(crate) fn wallet_browser_copy() -> serde_json::Value {
         "choose": "Choose wallet",
         "cancel": "Cancel sign-in",
         "waiting": "Finish signing the login message in your wallet.",
-        "received": "Wallet response received. Return to Trace Commons to check sign-in.",
-        "refused": "The wallet response was refused. Start sign-in again in Trace Commons.",
-        "expired": "Sign-in expired. Start sign-in again in Trace Commons.",
-        "cancelled": "Sign-in cancelled. Return to Trace Commons.",
+        "received": concat!("Wallet response received. Return to ", crate::app_name!(), " to check sign-in."),
+        "refused": concat!("The wallet response was refused. Start sign-in again in ", crate::app_name!(), "."),
+        "expired": concat!("Sign-in expired. Start sign-in again in ", crate::app_name!(), "."),
+        "cancelled": concat!("Sign-in cancelled. Return to ", crate::app_name!(), "."),
         "unavailable": "The wallet connection failed. Choose a wallet to retry."
     })
 }

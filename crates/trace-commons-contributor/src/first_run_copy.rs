@@ -513,7 +513,7 @@ pub fn first_run_copy() -> FirstRunCopy {
             title_bold: "tools and folders.",
             add_tool: "Not seeing your tool above? Click to add or drag & drop.",
             add_tool_caption: "OpenCode, a moved Claude Code or Codex folder, or a folder of exported traces",
-            add_tool_refused: "Trace Commons can't read this folder yet.",
+            add_tool_refused: concat!(crate::app_name!(), " can't read this folder yet."),
             added_by_you: "Added by you",
             which_kind: "What does {folder} hold?",
             trajectory_label: "Exported traces",

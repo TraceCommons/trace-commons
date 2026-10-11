@@ -86,7 +86,7 @@ pub enum ManagedError {
     UnsupportedVersion,
     #[error("sign in to this account before launching")]
     SignInRequired,
-    #[error("start the Trace Commons daemon before launching")]
+    #[error("start the {} daemon before launching", crate::brand::APP_NAME)]
     DaemonUnavailable,
     #[error("launch status unknown; reconcile before retrying")]
     LaunchUnknown,

@@ -238,7 +238,7 @@ pub(crate) fn post_digest(body: &str) -> Result<(), String> {
     {
         let body = body.to_string_lossy();
         let status = std::process::Command::new("notify-send")
-            .args(["--app-name=Trace Commons", "--", "Trace Commons"])
+            .args(["--app-name=Near.ai", "--", "Near.ai"])
             .arg(body.as_ref())
             .status()
             .map_err(|error| {
@@ -454,7 +454,7 @@ fn linux_desktop_entry_text(executable: &Path) -> Result<String, String> {
         "[Desktop Entry]\n\
          Type=Application\n\
          Version=1.0\n\
-         Name=Trace Commons\n\
+         Name=Near.ai\n\
          Comment=Review and contribute coding traces\n\
          Exec=\"{escaped_executable}\"\n\
          Terminal=false\n\

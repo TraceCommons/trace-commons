@@ -70,8 +70,9 @@ pub fn install(store: &ConfigStore) -> Result<()> {
     if !cfg!(target_os = "linux") {
         bail!(
             "autostart-not-supported-on-this-platform: on this platform the \
-             Trace Commons application registers the daemon as a login item. \
-             Run `daemon run` directly in the meantime."
+             {} application registers the daemon as a login item. \
+             Run `daemon run` directly in the meantime.",
+            crate::brand::APP_NAME
         );
     }
 

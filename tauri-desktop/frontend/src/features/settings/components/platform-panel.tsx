@@ -79,7 +79,7 @@ export function PlatformPanel() {
             action={
               canToggleLogin ? (
                 <Switch
-                  aria-label="Start Trace Commons at login"
+                  aria-label="Start Near.ai at login"
                   checked={loginState === "enabled"}
                   disabled={platform.busy}
                   onCheckedChange={(checked) =>

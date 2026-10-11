@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Print the Info.plist for TraceCommons.app.
+# Print the Info.plist for Near.ai.app.
 #
 # Extracted from make-app-bundle.sh so the version can be injected from a
 # release tag and asserted in a test without a Swift toolchain. The old
@@ -53,8 +53,8 @@ cat <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Trace Commons</string>
-    <key>CFBundleDisplayName</key><string>Trace Commons</string>
+    <key>CFBundleName</key><string>Near.ai</string>
+    <key>CFBundleDisplayName</key><string>Near.ai</string>
     <key>CFBundleIdentifier</key><string>ai.tracecommons.shell</string>
     <key>CFBundleExecutable</key><string>TraceCommonsApp</string>
     <key>CFBundlePackageType</key><string>APPL</string>

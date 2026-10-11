@@ -309,7 +309,8 @@ async fn await_loopback_code(listener: tokio::net::TcpListener) -> Result<String
         None => ("400 Bad Request", "Sign-in did not complete."),
     };
     let body = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Trace Commons</title><p>{message}</p>"
+        "<!doctype html><meta charset=\"utf-8\"><title>{app}</title><p>{message}</p>",
+        app = crate::brand::APP_NAME
     );
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",

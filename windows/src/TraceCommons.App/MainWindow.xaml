@@ -26,7 +26,7 @@
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d"
-    Title="Trace Commons">
+    Title="Near.ai">
 
     <Grid RowDefinitions="Auto,*" Background="{ThemeResource TcWindowBackgroundBrush}">
 
@@ -94,7 +94,7 @@
                                 Margin="0,0,8,0"
                                 VerticalAlignment="Center" />
             <TextBlock Grid.Column="1"
-                       Text="Trace Commons"
+                       Text="Near.ai"
                        Style="{StaticResource TcChromeTitleTextStyle}"
                        VerticalAlignment="Center" />
         </Grid>
@@ -405,7 +405,7 @@
                             Style="{StaticResource TcPrimaryButtonStyle}"
                             Click="OnApplyUpdateClick"
                             IsEnabled="{x:Bind ViewModel.IsUpdateApplyEnabled, Mode=OneWay}"
-                            AutomationProperties.Name="Install the update and restart Trace Commons" />
+                            AutomationProperties.Name="Install the update and restart Near.ai" />
                 </InfoBar.ActionButton>
             </InfoBar>
 

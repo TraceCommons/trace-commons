@@ -129,7 +129,10 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         review_install: "Review install",
         retry_install: "Retry install",
         install_preview: "Installation preview",
-        install_disclosure: "Trace Commons will create the directory and two persistent files shown below. It will refuse an occupied path and can roll back only while the installed files remain unchanged.",
+        install_disclosure: concat!(
+            crate::app_name!(),
+            " will create the directory and two persistent files shown below. It will refuse an occupied path and can roll back only while the installed files remain unchanged."
+        ),
         persistent_writes: "Persistent writes",
         target_path: "Target path",
         skill_file: "Skill file",
@@ -142,10 +145,17 @@ pub fn skill_learning_copy() -> SkillLearningCopy {
         installed: "Installed in Codex",
         rollback: "Roll back",
         rolling_back: "Rolling back…",
-        rollback_disclosure: "Rollback is available while Trace Commons can verify the installed package has not changed.",
+        rollback_disclosure: concat!(
+            "Rollback is available while ",
+            crate::app_name!(),
+            " can verify the installed package has not changed."
+        ),
         rollback_incomplete: "The skill could not be removed. Inspect the installed directory before retrying.",
         rollback_confirm_title: "Roll back this skill?",
-        rollback_confirm_body: "Trace Commons removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed.",
+        rollback_confirm_body: concat!(
+            crate::app_name!(),
+            " removes the skill's directory and the two files it installed, so Codex no longer has this skill. If those files have changed since the install, nothing is removed."
+        ),
         rollback_keep: "Keep",
         unavailable: "Skill workflow could not complete. Retry this step.",
     }
@@ -163,7 +173,10 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
             "This trace must be accepted before its correction can become a skill."
         }
         "skill-source-lineage-invalid" => {
-            "Trace Commons could not verify this skill against the selected trace."
+            concat!(
+                crate::app_name!(),
+                " could not verify this skill against the selected trace."
+            )
         }
         "skill-workflow-capacity" => {
             "Too many reviewed skill workflows are open. Finish or retry an existing workflow."
@@ -220,7 +233,11 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
         }
         "skill-install-plan-unknown" => "The installation preview expired. Create a new preview.",
         "skill-install-modified" | "skill-install-extra-files" => {
-            "The installed directory changed. Trace Commons refused rollback to protect those changes."
+            concat!(
+                "The installed directory changed. ",
+                crate::app_name!(),
+                " refused rollback to protect those changes."
+            )
         }
         "skill-install-multiple-matches" => {
             "More than one installed skill claims this trace. Inspect the Codex skills directory."
@@ -228,9 +245,17 @@ pub fn skill_learning_error_line(label: &str) -> &'static str {
         "skill-install-scan-limit" => {
             "The Codex skills directory is too large to verify safely. Inspect it before retrying."
         }
-        "skill-install-not-owned" => "Trace Commons cannot verify ownership of this installation.",
+        "skill-install-not-owned" => {
+            concat!(
+                crate::app_name!(),
+                " cannot verify ownership of this installation."
+            )
+        }
         "skill-install-unknown" => {
-            "Trace Commons could not find this installed skill. Its status will be checked again."
+            concat!(
+                crate::app_name!(),
+                " could not find this installed skill. Its status will be checked again."
+            )
         }
         "skill-home-unavailable" | "skill-install-root-invalid" => {
             "Codex's local skills directory is unavailable."
