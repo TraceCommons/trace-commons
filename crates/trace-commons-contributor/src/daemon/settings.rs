@@ -3203,6 +3203,15 @@ mod tests {
             Err(ERR_SETTINGS_INVALID_VALUE)
         );
         assert!(!s.insights_recap_card_enabled);
+        // "Hide" is undone by the Settings switch.
+        assert_eq!(
+            apply_settings_object(
+                &mut s,
+                &serde_json::json!({"insights_recap_card_enabled": true})
+            ),
+            Ok(true)
+        );
+        assert!(s.insights_recap_card_enabled);
     }
 
     /// The context threshold has no default; it is a number in range or

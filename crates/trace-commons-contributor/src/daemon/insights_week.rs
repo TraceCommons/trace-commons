@@ -2707,6 +2707,47 @@ mod tests {
         }
     }
 
+    /// "Hide" on the weekly summary card sets `insights_recap_card_enabled`
+    /// off; the Settings switch (`analytics_setting_recap_card`) sets it
+    /// back on through the same `set_settings`, and `insights_week` and
+    /// `get_settings` both follow.
+    #[test]
+    fn the_summary_card_switch_turns_back_on_after_hide() {
+        let (_dir, s) = shared();
+        s.settings.lock().unwrap().insights_counter_pass = true;
+        let request = |method: &str, params: serde_json::Value| Request {
+            id: 1,
+            method: method.to_string(),
+            params,
+        };
+        let state = |s: &DaemonShared| {
+            let week = handle_week(s, &call(serde_json::json!({"tz": 0})))
+                .result
+                .unwrap();
+            let settings = super::super::ipc::handle_request(
+                s,
+                &request("get_settings", serde_json::json!({})),
+            )
+            .result
+            .unwrap();
+            (
+                week["recap_card_enabled"].clone(),
+                settings["insights_recap_card_enabled"].clone(),
+            )
+        };
+        for on in [false, true] {
+            let set = super::super::ipc::handle_request(
+                &s,
+                &request(
+                    "set_settings",
+                    serde_json::json!({"insights_recap_card_enabled": on}),
+                ),
+            );
+            assert!(set.error.is_none(), "{:?}", set.error);
+            assert_eq!(state(&s), (serde_json::json!(on), serde_json::json!(on)));
+        }
+    }
+
     #[test]
     fn the_method_answers_off_by_default_and_refuses_bad_params() {
         let (_dir, s) = shared();

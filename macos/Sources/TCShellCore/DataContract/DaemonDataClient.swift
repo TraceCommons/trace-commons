@@ -201,7 +201,9 @@ public protocol DaemonDataClient: Sendable {
     /// `set_settings` with `local_notifications`.
     func setLocalNotifications(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings { insights_recap_card_enabled }`: the Insights weekly
-    /// summary card's only switch (its "Turn off").
+    /// summary card's only switch. The card's "Hide" sends false; the
+    /// Settings switch (`analytics_setting_recap_card`) sends either, so
+    /// "Hide" can be undone.
     func setInsightsRecapCard(_ on: Bool) async throws -> DaemonData.Settings
     /// `set_settings { insights_ledger_feed }`: whether Insights may read
     /// the proxy ledger for the glance and per-call tokens (owner decision D3, settled
